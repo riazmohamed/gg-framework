@@ -67,6 +67,11 @@ export class AuthStorage {
       return creds;
     }
 
+    // GLM and Moonshot use static API keys — no refresh needed
+    if (provider === "glm" || provider === "moonshot") {
+      return creds;
+    }
+
     // Refresh (preserve accountId if not returned by refresh)
     const refreshFn = provider === "anthropic" ? refreshAnthropicToken : refreshOpenAIToken;
     const refreshed = await refreshFn(creds.refreshToken);

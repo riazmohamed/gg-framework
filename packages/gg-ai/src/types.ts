@@ -2,7 +2,7 @@ import type { z } from "zod";
 
 // ── Providers ──────────────────────────────────────────────
 
-export type Provider = "anthropic" | "openai";
+export type Provider = "anthropic" | "openai" | "glm" | "moonshot";
 
 // ── Thinking ───────────────────────────────────────────────
 

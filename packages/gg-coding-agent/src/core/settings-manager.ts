@@ -7,7 +7,7 @@ import { getAppPaths } from "../config.js";
 const SettingsSchema = z.object({
   autoCompact: z.boolean().default(true),
   compactThreshold: z.number().min(0.1).max(1.0).default(0.8),
-  defaultProvider: z.enum(["anthropic", "openai"]).default("anthropic"),
+  defaultProvider: z.enum(["anthropic", "openai", "glm", "moonshot"]).default("anthropic"),
   defaultModel: z.string().optional(),
   maxTokens: z.number().int().min(256).default(16384),
   thinkingLevel: z.enum(["low", "medium", "high"]).optional(),

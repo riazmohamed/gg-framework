@@ -20,7 +20,7 @@ import { createTools } from "./tools/index.js";
 import { discoverAgents } from "./core/agents.js";
 import { loginAnthropic } from "./core/oauth/anthropic.js";
 import { loginOpenAI } from "./core/oauth/openai.js";
-import type { OAuthLoginCallbacks } from "./core/oauth/types.js";
+import type { OAuthCredentials, OAuthLoginCallbacks } from "./core/oauth/types.js";
 import chalk from "chalk";
 
 const _require = createRequire(import.meta.url);
@@ -35,7 +35,7 @@ Commands:
   continue                  Resume the most recent session for this directory
 
 Options:
-  -p, --provider <name>     LLM provider (anthropic, openai) [default: anthropic]
+  -p, --provider <name>     LLM provider (anthropic, openai, glm, moonshot) [default: anthropic]
   -m, --model <name>        Model name [default: claude-opus-4-6]
       --base-url <url>      Custom API base URL
       --system-prompt <text> Override system prompt
@@ -109,8 +109,16 @@ function main(): void {
     process.exit(0);
   }
 
-  const provider = (values.provider ?? "anthropic") as "anthropic" | "openai";
-  const model = values.model ?? (provider === "openai" ? "gpt-4.1" : "claude-opus-4-6");
+  const provider = (values.provider ?? "anthropic") as "anthropic" | "openai" | "glm" | "moonshot";
+  const model =
+    values.model ??
+    (provider === "openai"
+      ? "gpt-5.3-codex"
+      : provider === "glm"
+        ? "glm-5"
+        : provider === "moonshot"
+          ? "kimi-k2.5"
+          : "claude-opus-4-6");
 
   const thinkingLevel = values.thinking as ThinkingLevel | undefined;
   const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
@@ -202,7 +210,7 @@ async function runInkTUI(opts: {
   const creds = await authStorage.resolveCredentials(provider);
 
   // Detect all logged-in providers and preload their credentials
-  const allProviders: Provider[] = ["anthropic", "openai"];
+  const allProviders: Provider[] = ["anthropic", "openai", "glm", "moonshot"];
   const loggedInProviders: Provider[] = [];
   const credentialsByProvider: Record<string, { accessToken: string; accountId?: string }> = {};
 
@@ -337,8 +345,23 @@ async function runLogin(): Promise<void> {
       },
     };
 
-    const creds =
-      provider === "anthropic" ? await loginAnthropic(callbacks) : await loginOpenAI(callbacks);
+    let creds;
+    if (provider === "glm" || provider === "moonshot") {
+      const keyLabel = provider === "glm" ? "Z.AI" : "Moonshot";
+      const apiKey = await rl.question(chalk.hex("#60a5fa")(`Paste your ${keyLabel} API key: `));
+      if (!apiKey.trim()) {
+        console.log(chalk.hex("#ef4444")("No API key provided. Login cancelled."));
+        return;
+      }
+      creds = {
+        accessToken: apiKey.trim(),
+        refreshToken: "",
+        expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000 * 100, // ~100 years
+      } satisfies OAuthCredentials;
+    } else {
+      creds =
+        provider === "anthropic" ? await loginAnthropic(callbacks) : await loginOpenAI(callbacks);
+    }
 
     await authStorage.setCredentials(provider, creds);
     console.log(chalk.hex("#4ade80")(`\n✓ Logged in to ${displayName(provider)} successfully!`));
@@ -369,7 +392,10 @@ function readStdinSync(): string {
 }
 
 function displayName(provider: Provider): string {
-  return provider === "anthropic" ? "Anthropic" : "OpenAI";
+  if (provider === "anthropic") return "Anthropic";
+  if (provider === "glm") return "Z.AI (GLM)";
+  if (provider === "moonshot") return "Moonshot";
+  return "OpenAI";
 }
 
 function extractText(content: string | Array<{ type: string; text?: string }>): string {

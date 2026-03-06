@@ -1,4 +1,4 @@
-import { marked } from "marked";
+import { type MarkedExtension, marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 import chalk from "chalk";
 
@@ -16,7 +16,7 @@ marked.use(
     link: chalk.underline.blueBright,
     href: chalk.dim,
     tab: 2,
-  }) as any,
+  }) as MarkedExtension,
 );
 
 /**

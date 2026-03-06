@@ -39,42 +39,53 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     costTier: "low",
   },
-  // ── OpenAI ─────────────────────────────────────────────
+  // ── OpenAI (Codex) ─────────────────────────────────────
   {
-    id: "gpt-4.1",
-    name: "GPT-4.1",
+    id: "gpt-5.3-codex",
+    name: "GPT-5.3 Codex",
     provider: "openai",
-    contextWindow: 1_000_000,
-    maxOutputTokens: 32_768,
-    supportsThinking: false,
-    costTier: "medium",
-  },
-  {
-    id: "gpt-4.1-mini",
-    name: "GPT-4.1 Mini",
-    provider: "openai",
-    contextWindow: 1_000_000,
-    maxOutputTokens: 32_768,
-    supportsThinking: false,
-    costTier: "low",
-  },
-  {
-    id: "o3",
-    name: "o3",
-    provider: "openai",
-    contextWindow: 200_000,
-    maxOutputTokens: 100_000,
+    contextWindow: 400_000,
+    maxOutputTokens: 128_000,
     supportsThinking: true,
     costTier: "high",
   },
   {
-    id: "o4-mini",
-    name: "o4-mini",
+    id: "gpt-5.1-codex-mini",
+    name: "GPT-5.1 Codex Mini",
     provider: "openai",
     contextWindow: 200_000,
     maxOutputTokens: 100_000,
     supportsThinking: true,
     costTier: "low",
+  },
+  // ── GLM (Z.AI) ───────────────────────────────────────────
+  {
+    id: "glm-5",
+    name: "GLM-5",
+    provider: "glm",
+    contextWindow: 128_000,
+    maxOutputTokens: 16_384,
+    supportsThinking: false,
+    costTier: "medium",
+  },
+  {
+    id: "glm-4.7",
+    name: "GLM-4.7",
+    provider: "glm",
+    contextWindow: 128_000,
+    maxOutputTokens: 16_384,
+    supportsThinking: false,
+    costTier: "low",
+  },
+  // ── Moonshot (Kimi) ──────────────────────────────────────
+  {
+    id: "kimi-k2.5",
+    name: "Kimi K2.5",
+    provider: "moonshot",
+    contextWindow: 128_000,
+    maxOutputTokens: 16_384,
+    supportsThinking: false,
+    costTier: "medium",
   },
 ];
 
@@ -87,7 +98,9 @@ export function getModelsForProvider(provider: Provider): ModelInfo[] {
 }
 
 export function getDefaultModel(provider: Provider): ModelInfo {
-  if (provider === "openai") return MODELS.find((m) => m.id === "gpt-4.1")!;
+  if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.3-codex")!;
+  if (provider === "glm") return MODELS.find((m) => m.id === "glm-5")!;
+  if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k2.5")!;
   return MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
 }
 

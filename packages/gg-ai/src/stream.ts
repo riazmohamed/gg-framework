@@ -30,9 +30,23 @@ export function stream(options: StreamOptions): StreamResult {
         return streamOpenAICodex(options);
       }
       return streamOpenAI(options);
+    case "glm":
+      return streamAnthropic({
+        ...options,
+        baseUrl: options.baseUrl ?? "https://api.z.ai/api/anthropic/",
+        thinking: undefined,
+        serverTools: undefined,
+      });
+    case "moonshot":
+      return streamAnthropic({
+        ...options,
+        baseUrl: options.baseUrl ?? "https://api.moonshot.ai/anthropic/",
+        thinking: undefined,
+        serverTools: undefined,
+      });
     default:
       throw new GGAIError(
-        `Unknown provider: ${options.provider as string}. Supported: "anthropic", "openai"`,
+        `Unknown provider: ${options.provider as string}. Supported: "anthropic", "openai", "glm", "moonshot"`,
       );
   }
 }
