@@ -75,6 +75,7 @@ interface DurationItem {
   kind: "duration";
   durationMs: number;
   toolsUsed: string[];
+  verb: string;
   id: string;
 }
 
@@ -209,9 +210,11 @@ export function App(props: AppProps) {
   const [liveItems, setLiveItems] = useState<CompletedItem[]>(initialLiveItems);
   const [overlay, setOverlay] = useState<"model" | null>(null);
   const [lastUserMessage, setLastUserMessage] = useState("");
-  const [doneStatus, setDoneStatus] = useState<{ durationMs: number; toolsUsed: string[] } | null>(
-    null,
-  );
+  const [doneStatus, setDoneStatus] = useState<{
+    durationMs: number;
+    toolsUsed: string[];
+    verb: string;
+  } | null>(null);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
   const [currentModel, setCurrentModel] = useState(props.model);
   const [currentProvider, setCurrentProvider] = useState(props.provider);
@@ -515,7 +518,7 @@ export function App(props: AppProps) {
           duration: `${durationMs}ms`,
           toolsUsed: toolsUsed.join(",") || "none",
         });
-        setDoneStatus({ durationMs, toolsUsed });
+        setDoneStatus({ durationMs, toolsUsed, verb: pickDurationVerb(toolsUsed) });
       }, []),
       onAborted: useCallback(() => {
         log("WARN", "agent", "Agent run aborted by user");
@@ -712,7 +715,7 @@ export function App(props: AppProps) {
           <Box key={item.id} marginTop={1}>
             <Text color={theme.textDim}>
               {"✻ "}
-              {pickDurationVerb(item.toolsUsed)} {formatDuration(item.durationMs)}
+              {item.verb} {formatDuration(item.durationMs)}
             </Text>
           </Box>
         );
@@ -764,7 +767,7 @@ export function App(props: AppProps) {
           <Box marginTop={1}>
             <Text color={theme.textDim}>
               {"✻ "}
-              {pickDurationVerb(doneStatus.toolsUsed)} {formatDuration(doneStatus.durationMs)}
+              {doneStatus.verb} {formatDuration(doneStatus.durationMs)}
             </Text>
           </Box>
         )
