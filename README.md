@@ -133,9 +133,7 @@ That's it.
 ## Usage
 
 ```bash
-ggcoder                                    # Interactive mode
-ggcoder "fix the failing tests in src"     # Pass a prompt directly
-ggcoder -p moonshot                        # Start with a different provider
+ggcoder
 ```
 
 Type `/help` inside a session to see everything available.
