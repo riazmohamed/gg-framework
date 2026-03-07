@@ -102,6 +102,10 @@ Now `/deploy` works in that project. Different projects get different commands. 
 
 Same concept but for reusable behaviors across projects. Drop `.md` files in `~/.gg/skills/` (global) or `.gg/skills/` (per-project) and they get loaded into the system prompt. The agent just knows what it can do without you having to explain it every time.
 
+### Project guidelines with CLAUDE.md and AGENTS.md
+
+Want the agent to follow specific rules for your project? Drop a `CLAUDE.md` or `AGENTS.md` in your repo root (or any parent directory) and GG Coder picks it up automatically. Things like "always use pnpm", "run tests before committing", "never modify the database schema directly". Your rules, your project, the agent follows them.
+
 ---
 
 ## Getting started
