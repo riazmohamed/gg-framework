@@ -77,6 +77,7 @@ export function InputArea({
 }: InputAreaProps) {
   const theme = useTheme();
   const [value, setValue] = useState("");
+  const [cursor, setCursor] = useState(0);
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const historyRef = useRef<string[]>([]);
   const historyIndexRef = useRef(-1);
@@ -145,6 +146,7 @@ export function InputArea({
           if (newImages.length > 0) {
             setImages((prev) => [...prev, ...newImages]);
             setValue(cleanText);
+            setCursor(Math.min(cursor, cleanText.length));
           }
         })
         .finally(() => {
@@ -164,7 +166,8 @@ export function InputArea({
       }
 
       if (key.return && (key.shift || key.meta)) {
-        setValue((v) => v + "\n");
+        setValue((v) => v.slice(0, cursor) + "\n" + v.slice(cursor));
+        setCursor((c) => c + 1);
         return;
       }
 
@@ -178,6 +181,7 @@ export function InputArea({
           historyIndexRef.current = -1;
           onSubmit(cmd, []);
           setValue("");
+          setCursor(0);
           setImages([]);
           return;
         }
@@ -188,6 +192,7 @@ export function InputArea({
           historyIndexRef.current = -1;
           onSubmit(trimmed, [...images]);
           setValue("");
+          setCursor(0);
           setImages([]);
         }
         return;
@@ -204,6 +209,7 @@ export function InputArea({
       if (key.ctrl && input === "c") {
         if (value) {
           setValue("");
+          setCursor(0);
         } else {
           onAbort();
         }
@@ -214,8 +220,21 @@ export function InputArea({
         process.exit(0);
       }
 
+      // Home / End
+      if (key.ctrl && input === "a") {
+        setCursor(0);
+        return;
+      }
+      if (key.ctrl && input === "e") {
+        setCursor(value.length);
+        return;
+      }
+
       if (key.backspace || key.delete) {
-        setValue((v) => v.slice(0, -1));
+        if (cursor > 0) {
+          setValue((v) => v.slice(0, cursor - 1) + v.slice(cursor));
+          setCursor((c) => c - 1);
+        }
         return;
       }
 
@@ -233,6 +252,7 @@ export function InputArea({
             : Math.max(0, historyIndexRef.current - 1);
         historyIndexRef.current = newIndex;
         setValue(history[newIndex]);
+        setCursor(history[newIndex].length);
         return;
       }
 
@@ -251,9 +271,11 @@ export function InputArea({
         if (newIndex >= history.length) {
           historyIndexRef.current = -1;
           setValue("");
+          setCursor(0);
         } else {
           historyIndexRef.current = newIndex;
           setValue(history[newIndex]);
+          setCursor(history[newIndex].length);
         }
         return;
       }
@@ -262,6 +284,7 @@ export function InputArea({
         const now = Date.now();
         if (value && now - lastEscRef.current < 400) {
           setValue("");
+          setCursor(0);
         }
         lastEscRef.current = now;
         return;
@@ -276,27 +299,80 @@ export function InputArea({
       if (key.tab) {
         if (isSlashMode && filteredCommands.length > 0) {
           const selected = filteredCommands[Math.min(menuIndex, filteredCommands.length - 1)];
-          setValue("/" + selected.name);
+          const cmd = "/" + selected.name;
+          setValue(cmd);
+          setCursor(cmd.length);
         }
         return;
       }
 
-      if (key.leftArrow || key.rightArrow) {
+      if (key.leftArrow) {
+        if (cursor > 0) setCursor((c) => c - 1);
+        return;
+      }
+
+      if (key.rightArrow) {
+        if (cursor < value.length) setCursor((c) => c + 1);
         return;
       }
 
       if (input) {
-        setValue((v) => v + input);
+        setValue((v) => v.slice(0, cursor) + input + v.slice(cursor));
+        setCursor((c) => c + input.length);
       }
     },
     { isActive },
   );
 
-  // Calculate visual lines and cap at MAX_VISIBLE_LINES (scroll to bottom)
+  // Calculate visual lines and cap at MAX_VISIBLE_LINES (scroll to cursor)
   const visualLines = getVisualLines(value, columns);
+  const contentWidth = columns - PROMPT.length - BOX_OVERHEAD;
+
+  // Find which visual line and column the cursor is on
+  const cursorLineInfo = useMemo(() => {
+    let pos = 0;
+    const hardLines = value.split("\n");
+    let visualLineIndex = 0;
+    for (let h = 0; h < hardLines.length; h++) {
+      const wrapped = wrapLine(hardLines[h], contentWidth > 0 ? contentWidth : value.length + 1);
+      for (let w = 0; w < wrapped.length; w++) {
+        const lineLen = wrapped[w].length;
+        const lineStart = pos;
+        const lineEnd = pos + lineLen;
+        // Cursor is on this visual line if it falls within [lineStart, lineEnd]
+        // For the last wrapped segment of a hard line, also include the newline position
+        const isLastWrap = w === wrapped.length - 1;
+        const effectiveEnd = isLastWrap ? lineEnd : lineEnd;
+        if (cursor >= lineStart && cursor <= effectiveEnd) {
+          return { line: visualLineIndex, col: cursor - lineStart };
+        }
+        pos += lineLen;
+        // Account for the space consumed by word-wrap break
+        if (!isLastWrap) {
+          // wrapped lines don't consume extra chars unless word-broken
+        }
+        visualLineIndex++;
+      }
+      pos++; // newline character
+    }
+    // Fallback: cursor at end
+    return { line: visualLines.length - 1, col: visualLines[visualLines.length - 1]?.length ?? 0 };
+  }, [value, cursor, contentWidth, visualLines]);
+
+  // Scroll window to keep cursor visible
   const totalLines = visualLines.length;
-  const startLine = totalLines > MAX_VISIBLE_LINES ? totalLines - MAX_VISIBLE_LINES : 0;
-  const displayLines = visualLines.slice(startLine);
+  let startLine: number;
+  if (totalLines <= MAX_VISIBLE_LINES) {
+    startLine = 0;
+  } else {
+    // Ensure the cursor line is visible
+    const cursorLine = cursorLineInfo.line;
+    // Try to keep current scroll position, but adjust if cursor is out of view
+    const idealStart = Math.max(0, cursorLine - MAX_VISIBLE_LINES + 1);
+    startLine = Math.min(idealStart, totalLines - MAX_VISIBLE_LINES);
+  }
+  const displayLines = visualLines.slice(startLine, startLine + MAX_VISIBLE_LINES);
+  const cursorDisplayLine = cursorLineInfo.line - startLine;
 
   // Determine if the entire input is a slash command (for coloring)
   const isCommand = value.startsWith("/");
@@ -315,19 +391,35 @@ export function InputArea({
             <Text color={theme.accent}>{images.map((_, i) => `[Image #${i + 1}]`).join(" ")}</Text>
           </Box>
         )}
-        {displayLines.map((line, i) => (
-          <Box key={i}>
-            {/* Show prompt on first visible line only */}
-            <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
-              {i === 0 ? PROMPT : "  "}
-            </Text>
-            <Text color={isCommand ? theme.commandColor : theme.text} bold={isCommand}>
-              {line}
-              {/* Blinking cursor at end of last line */}
-              {i === displayLines.length - 1 && !disabled ? (cursorVisible ? "\u2588" : " ") : ""}
-            </Text>
-          </Box>
-        ))}
+        {displayLines.map((line, i) => {
+          const showCursor = !disabled && i === cursorDisplayLine;
+          const col = cursorLineInfo.col;
+          const textColor = isCommand ? theme.commandColor : theme.text;
+          const before = showCursor ? line.slice(0, col) : line;
+          const charUnderCursor = showCursor ? (col < line.length ? line[col] : " ") : "";
+          const after = showCursor ? line.slice(col + (col < line.length ? 1 : 0)) : "";
+
+          return (
+            <Box key={i}>
+              <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
+                {i === 0 ? PROMPT : "  "}
+              </Text>
+              <Text color={textColor} bold={isCommand}>
+                {before}
+              </Text>
+              {showCursor && (
+                <Text color={textColor} bold={isCommand} inverse={cursorVisible}>
+                  {charUnderCursor}
+                </Text>
+              )}
+              {after && (
+                <Text color={textColor} bold={isCommand}>
+                  {after}
+                </Text>
+              )}
+            </Box>
+          );
+        })}
       </Box>
       {/* Slash command menu — shown below the input box */}
       {isSlashMode && !disabled && filteredCommands.length > 0 && (
