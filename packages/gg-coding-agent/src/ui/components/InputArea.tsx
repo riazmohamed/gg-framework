@@ -3,6 +3,7 @@ import { Text, Box, useInput, useStdout } from "ink";
 import { useTheme } from "../theme/theme.js";
 import type { ImageAttachment } from "../../utils/image.js";
 import { extractImagePaths, readImageFile, getClipboardImage } from "../../utils/image.js";
+import { SlashCommandMenu, filterCommands, type SlashCommandInfo } from "./SlashCommandMenu.js";
 
 const MAX_VISIBLE_LINES = 5;
 const PROMPT = "❯ ";
@@ -15,6 +16,7 @@ interface InputAreaProps {
   onDownAtEnd?: () => void;
   onShiftTab?: () => void;
   cwd: string;
+  commands?: SlashCommandInfo[];
 }
 
 // Border (1 each side) + padding (1 each side) = 4 characters of overhead
@@ -71,6 +73,7 @@ export function InputArea({
   onDownAtEnd,
   onShiftTab,
   cwd,
+  commands = [],
 }: InputAreaProps) {
   const theme = useTheme();
   const [value, setValue] = useState("");
@@ -80,6 +83,20 @@ export function InputArea({
   const lastEscRef = useRef(0);
   const { stdout } = useStdout();
   const columns = stdout?.columns ?? 80;
+  const [menuIndex, setMenuIndex] = useState(0);
+
+  // Detect if we're in slash command mode
+  const isSlashMode = value.startsWith("/") && !value.includes(" ") && commands.length > 0;
+  const slashFilter = isSlashMode ? value.slice(1) : "";
+  const filteredCommands = useMemo(
+    () => (isSlashMode ? filterCommands(commands, slashFilter) : []),
+    [isSlashMode, commands, slashFilter],
+  );
+
+  // Reset menu index when filter changes
+  useEffect(() => {
+    setMenuIndex(0);
+  }, [slashFilter]);
 
   // Border color pulse (when idle/waiting for input)
   const borderPulseColors = useMemo(
@@ -152,6 +169,19 @@ export function InputArea({
       }
 
       if (key.return) {
+        // If slash menu is open and a command is selected, fill it in
+        if (isSlashMode && filteredCommands.length > 0) {
+          const selected = filteredCommands[Math.min(menuIndex, filteredCommands.length - 1)];
+          const cmd = "/" + selected.name;
+          // Submit the command directly
+          historyRef.current.push(cmd);
+          historyIndexRef.current = -1;
+          onSubmit(cmd, []);
+          setValue("");
+          setImages([]);
+          return;
+        }
+
         const trimmed = value.trim();
         if (trimmed || images.length > 0) {
           if (trimmed) historyRef.current.push(trimmed);
@@ -190,6 +220,11 @@ export function InputArea({
       }
 
       if (key.upArrow) {
+        // If slash menu is open, navigate it
+        if (isSlashMode && filteredCommands.length > 0) {
+          setMenuIndex((i) => Math.max(0, i - 1));
+          return;
+        }
         const history = historyRef.current;
         if (history.length === 0) return;
         const newIndex =
@@ -202,6 +237,11 @@ export function InputArea({
       }
 
       if (key.downArrow) {
+        // If slash menu is open, navigate it
+        if (isSlashMode && filteredCommands.length > 0) {
+          setMenuIndex((i) => Math.min(filteredCommands.length - 1, i + 1));
+          return;
+        }
         const history = historyRef.current;
         if (historyIndexRef.current === -1) {
           if (onDownAtEnd) onDownAtEnd();
@@ -232,7 +272,16 @@ export function InputArea({
         return;
       }
 
-      if (key.tab || key.leftArrow || key.rightArrow) {
+      // Tab completion for slash commands
+      if (key.tab) {
+        if (isSlashMode && filteredCommands.length > 0) {
+          const selected = filteredCommands[Math.min(menuIndex, filteredCommands.length - 1)];
+          setValue("/" + selected.name);
+        }
+        return;
+      }
+
+      if (key.leftArrow || key.rightArrow) {
         return;
       }
 
@@ -249,32 +298,41 @@ export function InputArea({
   const startLine = totalLines > MAX_VISIBLE_LINES ? totalLines - MAX_VISIBLE_LINES : 0;
   const displayLines = visualLines.slice(startLine);
 
+  // Determine if the entire input is a slash command (for coloring)
+  const isCommand = value.startsWith("/");
+
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      borderColor={disabled ? theme.textDim : borderPulseColors[borderFrame]}
-      paddingLeft={1}
-      paddingRight={1}
-    >
-      {images.length > 0 && (
-        <Box>
-          <Text color={theme.accent}>{images.map((_, i) => `[Image #${i + 1}]`).join(" ")}</Text>
-        </Box>
+    <Box flexDirection="column">
+      <Box
+        flexDirection="column"
+        borderStyle="round"
+        borderColor={disabled ? theme.textDim : borderPulseColors[borderFrame]}
+        paddingLeft={1}
+        paddingRight={1}
+      >
+        {images.length > 0 && (
+          <Box>
+            <Text color={theme.accent}>{images.map((_, i) => `[Image #${i + 1}]`).join(" ")}</Text>
+          </Box>
+        )}
+        {displayLines.map((line, i) => (
+          <Box key={i}>
+            {/* Show prompt on first visible line only */}
+            <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
+              {i === 0 ? PROMPT : "  "}
+            </Text>
+            <Text color={isCommand ? theme.commandColor : theme.text} bold={isCommand}>
+              {line}
+              {/* Blinking cursor at end of last line */}
+              {i === displayLines.length - 1 && !disabled ? (cursorVisible ? "\u2588" : " ") : ""}
+            </Text>
+          </Box>
+        ))}
+      </Box>
+      {/* Slash command menu — shown below the input box */}
+      {isSlashMode && !disabled && filteredCommands.length > 0 && (
+        <SlashCommandMenu commands={commands} filter={slashFilter} selectedIndex={menuIndex} />
       )}
-      {displayLines.map((line, i) => (
-        <Box key={i}>
-          {/* Show prompt on first visible line only */}
-          <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
-            {i === 0 ? PROMPT : "  "}
-          </Text>
-          <Text color={theme.text}>
-            {line}
-            {/* Blinking cursor at end of last line */}
-            {i === displayLines.length - 1 && !disabled ? (cursorVisible ? "\u2588" : " ") : ""}
-          </Text>
-        </Box>
-      ))}
     </Box>
   );
 }

@@ -19,5 +19,6 @@
   "diffContext": "#6b7280",
   "spinnerColor": "#60a5fa",
   "inputPrompt": "#60a5fa",
-  "footerText": "#6b7280"
+  "footerText": "#6b7280",
+  "commandColor": "#818cf8"
 }

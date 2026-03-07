@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from "react";
+import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { Box, Text, Static, useStdout } from "ink";
 import crypto from "node:crypto";
 import type {
@@ -26,6 +26,7 @@ import { Footer } from "./components/Footer.js";
 import { Banner } from "./components/Banner.js";
 import { ModelSelector } from "./components/ModelSelector.js";
 import { BackgroundTasksBar } from "./components/BackgroundTasksBar.js";
+import type { SlashCommandInfo } from "./components/SlashCommandMenu.js";
 import type { ProcessManager, BackgroundProcess } from "../core/process-manager.js";
 import { useTheme } from "./theme/theme.js";
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
@@ -36,6 +37,8 @@ import { log } from "../core/logger.js";
 import { SettingsManager } from "../core/settings-manager.js";
 import { shouldCompact, compact } from "../core/compaction/compactor.js";
 import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
+import { PROMPT_COMMANDS, getPromptCommand } from "../core/prompt-commands.js";
+import { loadCustomCommands, type CustomCommand } from "../core/custom-commands.js";
 
 // ── Completed Item Types ───────────────────────────────────
 
@@ -274,6 +277,15 @@ export function App(props: AppProps) {
   useEffect(() => {
     getGitBranch(props.cwd).then(setGitBranch);
   }, [props.cwd]);
+
+  // Load custom commands from .gg/commands/
+  const [customCommands, setCustomCommands] = useState<CustomCommand[]>([]);
+  const reloadCustomCommands = useCallback(() => {
+    loadCustomCommands(props.cwd).then(setCustomCommands);
+  }, [props.cwd]);
+  useEffect(() => {
+    reloadCustomCommands();
+  }, [reloadCustomCommands]);
 
   const persistNewMessages = useCallback(async () => {
     const sm = sessionManagerRef.current;
@@ -745,6 +757,11 @@ export function App(props: AppProps) {
         return;
       }
 
+      // Handle /quit — exit the agent
+      if (trimmed === "/quit" || trimmed === "/q" || trimmed === "/exit") {
+        process.exit(0);
+      }
+
       // Handle /clear — reset session and clear terminal
       if (trimmed === "/clear") {
         // Clear terminal screen + scrollback — needed because Ink's <Static>
@@ -756,6 +773,50 @@ export function App(props: AppProps) {
         agentLoop.reset();
         setLiveItems([{ kind: "info", text: "Session cleared.", id: getId() }]);
         return;
+      }
+
+      // Handle prompt-template commands (built-in + custom from .gg/commands/)
+      if (trimmed.startsWith("/")) {
+        const cmdName = trimmed.slice(1).split(" ")[0];
+        const builtinCmd = getPromptCommand(cmdName);
+        const customCmd = !builtinCmd ? customCommands.find((c) => c.name === cmdName) : undefined;
+        const promptText = builtinCmd?.prompt ?? customCmd?.prompt;
+
+        if (promptText) {
+          log("INFO", "command", `Prompt command: /${cmdName}`);
+
+          // Move live items into history before starting
+          setLiveItems((prev) => {
+            if (prev.length > 0) {
+              setHistory((h) => [...h, ...prev]);
+            }
+            return [];
+          });
+
+          // Show the command name as the user message
+          const userItem: UserItem = { kind: "user", text: trimmed, id: getId() };
+          setLastUserMessage(trimmed);
+          setDoneStatus(null);
+          setLiveItems([userItem]);
+
+          // Send the full prompt to the agent
+          try {
+            await agentLoop.run(promptText);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log("ERROR", "error", msg);
+            const isAbort = msg.includes("aborted") || msg.includes("abort");
+            setLiveItems((prev) => [
+              ...prev,
+              isAbort
+                ? { kind: "info", text: "Request was stopped.", id: getId() }
+                : { kind: "error", message: msg, id: getId() },
+            ]);
+          }
+          // Reload custom commands in case a setup command created new ones
+          reloadCustomCommands();
+          return;
+        }
       }
 
       // Check slash commands
@@ -876,6 +937,27 @@ export function App(props: AppProps) {
       }
     },
     [props.settingsFile],
+  );
+
+  // All available slash commands for the command palette
+  const allCommands = useMemo<SlashCommandInfo[]>(
+    () => [
+      { name: "model", aliases: ["m"], description: "Switch model" },
+      { name: "compact", aliases: ["c"], description: "Compact conversation" },
+      { name: "clear", aliases: [], description: "Clear session and terminal" },
+      { name: "quit", aliases: ["q", "exit"], description: "Exit the agent" },
+      ...PROMPT_COMMANDS.map((cmd) => ({
+        name: cmd.name,
+        aliases: cmd.aliases,
+        description: cmd.description,
+      })),
+      ...customCommands.map((cmd) => ({
+        name: cmd.name,
+        aliases: [] as string[],
+        description: cmd.description,
+      })),
+    ],
+    [customCommands],
   );
 
   const renderItem = (item: CompletedItem) => {
@@ -1038,6 +1120,7 @@ export function App(props: AppProps) {
         onDownAtEnd={handleFocusTaskBar}
         onShiftTab={handleToggleThinking}
         cwd={props.cwd}
+        commands={allCommands}
       />
       {overlay === "model" ? (
         <ModelSelector
