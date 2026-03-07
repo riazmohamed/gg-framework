@@ -13,38 +13,38 @@
 
 I built GG Coder because I got tired of waiting.
 
-Claude Code is a fantastic product. But every single request starts with a ~15,000 token system prompt. The Claude Agent SDK has the same problem — it's Claude Code under the hood. That's thousands of tokens of instructions the model has to wade through before it even looks at your code.
+Claude Code is great. I use it daily. But after spending enough time with it, you start to notice how much overhead it carries. Every single request ships with a massive system prompt, roughly ~15,000 tokens of instructions that the model re-reads on every turn. The Claude Agent SDK has the same issue since it's essentially Claude Code under the hood.
 
-That matters more than people realize.
+So I asked myself: what if we just... didn't do that?
 
 ---
 
 ## The system prompt problem
 
-Every token in the system prompt gets processed on **every single turn**. A bloated system prompt doesn't just cost more — it actively makes the agent worse.
+This is the thing nobody talks about. Every token in the system prompt gets processed on **every single turn**. It's not a one-time cost. It's a tax on every request you make.
 
 | | **Claude Code / Agent SDK** | **GG Coder** |
 |---|---|---|
 | System prompt size | ~15,000 tokens | **~1,100 tokens** |
 | Ratio | baseline | **~13x smaller** |
 
-### Why this matters
+### Why you should care
 
-**Slower responses.** More input tokens = longer time-to-first-token. You're waiting for the model to re-read instructions it's already seen a hundred times. Every turn. Every request. That delay adds up fast during a multi-turn coding session.
+**It's slower.** More input tokens means longer time-to-first-token. You're sitting there waiting for the model to process instructions it already knows. Every turn. Every request. In a 30-turn coding session, that wait time adds up to minutes of your life you're not getting back.
 
-**Worse instruction following.** LLMs have a well-documented problem: the more text you put in the system prompt, the worse they follow any individual instruction. It's called "lost in the middle" — models pay attention to the beginning and end of context but lose track of what's in between. A 15,000 token system prompt is a wall of rules fighting for attention. A 1,100 token prompt is clear and focused.
+**The model follows instructions worse.** This one's counterintuitive but well-documented. The more stuff you cram into a system prompt, the worse the model follows any single instruction. Researchers call it "lost in the middle." Models pay attention to the start and end of their context, and everything in between gets fuzzy. A 15,000 token system prompt is a wall of rules competing for attention. A 1,100 token prompt is focused and clear. The model actually reads it.
 
-**Context limits hit faster.** That ~15,000 tokens sits in your context window permanently. On a 200K context model, you've already burned ~7.5% before you've even said hello. In a long session with lots of file reads and tool calls, that overhead compounds. You hit compaction sooner, lose conversation history earlier, and the agent starts forgetting what it was doing.
+**You hit context limits way sooner.** That ~15,000 tokens of system prompt lives in your context window permanently. On a 200K context model, you've burned ~7.5% before you've even said hello. In a long session with file reads, tool calls, and back-and-forth, that overhead compounds. You hit compaction earlier, lose conversation history faster, and the agent forgets what it was doing mid-task.
 
-**Higher cost per turn.** Input tokens aren't free. Even with prompt caching, you're paying for that bloat on every cache miss — and cache misses happen more often than you'd think (context changes, tool results, new files). Leaner prompt = lower bill.
+**It costs more.** Input tokens aren't free. Even with prompt caching, you pay for the bloat on every cache miss. And cache misses happen more than you'd think (new files read, tool results change, context shifts). Smaller prompt = smaller bill. Simple math.
 
-GG Coder keeps only what the model actually needs: how to work, what tools it has, and project context. No pages of edge-case rules. No redundant formatting instructions. No paragraphs about what not to do. Just the signal.
+GG Coder keeps only what the model actually needs: how to approach work, what tools are available, and your project's context. That's it. No walls of edge-case rules. No formatting instructions the model ignores anyway. Just the stuff that matters.
 
 ---
 
 ## Four providers, one agent
 
-Not locked to a single provider. GG Coder supports four, and you switch between them mid-conversation with slash commands.
+Most coding agents lock you into one provider. GG Coder doesn't. You pick what works and switch mid-conversation with a slash command.
 
 | Provider | Models | Auth |
 |---|---|---|
@@ -53,41 +53,36 @@ Not locked to a single provider. GG Coder supports four, and you switch between 
 | **Z.AI (GLM)** | GLM-5, GLM-4.7 | API key |
 | **Moonshot** | Kimi K2.5 | API key |
 
-OAuth for Anthropic and OpenAI — log in once, tokens refresh automatically. GLM and Moonshot use straightforward API keys. Either way, you're coding in under 30 seconds.
+Anthropic and OpenAI use OAuth. Log in once, tokens refresh on their own. GLM and Moonshot take API keys. Either way you're up and running in seconds.
 
 ---
 
 ## Slash commands and custom workflows
 
-GG Coder is driven by slash commands, not CLI flags. Everything happens inside the session.
+GG Coder runs on slash commands, not CLI flags. Everything happens inside the session.
 
 ```bash
 # Switch models on the fly
 /model claude-opus-4-6
 /model kimi-k2.5
 
-# Compact context when it gets long
+# Compact context when things get long
 /compact
 
-# Session management
-/session list
-/session load my-feature
-/new
-
 # Built-in workflows
-/scan        # Find dead code, bugs, security issues (spawns 5 parallel agents)
-/verify      # Verify code against docs and best practices (8 parallel agents)
-/research    # Research best tools and patterns for your project
-/init        # Generate or update CLAUDE.md for your project
-/setup-lint  # Generate a /fix command tailored to your project
-/setup-commit # Generate a /commit command with quality checks
-/setup-tests # Set up testing infrastructure and generate /test
-/setup-update # Generate an /update command for dependency management
+/scan          # Find dead code, bugs, security issues (spawns 5 parallel agents)
+/verify        # Verify code against docs and best practices (8 parallel agents)
+/research      # Research best tools and patterns for your project
+/init          # Generate or update CLAUDE.md for your project
+/setup-lint    # Generate a /fix command tailored to your stack
+/setup-commit  # Generate a /commit command with quality checks
+/setup-tests   # Set up testing infrastructure and generate /test
+/setup-update  # Generate an /update command for dependency management
 ```
 
 ### Custom commands per project
 
-Drop a markdown file in `.gg/commands/` and it becomes a slash command. Frontmatter defines the name and description, the body becomes the prompt.
+This is where it gets fun. Drop a markdown file in `.gg/commands/` and it becomes a slash command. Frontmatter sets the name, the body becomes the prompt.
 
 ```markdown
 ---
@@ -101,11 +96,11 @@ description: Build, test, and deploy to production
 4. Verify the deployment is healthy
 ```
 
-Now `/deploy` works in that project. Different projects, different commands. The agent adapts to your workflow, not the other way around.
+Now `/deploy` works in that project. Different projects get different commands. Your React app might have `/deploy` and `/storybook`. Your API might have `/migrate` and `/seed`. The agent adapts to how you actually work.
 
-### Skills (global and per-project)
+### Skills
 
-Same idea, but for reusable behaviors. Drop `.md` files in `~/.gg/skills/` (global) or `.gg/skills/` (per-project) and they get injected into the system prompt as available capabilities. The agent knows what it can do without you having to explain it every session.
+Same concept but for reusable behaviors across projects. Drop `.md` files in `~/.gg/skills/` (global) or `.gg/skills/` (per-project) and they get loaded into the system prompt. The agent just knows what it can do without you having to explain it every time.
 
 ---
 
@@ -130,28 +125,28 @@ That's it.
 # Interactive mode
 ggcoder
 
-# Ask a question directly
+# Pass a prompt directly
 ggcoder "fix the failing tests in src/utils"
 
-# Use a different provider
+# Start with a different provider
 ggcoder -p moonshot
 ```
 
-Everything else happens inside the session via slash commands. Type `/help` to see what's available.
+Everything else happens inside the session. Type `/help` to see what's available.
 
 ---
 
 ## The packages
 
-The whole stack is open-source and composable. Three npm packages, each usable on its own.
+The whole stack is open source and composable. Three npm packages, each usable on its own.
 
 | Package | What it does |
 |---|---|
-| [`@kenkaiiii/gg-ai`](https://www.npmjs.com/package/@kenkaiiii/gg-ai) | Unified streaming API across all four providers. One interface, provider differences handled internally. |
+| [`@kenkaiiii/gg-ai`](https://www.npmjs.com/package/@kenkaiiii/gg-ai) | Unified streaming API across all four providers. One interface, differences handled internally. |
 | [`@kenkaiiii/gg-agent`](https://www.npmjs.com/package/@kenkaiiii/gg-agent) | Agent loop with multi-turn tool execution, Zod-validated parameters, error recovery. |
-| [`@kenkaiiii/ggcoder`](https://www.npmjs.com/package/@kenkaiiii/ggcoder) | Full CLI — tools, sessions, UI, OAuth, the works. |
+| [`@kenkaiiii/ggcoder`](https://www.npmjs.com/package/@kenkaiiii/ggcoder) | The full CLI. Tools, sessions, UI, OAuth, everything. |
 
-### Quick example — streaming API
+### Quick example: streaming API
 
 ```typescript
 import { stream } from "@kenkaiiii/gg-ai";
@@ -165,7 +160,7 @@ for await (const event of stream({
 }
 ```
 
-### Quick example — agent loop
+### Quick example: agent loop
 
 ```typescript
 import { Agent } from "@kenkaiiii/gg-agent";
@@ -207,8 +202,8 @@ Stack: TypeScript 5.9 + pnpm workspaces + Ink 6 + React 19 + Vitest 4 + Zod v4
 
 ## Community
 
-- [YouTube @kenkaidoesai](https://youtube.com/@kenkaidoesai) — tutorials and demos
-- [Skool community](https://skool.com/kenkai) — come hang out
+- [YouTube @kenkaidoesai](https://youtube.com/@kenkaidoesai) - tutorials and demos
+- [Skool community](https://skool.com/kenkai) - come hang out
 
 ---
 
