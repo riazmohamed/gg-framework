@@ -139,16 +139,29 @@ export function toAnthropicMessages(
     }
   }
 
-  // Build system as block array (supports cache_control)
-  const system: Anthropic.TextBlockParam[] | undefined = systemText
-    ? [
+  // Build system as block array (supports cache_control).
+  // Split on "<!-- uncached -->" marker: text before is cached, text after is not.
+  let system: Anthropic.TextBlockParam[] | undefined;
+  if (systemText) {
+    const marker = "<!-- uncached -->";
+    const markerIdx = systemText.indexOf(marker);
+    if (markerIdx !== -1 && cacheControl) {
+      const cachedPart = systemText.slice(0, markerIdx).trimEnd();
+      const uncachedPart = systemText.slice(markerIdx + marker.length).trimStart();
+      system = [
+        { type: "text" as const, text: cachedPart, cache_control: cacheControl },
+        ...(uncachedPart ? [{ type: "text" as const, text: uncachedPart }] : []),
+      ];
+    } else {
+      system = [
         {
           type: "text" as const,
           text: systemText,
           ...(cacheControl && { cache_control: cacheControl }),
         },
-      ]
-    : undefined;
+      ];
+    }
+  }
 
   return { system, messages: out };
 }

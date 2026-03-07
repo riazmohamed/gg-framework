@@ -121,13 +121,18 @@ export async function buildSystemPrompt(cwd: string, skills?: Skill[]): Promise<
     }
   }
 
-  // 9. Environment
+  // 9. Environment (static — cacheable)
   sections.push(
-    `## Environment\n\n` +
-      `- Current date: ${new Date().toISOString().split("T")[0]}\n` +
-      `- Working directory: ${cwd}\n` +
-      `- Platform: ${process.platform}`,
+    `## Environment\n\n` + `- Working directory: ${cwd}\n` + `- Platform: ${process.platform}`,
   );
+
+  // Dynamic section (uncached) — separated by marker so the transform layer
+  // can split the system prompt into cached + uncached blocks.
+  const today = new Date();
+  const day = today.getDate();
+  const month = today.toLocaleString("en-US", { month: "long" });
+  const year = today.getFullYear();
+  sections.push(`<!-- uncached -->\nToday's date: ${day} ${month} ${year}`);
 
   return sections.join("\n\n");
 }
