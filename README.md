@@ -11,11 +11,11 @@
   <a href="https://skool.com/kenkai"><img src="https://img.shields.io/badge/Skool-Community-7C3AED?style=for-the-badge" alt="Skool"></a>
 </p>
 
-I built GG Coder because I got tired of waiting.
+I've been writing code since before the AI wave hit. Been using Claude Code since release, and have gone through just about every coding agent out there since early 2024. I know what works and what's just overhead.
 
-Claude Code is great. I use it daily. But it ships ~15,000 tokens of system prompt on every single request. The Claude Agent SDK does the same thing since it's Claude Code under the hood.
+Claude Code is great. I use it daily. But after enough time with it, you notice how much baggage it carries. ~15,000 tokens of system prompt on every single request. The Claude Agent SDK does the same thing since it's Claude Code under the hood.
 
-So I asked: what if we just... didn't do that?
+GG Coder is what happens when you strip all of that out and keep only what actually matters.
 
 ---
 
