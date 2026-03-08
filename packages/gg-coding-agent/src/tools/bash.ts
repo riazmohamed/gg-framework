@@ -9,6 +9,7 @@ import { killProcessTree } from "../utils/process.js";
 import { truncateTail } from "./truncate.js";
 
 const DEFAULT_TIMEOUT = 120_000; // 120 seconds
+const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB — cap buffered output to prevent OOM
 
 const BashParams = z.object({
   command: z.string().describe("The bash command to execute"),
@@ -63,9 +64,21 @@ export function createBashTool(
         });
 
         const chunks: Buffer[] = [];
+        let totalBytes = 0;
+        let outputCapped = false;
 
-        child.stdout?.on("data", (data: Buffer) => chunks.push(data));
-        child.stderr?.on("data", (data: Buffer) => chunks.push(data));
+        const onData = (data: Buffer) => {
+          if (outputCapped) return;
+          totalBytes += data.length;
+          if (totalBytes > MAX_OUTPUT_BYTES) {
+            outputCapped = true;
+            // Keep what we have — it'll be truncated by truncateTail anyway
+            return;
+          }
+          chunks.push(data);
+        };
+        child.stdout?.on("data", onData);
+        child.stderr?.on("data", onData);
 
         let killed = false;
         let timedOut = false;
@@ -92,6 +105,9 @@ export function createBashTool(
           const result = truncateTail(rawOutput);
 
           let output = result.content;
+          if (outputCapped) {
+            output = `[Output capped at ${MAX_OUTPUT_BYTES / 1024 / 1024} MB to prevent memory exhaustion]\n${output}`;
+          }
           if (result.truncated) {
             // Save full output to temp file
             const tmpPath = path.join(os.tmpdir(), `gg-bash-${Date.now()}.txt`);

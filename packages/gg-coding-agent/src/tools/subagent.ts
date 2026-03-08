@@ -8,6 +8,7 @@ import { truncateTail } from "./truncate.js";
 const SUB_AGENT_MAX_TURNS = 10;
 const SUB_AGENT_MAX_OUTPUT_CHARS = 100_000; // ~25k tokens, matches other tool limits
 const SUB_AGENT_MAX_OUTPUT_LINES = 500;
+const SUB_AGENT_MAX_STDERR_CHARS = 10_000; // Cap stderr to prevent unbounded growth
 
 const SubAgentParams = z.object({
   task: z.string().describe("The task to delegate to the sub-agent"),
@@ -111,7 +112,12 @@ export function createSubAgentTool(
             const type = event.type as string;
             switch (type) {
               case "text_delta":
-                textOutput += event.text;
+                // Cap accumulation to ~2x the truncation limit (keeps tail for truncateTail)
+                if (textOutput.length < SUB_AGENT_MAX_OUTPUT_CHARS * 2) {
+                  textOutput += event.text;
+                } else if (!textOutput.endsWith("[output capped]")) {
+                  textOutput += "\n[output capped]";
+                }
                 break;
               case "tool_call_start":
                 toolUseCount++;
@@ -151,10 +157,15 @@ export function createSubAgentTool(
           }
         });
 
-        // Collect stderr
+        // Collect stderr (capped to prevent unbounded memory growth)
         let stderr = "";
         child.stderr?.on("data", (chunk: Buffer) => {
-          stderr += chunk.toString();
+          if (stderr.length < SUB_AGENT_MAX_STDERR_CHARS) {
+            stderr += chunk.toString();
+            if (stderr.length > SUB_AGENT_MAX_STDERR_CHARS) {
+              stderr = stderr.slice(0, SUB_AGENT_MAX_STDERR_CHARS);
+            }
+          }
         });
 
         child.on("close", (code) => {

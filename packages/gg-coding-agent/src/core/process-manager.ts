@@ -144,6 +144,13 @@ export class ProcessManager {
   }
 
   list(): BackgroundProcess[] {
+    // Prune completed processes older than 5 minutes to prevent Map growth
+    const cutoff = Date.now() - 5 * 60 * 1000;
+    for (const [id, proc] of this.processes) {
+      if (proc.exitCode !== null && !this.children.has(id) && proc.startedAt < cutoff) {
+        this.processes.delete(id);
+      }
+    }
     return Array.from(this.processes.values());
   }
 

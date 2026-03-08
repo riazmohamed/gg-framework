@@ -318,7 +318,14 @@ export function useAgentLoop(
               onToolUpdate?.(event.toolCallId, event.update);
               activeToolCallsRef.current = activeToolCallsRef.current.map((tc) =>
                 tc.toolCallId === event.toolCallId
-                  ? { ...tc, updates: [...tc.updates, event.update] }
+                  ? {
+                      ...tc,
+                      // Keep only the last 20 updates to prevent unbounded memory growth
+                      updates:
+                        tc.updates.length >= 20
+                          ? [...tc.updates.slice(-19), event.update]
+                          : [...tc.updates, event.update],
+                    }
                   : tc,
               );
               setActiveToolCalls(activeToolCallsRef.current);
