@@ -723,6 +723,23 @@ export function App(props: AppProps) {
           toolsUsed: toolsUsed.join(",") || "none",
         });
         setDoneStatus({ durationMs, toolsUsed, verb: pickDurationVerb(toolsUsed) });
+        // Flush live items to Static immediately so the long text exits
+        // the live area.  Ink's cursor math can miscount wrapped lines and
+        // clip the bottom of the content on subsequent live-area re-renders.
+        // Moving items to Static writes them once — no further rewrites.
+        setLiveItems((prev) => {
+          if (prev.length > 0) {
+            const duration: CompletedItem = {
+              kind: "duration",
+              durationMs,
+              toolsUsed,
+              verb: pickDurationVerb(toolsUsed),
+              id: getId(),
+            };
+            setHistory((h) => pruneHistory([...h, ...prev, duration]));
+          }
+          return [];
+        });
       }, []),
       onAborted: useCallback(() => {
         log("WARN", "agent", "Agent run aborted by user");

@@ -60,6 +60,12 @@ export function StreamingArea({
     return () => clearInterval(timer);
   }, [isRunning]);
 
+  // Return null when there is nothing to display.  Previously this kept an
+  // empty <Box marginTop={1}> alive while isRunning was true, adding phantom
+  // height to Ink's live area.  When isRunning later flipped to false in a
+  // separate render batch, the live area shrank and Ink's cursor math
+  // miscalculated the rewrite offset — clipping the bottom of the content.
+  if (!streamingText && !streamingThinking) return null;
   if (!isRunning && !streamingText) return null;
 
   return (

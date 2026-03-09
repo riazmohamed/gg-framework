@@ -30,8 +30,12 @@ export function Markdown({ children }: { children: string }) {
     }
   });
 
-  // Use measured width if available, otherwise fall back to stdout
-  const columns = measuredWidth > 0 ? measuredWidth : (stdout?.columns ?? 80);
+  // Use measured width when available. On first mount (before layout runs)
+  // fall back to stdout.columns minus padding overhead so tables don't
+  // overflow. The "⏺ " prefix = 2 cols, live area paddingRight = 1 col,
+  // plus 1 col safety margin = 4.  After the first layout pass,
+  // measuredWidth takes over with the exact value.
+  const columns = measuredWidth > 0 ? measuredWidth : Math.max(40, (stdout?.columns ?? 80) - 4);
   const tokens = marked.lexer(children);
   return (
     <Box ref={ref} flexDirection="column" flexShrink={1}>

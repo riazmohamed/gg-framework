@@ -140,6 +140,7 @@ export function useAgentLoop(
   const charCountRef = useRef(0);
   const realTokensAccumRef = useRef(0);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const doneCalledRef = useRef(false);
 
   const stopReveal = useCallback(() => {
     if (revealTimerRef.current) {
@@ -219,6 +220,7 @@ export function useAgentLoop(
       let wasAborted = false;
 
       // Reset state
+      doneCalledRef.current = false;
       textPendingRef.current = "";
       textVisibleRef.current = "";
       thinkingBufferRef.current = "";
@@ -415,6 +417,18 @@ export function useAgentLoop(
 
             case "agent_done":
               flushAllText();
+              // Batch ALL completion state into a single render so Ink
+              // processes the live-area change atomically.  Previously
+              // isRunning, activityPhase, and onDone landed in separate
+              // render batches, causing multiple live-area height changes
+              // that confused Ink's cursor math and clipped content.
+              setIsRunning(false);
+              phaseRef.current = "idle";
+              setActivityPhase("idle");
+              // Call onDone HERE (not in finally) so its state updates
+              // (doneStatus, flushing items to Static) are batched too.
+              onDone?.(Date.now() - runStartRef.current, [...toolsUsedRef.current]);
+              doneCalledRef.current = true;
               break;
           }
         }
@@ -438,8 +452,8 @@ export function useAgentLoop(
 
         if (wasAborted) {
           onAborted?.();
-        } else {
-          // Notify parent of duration + tools used
+        } else if (!doneCalledRef.current) {
+          // Safety fallback — normally agent_done calls onDone in-band
           const durationMs = Date.now() - runStartRef.current;
           onDone?.(durationMs, [...toolsUsedRef.current]);
         }
