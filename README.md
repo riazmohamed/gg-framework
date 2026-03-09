@@ -67,13 +67,28 @@ You can still add your own MCPs if you need them. But start with less. You'll ge
 
 ---
 
-## Install
+## Getting started
 
 ```bash
 npm i -g @kenkaiiii/ggcoder
+ggcoder login
+ggcoder
 ```
 
 Each package can also be installed independently. See the individual READMEs for details.
+
+---
+
+## For developers
+
+```bash
+git clone https://github.com/KenKaiii/gg-framework.git
+cd gg-framework
+pnpm install
+pnpm build
+```
+
+TypeScript 5.9 + pnpm workspaces + Ink 6 + React 19 + Vitest 4 + Zod v4
 
 ---
 
