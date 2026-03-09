@@ -258,10 +258,73 @@ export class SessionManager {
   }
 
   getMessages(entries: SessionEntry[]): Message[] {
-    return entries
+    const messages = entries
       .filter((e): e is MessageEntry => e.type === "message")
       .map((e) => e.message)
       .filter((m) => m.role !== "system");
+
+    // Repair orphaned tool_use blocks that lack matching tool_result messages.
+    // This can happen when a session is interrupted mid-tool-execution.
+    return SessionManager.repairToolPairs(messages);
+  }
+
+  /**
+   * Ensure every assistant message with tool_use blocks is followed by a tool
+   * message containing matching tool_result entries. Inserts synthetic
+   * tool_result messages where needed to prevent Anthropic API 400 errors.
+   */
+  static repairToolPairs(messages: Message[]): Message[] {
+    const repaired: Message[] = [];
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i]!;
+      repaired.push(msg);
+
+      if (msg.role !== "assistant") continue;
+      const content = Array.isArray(msg.content) ? msg.content : [];
+      const toolUseIds = content
+        .filter((p) => p.type === "tool_call")
+        .map((p) => (p as { type: "tool_call"; id: string }).id);
+      if (toolUseIds.length === 0) continue;
+
+      // Check if the next message is a tool message with matching results
+      const next = messages[i + 1];
+      if (next?.role === "tool" && Array.isArray(next.content)) {
+        const existingIds = new Set(next.content.map((r: { toolCallId: string }) => r.toolCallId));
+        const missing = toolUseIds.filter((id) => !existingIds.has(id));
+        if (missing.length > 0) {
+          // Patch the existing tool message with missing results
+          for (const id of missing) {
+            (
+              next.content as {
+                type: string;
+                toolCallId: string;
+                content: string;
+                isError: boolean;
+              }[]
+            ).push({
+              type: "tool_result",
+              toolCallId: id,
+              content: "Tool execution was interrupted.",
+              isError: true,
+            });
+          }
+        }
+      } else {
+        // No tool message follows — insert a synthetic one
+        repaired.push({
+          role: "tool" as const,
+          content: toolUseIds.map((id) => ({
+            type: "tool_result" as const,
+            toolCallId: id,
+            content: "Tool execution was interrupted.",
+            isError: true,
+          })),
+        });
+      }
+    }
+
+    return repaired;
   }
 
   getBranch(entries: SessionEntry[], leafId: string | null): SessionEntry[] {

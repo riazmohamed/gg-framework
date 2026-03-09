@@ -263,10 +263,23 @@ export async function* agentLoop(
       }
     } finally {
       options.signal?.removeEventListener("abort", abortHandler);
-    }
 
-    // Push tool results back into conversation
-    messages.push({ role: "tool", content: toolResults });
+      // Ensure every tool_use has a matching tool_result, even on abort.
+      // Without this, an aborted turn leaves an orphaned tool_use in the
+      // message history which causes Anthropic API 400 errors on the next
+      // request.
+      for (const tc of toolCalls) {
+        if (!toolResults.some((r) => r.toolCallId === tc.id)) {
+          toolResults.push({
+            type: "tool_result",
+            toolCallId: tc.id,
+            content: "Tool execution was aborted.",
+            isError: true,
+          });
+        }
+      }
+      messages.push({ role: "tool", content: toolResults });
+    }
   }
 
   // Exceeded max turns — return last assistant message
