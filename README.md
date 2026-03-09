@@ -27,15 +27,21 @@ Three packages. Each one works on its own. Stack them together and you get a ful
 
 ---
 
-## Getting started
+## Which package do I need?
+
+| You want to... | Use |
+|---|---|
+| Stream LLM responses across providers with one API | [`@kenkaiiii/gg-ai`](packages/gg-ai/README.md) |
+| Build an agent that calls tools and loops autonomously | [`@kenkaiiii/gg-agent`](packages/gg-agent/README.md) |
+| Use a ready-made CLI coding agent | [`@kenkaiiii/ggcoder`](packages/ggcoder/README.md) |
+
+Each package works on its own. Install only what you need.
 
 ```bash
-npm i -g @kenkaiiii/ggcoder
-ggcoder login
-ggcoder
+npm i @kenkaiiii/gg-ai          # Just the streaming layer
+npm i @kenkaiiii/gg-agent       # Streaming + agent loop
+npm i -g @kenkaiiii/ggcoder     # The full CLI
 ```
-
-Each package can also be installed independently. See the individual READMEs for details.
 
 ---
 
