@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// Drain performance entries to prevent buffer overflow warning from dependencies
+import { PerformanceObserver } from "node:perf_hooks";
+new PerformanceObserver(() => {}).observe({ entryTypes: ["measure", "mark"] });
+
 import { parseArgs } from "node:util";
 import fs from "node:fs";
 import readline from "node:readline/promises";

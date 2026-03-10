@@ -21,6 +21,7 @@ export async function buildSystemPrompt(cwd: string, skills?: Skill[]): Promise<
   sections.push(
     `## How to Work\n\n` +
       `### Before making changes\n` +
+      `- **IMPORTANT: \`edit\` and \`write\` will FAIL on any file you haven't \`read\` yet this session. Always read first.**\n` +
       `- Understand the task fully before touching code.\n` +
       `- Use \`find\`, \`grep\`, and \`read\` to explore the relevant area of the codebase.\n` +
       `- Look for project context files (CLAUDE.md, AGENTS.md) — they take precedence over defaults.\n` +
@@ -52,7 +53,7 @@ export async function buildSystemPrompt(cwd: string, skills?: Skill[]): Promise<
   // 4. Tools
   sections.push(
     `## Tools\n\n` +
-      `- **read**: Read a file before editing it. Use offset/limit for large files. Always read before edit.\n` +
+      `- **read**: Read file contents. Use offset/limit for large files.\n` +
       `- **edit**: Surgical changes to existing files. The old_text must uniquely match one location.\n` +
       `- **write**: Create new files or complete rewrites. Prefer edit for small changes.\n` +
       `- **bash**: Run commands (tests, builds, git, installs). Check exit code and output for errors. Never run commands that require interactive confirmation (e.g. y/n prompts) — use force flags or non-interactive alternatives instead (e.g. \`rm -f\` not \`rm -i\`, \`yes |\` prefix, \`--yes\`/\`--force\` flags). Set \`run_in_background=true\` for long-running processes (dev servers, watchers, file watchers) — returns a process ID immediately.\n` +
@@ -73,7 +74,6 @@ export async function buildSystemPrompt(cwd: string, skills?: Skill[]): Promise<
   // 5. Avoid
   sections.push(
     `## Avoid\n\n` +
-      `- Don't modify files you haven't read.\n` +
       `- Don't assume changes worked without verifying.\n` +
       `- Don't make multiple unrelated changes at once.\n` +
       `- Don't generate stubs or placeholder implementations unless asked.\n` +
