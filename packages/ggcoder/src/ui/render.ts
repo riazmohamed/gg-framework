@@ -7,6 +7,7 @@ import type { MCPClientManager } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
 import { App, type CompletedItem } from "./App.js";
 import { ThemeContext, loadTheme } from "./theme/theme.js";
+import { detectTheme } from "./theme/detect-theme.js";
 
 export interface RenderAppConfig {
   provider: Provider;
@@ -21,7 +22,7 @@ export interface RenderAppConfig {
   accountId?: string;
   cwd: string;
   version: string;
-  theme?: "dark" | "light";
+  theme?: "auto" | "dark" | "light";
   showThinking?: boolean;
   showTokenUsage?: boolean;
   onSlashCommand?: (input: string) => Promise<string | null>;
@@ -37,7 +38,9 @@ export interface RenderAppConfig {
 }
 
 export async function renderApp(config: RenderAppConfig): Promise<void> {
-  const theme = loadTheme(config.theme ?? "dark");
+  const themeSetting = config.theme ?? "auto";
+  const resolvedTheme = themeSetting === "auto" ? await detectTheme() : themeSetting;
+  const theme = loadTheme(resolvedTheme);
 
   // Clear screen
   process.stdout.write("\x1b[2J\x1b[H");
