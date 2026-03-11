@@ -37,11 +37,29 @@ export function isContextOverflow(err: unknown): boolean {
 }
 
 /**
+ * Detect billing/quota errors — these should NOT be retried.
+ * GLM returns HTTP 429 with "Insufficient balance" for quota exhaustion.
+ */
+export function isBillingError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return (
+    msg.includes("insufficient balance") ||
+    msg.includes("no resource package") ||
+    msg.includes("quota exceeded") ||
+    msg.includes("billing") ||
+    msg.includes("recharge")
+  );
+}
+
+/**
  * Detect overloaded/rate-limit errors from LLM providers.
  * HTTP 429 (rate limit) or 529/503 (overloaded).
+ * Excludes billing/quota errors which won't resolve with a retry.
  */
 export function isOverloaded(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
+  if (isBillingError(err)) return false;
   const msg = err.message.toLowerCase();
   return (
     msg.includes("overloaded") ||
