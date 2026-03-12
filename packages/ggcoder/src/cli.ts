@@ -11,6 +11,7 @@ import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import { renderApp } from "./ui/render.js";
 import { renderLoginSelector } from "./ui/login.js";
+import { renderSessionSelector } from "./ui/sessions.js";
 import type { CompletedItem } from "./ui/App.js";
 import { formatUserError } from "./utils/error-handler.js";
 import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
@@ -53,6 +54,17 @@ function main(): void {
 
   if (subcommand === "logout") {
     runLogout().catch((err) => {
+      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
+      closeLogger();
+      process.stderr.write(formatUserError(err) + "\n");
+      process.exit(1);
+    });
+    return;
+  }
+
+  if (subcommand === "sessions") {
+    process.argv.splice(2, 1);
+    runSessions().catch((err) => {
       log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
       closeLogger();
       process.stderr.write(formatUserError(err) + "\n");
@@ -134,6 +146,7 @@ async function runInkTUI(opts: {
   cwd: string;
   thinkingLevel?: ThinkingLevel;
   continueRecent?: boolean;
+  resumeSessionPath?: string;
   theme?: "auto" | "dark" | "light";
 }): Promise<void> {
   const { provider, model, cwd } = opts;
@@ -211,31 +224,32 @@ async function runInkTUI(opts: {
   let sessionPath: string | undefined;
   let initialHistory: CompletedItem[] | undefined;
 
-  if (opts.continueRecent) {
-    const existingPath = await sessionManager.getMostRecent(cwd);
+  // Determine which session to resume (explicit path or most recent)
+  const resumePath =
+    opts.resumeSessionPath ??
+    (opts.continueRecent ? await sessionManager.getMostRecent(cwd) : null);
 
-    if (existingPath) {
-      try {
-        const loaded = await sessionManager.load(existingPath);
-        const loadedMessages = sessionManager.getMessages(loaded.entries);
+  if (resumePath) {
+    try {
+      const loaded = await sessionManager.load(resumePath);
+      const loadedMessages = sessionManager.getMessages(loaded.entries);
 
-        if (loadedMessages.length > 0) {
-          messages.push(...loadedMessages);
-          sessionPath = existingPath;
-          log("INFO", "session", `Restored session`, {
-            path: existingPath,
-            messageCount: String(loadedMessages.length),
-          });
-          initialHistory = messagesToHistoryItems(loadedMessages);
-          initialHistory.push({
-            kind: "info",
-            text: `↻ Restored session (${loadedMessages.length} messages)`,
-            id: `restore-info`,
-          });
-        }
-      } catch {
-        // Session file corrupt or missing — start fresh
+      if (loadedMessages.length > 0) {
+        messages.push(...loadedMessages);
+        sessionPath = resumePath;
+        log("INFO", "session", `Restored session`, {
+          path: resumePath,
+          messageCount: String(loadedMessages.length),
+        });
+        initialHistory = messagesToHistoryItems(loadedMessages);
+        initialHistory.push({
+          kind: "info",
+          text: `↻ Restored session (${loadedMessages.length} messages)`,
+          id: `restore-info`,
+        });
       }
+    } catch {
+      // Session file corrupt or missing — start fresh
     }
   }
 
@@ -358,6 +372,62 @@ async function runLogout(): Promise<void> {
   log("INFO", "auth", "Logout succeeded");
   closeLogger();
   console.log(chalk.green("Logged out successfully."));
+}
+
+// ── Sessions ──────────────────────────────────────────────
+
+async function runSessions(): Promise<void> {
+  const paths = await ensureAppDirs();
+  initLogger(paths.logFile, { version: CLI_VERSION });
+  log("INFO", "session", "Sessions selector started");
+
+  const cwd = process.cwd();
+  const selectedPath = await renderSessionSelector(paths.sessionsDir, cwd);
+
+  if (!selectedPath) {
+    console.log(chalk.hex("#6b7280")("No session selected."));
+    closeLogger();
+    process.exit(0);
+  }
+
+  // Load saved settings for provider/model/theme
+  let savedProvider: "anthropic" | "openai" | "glm" | "moonshot" | undefined;
+  let savedModel: string | undefined;
+  let savedThinkingEnabled = false;
+  let savedTheme: "auto" | "dark" | "light" = "auto";
+  try {
+    const raw = JSON.parse(fs.readFileSync(paths.settingsFile, "utf-8"));
+    if (raw.defaultProvider) savedProvider = raw.defaultProvider;
+    if (raw.defaultModel) savedModel = raw.defaultModel;
+    if (raw.thinkingEnabled === true) savedThinkingEnabled = true;
+    if (raw.theme === "dark" || raw.theme === "light" || raw.theme === "auto")
+      savedTheme = raw.theme;
+  } catch {
+    // No settings file — use defaults
+  }
+
+  const provider: "anthropic" | "openai" | "glm" | "moonshot" = savedProvider ?? "anthropic";
+
+  function getDefault(p: string): string {
+    if (p === "openai") return "gpt-5.3-codex";
+    if (p === "glm") return "glm-5";
+    if (p === "moonshot") return "kimi-k2.5";
+    return "claude-opus-4-6";
+  }
+
+  const model = savedModel ?? getDefault(provider);
+  const thinkingLevel: ThinkingLevel | undefined = savedThinkingEnabled ? "medium" : undefined;
+
+  closeLogger();
+
+  await runInkTUI({
+    provider,
+    model,
+    cwd,
+    thinkingLevel,
+    resumeSessionPath: selectedPath,
+    theme: savedTheme,
+  });
 }
 
 // ── Helpers ────────────────────────────────────────────────
