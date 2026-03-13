@@ -29,6 +29,9 @@ interface ToolDoneProps {
 
 type ToolExecutionProps = ToolRunningProps | ToolDoneProps;
 
+/** Tools that use compact one-line summaries instead of showing output. */
+const COMPACT_TOOLS = new Set(["read", "grep", "find", "ls"]);
+
 export function ToolExecution(props: ToolExecutionProps) {
   const theme = useTheme();
 
@@ -43,6 +46,15 @@ export function ToolExecution(props: ToolExecutionProps) {
   }, [props.status]);
 
   if (props.status === "running") {
+    // Compact tools get a summary label while running
+    if (COMPACT_TOOLS.has(props.name)) {
+      const summary = getCompactRunningLabel(props.name, props.args);
+      return (
+        <Box marginTop={1}>
+          <Spinner label={`${summary} (ctrl+o to expand)`} />
+        </Box>
+      );
+    }
     const { label, detail } = getToolHeaderParts(props.name, props.args);
     return (
       <Box marginTop={1}>
@@ -52,6 +64,24 @@ export function ToolExecution(props: ToolExecutionProps) {
   }
 
   const { name, args, result, isError } = props;
+
+  // Compact tools — one-line summary, no output content
+  if (COMPACT_TOOLS.has(name) && !isError) {
+    const summary = getCompactDoneLabel(name, args, result);
+    return (
+      <Box marginTop={1} flexShrink={1}>
+        <Text>
+          <Text color={theme.primary} dimColor={isFresh}>
+            {"⏺ "}
+          </Text>
+          <Text bold color={theme.toolName} dimColor={isFresh}>
+            {summary}
+          </Text>
+        </Text>
+      </Box>
+    );
+  }
+
   const isDiff = name === "edit" && !isError && result.includes("---");
 
   const { label, detail } = getToolHeaderParts(name, args);
@@ -132,6 +162,49 @@ export function ToolExecution(props: ToolExecutionProps) {
       </Box>
     </Box>
   );
+}
+
+// ── Compact tool labels ─────────────────────────────────────
+
+function getCompactRunningLabel(name: string, _args: Record<string, unknown>): string {
+  switch (name) {
+    case "grep":
+      return "Searching…";
+    case "read":
+      return "Reading…";
+    case "find":
+      return "Finding files…";
+    case "ls":
+      return "Listing…";
+    default:
+      return `${name}…`;
+  }
+}
+
+function getCompactDoneLabel(name: string, args: Record<string, unknown>, result: string): string {
+  switch (name) {
+    case "grep": {
+      const lines = result.split("\n").filter((l) => l.length > 0);
+      // Filter out the summary line ("N match(es) found" or "[Truncated at N matches]")
+      const matchCount = lines.filter((l) => !l.match(/^\d+ match|^\[Truncated/)).length;
+      return `Searched for 1 pattern${matchCount > 0 ? ` (${matchCount} match${matchCount !== 1 ? "es" : ""})` : ""}`;
+    }
+    case "read": {
+      const filePath = String(args.file_path ?? "");
+      const shortPath = shortenPath(filePath);
+      return `Read ${shortPath}`;
+    }
+    case "find": {
+      const lines = result.split("\n").filter((l) => l.length > 0);
+      return `Found ${lines.length} file${lines.length !== 1 ? "s" : ""}`;
+    }
+    case "ls": {
+      const lines = result.split("\n").filter((l) => l.length > 0);
+      return `Listed ${lines.length} item${lines.length !== 1 ? "s" : ""}`;
+    }
+    default:
+      return name;
+  }
 }
 
 // ── Header formatting ──────────────────────────────────────

@@ -14,6 +14,7 @@ import { UserMessage } from "./components/UserMessage.js";
 import type { PasteInfo } from "./components/InputArea.js";
 import { AssistantMessage } from "./components/AssistantMessage.js";
 import { ToolExecution } from "./components/ToolExecution.js";
+import { ToolGroupExecution } from "./components/ToolGroupExecution.js";
 import { ServerToolExecution } from "./components/ServerToolExecution.js";
 import { SubAgentPanel, type SubAgentInfo } from "./components/SubAgentPanel.js";
 import { CompactionSpinner, CompactionDone } from "./components/CompactionNotice.js";
@@ -201,6 +202,24 @@ interface TombstoneItem {
   id: string;
 }
 
+/** Tools that get aggregated into a single compact group when concurrent. */
+const AGGREGATABLE_TOOLS = new Set(["read", "grep", "find", "ls"]);
+
+interface ToolGroupTool {
+  toolCallId: string;
+  name: string;
+  args: Record<string, unknown>;
+  status: "running" | "done";
+  result?: string;
+  isError?: boolean;
+}
+
+export interface ToolGroupItem {
+  kind: "tool_group";
+  tools: ToolGroupTool[];
+  id: string;
+}
+
 export type CompletedItem =
   | UserItem
   | TaskItem
@@ -216,6 +235,7 @@ export type CompletedItem =
   | DurationItem
   | BannerItem
   | SubAgentGroupItem
+  | ToolGroupItem
   | TombstoneItem;
 
 /**
@@ -727,6 +747,33 @@ export function App(props: AppProps) {
               }
               return [...prev, { kind: "subagent_group", agents: [newAgent], id: getId() }];
             });
+          } else if (AGGREGATABLE_TOOLS.has(name)) {
+            // Group concurrent read-only tools into a single compact item
+            setLiveItems((prev) => {
+              // Find an active tool group (has at least one running tool)
+              const groupIdx = prev.findIndex(
+                (item) =>
+                  item.kind === "tool_group" &&
+                  (item as ToolGroupItem).tools.some((t) => t.status === "running"),
+              );
+              if (groupIdx !== -1) {
+                const group = prev[groupIdx] as ToolGroupItem;
+                const next = [...prev];
+                next[groupIdx] = {
+                  ...group,
+                  tools: [...group.tools, { toolCallId, name, args, status: "running" }],
+                };
+                return next;
+              }
+              return [
+                ...prev,
+                {
+                  kind: "tool_group",
+                  tools: [{ toolCallId, name, args, status: "running" }],
+                  id: getId(),
+                },
+              ];
+            });
           } else {
             setLiveItems((prev) => [
               ...prev,
@@ -798,6 +845,26 @@ export function App(props: AppProps) {
             });
           } else {
             setLiveItems((prev) => {
+              // Check if this tool is in a tool_group
+              const groupIdx = prev.findIndex(
+                (item) =>
+                  item.kind === "tool_group" &&
+                  (item as ToolGroupItem).tools.some((t) => t.toolCallId === toolCallId),
+              );
+              if (groupIdx !== -1) {
+                const group = prev[groupIdx] as ToolGroupItem;
+                const next = [...prev];
+                next[groupIdx] = {
+                  ...group,
+                  tools: group.tools.map((t) =>
+                    t.toolCallId === toolCallId
+                      ? { ...t, status: "done" as const, result, isError }
+                      : t,
+                  ),
+                };
+                return next;
+              }
+
               // Find the matching tool_start and replace it with tool_done
               const startIdx = prev.findIndex(
                 (item) => item.kind === "tool_start" && item.toolCallId === toolCallId,
@@ -1368,6 +1435,8 @@ export function App(props: AppProps) {
             isError={item.isError}
           />
         );
+      case "tool_group":
+        return <ToolGroupExecution key={item.id} tools={item.tools} />;
       case "server_tool_start":
         return (
           <ServerToolExecution
