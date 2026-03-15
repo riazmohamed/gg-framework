@@ -11,6 +11,9 @@
     "format:check": "prettier --check packages/*/src/",
     "prepare": "pnpm build"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": ["sharp", "esbuild"]
+  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.0.3",

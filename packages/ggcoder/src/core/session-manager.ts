@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
-import type { Message, Provider } from "@kenkaiiii/gg-ai";
+import type { Message, Provider } from "@abukhaled/gg-ai";
 
 // ── Entry Types ────────────────────────────────────────────
 

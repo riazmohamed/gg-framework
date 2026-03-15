@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool } from "@abukhaled/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
 import { killProcessTree } from "../utils/process.js";
 import { truncateTail } from "./truncate.js";

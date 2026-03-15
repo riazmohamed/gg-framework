@@ -2,7 +2,7 @@ import { AgentSession, type AgentSessionOptions } from "../core/agent-session.js
 import { formatUserError } from "../utils/error-handler.js";
 import { initLogger, log, attachToEventBus, closeLogger } from "../core/logger.js";
 import { getAppPaths } from "../config.js";
-import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 
 export interface PrintModeOptions {
   message: string;

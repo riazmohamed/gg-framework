@@ -116,7 +116,7 @@ function renderScreen(sessions: SessionDisplay[], selectedIndex: number): string
       chalk.hex("#60a5fa").bold("GG Coder") +
       (_version ? chalk.hex(TEXT_DIM)(` v${_version}`) : "") +
       chalk.hex(TEXT_DIM)(" · By ") +
-      chalk.hex(TEXT).bold("Ken Kai"),
+      chalk.hex(TEXT).bold("Abu Khaled"),
   );
   lines.push(gradientLine(LOGO_LINES[1]!) + GAP + chalk.hex(PRIMARY)("Sessions"));
   lines.push(

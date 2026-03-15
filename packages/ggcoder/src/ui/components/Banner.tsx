@@ -2,7 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { getModel } from "../../core/model-registry.js";
-import type { Provider } from "@kenkaiiii/gg-ai";
+import type { Provider } from "@abukhaled/gg-ai";
 
 interface BannerProps {
   version: string;
@@ -60,7 +60,7 @@ export function Banner({ version, model, cwd, taskCount }: BannerProps) {
         <Text color={theme.textDim}> v{version}</Text>
         <Text color={theme.textDim}> · By </Text>
         <Text color={theme.text} bold>
-          Ken Kai
+          Abu Khaled
         </Text>
       </Box>
       <Box>

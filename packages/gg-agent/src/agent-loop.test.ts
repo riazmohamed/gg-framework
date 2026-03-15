@@ -1,17 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { isContextOverflow, agentLoop } from "./agent-loop.js";
 import type { AgentEvent, AgentResult } from "./types.js";
-import type { Message } from "@kenkaiiii/gg-ai";
+import type { Message } from "@abukhaled/gg-ai";
 
 // ── Mock stream ────────────────────────────────────────────
 
-vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => {
+vi.mock("@abukhaled/gg-ai", async (importOriginal) => {
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
-  const mod = await importOriginal<typeof import("@kenkaiiii/gg-ai")>();
+  const mod = await importOriginal<typeof import("@abukhaled/gg-ai")>();
   return { ...mod, stream: vi.fn() };
 });
 
-import { stream } from "@kenkaiiii/gg-ai";
+import { stream } from "@abukhaled/gg-ai";
 const mockStream = vi.mocked(stream);
 
 function makeResponse(text: string, stopReason = "end_turn") {

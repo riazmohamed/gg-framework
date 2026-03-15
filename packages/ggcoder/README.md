@@ -1,24 +1,24 @@
-# @kenkaiiii/ggcoder
+# @abukhaled/ggcoder
 
 <p align="center">
   <strong>The fast, lean coding agent. Four providers. Zero bloat.</strong>
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@kenkaiiii/ggcoder"><img src="https://img.shields.io/npm/v/@kenkaiiii/ggcoder?style=for-the-badge" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@abukhaled/ggcoder"><img src="https://img.shields.io/npm/v/@abukhaled/ggcoder?style=for-the-badge" alt="npm version"></a>
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
-  <a href="https://youtube.com/@kenkaidoesai"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
-  <a href="https://skool.com/kenkai"><img src="https://img.shields.io/badge/Skool-Community-7C3AED?style=for-the-badge" alt="Skool"></a>
+  <a href="https://youtube.com/@abukhaled"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
+  <a href="https://skool.com/abukhaled"><img src="https://img.shields.io/badge/Skool-Community-7C3AED?style=for-the-badge" alt="Skool"></a>
 </p>
 
-The CLI that sits on top of the [GG Framework](../../README.md). Built on [`@kenkaiiii/gg-ai`](../gg-ai/README.md) and [`@kenkaiiii/gg-agent`](../gg-agent/README.md).
+The CLI that sits on top of the [GG Framework](../../README.md). Built on [`@abukhaled/gg-ai`](../gg-ai/README.md) and [`@abukhaled/gg-agent`](../gg-agent/README.md).
 
 ---
 
 ## Install
 
 ```bash
-npm i -g @kenkaiiii/ggcoder
+npm i -g @abukhaled/ggcoder
 ```
 
 ---
@@ -148,8 +148,8 @@ Plus the [Grep MCP](https://grep.dev) for searching across 1M+ public GitHub rep
 
 ## Community
 
-- [YouTube @kenkaidoesai](https://youtube.com/@kenkaidoesai) - tutorials and demos
-- [Skool community](https://skool.com/kenkai) - come hang out
+- [YouTube @abukhaled](https://youtube.com/@abukhaled) - tutorials and demos
+- [Skool community](https://skool.com/abukhaled) - come hang out
 
 ---
 

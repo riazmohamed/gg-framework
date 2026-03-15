@@ -1,5 +1,5 @@
 import React from "react";
-import type { Provider } from "@kenkaiiii/gg-ai";
+import type { Provider } from "@abukhaled/gg-ai";
 import { MODELS } from "../../core/model-registry.js";
 import { SelectList } from "./SelectList.js";
 

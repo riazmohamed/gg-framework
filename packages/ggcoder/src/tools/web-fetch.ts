@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool } from "@abukhaled/gg-agent";
 
 /**
  * Block requests to private/internal network addresses to prevent SSRF.

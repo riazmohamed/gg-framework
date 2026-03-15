@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import type { Provider } from "@kenkaiiii/gg-ai";
+import type { Provider } from "@abukhaled/gg-ai";
 
 const LOGO_LINES = [
   " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
@@ -59,7 +59,7 @@ function renderScreen(selectedIndex: number): string {
       chalk.hex(PRIMARY).bold("GG Coder") +
       (_version ? chalk.hex(TEXT_DIM)(` v${_version}`) : "") +
       chalk.hex(TEXT_DIM)(" · By ") +
-      chalk.hex(TEXT).bold("Ken Kai"),
+      chalk.hex(TEXT).bold("Abu Khaled"),
   );
   lines.push(gradientLine(LOGO_LINES[1]!) + GAP + chalk.hex("#a78bfa")("Login"));
   lines.push(gradientLine(LOGO_LINES[2]!) + GAP + chalk.hex(TEXT_DIM)("Select a provider"));

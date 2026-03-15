@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { AgentSession } from "../core/agent-session.js";
 import { TelegramBot, type TelegramMessage } from "../core/telegram.js";
 import chalk from "chalk";
@@ -670,7 +670,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
         chalk.hex("#60a5fa").bold("GG Coder") +
         chalk.hex("#6b7280")(` v${options.version}`) +
         chalk.hex("#6b7280")(" · By ") +
-        chalk.white.bold("Ken Kai"),
+        chalk.white.bold("Abu Khaled"),
     );
     console.log(`  ${gradientText(LOGO[1]!)}${GAP}` + chalk.hex("#a78bfa")(modelName));
     console.log(`  ${gradientText(LOGO[2]!)}${GAP}` + chalk.hex("#6b7280")(displayPath));

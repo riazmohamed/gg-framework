@@ -1,4 +1,4 @@
-import type { AgentEvent } from "@kenkaiiii/gg-agent";
+import type { AgentEvent } from "@abukhaled/gg-agent";
 
 // ── Event Map ──────────────────────────────────────────────
 

@@ -10,7 +10,7 @@ import {
 } from "./compactor.js";
 import { estimateConversationTokens } from "./token-estimator.js";
 import { getContextWindow } from "../model-registry.js";
-import type { Message, ContentPart, ToolResult } from "@kenkaiiii/gg-ai";
+import type { Message, ContentPart, ToolResult } from "@abukhaled/gg-ai";
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -387,7 +387,7 @@ describe("extractSummaryText", () => {
 
 // ── compact (integration) ──────────────────────────────────
 
-vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => {
+vi.mock("@abukhaled/gg-ai", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
     ...actual,
@@ -396,7 +396,7 @@ vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => {
 });
 
 // Must import stream AFTER mock setup
-import { stream } from "@kenkaiiii/gg-ai";
+import { stream } from "@abukhaled/gg-ai";
 
 describe("compact", () => {
   const baseOptions = {

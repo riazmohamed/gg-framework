@@ -1,7 +1,7 @@
 import React from "react";
 import { render } from "ink";
-import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
+import type { AgentTool } from "@abukhaled/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
 import type { MCPClientManager } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";

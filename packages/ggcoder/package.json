@@ -1,12 +1,12 @@
 {
-  "name": "@kenkaiiii/ggcoder",
+  "name": "@abukhaled/ggcoder",
   "version": "4.2.35",
   "type": "module",
   "description": "CLI coding agent with OAuth authentication for Anthropic and OpenAI",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kenkaiiii/gg-framework.git",
+    "url": "git+https://github.com/abukhaled/gg-framework.git",
     "directory": "packages/ggcoder"
   },
   "bin": {
@@ -27,8 +27,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@kenkaiiii/gg-agent": "workspace:*",
-    "@kenkaiiii/gg-ai": "workspace:*",
+    "@abukhaled/gg-agent": "workspace:*",
+    "@abukhaled/gg-ai": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "chalk": "^5.6.2",
     "cli-highlight": "^2.1.11",

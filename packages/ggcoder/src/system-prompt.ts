@@ -12,7 +12,7 @@ export async function buildSystemPrompt(cwd: string, skills?: Skill[]): Promise<
 
   // 1. Identity
   sections.push(
-    `You are GG Coder by Ken Kai — a coding agent that works directly in the user's codebase. ` +
+    `You are GG Coder by Abu Khaled — a coding agent that works directly in the user's codebase. ` +
       `You explore, understand, change, and verify code — completing tasks end-to-end ` +
       `rather than just suggesting edits.`,
   );

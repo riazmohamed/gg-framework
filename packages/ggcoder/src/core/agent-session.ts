@@ -1,5 +1,5 @@
-import { agentLoop, type AgentEvent, type AgentTool } from "@kenkaiiii/gg-agent";
-import { ProviderError, type Message, type Provider, type ThinkingLevel } from "@kenkaiiii/gg-ai";
+import { agentLoop, type AgentEvent, type AgentTool } from "@abukhaled/gg-agent";
+import { ProviderError, type Message, type Provider, type ThinkingLevel } from "@abukhaled/gg-ai";
 import { EventBus } from "./event-bus.js";
 import {
   SlashCommandRegistry,

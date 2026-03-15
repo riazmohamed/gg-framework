@@ -7,7 +7,7 @@ import type {
   StopReason,
   Usage,
   StreamOptions,
-} from "@kenkaiiii/gg-ai";
+} from "@abukhaled/gg-ai";
 
 // ── Tool Results ────────────────────────────────────────────
 

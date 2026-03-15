@@ -1,12 +1,12 @@
 {
-  "name": "@kenkaiiii/gg-agent",
+  "name": "@abukhaled/gg-agent",
   "version": "4.2.35",
   "type": "module",
   "description": "Agentic loop system with tool execution for LLMs",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kenkaiiii/gg-framework.git",
+    "url": "git+https://github.com/abukhaled/gg-framework.git",
     "directory": "packages/gg-agent"
   },
   "exports": {
@@ -27,7 +27,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@kenkaiiii/gg-ai": "workspace:*",
+    "@abukhaled/gg-ai": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {

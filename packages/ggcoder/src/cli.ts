@@ -22,7 +22,7 @@ import { renderLoginSelector } from "./ui/login.js";
 import { renderSessionSelector } from "./ui/sessions.js";
 import type { CompletedItem } from "./ui/App.js";
 import { formatUserError } from "./utils/error-handler.js";
-import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { AuthStorage } from "./core/auth-storage.js";
 import { SessionManager } from "./core/session-manager.js";
 import { ensureAppDirs, getAppPaths } from "./config.js";
@@ -606,7 +606,7 @@ async function runTelegramSetup(): Promise<void> {
       chalk.hex("#60a5fa").bold("GG Coder") +
       chalk.hex("#6b7280")(` v${CLI_VERSION}`) +
       chalk.hex("#6b7280")(" · By ") +
-      chalk.white.bold("Ken Kai"),
+      chalk.white.bold("Abu Khaled"),
   );
   console.log(`  ${gradientText(LOGO[1]!)}${GAP}` + chalk.hex("#a78bfa")("Telegram Setup"));
   console.log(`  ${gradientText(LOGO[2]!)}${GAP}` + chalk.hex("#6b7280")("Remote Control"));

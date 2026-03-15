@@ -1,4 +1,4 @@
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool } from "@abukhaled/gg-agent";
 import { ProcessManager } from "../core/process-manager.js";
 import { createReadTool } from "./read.js";
 import { createWriteTool } from "./write.js";

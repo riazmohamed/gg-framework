@@ -7,7 +7,7 @@ import {
   type Usage,
   type ContentPart,
   type AssistantMessage,
-} from "@kenkaiiii/gg-ai";
+} from "@abukhaled/gg-ai";
 import type {
   AgentEvent,
   AgentOptions,
