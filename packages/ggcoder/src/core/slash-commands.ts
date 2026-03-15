@@ -1,3 +1,7 @@
+import { readFileSync, existsSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
+
 // ── Types ──────────────────────────────────────────────────
 
 export interface SlashCommandContext {
@@ -207,6 +211,42 @@ export function createBuiltinCommands(): SlashCommand[] {
       execute(_args, ctx) {
         ctx.quit();
         return "Goodbye!";
+      },
+    },
+    {
+      name: "teach-me",
+      aliases: ["teach"],
+      description: "Open the comprehensive guide on building this LLM agent framework",
+      usage: "/teach-me",
+      execute() {
+        // Try to find the BUILD_GUIDE.md in the project root or ~/.gg
+        const projectRoot = process.cwd();
+        const guidePaths = [
+          join(projectRoot, "BUILD_GUIDE.md"),
+          join(homedir(), ".gg", "BUILD_GUIDE.md"),
+        ];
+
+        let guideContent = "";
+        for (const guidePath of guidePaths) {
+          if (existsSync(guidePath)) {
+            try {
+              guideContent = readFileSync(guidePath, "utf-8");
+              break;
+            } catch {
+              // Continue to next path
+            }
+          }
+        }
+
+        if (!guideContent) {
+          return `BUILD_GUIDE.md not found. Expected at:\n${guidePaths.join("\n")}\n\nPlease ensure the guide is present in your project root or ~/.gg directory.`;
+        }
+
+        // Return first 2000 characters + suggestion to view full file
+        const preview = guideContent.length > 2000
+          ? `${guideContent.slice(0, 2000)}\n\n...[truncated]\n\nView the full guide with: cat BUILD_GUIDE.md`
+          : guideContent;
+        return preview;
       },
     },
   ];
