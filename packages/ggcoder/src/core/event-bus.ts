@@ -80,6 +80,14 @@ export class EventBus {
     return this.on(event, wrapper);
   }
 
+  /** Remove all listeners, freeing closures that may retain large scopes. */
+  removeAllListeners(): void {
+    for (const set of this.listeners.values()) {
+      set.clear();
+    }
+    this.listeners.clear();
+  }
+
   forwardAgentEvent(event: AgentEvent): void {
     switch (event.type) {
       case "text_delta":

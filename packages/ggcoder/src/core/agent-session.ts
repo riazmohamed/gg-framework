@@ -434,6 +434,9 @@ export class AgentSession {
     this.processManager?.shutdownAll();
     await this.mcpManager?.dispose();
     await this.extensionLoader.deactivateAll();
+    this.eventBus.removeAllListeners();
+    this.messages = [];
+    this.tools = [];
   }
 
   // ── Private ────────────────────────────────────────────
