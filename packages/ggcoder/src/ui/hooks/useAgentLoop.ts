@@ -408,19 +408,21 @@ export function useAgentLoop(
 
             case "tool_call_update": {
               onToolUpdate?.(event.toolCallId, event.update);
-              activeToolCallsRef.current = activeToolCallsRef.current.map((tc) =>
-                tc.toolCallId === event.toolCallId
-                  ? {
-                      ...tc,
-                      // Keep only the last 20 updates to prevent unbounded memory growth
-                      updates:
-                        tc.updates.length >= 20
-                          ? [...tc.updates.slice(-19), event.update]
-                          : [...tc.updates, event.update],
-                    }
-                  : tc,
+              // Mutate the matching tool call in-place to avoid allocating
+              // a new array + new objects on every update event. Over a 5h
+              // session with thousands of tool calls this prevents significant
+              // GC pressure from spread-copy churn.
+              const target = activeToolCallsRef.current.find(
+                (tc) => tc.toolCallId === event.toolCallId,
               );
-              setActiveToolCalls(activeToolCallsRef.current);
+              if (target) {
+                if (target.updates.length >= 20) {
+                  target.updates.shift();
+                }
+                target.updates.push(event.update);
+              }
+              // Spread once to create a new array reference for React state
+              setActiveToolCalls([...activeToolCallsRef.current]);
               break;
             }
 
@@ -591,7 +593,7 @@ export function useAgentLoop(
         elapsedTimerRef.current = null;
       }
     };
-  }, [stopReveal]);
+  }, [stopReveal, stopThinkingReveal]);
 
   return {
     run,
