@@ -1386,6 +1386,7 @@ export function App(props: AppProps) {
       { name: "compact", aliases: ["c"], description: "Compact conversation" },
       { name: "clear", aliases: [], description: "Clear session and terminal" },
       { name: "quit", aliases: ["q", "exit"], description: "Exit the agent" },
+      { name: "teach-me", aliases: ["teach"], description: "Open the comprehensive guide on building this LLM agent framework" },
       ...PROMPT_COMMANDS.map((cmd) => ({
         name: cmd.name,
         aliases: cmd.aliases,
