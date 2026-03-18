@@ -9,6 +9,7 @@ import { App, type CompletedItem } from "./App.js";
 import { ThemeContext, loadTheme } from "./theme/theme.js";
 import { detectTheme } from "./theme/detect-theme.js";
 import { AnimationProvider } from "./components/AnimationContext.js";
+import { TerminalSizeProvider } from "./hooks/useTerminalSize.js";
 
 export interface RenderAppConfig {
   provider: Provider;
@@ -51,34 +52,38 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       ThemeContext.Provider,
       { value: theme },
       React.createElement(
-        AnimationProvider,
+        TerminalSizeProvider,
         null,
-        React.createElement(App, {
-          provider: config.provider,
-          model: config.model,
-          tools: config.tools,
-          webSearch: config.webSearch,
-          messages: config.messages,
-          maxTokens: config.maxTokens,
-          thinking: config.thinking,
-          apiKey: config.apiKey,
-          baseUrl: config.baseUrl,
-          accountId: config.accountId,
-          cwd: config.cwd,
-          version: config.version,
-          showThinking: config.showThinking,
-          showTokenUsage: config.showTokenUsage,
-          onSlashCommand: config.onSlashCommand,
-          loggedInProviders: config.loggedInProviders,
-          credentialsByProvider: config.credentialsByProvider,
-          initialHistory: config.initialHistory,
-          sessionsDir: config.sessionsDir,
-          sessionPath: config.sessionPath,
-          processManager: config.processManager,
-          settingsFile: config.settingsFile,
-          mcpManager: config.mcpManager,
-          authStorage: config.authStorage,
-        }),
+        React.createElement(
+          AnimationProvider,
+          null,
+          React.createElement(App, {
+            provider: config.provider,
+            model: config.model,
+            tools: config.tools,
+            webSearch: config.webSearch,
+            messages: config.messages,
+            maxTokens: config.maxTokens,
+            thinking: config.thinking,
+            apiKey: config.apiKey,
+            baseUrl: config.baseUrl,
+            accountId: config.accountId,
+            cwd: config.cwd,
+            version: config.version,
+            showThinking: config.showThinking,
+            showTokenUsage: config.showTokenUsage,
+            onSlashCommand: config.onSlashCommand,
+            loggedInProviders: config.loggedInProviders,
+            credentialsByProvider: config.credentialsByProvider,
+            initialHistory: config.initialHistory,
+            sessionsDir: config.sessionsDir,
+            sessionPath: config.sessionPath,
+            processManager: config.processManager,
+            settingsFile: config.settingsFile,
+            mcpManager: config.mcpManager,
+            authStorage: config.authStorage,
+          }),
+        ),
       ),
     ),
     {

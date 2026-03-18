@@ -1,21 +1,23 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useContext, createContext } from "react";
 import { useStdout } from "ink";
 
+interface TerminalSizeValue {
+  columns: number;
+  rows: number;
+  resizeKey: number;
+}
+
+const TerminalSizeContext = createContext<TerminalSizeValue | null>(null);
+
 /**
- * Returns { columns, rows, resizeKey } and forces a React re-render whenever
- * the terminal is resized.
+ * Provider that attaches a single resize listener to stdout and shares
+ * { columns, rows, resizeKey } with all descendants via context.
  *
- * `columns` and `rows` update immediately on every resize event so layout
- * stays responsive while the user drags.
- *
- * `resizeKey` increments once after resize events settle (300ms debounce).
- * Use it as a React `key` on the root content wrapper to force a full
- * remount — this is the only reliable way to make Ink re-render <Static>
- * content that was already printed to scrollback and got corrupted by
- * terminal text reflow.  Debounces 300ms then clears screen+scrollback
- * and remounts.
+ * Mount this once near the root of the component tree (e.g. in render.ts
+ * or App.tsx) to avoid the MaxListenersExceededWarning that occurs when
+ * every component independently listens for resize events.
  */
-export function useTerminalSize() {
+export function TerminalSizeProvider({ children }: { children: React.ReactNode }) {
   const { stdout } = useStdout();
   const [size, setSize] = useState({
     columns: stdout?.columns ?? 80,
@@ -54,5 +56,27 @@ export function useTerminalSize() {
     };
   }, [stdout, onResize]);
 
-  return { ...size, resizeKey };
+  const value = React.useMemo(() => ({ ...size, resizeKey }), [size, resizeKey]);
+
+  return React.createElement(TerminalSizeContext.Provider, { value }, children);
+}
+
+/**
+ * Returns { columns, rows, resizeKey } from the nearest TerminalSizeProvider.
+ *
+ * `columns` and `rows` update immediately on every resize event so layout
+ * stays responsive while the user drags.
+ *
+ * `resizeKey` increments once after resize events settle (300ms debounce).
+ * Use it as a React `key` on the root content wrapper to force a full
+ * remount — this is the only reliable way to make Ink re-render <Static>
+ * content that was already printed to scrollback and got corrupted by
+ * terminal text reflow.
+ */
+export function useTerminalSize() {
+  const ctx = useContext(TerminalSizeContext);
+  if (!ctx) {
+    throw new Error("useTerminalSize must be used within a <TerminalSizeProvider>");
+  }
+  return ctx;
 }
