@@ -21,21 +21,34 @@ import {
 } from "./utils/format.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import { ensureAppDirs } from "./config.js";
+import { discoverSkills } from "./core/skills.js";
+import path from "node:path";
+import fs from "node:fs/promises";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import { getContextWindow } from "./core/model-registry.js";
 
 export async function runInteractive(config: CliConfig): Promise<void> {
   const { provider, model, cwd } = config;
 
-  // Build system prompt
-  const systemPrompt = config.systemPrompt ?? (await buildSystemPrompt(cwd));
+  // Load auth & ensure dirs
+  const paths = await ensureAppDirs();
+
+  // Ensure project-local .gg directories exist
+  const localGGDir = path.join(cwd, ".gg");
+  await fs.mkdir(path.join(localGGDir, "skills"), { recursive: true });
+  await fs.mkdir(path.join(localGGDir, "commands"), { recursive: true });
+  await fs.mkdir(path.join(localGGDir, "agents"), { recursive: true });
+
+  // Discover skills & build system prompt
+  const skills = await discoverSkills({
+    globalSkillsDir: paths.skillsDir,
+    projectDir: cwd,
+  });
+  const systemPrompt = config.systemPrompt ?? (await buildSystemPrompt(cwd, skills));
 
   // Create tools
-  const { tools, processManager } = createTools(cwd);
+  const { tools, processManager } = createTools(cwd, { skills });
   process.on("exit", () => processManager.shutdownAll());
-
-  // Load auth
-  const paths = await ensureAppDirs();
   const authStorage = new AuthStorage(paths.authFile);
   await authStorage.load();
 

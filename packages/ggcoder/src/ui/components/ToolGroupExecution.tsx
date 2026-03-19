@@ -155,7 +155,7 @@ export function ToolGroupExecution({ tools }: { tools: ToolGroupTool[] }) {
 
   return (
     <Box marginTop={1} flexShrink={1}>
-      <Text>
+      <Text wrap="wrap">
         <Text color={theme.primary}>{"⏺ "}</Text>
         <SummaryText segments={segments} />
       </Text>

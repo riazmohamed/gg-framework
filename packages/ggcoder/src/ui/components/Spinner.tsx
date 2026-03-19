@@ -10,7 +10,7 @@ export function Spinner({ label }: { label?: string }) {
   const frame = deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length);
 
   return (
-    <Text color={theme.spinnerColor}>
+    <Text color={theme.spinnerColor} wrap="wrap">
       {SPINNER_FRAMES[frame]} {label && <Text dimColor>{label}</Text>}
     </Text>
   );

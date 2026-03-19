@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { AgentSession } from "../core/agent-session.js";
-import { isAbortError } from "@kenkaiiii/gg-agent";
+import { isAbortError } from "@abukhaled/gg-agent";
 import { TelegramBot, type TelegramMessage } from "../core/telegram.js";
 import chalk from "chalk";
 import { formatUserError } from "../utils/error-handler.js";

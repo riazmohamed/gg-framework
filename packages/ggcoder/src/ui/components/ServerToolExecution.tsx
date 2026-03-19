@@ -2,6 +2,7 @@ import React from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { Spinner } from "./Spinner.js";
+import { useTerminalSize } from "../hooks/useTerminalSize.js";
 
 interface ServerToolRunningProps {
   status: "running";
@@ -20,13 +21,21 @@ interface ServerToolDoneProps {
 
 type ServerToolExecutionProps = ServerToolRunningProps | ServerToolDoneProps;
 
+// "⏺ " prefix = 2 chars
+const HEADER_PREFIX = 2;
+// paddingLeft(2) + "⎿  " = 5 chars
+const DETAIL_PREFIX = 5;
+
 export function ServerToolExecution(props: ServerToolExecutionProps) {
   const theme = useTheme();
+  const { columns } = useTerminalSize();
   const { label, detail } = getHeader(props.name, props.input);
 
-  const header = (
-    <Text>
-      <Text color={theme.primary}>{"⏺ "}</Text>
+  const headerContentWidth = Math.max(10, columns - HEADER_PREFIX);
+  const detailContentWidth = Math.max(10, columns - DETAIL_PREFIX);
+
+  const headerContent = (
+    <Text wrap="wrap">
       <Text bold color={theme.toolName}>
         {label}
       </Text>
@@ -45,10 +54,21 @@ export function ServerToolExecution(props: ServerToolExecutionProps) {
   if (props.status === "running") {
     return (
       <Box flexDirection="column" marginTop={1}>
-        <Box>{header}</Box>
-        <Box paddingLeft={2}>
-          <Text color={theme.textDim}>{"⎿  "}</Text>
-          <Spinner label="Searching..." />
+        <Box flexDirection="row">
+          <Box width={HEADER_PREFIX} flexShrink={0}>
+            <Text color={theme.primary}>{"⏺ "}</Text>
+          </Box>
+          <Box flexGrow={1} width={headerContentWidth}>
+            {headerContent}
+          </Box>
+        </Box>
+        <Box paddingLeft={2} flexDirection="row">
+          <Box width={3} flexShrink={0}>
+            <Text color={theme.textDim}>{"⎿  "}</Text>
+          </Box>
+          <Box flexGrow={1} width={detailContentWidth}>
+            <Spinner label="Searching..." />
+          </Box>
         </Box>
       </Box>
     );
@@ -59,12 +79,23 @@ export function ServerToolExecution(props: ServerToolExecutionProps) {
 
   return (
     <Box flexDirection="column" marginTop={1}>
-      <Box>{header}</Box>
-      <Box paddingLeft={2}>
-        <Text color={theme.textDim}>
-          {"⎿  "}
-          {isAborted ? "Stopped." : `Did 1 search in ${duration}s`}
-        </Text>
+      <Box flexDirection="row">
+        <Box width={HEADER_PREFIX} flexShrink={0}>
+          <Text color={theme.primary}>{"⏺ "}</Text>
+        </Box>
+        <Box flexGrow={1} width={headerContentWidth}>
+          {headerContent}
+        </Box>
+      </Box>
+      <Box paddingLeft={2} flexDirection="row">
+        <Box width={3} flexShrink={0}>
+          <Text color={theme.textDim}>{"⎿  "}</Text>
+        </Box>
+        <Box flexGrow={1} width={detailContentWidth}>
+          <Text color={theme.textDim} wrap="wrap">
+            {isAborted ? "Stopped." : `Did 1 search in ${duration}s`}
+          </Text>
+        </Box>
       </Box>
     </Box>
   );

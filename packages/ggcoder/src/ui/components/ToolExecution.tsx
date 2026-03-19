@@ -3,12 +3,17 @@ import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { Spinner } from "./Spinner.js";
 import { highlightCode, langFromPath } from "../utils/highlight.js";
+import { useTerminalSize } from "../hooks/useTerminalSize.js";
 
 const MAX_OUTPUT_LINES = 4; // max lines shown per tool result
 
+// "⏺ " prefix = 2 chars
+const HEADER_PREFIX = 2;
+// Body is indented paddingLeft={2} + "⎿  " or "   " = 3 chars
+const BODY_PREFIX = 5;
+
 /** Truncate a line so it fits within ~1 terminal row. */
-function truncateLine(line: string, reservedChars = 6): string {
-  const cols = process.stdout.columns || 80;
+function truncateLine(line: string, cols: number, reservedChars = 6): string {
   const max = cols - reservedChars;
   return line.length > max ? line.slice(0, max) + "…" : line;
 }
@@ -34,6 +39,7 @@ const COMPACT_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
 export function ToolExecution(props: ToolExecutionProps) {
   const theme = useTheme();
+  const { columns } = useTerminalSize();
 
   if (props.status === "running") {
     // Compact tools get a summary label while running
@@ -54,18 +60,22 @@ export function ToolExecution(props: ToolExecutionProps) {
   }
 
   const { name, args, result, isError } = props;
+  const headerContentWidth = Math.max(10, columns - HEADER_PREFIX);
+  const bodyContentWidth = Math.max(10, columns - BODY_PREFIX);
 
   // Compact tools — one-line summary, no output content
   if (COMPACT_TOOLS.has(name) && !isError) {
     const summary = getCompactDoneLabel(name, args, result);
     return (
-      <Box marginTop={1} flexShrink={1}>
-        <Text>
+      <Box marginTop={1} flexDirection="row">
+        <Box width={HEADER_PREFIX} flexShrink={0}>
           <Text color={theme.primary}>{"⏺ "}</Text>
-          <Text bold color={theme.toolName}>
+        </Box>
+        <Box flexGrow={1} width={headerContentWidth}>
+          <Text bold color={theme.toolName} wrap="wrap">
             {summary}
           </Text>
-        </Text>
+        </Box>
       </Box>
     );
   }
@@ -73,7 +83,9 @@ export function ToolExecution(props: ToolExecutionProps) {
   const isDiff = name === "edit" && !isError && result.includes("---");
 
   const { label, detail } = getToolHeaderParts(name, args);
-  const body = isDiff ? buildDiffBody(result, args) : buildResultBody(name, result, isError);
+  const body = isDiff
+    ? buildDiffBody(result, args, columns)
+    : buildResultBody(name, result, isError, columns);
 
   const headerColor = isError ? theme.toolError : theme.toolName;
 
@@ -81,21 +93,25 @@ export function ToolExecution(props: ToolExecutionProps) {
   if (!body) {
     const inline = getInlineSummary(name, result, isError);
     return (
-      <Box marginTop={1} flexShrink={1}>
-        <Text>
+      <Box marginTop={1} flexDirection="row">
+        <Box width={HEADER_PREFIX} flexShrink={0}>
           <Text color={theme.primary}>{"⏺ "}</Text>
-          <Text bold color={headerColor}>
-            {label}
-          </Text>
-          {detail && (
-            <Text color={theme.text}>
-              {"("}
-              {detail}
-              {")"}
+        </Box>
+        <Box flexGrow={1} width={headerContentWidth}>
+          <Text wrap="wrap">
+            <Text bold color={headerColor}>
+              {label}
             </Text>
-          )}
-          {inline && <Text color={theme.textDim}> {inline}</Text>}
-        </Text>
+            {detail && (
+              <Text color={theme.text}>
+                {"("}
+                {detail}
+                {")"}
+              </Text>
+            )}
+            {inline && <Text color={theme.textDim}> {inline}</Text>}
+          </Text>
+        </Box>
       </Box>
     );
   }
@@ -105,33 +121,41 @@ export function ToolExecution(props: ToolExecutionProps) {
 
   return (
     <Box flexDirection="column" marginTop={1}>
-      {/* Header */}
-      <Box>
-        <Text>
+      {/* Header: fixed prefix + wrapping content */}
+      <Box flexDirection="row">
+        <Box width={HEADER_PREFIX} flexShrink={0}>
           <Text color={theme.primary}>{"⏺ "}</Text>
-          <Text bold color={headerColor}>
-            {label}
-          </Text>
-          {detail && (
-            <Text color={theme.text}>
-              {"("}
-              {detail}
-              {")"}
+        </Box>
+        <Box flexGrow={1} width={headerContentWidth}>
+          <Text wrap="wrap">
+            <Text bold color={headerColor}>
+              {label}
             </Text>
-          )}
-        </Text>
+            {detail && (
+              <Text color={theme.text}>
+                {"("}
+                {detail}
+                {")"}
+              </Text>
+            )}
+          </Text>
+        </Box>
       </Box>
-      {/* Body with ⎿ connector */}
+      {/* Body with ⎿ connector: fixed prefix + wrapping content */}
       <Box flexDirection="column" paddingLeft={2}>
         {lines.map((line, i) => (
-          <Box key={i}>
-            <Text color={theme.textDim}>{i === 0 ? "⎿  " : "   "}</Text>
-            <Box flexShrink={1}>{line}</Box>
+          <Box key={i} flexDirection="row">
+            <Box width={3} flexShrink={0}>
+              <Text color={theme.textDim}>{i === 0 ? "⎿  " : "   "}</Text>
+            </Box>
+            <Box flexGrow={1} width={bodyContentWidth}>
+              {line}
+            </Box>
           </Box>
         ))}
         {hiddenCount > 0 && (
           <Box>
-            <Text color={theme.textDim}>
+            <Text color={theme.textDim} wrap="wrap">
               {"   … +"}
               {hiddenCount}
               {" lines (ctrl+o to expand)"}
@@ -229,6 +253,10 @@ function getToolHeaderParts(
       const trunc = task.length > 50 ? task.slice(0, 47) + "…" : task;
       return { label: displayName, detail: trunc };
     }
+    case "skill": {
+      const skillName = String(args.skill ?? "");
+      return { label: displayName, detail: skillName };
+    }
     case "web_fetch": {
       const url = String(args.url ?? "");
       const trunc = url.length > 60 ? url.slice(0, 57) + "…" : url;
@@ -282,6 +310,8 @@ function toolDisplayName(name: string): string {
       return "List";
     case "subagent":
       return "Agent";
+    case "skill":
+      return "Skill";
     case "web_fetch":
       return "Fetch";
     case "tasks":
@@ -313,6 +343,8 @@ function getInlineSummary(name: string, result: string, isError: boolean): strin
     }
     case "subagent":
       return "completed";
+    case "skill":
+      return result.startsWith("Error") ? result.split("\n")[0] : "loaded";
     case "web_fetch": {
       const lines = result.split("\n").filter((l) => l.length > 0);
       if (result.startsWith("Error")) return result.split("\n")[0];
@@ -383,7 +415,11 @@ function parseDiffWithLineNumbers(result: string): NumberedDiffLine[] {
   return numbered;
 }
 
-function buildDiffBody(result: string, args?: Record<string, unknown>): BodyContent {
+function buildDiffBody(
+  result: string,
+  args?: Record<string, unknown>,
+  _columns?: number,
+): BodyContent {
   const added = (result.match(/^\+[^+]/gm) ?? []).length;
   const removed = (result.match(/^-[^-]/gm) ?? []).length;
 
@@ -423,14 +459,19 @@ function buildDiffBody(result: string, args?: Record<string, unknown>): BodyCont
   };
 }
 
-function buildResultBody(name: string, result: string, isError: boolean): BodyContent | null {
+function buildResultBody(
+  name: string,
+  result: string,
+  isError: boolean,
+  columns: number,
+): BodyContent | null {
   if (isError) {
     const lines = result.split("\n");
     const display = lines.slice(0, MAX_OUTPUT_LINES);
     return {
       lines: display.map((l, i) => (
-        <Text key={i} color="#f87171">
-          {truncateLine(l)}
+        <Text key={i} color="#f87171" wrap="wrap">
+          {truncateLine(l, columns)}
         </Text>
       )),
       totalLines: lines.length,
@@ -448,8 +489,8 @@ function buildResultBody(name: string, result: string, isError: boolean): BodyCo
       const display = outputLines.slice(0, MAX_OUTPUT_LINES);
       return {
         lines: display.map((l, i) => (
-          <Text key={i} color={exitCode !== "0" ? "#fbbf24" : "#9ca3af"}>
-            {truncateLine(l)}
+          <Text key={i} color={exitCode !== "0" ? "#fbbf24" : "#9ca3af"} wrap="wrap">
+            {truncateLine(l, columns)}
           </Text>
         )),
         totalLines: outputLines.length,
@@ -492,13 +533,15 @@ function buildResultBody(name: string, result: string, isError: boolean): BodyCo
       const display = lines.slice(0, MAX_OUTPUT_LINES);
       return {
         lines: display.map((l, i) => (
-          <Text key={i} color="#9ca3af">
-            {truncateLine(l)}
+          <Text key={i} color="#9ca3af" wrap="wrap">
+            {truncateLine(l, columns)}
           </Text>
         )),
         totalLines: lines.length,
       };
     }
+    case "skill":
+      return null; // compact display with inline summary
     case "web_fetch": {
       if (result.startsWith("Error")) {
         return {
@@ -592,9 +635,10 @@ const GrepLine = memo(function GrepLine({ line }: { line: string }) {
   const file = line.slice(0, firstColon);
   const lineNo = line.slice(firstColon + 1, secondColon);
   const rawContent = line.slice(secondColon + 1);
-  // Truncate so the full line fits within ~4 terminal rows
+  // Truncate so the full line fits within ~1 terminal row
+  const cols = process.stdout.columns || 80;
   const prefixLen = file.length + lineNo.length + 2; // 2 = colons
-  const content = truncateLine(rawContent, prefixLen + 6);
+  const content = truncateLine(rawContent, cols, prefixLen + 6);
 
   return (
     <Text>

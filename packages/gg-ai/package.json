@@ -1,6 +1,6 @@
 {
   "name": "@abukhaled/gg-ai",
-  "version": "4.2.38",
+  "version": "4.2.47",
   "type": "module",
   "description": "Unified LLM streaming API for Anthropic and OpenAI",
   "license": "MIT",
@@ -24,7 +24,8 @@
   ],
   "scripts": {
     "build": "tsup",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

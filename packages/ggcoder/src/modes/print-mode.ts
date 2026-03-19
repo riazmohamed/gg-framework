@@ -1,5 +1,5 @@
 import { AgentSession, type AgentSessionOptions } from "../core/agent-session.js";
-import { isAbortError } from "@kenkaiiii/gg-agent";
+import { isAbortError } from "@abukhaled/gg-agent";
 import { formatUserError } from "../utils/error-handler.js";
 import { initLogger, log, attachToEventBus, closeLogger } from "../core/logger.js";
 import { getAppPaths } from "../config.js";

@@ -1,6 +1,6 @@
 import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { AgentSession } from "../core/agent-session.js";
-import { isAbortError } from "@kenkaiiii/gg-agent";
+import { isAbortError } from "@abukhaled/gg-agent";
 import { formatUserError } from "../utils/error-handler.js";
 import { closeLogger } from "../core/logger.js";
 

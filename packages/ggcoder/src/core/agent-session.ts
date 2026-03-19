@@ -24,6 +24,8 @@ import { log } from "./logger.js";
 import { setEstimatorModel } from "./compaction/token-estimator.js";
 import { discoverAgents } from "./agents.js";
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 // ── Options ────────────────────────────────────────────────
 
@@ -111,6 +113,12 @@ export class AgentSession {
     // Session manager
     this.sessionManager = new SessionManager(paths.sessionsDir);
 
+    // Ensure project-local .gg directories exist
+    const localGGDir = path.join(this.cwd, ".gg");
+    await fs.mkdir(path.join(localGGDir, "skills"), { recursive: true });
+    await fs.mkdir(path.join(localGGDir, "commands"), { recursive: true });
+    await fs.mkdir(path.join(localGGDir, "agents"), { recursive: true });
+
     // Discover skills
     this.skills = await discoverSkills({
       globalSkillsDir: paths.skillsDir,
@@ -128,6 +136,7 @@ export class AgentSession {
     });
     const { tools, processManager } = createTools(this.cwd, {
       agents,
+      skills: this.skills,
       provider: this.provider,
       model: this.model,
     });

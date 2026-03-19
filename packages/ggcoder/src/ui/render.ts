@@ -5,10 +5,12 @@ import type { AgentTool } from "@abukhaled/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
 import type { MCPClientManager } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
+import type { Skill } from "../core/skills.js";
 import { App, type CompletedItem } from "./App.js";
 import { ThemeContext, loadTheme } from "./theme/theme.js";
 import { detectTheme } from "./theme/detect-theme.js";
 import { AnimationProvider } from "./components/AnimationContext.js";
+import { TerminalSizeProvider } from "./hooks/useTerminalSize.js";
 
 export interface RenderAppConfig {
   provider: Provider;
@@ -36,6 +38,10 @@ export interface RenderAppConfig {
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
+  planModeRef?: { current: boolean };
+  onEnterPlanRef?: { current: (reason?: string) => void };
+  onExitPlanRef?: { current: (planPath: string) => Promise<string> };
+  skills?: Skill[];
 }
 
 export async function renderApp(config: RenderAppConfig): Promise<void> {
@@ -51,34 +57,42 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       ThemeContext.Provider,
       { value: theme },
       React.createElement(
-        AnimationProvider,
+        TerminalSizeProvider,
         null,
-        React.createElement(App, {
-          provider: config.provider,
-          model: config.model,
-          tools: config.tools,
-          webSearch: config.webSearch,
-          messages: config.messages,
-          maxTokens: config.maxTokens,
-          thinking: config.thinking,
-          apiKey: config.apiKey,
-          baseUrl: config.baseUrl,
-          accountId: config.accountId,
-          cwd: config.cwd,
-          version: config.version,
-          showThinking: config.showThinking,
-          showTokenUsage: config.showTokenUsage,
-          onSlashCommand: config.onSlashCommand,
-          loggedInProviders: config.loggedInProviders,
-          credentialsByProvider: config.credentialsByProvider,
-          initialHistory: config.initialHistory,
-          sessionsDir: config.sessionsDir,
-          sessionPath: config.sessionPath,
-          processManager: config.processManager,
-          settingsFile: config.settingsFile,
-          mcpManager: config.mcpManager,
-          authStorage: config.authStorage,
-        }),
+        React.createElement(
+          AnimationProvider,
+          null,
+          React.createElement(App, {
+            provider: config.provider,
+            model: config.model,
+            tools: config.tools,
+            webSearch: config.webSearch,
+            messages: config.messages,
+            maxTokens: config.maxTokens,
+            thinking: config.thinking,
+            apiKey: config.apiKey,
+            baseUrl: config.baseUrl,
+            accountId: config.accountId,
+            cwd: config.cwd,
+            version: config.version,
+            showThinking: config.showThinking,
+            showTokenUsage: config.showTokenUsage,
+            onSlashCommand: config.onSlashCommand,
+            loggedInProviders: config.loggedInProviders,
+            credentialsByProvider: config.credentialsByProvider,
+            initialHistory: config.initialHistory,
+            sessionsDir: config.sessionsDir,
+            sessionPath: config.sessionPath,
+            processManager: config.processManager,
+            settingsFile: config.settingsFile,
+            mcpManager: config.mcpManager,
+            authStorage: config.authStorage,
+            planModeRef: config.planModeRef,
+            onEnterPlanRef: config.onEnterPlanRef,
+            onExitPlanRef: config.onExitPlanRef,
+            skills: config.skills,
+          }),
+        ),
       ),
     ),
     {
