@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { getModel } from "../../core/model-registry.js";
+import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import type { Provider } from "@abukhaled/gg-ai";
 
 interface BannerProps {
@@ -13,8 +14,8 @@ interface BannerProps {
 }
 
 const LOGO_LINES = [
-  " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
-  " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
+  " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
+  " \u2588  \u2588 \u2588 \u2580\u2588",
   " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
 ];
 
@@ -34,28 +35,31 @@ const GRADIENT = [
   "#6da1f9",
 ];
 
-const GAP = "   ";
-
 export function Banner({ version, model, cwd, taskCount }: BannerProps) {
   const theme = useTheme();
+  const { columns } = useTerminalSize();
   const modelInfo = getModel(model);
   const modelName = modelInfo?.name ?? model;
 
   const home = process.env.HOME ?? "";
   const displayPath = home && cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd;
 
-  // Static gradient — no animation needed since the banner is rendered once
-  // into Ink's Static area. Animating here would waste CPU and could cause
-  // visual duplicates on terminal resize.
   const shift = 0;
 
+  // Always use stacked layout: logo on top, info below.
+  // Side-by-side layout breaks in split-pane terminals (e.g. Warp) where
+  // stdout.columns reports full terminal width, not individual pane width,
+  // causing rows to wrap and destroying the logo's vertical alignment.
   return (
-    <Box flexDirection="column" marginTop={1} marginBottom={1}>
-      <Box>
+    <Box flexDirection="column" marginTop={1} marginBottom={1} width={columns}>
+      <Box flexDirection="column">
         <GradientText text={LOGO_LINES[0]} shift={shift} />
-        <Text>{GAP}</Text>
+        <GradientText text={LOGO_LINES[1]} shift={shift} />
+        <GradientText text={LOGO_LINES[2]} shift={shift} />
+      </Box>
+      <Box marginTop={1}>
         <Text color={theme.primary} bold>
-          GG Coder
+          OG Coder
         </Text>
         <Text color={theme.textDim}> v{version}</Text>
         <Text color={theme.textDim}> · By </Text>
@@ -64,15 +68,13 @@ export function Banner({ version, model, cwd, taskCount }: BannerProps) {
         </Text>
       </Box>
       <Box>
-        <GradientText text={LOGO_LINES[1]} shift={shift} />
-        <Text>{GAP}</Text>
         <Text color={theme.secondary}>{modelName}</Text>
         <Text color={theme.textDim}>{"  "}</Text>
-        <Text color={theme.textDim}>{displayPath}</Text>
+        <Text color={theme.textDim} wrap="truncate">
+          {displayPath}
+        </Text>
       </Box>
       <Box>
-        <GradientText text={LOGO_LINES[2]} shift={shift} />
-        <Text>{GAP}</Text>
         <Text color={theme.primary}>^T</Text>
         <Text color={theme.textDim}> tasks</Text>
         {taskCount !== undefined && taskCount > 0 && (

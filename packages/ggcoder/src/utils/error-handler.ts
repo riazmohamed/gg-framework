@@ -19,7 +19,7 @@ export function formatUserError(err: unknown): string {
     lowerMsg.includes("apikey") ||
     lowerMsg.includes("no auth")
   ) {
-    return chalk.red('Not logged in. Run "ggcoder login" to authenticate.');
+    return chalk.red('Not logged in. Run "ogcoder login" to authenticate.');
   }
 
   // Auth: invalid/expired token
@@ -29,7 +29,7 @@ export function formatUserError(err: unknown): string {
     /invalid.*key/.test(lowerMsg) ||
     /invalid.*token/.test(lowerMsg)
   ) {
-    return chalk.red('Session expired or invalid. Run "ggcoder login" to re-authenticate.');
+    return chalk.red('Session expired or invalid. Run "ogcoder login" to re-authenticate.');
   }
 
   // Billing/quota errors (GLM returns 429 for these)

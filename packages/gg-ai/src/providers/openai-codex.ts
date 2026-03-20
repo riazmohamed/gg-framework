@@ -54,8 +54,8 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
     Accept: "text/event-stream",
     Authorization: `Bearer ${options.apiKey}`,
     "OpenAI-Beta": "responses=experimental",
-    originator: "ggcoder",
-    "User-Agent": `ggcoder (${os.platform()} ${os.release()}; ${os.arch()})`,
+    originator: "ogcoder",
+    "User-Agent": `ogcoder (${os.platform()} ${os.release()}; ${os.arch()})`,
   };
 
   if (options.accountId) {

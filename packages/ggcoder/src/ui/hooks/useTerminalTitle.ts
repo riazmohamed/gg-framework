@@ -6,7 +6,7 @@ import { SPINNER_FRAMES, SPINNER_INTERVAL } from "../spinner-frames.js";
 import { useAnimationTick, deriveFrame } from "../components/AnimationContext.js";
 
 function getTitleText(phase: ActivityPhase, isRunning: boolean): string {
-  if (!isRunning) return "GG Coder";
+  if (!isRunning) return "OG Coder";
   switch (phase) {
     case "thinking":
       return "Thinking...";
@@ -17,7 +17,7 @@ function getTitleText(phase: ActivityPhase, isRunning: boolean): string {
     case "waiting":
       return "Thinking...";
     default:
-      return "GG Coder";
+      return "OG Coder";
   }
 }
 
@@ -39,7 +39,7 @@ export function useTerminalTitle(phase: ActivityPhase, isRunning: boolean): void
   // Reset title on unmount
   useEffect(() => {
     return () => {
-      stdout?.write(`\x1b]0;GG Coder\x1b\\`);
+      stdout?.write(`\x1b]0;OG Coder\x1b\\`);
     };
   }, [stdout]);
 }

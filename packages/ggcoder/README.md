@@ -1,11 +1,11 @@
-# @abukhaled/ggcoder
+# @abukhaled/ogcoder
 
 <p align="center">
   <strong>The fast, lean coding agent. Four providers. Zero bloat.</strong>
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@abukhaled/ggcoder"><img src="https://img.shields.io/npm/v/@abukhaled/ggcoder?style=for-the-badge" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@abukhaled/ogcoder"><img src="https://img.shields.io/npm/v/@abukhaled/ogcoder?style=for-the-badge" alt="npm version"></a>
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
   <a href="https://youtube.com/@abukhaled"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
   <a href="https://skool.com/abukhaled"><img src="https://img.shields.io/badge/Skool-Community-7C3AED?style=for-the-badge" alt="Skool"></a>
@@ -18,7 +18,7 @@ The CLI that sits on top of the [GG Framework](../../README.md). Built on [`@abu
 ## Install
 
 ```bash
-npm i -g @abukhaled/ggcoder
+npm i -g @abukhaled/ogcoder
 ```
 
 ---
@@ -26,8 +26,8 @@ npm i -g @abukhaled/ggcoder
 ## Getting started
 
 ```bash
-ggcoder login    # Pick provider, authenticate
-ggcoder          # Start coding
+ogcoder login    # Pick provider, authenticate
+ogcoder          # Start coding
 ```
 
 OAuth for Anthropic and OpenAI (log in once, auto-refresh). API keys for GLM and Moonshot. Up and running in seconds either way.
@@ -38,7 +38,7 @@ OAuth for Anthropic and OpenAI (log in once, auto-refresh). API keys for GLM and
 
 Every token in the system prompt gets processed on **every single turn**. It's not a one-time cost. It's a tax on every request.
 
-| | **Claude Code / Agent SDK** | **GG Coder** |
+| | **Claude Code / Agent SDK** | **OG Coder** |
 |---|---|---|
 | System prompt size | ~15,000 tokens | **~1,100 tokens** |
 | Ratio | baseline | **~13x smaller** |
@@ -50,7 +50,7 @@ Every token in the system prompt gets processed on **every single turn**. It's n
 - **Context fills up faster.** ~15,000 tokens sitting in your window permanently. That's ~7.5% of a 200K model gone before you say hello. You hit compaction sooner, lose history faster, and the agent forgets what it was doing.
 - **Higher cost.** Input tokens aren't free. Every cache miss charges you for the full bloat. Smaller prompt = smaller bill.
 
-GG Coder sends only what the model needs: how to work, what tools it has, and your project context. No walls of rules. No formatting instructions. Just signal.
+OG Coder sends only what the model needs: how to work, what tools it has, and your project context. No walls of rules. No formatting instructions. Just signal.
 
 ---
 
@@ -60,7 +60,7 @@ Same philosophy applies to tools. People collect MCPs like Pokemon. Slack MCP, G
 
 This doesn't help. It confuses the agent. More tool descriptions = more noise = worse tool selection. The model spends tokens reasoning about tools it will never call.
 
-GG Coder ships with one MCP: [Grep](https://grep.dev). That's it. It lets the agent search across 1M+ public GitHub repos to verify implementations against real-world code. Correct API usage, library idioms, production patterns. One tool that actually makes the output better.
+OG Coder ships with one MCP: [Grep](https://grep.dev). That's it. It lets the agent search across 1M+ public GitHub repos to verify implementations against real-world code. Correct API usage, library idioms, production patterns. One tool that actually makes the output better.
 
 You can still add your own MCPs if you need them. But start with less. You'll get better results.
 
@@ -120,7 +120,7 @@ They get loaded into the system prompt automatically. The agent knows what it ca
 
 ## Project guidelines
 
-Drop a `CLAUDE.md` or `AGENTS.md` in your repo root (or any parent directory). GG Coder picks it up automatically.
+Drop a `CLAUDE.md` or `AGENTS.md` in your repo root (or any parent directory). OG Coder picks it up automatically.
 
 Your rules. Your conventions. The agent follows them.
 
@@ -128,7 +128,7 @@ Your rules. Your conventions. The agent follows them.
 
 ## Tools
 
-GG Coder comes with a focused set of tools:
+OG Coder comes with a focused set of tools:
 
 | Tool | What it does |
 |---|---|

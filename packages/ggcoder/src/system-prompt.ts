@@ -17,7 +17,7 @@ export async function buildSystemPrompt(
 
   // 1. Identity
   sections.push(
-    `You are GG Coder by Abu Khaled — a coding agent that works directly in the user's codebase. ` +
+    `You are OG Coder by Abu Khaled — a coding agent that works directly in the user's codebase. ` +
       `You explore, understand, change, and verify code — completing tasks end-to-end ` +
       `rather than just suggesting edits.`,
   );

@@ -24,7 +24,7 @@ export async function loginOpenAI(callbacks: OAuthLoginCallbacks): Promise<OAuth
   url.searchParams.set("state", state);
   url.searchParams.set("id_token_add_organizations", "true");
   url.searchParams.set("codex_cli_simplified_flow", "true");
-  url.searchParams.set("originator", "ggcoder");
+  url.searchParams.set("originator", "ogcoder");
 
   let code: string;
 

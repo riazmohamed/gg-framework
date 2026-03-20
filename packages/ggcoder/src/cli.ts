@@ -758,8 +758,8 @@ async function runTelegramSetup(): Promise<void> {
 
   // Banner (matches Banner.tsx)
   const LOGO = [
-    " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
-    " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
+    " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
+    " \u2588  \u2588 \u2588 \u2580\u2588",
     " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
   ];
   const GRADIENT = [
@@ -791,7 +791,7 @@ async function runTelegramSetup(): Promise<void> {
   console.log();
   console.log(
     `  ${gradientText(LOGO[0]!)}${GAP}` +
-      chalk.hex("#60a5fa").bold("GG Coder") +
+      chalk.hex("#60a5fa").bold("OG Coder") +
       chalk.hex("#6b7280")(` v${CLI_VERSION}`) +
       chalk.hex("#6b7280")(" · By ") +
       chalk.white.bold("Abu Khaled"),
@@ -898,7 +898,7 @@ async function runTelegramSetup(): Promise<void> {
         chalk.hex("#6b7280")("    2. Add the bot to your group\n") +
         chalk.hex("#6b7280")("    3. Send /link in the group to connect it to a project\n\n") +
         chalk.hex("#60a5fa")("  To start:\n") +
-        chalk.hex("#6b7280")("    cd your-project && ggcoder serve\n"),
+        chalk.hex("#6b7280")("    cd your-project && ogcoder serve\n"),
     );
   } finally {
     rl.close();
@@ -929,10 +929,10 @@ async function runServe(): Promise<void> {
     console.error(
       chalk.hex("#ef4444")("Telegram not configured.\n\n") +
         "Run " +
-        chalk.hex("#60a5fa").bold("ggcoder telegram") +
+        chalk.hex("#60a5fa").bold("ogcoder telegram") +
         " to set up your bot token and user ID.\n\n" +
         chalk.hex("#6b7280")("Or provide manually:\n") +
-        chalk.hex("#6b7280")("  ggcoder serve --bot-token TOKEN --user-id ID"),
+        chalk.hex("#6b7280")("  ogcoder serve --bot-token TOKEN --user-id ID"),
     );
     process.exit(1);
   }

@@ -99,7 +99,7 @@ interface ChatState {
 }
 
 /**
- * Serve mode: run ggcoder controlled via Telegram.
+ * Serve mode: run ogcoder controlled via Telegram.
  *
  * - DMs to bot → default project (CWD where serve was started)
  * - Groups → linked projects via /link <path>
@@ -298,7 +298,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     const currentModel = state?.session.getState().model ?? options.model;
     const modelInfo = MODELS.find((m) => m.id === currentModel);
 
-    let text = `*ggcoder* — remote coding agent\n\n`;
+    let text = `*ogcoder* — remote coding agent\n\n`;
     text += `Project: \`${path.basename(projectPath)}\`\n`;
     text += `Model: *${modelInfo?.name ?? currentModel}*\n\n`;
 
@@ -364,7 +364,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     const groupName = chatTitle ?? "this group";
     await bot.send(
       chatId,
-      `*ggcoder* joined *${groupName}*\n\n` +
+      `*ogcoder* joined *${groupName}*\n\n` +
         `Send /link to connect to a project\n` +
         `Send /help for all commands`,
     );
@@ -604,7 +604,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
       return;
     }
 
-    // ── Forward to ggcoder slash commands ──
+    // ── Forward to ogcoder slash commands ──
 
     if (!TELEGRAM_COMMANDS.has(cmd)) {
       const projectPath = resolveProjectPath(chatId);
@@ -613,7 +613,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
       if (state.isProcessing) {
         await bot.send(
           chatId,
-          "ggcoder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
+          "ogcoder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
         );
         return;
       }
@@ -649,7 +649,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     if (state.isProcessing) {
       await bot.send(
         chatId,
-        "ggcoder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
+        "ogcoder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
       );
       return;
     }
@@ -686,10 +686,10 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     const displayPath =
       home && options.cwd.startsWith(home) ? "~" + options.cwd.slice(home.length) : options.cwd;
 
-    // GG logo with gradient (matches Banner.tsx)
+    // OG logo with gradient (matches Banner.tsx)
     const LOGO = [
-      " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
-      " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
+      " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
+      " \u2588  \u2588 \u2588 \u2580\u2588",
       " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
     ];
     const GRADIENT = [
@@ -723,7 +723,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     console.log();
     console.log(
       `  ${gradientText(LOGO[0]!)}${GAP}` +
-        chalk.hex("#60a5fa").bold("GG Coder") +
+        chalk.hex("#60a5fa").bold("OG Coder") +
         chalk.hex("#6b7280")(` v${options.version}`) +
         chalk.hex("#6b7280")(" · By ") +
         chalk.white.bold("Abu Khaled"),

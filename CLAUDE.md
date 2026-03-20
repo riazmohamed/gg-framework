@@ -8,9 +8,9 @@ A modular TypeScript framework for building LLM-powered apps — from raw stream
 |---|---|---|
 | `packages/gg-ai` | `@abukhaled/gg-ai` | Unified LLM streaming API |
 | `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution |
-| `packages/ggcoder` | `@abukhaled/ggcoder` | CLI coding agent |
+| `packages/ogcoder` | `@abukhaled/ogcoder` | CLI coding agent |
 
-**Install**: `npm i -g @abukhaled/ggcoder`
+**Install**: `npm i -g @abukhaled/ogcoder`
 
 ## Project Structure
 
@@ -30,7 +30,7 @@ packages/
   │       ├── agent.ts       # Agent class + AgentStream
   │       └── agent-loop.ts  # Pure async generator loop
   │
-  └── ggcoder/               # @abukhaled/ggcoder — CLI (ggcoder)
+  └── ogcoder/               # @abukhaled/ogcoder — CLI (ogcoder)
       └── src/
           ├── cli.ts         # CLI entry point
           ├── config.ts      # Configuration constants
@@ -52,7 +52,7 @@ packages/
 
 ## Package Dependencies
 
-`@abukhaled/gg-ai` (standalone) → `@abukhaled/gg-agent` (depends on ai) → `@abukhaled/ggcoder` (depends on both)
+`@abukhaled/gg-ai` (standalone) → `@abukhaled/gg-agent` (depends on ai) → `@abukhaled/ogcoder` (depends on both)
 
 ## Tech Stack
 
@@ -75,7 +75,7 @@ pnpm check                          # tsc --noEmit across all packages
 # Per-package
 pnpm --filter @abukhaled/gg-ai build
 pnpm --filter @abukhaled/gg-agent build
-pnpm --filter @abukhaled/ggcoder build
+pnpm --filter @abukhaled/ogcoder build
 ```
 
 ## Publishing to npm
@@ -91,7 +91,7 @@ Must use `pnpm publish` (not `npm publish`) so `workspace:*` references resolve 
 ```bash
 pnpm --filter @abukhaled/gg-ai publish --no-git-checks
 pnpm --filter @abukhaled/gg-agent publish --no-git-checks
-pnpm --filter @abukhaled/ggcoder publish --no-git-checks
+pnpm --filter @abukhaled/ogcoder publish --no-git-checks
 ```
 
 ### Auth
@@ -103,9 +103,9 @@ pnpm --filter @abukhaled/ggcoder publish --no-git-checks
 ### Verify
 
 ```bash
-npm view @abukhaled/ggcoder versions --json   # check published versions
-npm i -g @abukhaled/ggcoder@<version>         # test install
-ggcoder --help                                # verify CLI works
+npm view @abukhaled/ogcoder versions --json   # check published versions
+npm i -g @abukhaled/ogcoder@<version>         # test install
+ogcoder --help                                # verify CLI works
 ```
 
 If `npm i` gets ETARGET after publishing, clear cache: `npm cache clean --force`
@@ -114,7 +114,7 @@ If `npm i` gets ETARGET after publishing, clear cache: `npm cache clean --force`
 
 - Types → `types.ts` in each package
 - Providers → `providers/` directory in @abukhaled/gg-ai
-- Tools → `tools/` directory in @abukhaled/ggcoder, one file per tool
+- Tools → `tools/` directory in @abukhaled/ogcoder, one file per tool
 - UI components → `ui/components/`, one component per file
 - OAuth flows → `core/oauth/`, one file per provider
 - Tests → co-located with source files

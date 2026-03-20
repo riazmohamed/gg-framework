@@ -3,8 +3,8 @@ import { readFile } from "node:fs/promises";
 import { SessionManager, type SessionInfo } from "../core/session-manager.js";
 
 const LOGO_LINES = [
-  " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
-  " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
+  " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
+  " \u2588  \u2588 \u2588 \u2580\u2588",
   " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
 ];
 const GRADIENT = [
@@ -113,7 +113,7 @@ function renderScreen(sessions: SessionDisplay[], selectedIndex: number): string
   lines.push(
     gradientLine(LOGO_LINES[0]!) +
       GAP +
-      chalk.hex("#60a5fa").bold("GG Coder") +
+      chalk.hex("#60a5fa").bold("OG Coder") +
       (_version ? chalk.hex(TEXT_DIM)(` v${_version}`) : "") +
       chalk.hex(TEXT_DIM)(" · By ") +
       chalk.hex(TEXT).bold("Abu Khaled"),

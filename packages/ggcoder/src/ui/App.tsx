@@ -74,7 +74,7 @@ function getProviderErrorHint(message: string): string | null {
     return "You've hit the provider's rate limit. Wait a moment before retrying.";
   }
   if (lower.includes("502") || lower.includes("bad gateway")) {
-    return "The provider returned a server error. This is not a ggcoder issue — try again shortly.";
+    return "The provider returned a server error. This is not a ogcoder issue — try again shortly.";
   }
   if (lower.includes("503") || lower.includes("service unavailable")) {
     return "The provider's service is temporarily unavailable. Try again in a moment.";
@@ -83,7 +83,7 @@ function getProviderErrorHint(message: string): string | null {
     return "The request to the provider timed out. Their servers may be slow — try again.";
   }
   if (lower.includes("500") && lower.includes("internal server error")) {
-    return "The provider experienced an internal error. This is not a ggcoder issue.";
+    return "The provider experienced an internal error. This is not a ogcoder issue.";
   }
   if (
     lower.includes("does not recognize the requested model") ||
@@ -1358,7 +1358,7 @@ export function App(props: AppProps) {
           } else {
             // GLM models: save image to temp file and instruct model to use vision MCP tool
             const ext = img.mediaType.split("/")[1] ?? "png";
-            const tmpPath = `/tmp/ggcoder-img-${Date.now()}.${ext}`;
+            const tmpPath = `/tmp/ogcoder-img-${Date.now()}.${ext}`;
             try {
               writeFileSync(tmpPath, Buffer.from(img.data, "base64"));
               parts.push({

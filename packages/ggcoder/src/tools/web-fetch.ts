@@ -65,7 +65,7 @@ export function createWebFetchTool(): AgentTool<typeof parameters> {
       try {
         const response = await fetch(args.url, {
           headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; GGCoder/1.0)",
+            "User-Agent": "Mozilla/5.0 (compatible; OGCoder/1.0)",
             Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           },
           signal: AbortSignal.timeout(30000),

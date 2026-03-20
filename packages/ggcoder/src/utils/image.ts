@@ -237,7 +237,7 @@ export function getClipboardImage(): Promise<ImageAttachment | null> {
       const mediaType = isPng ? "image/png" : "image/tiff";
 
       // Write clipboard image to temp file, then read as base64
-      const tmpPath = `/tmp/ggcoder-clipboard-${Date.now()}.${ext}`;
+      const tmpPath = `/tmp/ogcoder-clipboard-${Date.now()}.${ext}`;
       const writeScript = [
         `set imgData to the clipboard as «class ${clipClass}»`,
         `set filePath to POSIX file "${tmpPath}"`,

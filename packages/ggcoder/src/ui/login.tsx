@@ -2,8 +2,8 @@ import chalk from "chalk";
 import type { Provider } from "@abukhaled/gg-ai";
 
 const LOGO_LINES = [
-  " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
-  " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
+  " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
+  " \u2588  \u2588 \u2588 \u2580\u2588",
   " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
 ];
 const GRADIENT = [
@@ -56,7 +56,7 @@ function renderScreen(selectedIndex: number): string {
   lines.push(
     gradientLine(LOGO_LINES[0]!) +
       GAP +
-      chalk.hex(PRIMARY).bold("GG Coder") +
+      chalk.hex(PRIMARY).bold("OG Coder") +
       (_version ? chalk.hex(TEXT_DIM)(` v${_version}`) : "") +
       chalk.hex(TEXT_DIM)(" · By ") +
       chalk.hex(TEXT).bold("Abu Khaled"),

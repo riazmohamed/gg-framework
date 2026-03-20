@@ -51,7 +51,7 @@ export class MCPClientManager {
         env: { ...process.env, ...config.env } as Record<string, string>,
         stderr: "pipe",
       });
-      client = new Client({ name: "ggcoder", version: "1.0.0" });
+      client = new Client({ name: "ogcoder", version: "1.0.0" });
       await client.connect(transport, { timeout });
     } else {
       // HTTP transport — try StreamableHTTP first, fall back to SSE
@@ -62,7 +62,7 @@ export class MCPClientManager {
         transport = new StreamableHTTPClientTransport(url, {
           requestInit: reqInit,
         });
-        client = new Client({ name: "ggcoder", version: "1.0.0" });
+        client = new Client({ name: "ogcoder", version: "1.0.0" });
         await client.connect(transport, { timeout });
       } catch (streamableErr) {
         log("INFO", "mcp", `StreamableHTTP failed for "${config.name}", trying SSE fallback`, {
@@ -74,7 +74,7 @@ export class MCPClientManager {
             : undefined,
           requestInit: reqInit,
         });
-        client = new Client({ name: "ggcoder", version: "1.0.0" });
+        client = new Client({ name: "ogcoder", version: "1.0.0" });
         await client.connect(transport, { timeout });
       }
     }

@@ -10,7 +10,7 @@
 2. [Architecture & Dependencies](#architecture--dependencies)
 3. [Phase 1: Foundation (gg-ai)](#phase-1-foundation-gg-ai)
 4. [Phase 2: Agent Loop (gg-agent)](#phase-2-agent-loop-gg-agent)
-5. [Phase 3: CLI Application (ggcoder)](#phase-3-cli-application-ggcoder)
+5. [Phase 3: CLI Application (ogcoder)](#phase-3-cli-application-ogcoder)
 6. [Build & Deployment](#build--deployment)
 7. [Key Patterns & Conventions](#key-patterns--conventions)
 8. [Testing Strategy](#testing-strategy)
@@ -25,7 +25,7 @@
 |---------|-----|---------|------------------|
 | `@abukhaled/gg-ai` | Unified LLM streaming API | Core streaming layer for Anthropic, OpenAI, GLM, Moonshot | **Standalone** |
 | `@abukhaled/gg-agent` | Multi-turn agentic loop | Tool execution, context overflow handling, multi-turn reasoning | Depends on `gg-ai` |
-| `@abukhaled/ggcoder` | Full CLI coding agent | Terminal UI, OAuth, file tools, MCP integration, slash commands | Depends on both |
+| `@abukhaled/ogcoder` | Full CLI coding agent | Terminal UI, OAuth, file tools, MCP integration, slash commands | Depends on both |
 
 **Stacking principle**: Each package works independently. Stack them together to build higher-level abstractions.
 
@@ -34,7 +34,7 @@
     ↓
 @abukhaled/gg-agent (agent loop + tool execution)
     ↓
-@abukhaled/ggcoder (CLI with Ink/React terminal UI)
+@abukhaled/ogcoder (CLI with Ink/React terminal UI)
 ```
 
 ---
@@ -77,7 +77,7 @@ packages/
 │   │   └── index.ts          # Exports
 │   └── package.json
 │
-└── ggcoder/
+└── ogcoder/
     ├── src/
     │   ├── cli.ts            # Entry point (891 lines)
     │   ├── config.ts         # App paths, constants
@@ -485,12 +485,12 @@ pnpm format:check
 **Success criteria**:
 - ✅ All tests pass
 - ✅ No type errors
-- ✅ Can be imported by ggcoder
+- ✅ Can be imported by ogcoder
 - ✅ agentLoop works with real stream from gg-ai
 
 ---
 
-# Phase 3: CLI Application (ggcoder)
+# Phase 3: CLI Application (ogcoder)
 
 ## Goal
 Build a **production CLI coding agent** with OAuth auth, terminal UI, file tools, and interactive chat.
@@ -501,7 +501,7 @@ This is the largest phase. Break it into sub-phases:
 
 #### Prompt 1: Create Config & Paths
 ```
-Create packages/ggcoder/src/config.ts with:
+Create packages/ogcoder/src/config.ts with:
 - getAppPaths() → { homeDir, ggDir, authFile, sessionsDir, debugLog, commandsDir, mcp-config }
 - ensureAppDirs() → creates ~/.gg/ and subdirectories
 - DEFAULT_MODEL, CONTEXT_WINDOWS for each model
@@ -510,7 +510,7 @@ Create packages/ggcoder/src/config.ts with:
 
 #### Prompt 2: Create Logger
 ```
-Create packages/ggcoder/src/core/logger.ts with:
+Create packages/ogcoder/src/core/logger.ts with:
 - Singleton logger that writes to ~/.gg/debug.log
 - log(level, category, message, metadata?)
 - Timestamp each entry
@@ -520,7 +520,7 @@ Create packages/ggcoder/src/core/logger.ts with:
 
 #### Prompt 3: Create Auth Storage
 ```
-Create packages/ggcoder/src/core/auth-storage.ts with:
+Create packages/ogcoder/src/core/auth-storage.ts with:
 - AuthStorage class
 - save(provider, token) → writes encrypted JSON to ~/.gg/auth.json
 - load(provider) → retrieves token
@@ -531,7 +531,7 @@ Create packages/ggcoder/src/core/auth-storage.ts with:
 
 #### Prompt 4: Implement OAuth PKCE Flows
 ```
-Create packages/ggcoder/src/core/oauth/ with:
+Create packages/ogcoder/src/core/oauth/ with:
 - anthropic.ts: loginAnthropic() → launches browser PKCE flow
   - Authorization endpoint
   - Token exchange
@@ -543,7 +543,7 @@ Create packages/ggcoder/src/core/oauth/ with:
 
 #### Prompt 5: Create Session Management
 ```
-Create packages/ggcoder/src/core/session-manager.ts with:
+Create packages/ogcoder/src/core/session-manager.ts with:
 - SessionManager class
 - createSession(name?, provider?, model?) → creates ~/.gg/sessions/{id}.json
 - loadSession(id) → reads session file
@@ -555,7 +555,7 @@ Create packages/ggcoder/src/core/session-manager.ts with:
 
 #### Prompt 6: Create Agent Session Coordinator
 ```
-Create packages/ggcoder/src/core/agent-session.ts with:
+Create packages/ogcoder/src/core/agent-session.ts with:
 - AgentSession class that coordinates agent + session + auth
 - Constructor takes SessionManager, AuthStorage, logger
 - Methods:
@@ -568,7 +568,7 @@ Create packages/ggcoder/src/core/agent-session.ts with:
 
 #### Prompt 7: Create Settings Manager
 ```
-Create packages/ggcoder/src/core/settings-manager.ts with:
+Create packages/ogcoder/src/core/settings-manager.ts with:
 - SettingsManager class
 - loadSettings() → from ~/.gg/settings.json
 - saveSettings(settings) → persists
@@ -579,7 +579,7 @@ Create packages/ggcoder/src/core/settings-manager.ts with:
 
 #### Prompt 8: Implement File Tools
 ```
-Create packages/ggcoder/src/tools/ with individual files:
+Create packages/ogcoder/src/tools/ with individual files:
 - read.ts: read(file_path, offset?, limit?) → returns file contents (truncates large files)
 - write.ts: write(file_path, content) → creates/overwrites file, creates parent dirs
 - edit.ts: edit(file_path, old_text, new_text) → surgical replacement (old_text must match exactly once)
@@ -593,7 +593,7 @@ Create packages/ggcoder/src/tools/ with individual files:
 
 #### Prompt 9: Implement web-fetch Tool
 ```
-Create packages/ggcoder/src/tools/web-fetch.ts with:
+Create packages/ogcoder/src/tools/web-fetch.ts with:
 - web_fetch(url, max_length?) → fetch URL, strip HTML, return text
 - Use node-fetch or built-in fetch
 - Respect max_length parameter (default 10000 chars)
@@ -602,7 +602,7 @@ Create packages/ggcoder/src/tools/web-fetch.ts with:
 
 #### Prompt 10: Implement Task System
 ```
-Create packages/ggcoder/src/tools/tasks.ts with:
+Create packages/ogcoder/src/tools/tasks.ts with:
 - tasks(action: "add"|"list"|"done"|"remove", id?, title?, prompt?) → task management
 - Store tasks in ~/.gg/tasks.json
 - support add, list, mark done, remove operations
@@ -611,7 +611,7 @@ Create packages/ggcoder/src/tools/tasks.ts with:
 
 #### Prompt 11: Implement Subagent Tool
 ```
-Create packages/ggcoder/src/tools/subagent.ts with:
+Create packages/ogcoder/src/tools/subagent.ts with:
 - subagent(prompt) → spawn isolated Agent with same auth/model
 - Return agent result
 - Use for parallel/recursive work
@@ -620,7 +620,7 @@ Create packages/ggcoder/src/tools/subagent.ts with:
 
 #### Prompt 12: Create Tool Index
 ```
-Create packages/ggcoder/src/tools/index.ts with:
+Create packages/ogcoder/src/tools/index.ts with:
 - createTools(agentSession, fileSystem) → AgentTool[]
 - Return array of all tools with execute functions wired up
 - Tools should have proper error handling and validation
@@ -630,7 +630,7 @@ Create packages/ggcoder/src/tools/index.ts with:
 
 #### Prompt 13: Generate System Prompt
 ```
-Create packages/ggcoder/src/system-prompt.ts with:
+Create packages/ogcoder/src/system-prompt.ts with:
 - buildSystemPrompt(options) → string
 - Include:
   - Role: expert coding agent
@@ -644,7 +644,7 @@ Create packages/ggcoder/src/system-prompt.ts with:
 
 #### Prompt 14: Create Slash Commands
 ```
-Create packages/ggcoder/src/core/slash-commands.ts with:
+Create packages/ogcoder/src/core/slash-commands.ts with:
 - Registry pattern for commands: { name, aliases, description, usage, execute }
 - Built-in commands:
   - /model or /m [provider] [model] → switch model
@@ -660,7 +660,7 @@ Create packages/ggcoder/src/core/slash-commands.ts with:
 
 #### Prompt 15: Create Prompt Commands
 ```
-Create packages/ggcoder/src/core/prompt-commands.ts with:
+Create packages/ogcoder/src/core/prompt-commands.ts with:
 - Built-in prompt templates (e.g., "fix", "test", "refactor")
 - Each is a multi-line prompt stored in ~.gg/commands/
 - Support variables: {file}, {selection}, {language}
@@ -670,7 +670,7 @@ Create packages/ggcoder/src/core/prompt-commands.ts with:
 
 #### Prompt 16: Create Base UI Components
 ```
-Create packages/ggcoder/src/ui/components/ with individual React components:
+Create packages/ogcoder/src/ui/components/ with individual React components:
 - Spinner.tsx: animated spinner (frames: | / - \)
 - TextBlock.tsx: markdown-formatted text with syntax highlighting
 - ToolCall.tsx: displays tool call (name, args, status)
@@ -685,7 +685,7 @@ Create packages/ggcoder/src/ui/components/ with individual React components:
 
 #### Prompt 17: Create App State & Hooks
 ```
-Create packages/ggcoder/src/ui/hooks/ with:
+Create packages/ogcoder/src/ui/hooks/ with:
 - useAgentLoop(options) → runs agent loop, yields events
 - useSessionManager() → CRUD on sessions
 - useSlashCommands(registry) → parses /command input
@@ -695,7 +695,7 @@ Create packages/ggcoder/src/ui/hooks/ with:
 
 #### Prompt 18: Create Main App Component
 ```
-Create packages/ggcoder/src/ui/App.tsx with (1700+ lines):
+Create packages/ogcoder/src/ui/App.tsx with (1700+ lines):
 - Main React component using Ink + react-dom
 - State: messages[], liveItems[], currentInput, tokenUsage
 - Input handler:
@@ -720,7 +720,7 @@ Create packages/ggcoder/src/ui/App.tsx with (1700+ lines):
 
 #### Prompt 19: Create Render Function
 ```
-Create packages/ggcoder/src/ui/render.ts with:
+Create packages/ogcoder/src/ui/render.ts with:
 - renderApp(session, auth, settings) → runs React/Ink app
 - Setup React root using Ink
 - Handle process signals (SIGINT, SIGTERM)
@@ -731,7 +731,7 @@ Create packages/ggcoder/src/ui/render.ts with:
 
 #### Prompt 20: Create Interactive Mode
 ```
-Create packages/ggcoder/src/modes/ with:
+Create packages/ogcoder/src/modes/ with:
 - interactive.ts: runInteractive(session) → uses Ink/React terminal UI
 - Main execution path
 - All user input goes through React component
@@ -757,7 +757,7 @@ Create modes/rpc-mode.ts and modes/serve-mode.ts with:
 
 #### Prompt 23: Create CLI Entry Point
 ```
-Create packages/ggcoder/src/cli.ts (891 lines) with:
+Create packages/ogcoder/src/cli.ts (891 lines) with:
 - #!/usr/bin/env node shebang
 - Parse CLI args: --model, --provider, --json, --version, etc.
 - Subcommands:
@@ -777,7 +777,7 @@ Create packages/ggcoder/src/cli.ts (891 lines) with:
 
 #### Prompt 24: Create MCP Integration
 ```
-Create packages/ggcoder/src/core/mcp/ with:
+Create packages/ogcoder/src/core/mcp/ with:
 - MCPClientManager class
 - Load MCP servers from ~/.gg/mcp-config.json
 - For each server: spawn process, connect via stdio
@@ -787,7 +787,7 @@ Create packages/ggcoder/src/core/mcp/ with:
 
 #### Prompt 25: Create Context Compaction
 ```
-Create packages/ggcoder/src/core/compaction/ with:
+Create packages/ogcoder/src/core/compaction/ with:
 - Token estimator: estimate token count for messages
 - Compactor: call Anthropic prompt caching API to summarize old context
 - shouldCompact(messages) → boolean based on approaching context limit
@@ -797,7 +797,7 @@ Create packages/ggcoder/src/core/compaction/ with:
 
 #### Prompt 26: Create Extension System
 ```
-Create packages/ggcoder/src/core/extensions/ with:
+Create packages/ogcoder/src/core/extensions/ with:
 - Extension interface: { name, version, activate(context) }
 - ExtensionLoader: discovers and loads ~/.gg/extensions/
 - Each extension can:
@@ -806,12 +806,12 @@ Create packages/ggcoder/src/core/extensions/ with:
   - Hook into events
 ```
 
-### Tests for Phase 3 (ggcoder)
+### Tests for Phase 3 (ogcoder)
 
-**Test locations**: `packages/ggcoder/src/**/*.test.ts`
+**Test locations**: `packages/ogcoder/src/**/*.test.ts`
 
 ```typescript
-// Test 1: Tool validation (packages/ggcoder/src/tools/)
+// Test 1: Tool validation (packages/ogcoder/src/tools/)
 // - read: verify truncation for large files
 // - write: verify file creation and parent dir creation
 // - edit: verify exact match requirement
@@ -861,7 +861,7 @@ Create packages/ggcoder/src/core/extensions/ with:
 ### Build & Validate Phase 3
 
 ```bash
-cd packages/ggcoder
+cd packages/ogcoder
 pnpm build
 pnpm check
 pnpm test
@@ -871,8 +871,8 @@ pnpm format:check
 ```
 
 **Success criteria**:
-- ✅ `ggcoder --help` works
-- ✅ `ggcoder login` authenticates
+- ✅ `ogcoder --help` works
+- ✅ `ogcoder login` authenticates
 - ✅ Interactive mode starts and accepts input
 - ✅ `/model` command switches models
 - ✅ Prompt execution calls tools
@@ -949,17 +949,17 @@ pnpm check && pnpm lint && pnpm format:check
    # 2. Publish gg-agent (depends on gg-ai)
    pnpm --filter @abukhaled/gg-agent publish --no-git-checks
 
-   # 3. Publish ggcoder (depends on both)
-   pnpm --filter @abukhaled/ggcoder publish --no-git-checks
+   # 3. Publish ogcoder (depends on both)
+   pnpm --filter @abukhaled/ogcoder publish --no-git-checks
    ```
 
 4. **Verify**:
    ```bash
-   npm view @abukhaled/ggcoder versions --json
+   npm view @abukhaled/ogcoder versions --json
 
    # Test install
-   npm i -g @abukhaled/ggcoder@4.2.36
-   ggcoder --help
+   npm i -g @abukhaled/ogcoder@4.2.36
+   ogcoder --help
    ```
 
 ### Troubleshooting
@@ -1181,12 +1181,12 @@ describe("gg-agent", () => {
 
 **Run**: `pnpm --filter @abukhaled/gg-agent test`
 
-### ggcoder (CLI Layer)
+### ogcoder (CLI Layer)
 
 **Goal**: Verify tools work, sessions persist, commands execute.
 
 ```typescript
-describe("ggcoder", () => {
+describe("ogcoder", () => {
   describe("tools", () => {
     it("read: returns file contents", async () => { ... });
     it("write: creates file with parent dirs", async () => { ... });
@@ -1214,7 +1214,7 @@ describe("ggcoder", () => {
 });
 ```
 
-**Run**: `pnpm --filter @abukhaled/ggcoder test`
+**Run**: `pnpm --filter @abukhaled/ogcoder test`
 
 ## Mocking Strategy
 
@@ -1335,7 +1335,7 @@ jobs:
 
 2. **Then gg-agent**: Show how to build an autonomous loop on top of streaming. Teach async generators, event emission, tool execution, error recovery. Real-world value: students understand how modern AI agents actually work.
 
-3. **Finally ggcoder**: Show how to build a production CLI. Teach Ink/React, OAuth, file operations, complex state management. Real-world value: students ship a real product.
+3. **Finally ogcoder**: Show how to build a production CLI. Teach Ink/React, OAuth, file operations, complex state management. Real-world value: students ship a real product.
 
 ### Learning Objectives
 
@@ -1351,7 +1351,7 @@ jobs:
 - Build multi-turn reasoning systems
 - Practice event-driven architecture
 
-**Phase 3 (ggcoder)**:
+**Phase 3 (ogcoder)**:
 - Build terminal UI with React (Ink)
 - Implement OAuth flows
 - Handle file I/O securely
@@ -1399,7 +1399,7 @@ jobs:
 
 ### Adding a New Tool
 
-1. Create `packages/ggcoder/src/tools/mytool.ts`
+1. Create `packages/ogcoder/src/tools/mytool.ts`
 2. Implement `AgentTool` with Zod parameters and execute function
 3. Add to `createTools()` in `tools/index.ts`
 4. Write tests in `tools/mytool.test.ts`
@@ -1408,11 +1408,11 @@ jobs:
 ### Adding a Slash Command
 
 **Option A: UI handler** (needs React state access)
-- Edit `packages/ggcoder/src/ui/App.tsx` in `handleSubmit()`
+- Edit `packages/ogcoder/src/ui/App.tsx` in `handleSubmit()`
 - Check for `/mycommand` and update state directly
 
 **Option B: Registry command** (pure logic, no UI)
-- Add to `createBuiltinCommands()` in `packages/ggcoder/src/core/slash-commands.ts`
+- Add to `createBuiltinCommands()` in `packages/ogcoder/src/core/slash-commands.ts`
 - Implement `execute(args, context)` function
 - If needs new capability, add method to `SlashCommandContext` and wire in `AgentSession`
 
@@ -1432,10 +1432,10 @@ Before publishing to npm:
 - [ ] package.json has `publishConfig: { access: "public" }`
 - [ ] README.md updated with changes
 - [ ] git commit + push
-- [ ] Publish in order: gg-ai → gg-agent → ggcoder
+- [ ] Publish in order: gg-ai → gg-agent → ogcoder
 - [ ] Verify npm pages show new versions
-- [ ] Test install: `npm i -g @abukhaled/ggcoder@<version>`
-- [ ] CLI works: `ggcoder --version`
+- [ ] Test install: `npm i -g @abukhaled/ogcoder@<version>`
+- [ ] CLI works: `ogcoder --version`
 
 ---
 

@@ -21,7 +21,7 @@ export function initLogger(
     // Can't open log file — silently disable logging
     return;
   }
-  const parts = ["ggcoder"];
+  const parts = ["ogcoder"];
   if (meta?.version) parts[0] += ` v${meta.version}`;
   parts.push("started");
   if (meta?.provider) parts.push(`provider=${meta.provider}`);
@@ -157,7 +157,7 @@ export function attachToEventBus(bus: EventBus): void {
  */
 export function closeLogger(): void {
   if (fd === null) return;
-  log("INFO", "shutdown", "ggcoder shutting down");
+  log("INFO", "shutdown", "ogcoder shutting down");
   try {
     fs.closeSync(fd);
   } catch {

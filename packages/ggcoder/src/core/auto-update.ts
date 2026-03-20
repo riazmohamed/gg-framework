@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-const PACKAGE_NAME = "@abukhaled/ggcoder";
+const PACKAGE_NAME = "@abukhaled/ogcoder";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
 const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const FETCH_TIMEOUT_MS = 3000;
