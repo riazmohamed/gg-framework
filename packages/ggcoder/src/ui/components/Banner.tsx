@@ -14,8 +14,8 @@ interface BannerProps {
 }
 
 const LOGO_LINES = [
-  " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
-  " \u2588  \u2588 \u2588 \u2580\u2588",
+  " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
+  " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
   " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
 ];
 
@@ -35,6 +35,11 @@ const GRADIENT = [
   "#6da1f9",
 ];
 
+const GAP = "   ";
+// Logo is 9 visible chars wide + GAP (3) = 12 chars before info text
+const LOGO_WIDTH = 9;
+const SIDE_BY_SIDE_MIN = LOGO_WIDTH + GAP.length + 20; // need ~32 cols for side-by-side
+
 export function Banner({ version, model, cwd, taskCount }: BannerProps) {
   const theme = useTheme();
   const { columns } = useTerminalSize();
@@ -44,20 +49,53 @@ export function Banner({ version, model, cwd, taskCount }: BannerProps) {
   const home = process.env.HOME ?? "";
   const displayPath = home && cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd;
 
+  // Static gradient — no animation needed since the banner is rendered once
+  // into Ink's Static area. Animating here would waste CPU and could cause
+  // visual duplicates on terminal resize.
   const shift = 0;
 
-  // Always use stacked layout: logo on top, info below.
-  // Side-by-side layout breaks in split-pane terminals (e.g. Warp) where
-  // stdout.columns reports full terminal width, not individual pane width,
-  // causing rows to wrap and destroying the logo's vertical alignment.
-  return (
-    <Box flexDirection="column" marginTop={1} marginBottom={1} width={columns}>
-      <Box flexDirection="column">
+  // At narrow widths, stack logo above info instead of side-by-side
+  if (columns < SIDE_BY_SIDE_MIN) {
+    return (
+      <Box flexDirection="column" marginTop={1} marginBottom={1} width={columns}>
         <GradientText text={LOGO_LINES[0]} shift={shift} />
         <GradientText text={LOGO_LINES[1]} shift={shift} />
         <GradientText text={LOGO_LINES[2]} shift={shift} />
+        <Box marginTop={1}>
+          <Text color={theme.primary} bold>
+            OG Coder
+          </Text>
+          <Text color={theme.textDim}> v{version}</Text>
+        </Box>
+        <Box>
+          <Text color={theme.secondary}>{modelName}</Text>
+          <Text color={theme.textDim}>{"  "}</Text>
+          <Text color={theme.textDim} wrap="truncate">
+            {displayPath}
+          </Text>
+        </Box>
+        <Box>
+          <Text color={theme.primary}>^T</Text>
+          <Text color={theme.textDim}> tasks</Text>
+          {taskCount !== undefined && taskCount > 0 && (
+            <Text color={theme.secondary}> ({taskCount})</Text>
+          )}
+          <Text color={theme.textDim}>{"  "}</Text>
+          <Text color={theme.primary}>^S</Text>
+          <Text color={theme.textDim}> skills</Text>
+          <Text color={theme.textDim}>{"  "}</Text>
+          <Text color={theme.primary}>^P</Text>
+          <Text color={theme.textDim}> plan</Text>
+        </Box>
       </Box>
-      <Box marginTop={1}>
+    );
+  }
+
+  return (
+    <Box flexDirection="column" marginTop={1} marginBottom={1} width={columns}>
+      <Box>
+        <GradientText text={LOGO_LINES[0]} shift={shift} />
+        <Text>{GAP}</Text>
         <Text color={theme.primary} bold>
           OG Coder
         </Text>
@@ -68,6 +106,8 @@ export function Banner({ version, model, cwd, taskCount }: BannerProps) {
         </Text>
       </Box>
       <Box>
+        <GradientText text={LOGO_LINES[1]} shift={shift} />
+        <Text>{GAP}</Text>
         <Text color={theme.secondary}>{modelName}</Text>
         <Text color={theme.textDim}>{"  "}</Text>
         <Text color={theme.textDim} wrap="truncate">
@@ -75,6 +115,8 @@ export function Banner({ version, model, cwd, taskCount }: BannerProps) {
         </Text>
       </Box>
       <Box>
+        <GradientText text={LOGO_LINES[2]} shift={shift} />
+        <Text>{GAP}</Text>
         <Text color={theme.primary}>^T</Text>
         <Text color={theme.textDim}> tasks</Text>
         {taskCount !== undefined && taskCount > 0 && (

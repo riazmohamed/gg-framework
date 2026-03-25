@@ -7,9 +7,78 @@ import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import type { ImageAttachment } from "../../utils/image.js";
 import { extractImagePaths, readImageFile, getClipboardImage } from "../../utils/image.js";
 import { SlashCommandMenu, filterCommands, type SlashCommandInfo } from "./SlashCommandMenu.js";
+import { log } from "../../core/logger.js";
 
 const MAX_VISIBLE_LINES = 5;
 const PROMPT = "❯ ";
+
+// SGR mouse sequence: ESC [ < button ; col ; row M/m
+// M = press, m = release. Coordinates are 1-based.
+// SGR mouse sequence (global) — used both to strip sequences from input data
+// and to extract click coordinates. Must reset lastIndex before each use.
+// eslint-disable-next-line no-control-regex
+const SGR_MOUSE_RE_G = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
+
+// Enable/disable escape sequences for SGR mouse tracking.
+// ?1000h = basic click tracking, ?1006h = SGR extended mode (supports coords > 223).
+const ENABLE_MOUSE = "\x1b[?1000h\x1b[?1006h";
+const DISABLE_MOUSE = "\x1b[?1006l\x1b[?1000l";
+
+// Guard against stray SGR mouse sequences leaking into text input.
+// Some terminals or multiplexers send these even without mouse tracking enabled.
+function isMouseEscapeSequence(input: string): boolean {
+  return input.includes("[<") && /\[<\d+;\d+;\d+[Mm]/.test(input);
+}
+
+// Option+Arrow escape sequences — terminals send these as raw input strings
+// rather than setting key.meta + key.leftArrow reliably.
+const OPTION_LEFT_SEQUENCES = new Set([
+  "\x1bb", // Meta+b (emacs style)
+  "\x1b[1;3D", // CSI 1;3 D (xterm with modifiers)
+]);
+const OPTION_RIGHT_SEQUENCES = new Set([
+  "\x1bf", // Meta+f (emacs style)
+  "\x1b[1;3C", // CSI 1;3 C (xterm with modifiers)
+]);
+
+/** Classify a character as word, punctuation, or space. */
+function charClass(ch: string): "word" | "punct" | "space" {
+  if (/\s/.test(ch)) return "space";
+  if (/\w/.test(ch)) return "word";
+  return "punct";
+}
+
+/** Find the start of the previous word from `pos` in `text`. */
+function prevWordBoundary(text: string, pos: number): number {
+  if (pos <= 0) return 0;
+  let i = pos - 1;
+  // Skip whitespace
+  while (i > 0 && charClass(text[i]) === "space") i--;
+  if (i <= 0) return 0;
+  // Skip through same character class (word or punct)
+  const cls = charClass(text[i]);
+  while (i > 0 && charClass(text[i - 1]) === cls) i--;
+  return i;
+}
+
+/** Find the end of the next word from `pos` in `text`. */
+function nextWordBoundary(text: string, pos: number): number {
+  const len = text.length;
+  if (pos >= len) return len;
+  let i = pos;
+  // Skip through current character class (word or punct)
+  const cls = charClass(text[i]);
+  while (i < len && charClass(text[i]) === cls) i++;
+  // Skip whitespace
+  while (i < len && charClass(text[i]) === "space") i++;
+  return i;
+}
+
+/** Get the normalized selection range [start, end] from anchor and cursor, or null. */
+function getSelectionRange(anchor: number | null, cur: number): [number, number] | null {
+  if (anchor === null || anchor === cur) return null;
+  return [Math.min(anchor, cur), Math.max(anchor, cur)];
+}
 
 export interface PasteInfo {
   offset: number; // char index where paste starts in value
@@ -33,6 +102,9 @@ interface InputAreaProps {
 
 // Border (1 each side) + padding (1 each side) = 4 characters of overhead
 const BOX_OVERHEAD = 4;
+// Minimum content width to prevent zero/negative values that cause infinite
+// re-render loops when Ink tries to wrap text wider than available space.
+const MIN_CONTENT_WIDTH = 10;
 
 /**
  * Split text into visual lines based on terminal width.
@@ -64,8 +136,7 @@ function wrapLine(text: string, contentWidth: number): string[] {
 }
 
 function getVisualLines(text: string, columns: number): string[] {
-  const contentWidth = columns - PROMPT.length - BOX_OVERHEAD;
-  if (contentWidth <= 0) return [text];
+  const contentWidth = Math.max(MIN_CONTENT_WIDTH, columns - PROMPT.length - BOX_OVERHEAD);
   if (text.length === 0) return [""];
 
   // Split on real newlines first, then wrap each
@@ -93,6 +164,7 @@ export function InputArea({
   const theme = useTheme();
   const [value, setValue] = useState("");
   const [cursor, setCursor] = useState(0);
+  const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null);
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const historyRef = useRef<string[]>([]);
   const historyIndexRef = useRef(-1);
@@ -190,8 +262,218 @@ export function InputArea({
     };
   }, [isActive, internal_eventEmitter]);
 
+  // --- Mouse click-to-position-cursor ---
+  // Store layout info in a ref so the mouse handler can map terminal
+  // coordinates to character offsets without re-subscribing on every change.
+  const layoutRef = useRef({
+    value: "",
+    displayLines: [""] as string[],
+    startLine: 0,
+    contentWidth: 10,
+    columns: 80,
+    hasImages: false,
+  });
+
+  // Self-calibrating anchor: the terminal row (1-based) of the LAST
+  // display line.  We track the last line (not the first) because Ink
+  // grows the input box upward — the bottom stays at a stable position
+  // while the top moves up as lines are added.  Calibrated on any
+  // single-line click (unambiguous), then remains valid as text wraps.
+  const lastLineRowRef = useRef(-1);
+
+  // Enable SGR mouse tracking and intercept mouse sequences before Ink's
+  // useInput sees them (which would insert the raw escape text).  We wrap
+  // the internal event emitter's `emit` so mouse data is consumed here and
+  // never forwarded to Ink's input handler.
+  const mouseEmitRef = useRef<{
+    original: typeof internal_eventEmitter.emit | null;
+  }>({ original: null });
+
+  useEffect(() => {
+    if (!isActive || !internal_eventEmitter) return;
+
+    process.stdout.write(ENABLE_MOUSE);
+
+    // Safety: ensure mouse tracking is disabled even on crash/SIGINT/unexpected exit
+    // so the terminal isn't left in a broken state sending escape sequences on every click.
+    const onProcessExit = () => process.stdout.write(DISABLE_MOUSE);
+    process.on("exit", onProcessExit);
+
+    const originalEmit = internal_eventEmitter.emit.bind(internal_eventEmitter);
+    mouseEmitRef.current.original = originalEmit;
+
+    // Scroll passthrough: when a scroll event is detected, temporarily disable
+    // mouse tracking so the terminal handles scroll natively (scrollback buffer).
+    // Re-enable after a short idle period so click-to-cursor continues to work.
+    let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+    let mouseDisabled = false;
+
+    const reenableMouse = () => {
+      if (mouseDisabled) {
+        process.stdout.write(ENABLE_MOUSE);
+        mouseDisabled = false;
+      }
+    };
+
+    const pauseMouseForScroll = () => {
+      if (!mouseDisabled) {
+        process.stdout.write(DISABLE_MOUSE);
+        mouseDisabled = true;
+      }
+      if (scrollTimer) clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(reenableMouse, 300);
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    internal_eventEmitter.emit = (event: string | symbol, ...args: any[]): boolean => {
+      if (event === "input" && typeof args[0] === "string") {
+        const data = args[0] as string;
+        // Strip all SGR mouse sequences from the data
+        const stripped = data.replace(SGR_MOUSE_RE_G, "");
+
+        // Process each mouse sequence for click handling
+        let match: RegExpExecArray | null;
+        SGR_MOUSE_RE_G.lastIndex = 0;
+        while ((match = SGR_MOUSE_RE_G.exec(data)) !== null) {
+          const btnCode = parseInt(match[1], 10);
+          const termCol = parseInt(match[2], 10);
+          const termRow = parseInt(match[3], 10);
+          const isPress = match[4] === "M";
+
+          // Decode SGR button code with bitmask:
+          // bits 0-1: button (0=left, 1=middle, 2=right, 3=release)
+          // bit 5 (32): motion event
+          // bit 6 (64): scroll wheel
+          const button = btnCode & 3;
+          const isMotion = (btnCode & 32) !== 0;
+          const isScroll = (btnCode & 64) !== 0;
+
+          // On scroll: disable mouse tracking so the terminal handles it natively,
+          // then re-enable after idle so click-to-cursor keeps working.
+          if (isScroll) {
+            pauseMouseForScroll();
+            continue;
+          }
+
+          // Only handle left-click press (button 0), not motion or release
+          if (button !== 0 || isMotion || !isPress) continue;
+
+          const layout = layoutRef.current;
+          if (!layout.value && layout.displayLines.length <= 1 && !layout.displayLines[0]) continue;
+
+          const numDisplayLines = layout.displayLines.length;
+
+          // Calibrate on single-line click (unambiguous — the clicked row
+          // IS the last (and only) display line's terminal row).
+          if (numDisplayLines === 1) {
+            lastLineRowRef.current = termRow;
+          }
+
+          // Determine which display line was clicked by computing from the
+          // last line's row (stable because Ink grows the box upward).
+          let clickedDisplayLine: number;
+          if (lastLineRowRef.current > 0) {
+            const firstLineRow = lastLineRowRef.current - numDisplayLines + 1;
+            clickedDisplayLine = termRow - firstLineRow;
+            // If calibration is stale (click outside valid range), recalibrate.
+            if (clickedDisplayLine < 0) {
+              lastLineRowRef.current = termRow + (numDisplayLines - 1);
+              clickedDisplayLine = 0;
+            } else if (clickedDisplayLine >= numDisplayLines) {
+              lastLineRowRef.current = termRow;
+              clickedDisplayLine = numDisplayLines - 1;
+            }
+          } else {
+            // Not calibrated yet — assume click is on the last display line.
+            // This calibrates correctly because the bottom is stable in Ink.
+            lastLineRowRef.current = termRow;
+            clickedDisplayLine = numDisplayLines - 1;
+          }
+
+          log("INFO", "mouse", "click", {
+            termRow,
+            termCol,
+            lastLineRow: lastLineRowRef.current,
+            clickedDisplayLine,
+            numDisplayLines,
+          });
+
+          // Clamp to valid range
+          if (clickedDisplayLine < 0) clickedDisplayLine = 0;
+          if (clickedDisplayLine >= numDisplayLines) clickedDisplayLine = numDisplayLines - 1;
+
+          // Column within the text: subtract border(1) + padding(1) + prompt(2) = 4
+          const textCol = termCol - 1 - 4;
+          const line = layout.displayLines[clickedDisplayLine];
+          const col = Math.max(0, Math.min(textCol, line.length));
+
+          // Convert display line + col to absolute character offset
+          const { value: val, startLine: sl, contentWidth: cw } = layout;
+          const hardLines = val.split("\n");
+          let charOffset = 0;
+          let vlIndex = 0;
+          let found = false;
+          for (let h = 0; h < hardLines.length; h++) {
+            const wrapped = wrapLine(hardLines[h], cw > 0 ? cw : val.length + 1);
+            for (let w = 0; w < wrapped.length; w++) {
+              if (vlIndex === sl + clickedDisplayLine) {
+                setCursor(Math.min(charOffset + col, val.length));
+                setSelectionAnchor(null);
+                found = true;
+                break;
+              }
+              charOffset += wrapped[w].length;
+              vlIndex++;
+            }
+            if (found) break;
+            charOffset++; // newline
+          }
+        }
+
+        // Forward non-mouse data (if any remains) to Ink
+        if (stripped) {
+          return originalEmit("input", stripped);
+        }
+        return true; // swallowed entirely
+      }
+      return originalEmit(event, ...args);
+    };
+
+    return () => {
+      if (scrollTimer) clearTimeout(scrollTimer);
+      process.stdout.write(DISABLE_MOUSE);
+      process.removeListener("exit", onProcessExit);
+      // Restore original emit
+      if (mouseEmitRef.current.original) {
+        internal_eventEmitter.emit = mouseEmitRef.current.original;
+        mouseEmitRef.current.original = null;
+      }
+    };
+  }, [isActive, internal_eventEmitter]);
+
+  // Helper: delete selected text and return new value + cursor position.
+  // Returns null if no selection is active.
+  const deleteSelection = (): { newValue: string; newCursor: number } | null => {
+    const sel = getSelectionRange(selectionAnchor, cursor);
+    if (!sel) return null;
+    const [start, end] = sel;
+    return { newValue: value.slice(0, start) + value.slice(end), newCursor: start };
+  };
+
+  // Helper: clear all input state (used on submit / Ctrl+C / Escape)
+  const clearInput = () => {
+    setValue("");
+    setCursor(0);
+    setSelectionAnchor(null);
+    setImages([]);
+    setPasteText("");
+  };
+
   useInput(
     (input, key) => {
+      // Filter out stray mouse escape sequences so they don't get inserted as text
+      if (isMouseEscapeSequence(input)) return;
+
       // Ctrl+T toggles task overlay — works even while agent is running
       if (key.ctrl && input === "t") {
         onToggleTasks?.();
@@ -220,8 +502,16 @@ export function InputArea({
       }
 
       if (key.return && (key.shift || key.meta)) {
-        setValue((v) => v.slice(0, cursor) + "\n" + v.slice(cursor));
-        setCursor((c) => c + 1);
+        // If there's a selection, replace it with the newline
+        const sel = deleteSelection();
+        if (sel) {
+          setValue(sel.newValue.slice(0, sel.newCursor) + "\n" + sel.newValue.slice(sel.newCursor));
+          setCursor(sel.newCursor + 1);
+        } else {
+          setValue((v) => v.slice(0, cursor) + "\n" + v.slice(cursor));
+          setCursor((c) => c + 1);
+        }
+        setSelectionAnchor(null);
         return;
       }
 
@@ -234,10 +524,7 @@ export function InputArea({
           historyRef.current.push(cmd);
           historyIndexRef.current = -1;
           onSubmit(cmd, []);
-          setValue("");
-          setCursor(0);
-          setImages([]);
-          setPasteText("");
+          clearInput();
           return;
         }
 
@@ -256,10 +543,7 @@ export function InputArea({
                 }
               : undefined;
           onSubmit(trimmed, [...images], paste);
-          setValue("");
-          setCursor(0);
-          setImages([]);
-          setPasteText("");
+          clearInput();
         }
         return;
       }
@@ -274,10 +558,7 @@ export function InputArea({
 
       if (key.ctrl && input === "c") {
         if (value || images.length > 0) {
-          setValue("");
-          setCursor(0);
-          setImages([]);
-          setPasteText("");
+          clearInput();
         } else {
           onAbort();
         }
@@ -288,23 +569,57 @@ export function InputArea({
         process.exit(0);
       }
 
-      // Home / End
+      // Ctrl+W — delete previous word (or selection)
+      if (key.ctrl && input === "w") {
+        const sel = deleteSelection();
+        if (sel) {
+          setValue(sel.newValue);
+          setCursor(sel.newCursor);
+        } else if (cursor > 0) {
+          const boundary = prevWordBoundary(value, cursor);
+          setValue((v) => v.slice(0, boundary) + v.slice(cursor));
+          setCursor(boundary);
+        }
+        setSelectionAnchor(null);
+        return;
+      }
+
+      // Home / End — Shift extends selection
       if (key.ctrl && input === "a") {
+        if (key.shift) {
+          if (selectionAnchor === null) setSelectionAnchor(cursor);
+        } else {
+          setSelectionAnchor(null);
+        }
         setCursor(0);
         return;
       }
       if (key.ctrl && input === "e") {
+        if (key.shift) {
+          if (selectionAnchor === null) setSelectionAnchor(cursor);
+        } else {
+          setSelectionAnchor(null);
+        }
         setCursor(value.length);
         return;
       }
 
       if (key.backspace || key.delete) {
+        // If selection active, delete the selection
+        const sel = deleteSelection();
+        if (sel) {
+          setValue(sel.newValue);
+          setCursor(sel.newCursor);
+          setSelectionAnchor(null);
+          return;
+        }
         if (cursor > 0) {
           setValue((v) => v.slice(0, cursor - 1) + v.slice(cursor));
           setCursor((c) => c - 1);
         } else if (!value && images.length > 0) {
           setImages((prev) => prev.slice(0, -1));
         }
+        setSelectionAnchor(null);
         return;
       }
 
@@ -314,6 +629,7 @@ export function InputArea({
           setMenuIndex((i) => Math.max(0, i - 1));
           return;
         }
+        setSelectionAnchor(null);
         const history = historyRef.current;
         if (history.length === 0) return;
         const newIndex =
@@ -332,6 +648,7 @@ export function InputArea({
           setMenuIndex((i) => Math.min(filteredCommands.length - 1, i + 1));
           return;
         }
+        setSelectionAnchor(null);
         const history = historyRef.current;
         if (historyIndexRef.current === -1) {
           if (onDownAtEnd) onDownAtEnd();
@@ -351,12 +668,15 @@ export function InputArea({
       }
 
       if (key.escape) {
+        // First escape clears selection, second clears input (double-tap)
+        if (selectionAnchor !== null) {
+          setSelectionAnchor(null);
+          lastEscRef.current = Date.now();
+          return;
+        }
         const now = Date.now();
         if ((value || images.length > 0) && now - lastEscRef.current < 400) {
-          setValue("");
-          setCursor(0);
-          setImages([]);
-          setPasteText("");
+          clearInput();
         }
         lastEscRef.current = now;
         return;
@@ -374,31 +694,96 @@ export function InputArea({
           const cmd = "/" + selected.name;
           setValue(cmd);
           setCursor(cmd.length);
+          setSelectionAnchor(null);
         }
         return;
       }
 
+      // Option+Arrow word jump via raw escape sequences — many terminals send
+      // these as input strings rather than setting key.meta + arrow reliably.
+      if (OPTION_LEFT_SEQUENCES.has(input)) {
+        if (selectionAnchor !== null) {
+          const sel = getSelectionRange(selectionAnchor, cursor);
+          if (sel) setCursor(sel[0]);
+          setSelectionAnchor(null);
+        } else {
+          setCursor(prevWordBoundary(value, cursor));
+        }
+        return;
+      }
+      if (OPTION_RIGHT_SEQUENCES.has(input)) {
+        if (selectionAnchor !== null) {
+          const sel = getSelectionRange(selectionAnchor, cursor);
+          if (sel) setCursor(sel[1]);
+          setSelectionAnchor(null);
+        } else {
+          setCursor(nextWordBoundary(value, cursor));
+        }
+        return;
+      }
+
+      // Arrow keys — Shift extends selection, Meta/Option jumps words
       if (key.leftArrow) {
-        if (cursor > 0) setCursor((c) => c - 1);
+        if (key.shift) {
+          if (selectionAnchor === null) setSelectionAnchor(cursor);
+        } else if (selectionAnchor !== null) {
+          // Collapse selection to the left edge
+          const sel = getSelectionRange(selectionAnchor, cursor);
+          if (sel) setCursor(sel[0]);
+          setSelectionAnchor(null);
+          return;
+        }
+        if (key.meta) {
+          setCursor(prevWordBoundary(value, cursor));
+        } else if (cursor > 0) {
+          setCursor((c) => c - 1);
+        }
+        if (!key.shift) setSelectionAnchor(null);
         return;
       }
 
       if (key.rightArrow) {
-        if (cursor < value.length) setCursor((c) => c + 1);
+        if (key.shift) {
+          if (selectionAnchor === null) setSelectionAnchor(cursor);
+        } else if (selectionAnchor !== null) {
+          // Collapse selection to the right edge
+          const sel = getSelectionRange(selectionAnchor, cursor);
+          if (sel) setCursor(sel[1]);
+          setSelectionAnchor(null);
+          return;
+        }
+        if (key.meta) {
+          setCursor(nextWordBoundary(value, cursor));
+        } else if (cursor < value.length) {
+          setCursor((c) => c + 1);
+        }
+        if (!key.shift) setSelectionAnchor(null);
         return;
       }
 
       if (input) {
         const normalized = input.replace(/\r\n?/g, "\n");
-        setValue((v) => v.slice(0, cursor) + normalized + v.slice(cursor));
-        setCursor((c) => c + normalized.length);
+
+        // If there's a selection, replace it with the typed input
+        const sel = deleteSelection();
+        if (sel) {
+          setValue(
+            sel.newValue.slice(0, sel.newCursor) + normalized + sel.newValue.slice(sel.newCursor),
+          );
+          setCursor(sel.newCursor + normalized.length);
+          setSelectionAnchor(null);
+        } else {
+          setValue((v) => v.slice(0, cursor) + normalized + v.slice(cursor));
+          setCursor((c) => c + normalized.length);
+        }
 
         // Detect paste: Ink delivers pasted text as input.length > 1
         // For large pastes, Ink may split into multiple chunks, so we
         // accumulate and debounce to capture the full paste.
         if (input.length > 1) {
+          const pasteStart = sel ? sel.newCursor : cursor;
           setPasteText((prev) => {
-            if (!prev) setPasteOffset(cursor); // record where paste starts on first chunk
+            if (!prev) setPasteOffset(pasteStart);
             return prev + normalized;
           });
           if (pasteTimerRef.current) clearTimeout(pasteTimerRef.current);
@@ -415,7 +800,7 @@ export function InputArea({
 
   // Calculate visual lines and cap at MAX_VISIBLE_LINES (scroll to cursor)
   const visualLines = getVisualLines(value, columns);
-  const contentWidth = columns - PROMPT.length - BOX_OVERHEAD;
+  const contentWidth = Math.max(MIN_CONTENT_WIDTH, columns - PROMPT.length - BOX_OVERHEAD);
 
   // Find which visual line and column the cursor is on
   const cursorLineInfo = useMemo(() => {
@@ -423,7 +808,7 @@ export function InputArea({
     const hardLines = value.split("\n");
     let visualLineIndex = 0;
     for (let h = 0; h < hardLines.length; h++) {
-      const wrapped = wrapLine(hardLines[h], contentWidth > 0 ? contentWidth : value.length + 1);
+      const wrapped = wrapLine(hardLines[h], contentWidth);
       for (let w = 0; w < wrapped.length; w++) {
         const lineLen = wrapped[w].length;
         const lineStart = pos;
@@ -463,6 +848,14 @@ export function InputArea({
   const displayLines = visualLines.slice(startLine, startLine + MAX_VISIBLE_LINES);
   const cursorDisplayLine = cursorLineInfo.line - startLine;
 
+  // Keep layout ref in sync for mouse click handler
+  layoutRef.current.value = value;
+  layoutRef.current.displayLines = displayLines;
+  layoutRef.current.startLine = startLine;
+  layoutRef.current.contentWidth = contentWidth;
+  layoutRef.current.columns = columns;
+  layoutRef.current.hasImages = images.length > 0;
+
   // Determine if the input starts with a slash command and find command boundary
   const isCommand = value.startsWith("/");
   // Command portion ends at first space (e.g., "/research" in "/research some args")
@@ -472,8 +865,11 @@ export function InputArea({
       : value.indexOf(" ")
     : 0;
 
+  // Active selection range (absolute character offsets)
+  const selection = getSelectionRange(selectionAnchor, cursor);
+
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={columns}>
       <Box
         flexDirection="column"
         borderStyle="round"
@@ -554,52 +950,196 @@ export function InputArea({
               offset++; // newline
             }
 
-            // Determine color for each character based on whether it's in the command portion
-            const renderSegments = (text: string, textStartOffset: number) => {
-              if (!isCommand || textStartOffset >= commandEndIndex) {
-                return <Text color={theme.text}>{text}</Text>;
-              }
-              const cmdChars = Math.min(text.length, commandEndIndex - textStartOffset);
+            const lineEndOffset = lineStartOffset + line.length;
+
+            // Render a text segment with command coloring and optional selection highlight
+            const renderSegment = (
+              text: string,
+              absOffset: number,
+              opts?: { inverse?: boolean },
+            ) => {
+              if (!text) return null;
+              const inCmd = isCommand && absOffset < commandEndIndex;
+              const cmdChars = inCmd ? Math.min(text.length, commandEndIndex - absOffset) : 0;
+              const inv = opts?.inverse ?? false;
+
               if (cmdChars >= text.length) {
                 return (
-                  <Text color={theme.commandColor} bold>
+                  <Text color={theme.commandColor} bold inverse={inv}>
                     {text}
                   </Text>
                 );
               }
+              if (cmdChars > 0) {
+                return (
+                  <>
+                    <Text color={theme.commandColor} bold inverse={inv}>
+                      {text.slice(0, cmdChars)}
+                    </Text>
+                    <Text color={theme.text} inverse={inv}>
+                      {text.slice(cmdChars)}
+                    </Text>
+                  </>
+                );
+              }
               return (
-                <>
-                  <Text color={theme.commandColor} bold>
-                    {text.slice(0, cmdChars)}
-                  </Text>
-                  <Text color={theme.text}>{text.slice(cmdChars)}</Text>
-                </>
+                <Text color={theme.text} inverse={inv}>
+                  {text}
+                </Text>
               );
             };
 
-            const before = showCursor ? line.slice(0, col) : line;
-            const charUnderCursor = showCursor ? (col < line.length ? line[col] : " ") : "";
-            const after = showCursor ? line.slice(col + (col < line.length ? 1 : 0)) : "";
-            const cursorCharOffset = lineStartOffset + col;
-            const cursorInCommand = isCommand && cursorCharOffset < commandEndIndex;
+            // Build segments for: [before-sel] [selected] [cursor] [after-sel]
+            // considering that cursor and selection can overlap on this line
+            const segments: React.ReactNode[] = [];
+            let pos = 0; // position within `line`
+
+            // Determine selection overlap with this line (in line-local coords)
+            const selLocalStart = selection
+              ? Math.max(0, selection[0] - lineStartOffset)
+              : line.length;
+            const selLocalEnd = selection
+              ? Math.min(line.length, selection[1] - lineStartOffset)
+              : line.length;
+            const hasSelOnLine =
+              selection !== null && selection[0] < lineEndOffset && selection[1] > lineStartOffset;
+
+            if (hasSelOnLine) {
+              // Text before selection
+              if (selLocalStart > 0) {
+                segments.push(
+                  <React.Fragment key="pre">
+                    {renderSegment(line.slice(0, selLocalStart), lineStartOffset)}
+                  </React.Fragment>,
+                );
+                pos = selLocalStart;
+              }
+
+              // Selected text — render with inverse, but split around cursor if needed
+              if (showCursor && col >= selLocalStart && col < selLocalEnd) {
+                // Cursor is inside the selection
+                if (col > pos) {
+                  segments.push(
+                    <React.Fragment key="sel-before">
+                      {renderSegment(line.slice(pos, col), lineStartOffset + pos, {
+                        inverse: true,
+                      })}
+                    </React.Fragment>,
+                  );
+                }
+                // Cursor character (blinks within selection)
+                const cursorChar = col < line.length ? line[col] : " ";
+                const cursorAbs = lineStartOffset + col;
+                const curInCmd = isCommand && cursorAbs < commandEndIndex;
+                segments.push(
+                  <Text
+                    key="cursor"
+                    color={curInCmd ? theme.commandColor : theme.text}
+                    bold={curInCmd}
+                    inverse={cursorVisible}
+                  >
+                    {cursorChar}
+                  </Text>,
+                );
+                const afterCursorPos = col + (col < line.length ? 1 : 0);
+                if (afterCursorPos < selLocalEnd) {
+                  segments.push(
+                    <React.Fragment key="sel-after">
+                      {renderSegment(
+                        line.slice(afterCursorPos, selLocalEnd),
+                        lineStartOffset + afterCursorPos,
+                        { inverse: true },
+                      )}
+                    </React.Fragment>,
+                  );
+                }
+                pos = selLocalEnd;
+              } else {
+                // Cursor not on this selection portion — render entire selection inverse
+                segments.push(
+                  <React.Fragment key="sel">
+                    {renderSegment(line.slice(pos, selLocalEnd), lineStartOffset + pos, {
+                      inverse: true,
+                    })}
+                  </React.Fragment>,
+                );
+                pos = selLocalEnd;
+              }
+
+              // Cursor after selection on this line
+              if (showCursor && col >= selLocalEnd) {
+                // Text between selection end and cursor
+                if (col > pos) {
+                  segments.push(
+                    <React.Fragment key="mid">
+                      {renderSegment(line.slice(pos, col), lineStartOffset + pos)}
+                    </React.Fragment>,
+                  );
+                }
+                const cursorChar = col < line.length ? line[col] : " ";
+                const cursorAbs = lineStartOffset + col;
+                const curInCmd = isCommand && cursorAbs < commandEndIndex;
+                segments.push(
+                  <Text
+                    key="cursor"
+                    color={curInCmd ? theme.commandColor : theme.text}
+                    bold={curInCmd}
+                    inverse={cursorVisible}
+                  >
+                    {cursorChar}
+                  </Text>,
+                );
+                pos = col + (col < line.length ? 1 : 0);
+              }
+
+              // Text after selection (and cursor)
+              if (pos < line.length) {
+                segments.push(
+                  <React.Fragment key="post">
+                    {renderSegment(line.slice(pos), lineStartOffset + pos)}
+                  </React.Fragment>,
+                );
+              }
+            } else {
+              // No selection on this line — original cursor-only rendering
+              const before = showCursor ? line.slice(0, col) : line;
+              const charUnderCursor = showCursor ? (col < line.length ? line[col] : " ") : "";
+              const after = showCursor ? line.slice(col + (col < line.length ? 1 : 0)) : "";
+              const cursorCharOffset = lineStartOffset + col;
+              const cursorInCommand = isCommand && cursorCharOffset < commandEndIndex;
+
+              segments.push(
+                <React.Fragment key="before">
+                  {renderSegment(before, lineStartOffset)}
+                </React.Fragment>,
+              );
+              if (showCursor) {
+                segments.push(
+                  <Text
+                    key="cursor"
+                    color={cursorInCommand ? theme.commandColor : theme.text}
+                    bold={cursorInCommand}
+                    inverse={cursorVisible}
+                  >
+                    {charUnderCursor}
+                  </Text>,
+                );
+              }
+              if (after) {
+                segments.push(
+                  <React.Fragment key="after">
+                    {renderSegment(after, lineStartOffset + col + (col < line.length ? 1 : 0))}
+                  </React.Fragment>,
+                );
+              }
+            }
 
             return (
               <Box key={i}>
                 <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
                   {i === 0 ? PROMPT : "  "}
                 </Text>
-                {renderSegments(before, lineStartOffset)}
-                {showCursor && (
-                  <Text
-                    color={cursorInCommand ? theme.commandColor : theme.text}
-                    bold={cursorInCommand}
-                    inverse={cursorVisible}
-                  >
-                    {charUnderCursor}
-                  </Text>
-                )}
-                {after &&
-                  renderSegments(after, lineStartOffset + col + (col < line.length ? 1 : 0))}
+                {segments}
               </Box>
             );
           });

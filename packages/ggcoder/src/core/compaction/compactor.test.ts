@@ -185,14 +185,16 @@ describe("prepareMessagesForSummary", () => {
     expect(content[0].type).toBe("text");
   });
 
-  it("truncates long tool results", () => {
+  it("converts tool results to truncated user text", () => {
     const longContent = "x".repeat(5000);
     const msgs = [makeToolResultMessage("t1", longContent)];
     const prepared = prepareMessagesForSummary(msgs);
 
-    const results = prepared[0].content as ToolResult[];
-    expect(results[0].content.length).toBeLessThan(longContent.length);
-    expect(results[0].content).toContain("truncated");
+    // Tool messages are converted to user text messages for the summarizer
+    expect(prepared[0].role).toBe("user");
+    const text = prepared[0].content as string;
+    expect(text.length).toBeLessThan(longContent.length);
+    expect(text).toContain("truncated");
   });
 
   it("truncates long user messages", () => {

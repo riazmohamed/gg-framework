@@ -86,12 +86,10 @@ export function findRecentCutPoint(messages: Message[], tokenBudget: number): nu
   }
 
   // Don't split tool_call and tool_result pairs:
-  // If cut lands on a tool result message, back up to include the preceding assistant
-  if (cutIndex < messages.length && messages[cutIndex].role === "tool") {
-    // Back up to find the assistant message with the tool_call
-    if (cutIndex > 1) {
-      cutIndex--;
-    }
+  // If cut lands on a tool result message, back up past all consecutive tool
+  // messages and the preceding assistant message that triggered them.
+  while (cutIndex > 1 && cutIndex < messages.length && messages[cutIndex].role === "tool") {
+    cutIndex--;
   }
 
   // Never cut before index 1 (preserve system message at 0)
@@ -141,31 +139,61 @@ function extractFileOperations(messages: Message[]): { read: Set<string>; modifi
 }
 
 /**
- * Prepare conversation messages for the summarizer by truncating large tool
- * results and stripping thinking blocks. Returns lightweight copies suitable
- * for a summary LLM call — the originals are not mutated.
+ * Convert a tool_call ContentPart to a text representation so the summarizer
+ * can see tool usage without requiring tool_use/tool_result pairing.
+ */
+function toolCallToText(
+  tc: ContentPart & { type: "tool_call"; name: string; args: Record<string, unknown> },
+): string {
+  const argsStr = Object.entries(tc.args)
+    .map(([k, v]) => `${k}: ${typeof v === "object" && v !== null ? JSON.stringify(v) : String(v)}`)
+    .join("\n");
+  return `[Tool Call: ${tc.name}]\n${argsStr}`;
+}
+
+/**
+ * Convert a ToolResult to a text representation.
+ */
+function toolResultToText(tr: ToolResult): string {
+  const prefix = tr.isError ? "[Tool Error]" : "[Tool Result]";
+  return `${prefix}\n${truncateString(tr.content, TOOL_RESULT_MAX_CHARS)}`;
+}
+
+/**
+ * Prepare conversation messages for the summarizer by converting tool_call and
+ * tool_result blocks to plain text, stripping thinking blocks, and truncating
+ * large content. Converting tool blocks to text eliminates the tool_use/tool_result
+ * pairing constraint entirely — the summarizer sees only user/assistant text messages.
+ * Returns lightweight copies — the originals are not mutated.
  */
 export function prepareMessagesForSummary(msgs: Message[]): Message[] {
-  return msgs.map((msg): Message => {
-    // Tool result messages — truncate long results
+  const converted = msgs.map((msg): Message => {
+    // Tool result messages — convert to user text message
     if (msg.role === "tool") {
       const results = msg.content as ToolResult[];
-      return {
-        role: "tool",
-        content: results.map((tr) => ({
-          ...tr,
-          content: truncateString(tr.content, TOOL_RESULT_MAX_CHARS),
-        })),
-      };
+      const text = results.map((tr) => toolResultToText(tr)).join("\n\n");
+      return { role: "user", content: text };
     }
 
-    // Assistant messages with ContentPart[] — strip thinking, truncate text
+    // Assistant messages with ContentPart[] — convert tool_calls to text, strip thinking
     if (msg.role === "assistant" && Array.isArray(msg.content)) {
       const parts = (msg.content as ContentPart[])
         .filter((p) => p.type !== "thinking") // strip thinking blocks
         .map((p): ContentPart => {
           if (p.type === "text") {
             return { ...p, text: truncateString(p.text, TOOL_RESULT_MAX_CHARS) };
+          }
+          if (p.type === "tool_call") {
+            return {
+              type: "text",
+              text: toolCallToText(
+                p as ContentPart & {
+                  type: "tool_call";
+                  name: string;
+                  args: Record<string, unknown>;
+                },
+              ),
+            };
           }
           return p;
         });
@@ -179,12 +207,149 @@ export function prepareMessagesForSummary(msgs: Message[]): Message[] {
 
     return msg;
   });
+
+  // Merge consecutive same-role messages that can appear after tool→user conversion
+  // (e.g., assistant with tool_call followed by tool→user then real user).
+  return mergeConsecutiveSameRole(converted);
+}
+
+/**
+ * Merge consecutive messages with the same role into a single message.
+ * This handles cases where tool→user conversion creates adjacent user messages,
+ * which would violate the alternating user/assistant API requirement.
+ */
+function mergeConsecutiveSameRole(msgs: Message[]): Message[] {
+  if (msgs.length === 0) return msgs;
+  const merged: Message[] = [msgs[0]];
+
+  for (let i = 1; i < msgs.length; i++) {
+    const prev = merged[merged.length - 1];
+    const curr = msgs[i];
+    if (prev.role === curr.role && (prev.role === "user" || prev.role === "assistant")) {
+      // Merge into the previous message as a string
+      const prevText = messageToString(prev);
+      const currText = messageToString(curr);
+      merged[merged.length - 1] = { role: prev.role, content: prevText + "\n\n" + currText };
+    } else {
+      merged.push(curr);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Extract string content from a message for merging purposes.
+ */
+function messageToString(msg: Message): string {
+  if (typeof msg.content === "string") return msg.content;
+  if (Array.isArray(msg.content)) {
+    return (msg.content as ContentPart[])
+      .filter((p): p is ContentPart & { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("\n\n");
+  }
+  return "";
+}
+
+/**
+ * Check whether a message is an assistant message that contains tool_call blocks.
+ */
+function hasToolCalls(msg: Message): boolean {
+  if (msg.role !== "assistant" || !Array.isArray(msg.content)) return false;
+  return (msg.content as ContentPart[]).some((p) => p.type === "tool_call");
+}
+
+/**
+ * Collect all tool_call IDs from an assistant message.
+ */
+function getToolCallIds(msg: Message): Set<string> {
+  const ids = new Set<string>();
+  if (msg.role === "assistant" && Array.isArray(msg.content)) {
+    for (const p of msg.content as ContentPart[]) {
+      if (p.type === "tool_call")
+        ids.add((p as ContentPart & { type: "tool_call"; id: string }).id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Collect all tool_result IDs (toolCallId) from a tool message.
+ */
+function getToolResultIds(msg: Message): Set<string> {
+  const ids = new Set<string>();
+  if (msg.role === "tool" && Array.isArray(msg.content)) {
+    for (const tr of msg.content as ToolResult[]) {
+      ids.add(tr.toolCallId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Repair tool_use / tool_result pairing in a message array (mutates in place).
+ *
+ * Two repair strategies matching real-world patterns (Roo-Code, openclaw):
+ * 1. Strip orphaned tool_call blocks from assistant messages when the next
+ *    message doesn't contain their matching tool_result.
+ * 2. Remove orphaned tool messages whose tool_use assistant was dropped.
+ */
+function repairToolPairing(msgs: Message[]): void {
+  // Build a set of all tool_call IDs and tool_result IDs in the conversation
+  const allToolCallIds = new Set<string>();
+  const allToolResultIds = new Set<string>();
+  for (const msg of msgs) {
+    for (const id of getToolCallIds(msg)) allToolCallIds.add(id);
+    for (const id of getToolResultIds(msg)) allToolResultIds.add(id);
+  }
+
+  // Walk through and fix mismatches
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const msg = msgs[i];
+
+    // Remove tool messages whose tool_call IDs have no matching assistant
+    if (msg.role === "tool" && Array.isArray(msg.content)) {
+      const results = msg.content as ToolResult[];
+      const kept = results.filter((tr) => allToolCallIds.has(tr.toolCallId));
+      if (kept.length === 0) {
+        msgs.splice(i, 1);
+        continue;
+      }
+      if (kept.length < results.length) {
+        (msgs[i] as { content: ToolResult[] }).content = kept;
+      }
+    }
+
+    // Strip tool_call blocks from assistant messages that have no matching tool_result
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      const parts = msg.content as ContentPart[];
+      const hasOrphans = parts.some(
+        (p) =>
+          p.type === "tool_call" &&
+          !allToolResultIds.has((p as ContentPart & { type: "tool_call"; id: string }).id),
+      );
+      if (hasOrphans) {
+        const kept = parts.filter(
+          (p) =>
+            p.type !== "tool_call" ||
+            allToolResultIds.has((p as ContentPart & { type: "tool_call"; id: string }).id),
+        );
+        if (kept.length === 0) {
+          (msgs[i] as { content: string | ContentPart[] }).content = "";
+        } else {
+          (msgs[i] as { content: ContentPart[] }).content = kept;
+        }
+      }
+    }
+  }
 }
 
 /**
  * Select messages that fit within a token budget for the summary LLM call.
  * Walks forward from the start, accumulating messages until the budget is
- * exceeded. Returns the selected subset.
+ * exceeded. Ensures tool_use / tool_result pairs are never split: if the last
+ * selected message is an assistant with tool_call blocks, it is removed so the
+ * API never sees an orphaned tool_use without a matching tool_result.
  */
 export function selectMessagesInBudget(msgs: Message[], tokenBudget: number): Message[] {
   let accumulated = 0;
@@ -195,6 +360,12 @@ export function selectMessagesInBudget(msgs: Message[], tokenBudget: number): Me
     if (accumulated + tokens > tokenBudget) break;
     accumulated += tokens;
     selected.push(msg);
+  }
+
+  // Drop trailing assistant messages that have tool_call blocks without
+  // their corresponding tool_result (which was cut by the budget).
+  while (selected.length > 0 && hasToolCalls(selected[selected.length - 1])) {
+    selected.pop();
   }
 
   return selected;
@@ -466,6 +637,11 @@ export async function compact(
     },
     ...recentMessages,
   ];
+
+  // Repair tool_use / tool_result pairing in the final message array.
+  // Despite cut-point logic, edge cases (e.g., the trailing-assistant pop
+  // below, or future code paths) could leave orphaned blocks.
+  repairToolPairing(newMessages);
 
   // Ensure the conversation doesn't end with an assistant message.
   // Some models reject "assistant prefill" — the conversation must end

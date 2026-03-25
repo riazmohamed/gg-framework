@@ -209,6 +209,13 @@ interface ServerToolDoneItem {
   id: string;
 }
 
+interface PlanTransitionItem {
+  kind: "plan_transition";
+  text: string;
+  active: boolean;
+  id: string;
+}
+
 interface TombstoneItem {
   kind: "tombstone";
   id: string;
@@ -249,6 +256,7 @@ export type CompletedItem =
   | BannerItem
   | SubAgentGroupItem
   | ToolGroupItem
+  | PlanTransitionItem
   | TombstoneItem;
 
 /**
@@ -434,13 +442,24 @@ export interface AppProps {
 export function App(props: AppProps) {
   const theme = useTheme();
   const { stdout } = useStdout();
-  const { resizeKey } = useTerminalSize();
+  const { columns, resizeKey } = useTerminalSize();
+
+  // Hoisted before terminal title hook so it can reference them
+  const [lastUserMessage, setLastUserMessage] = useState("");
+  const [planMode, setPlanMode] = useState(false);
 
   // Terminal title — updated later after agentLoop is created
   // (hoisted here so the hook is always called in the same order)
   const [titlePhase, setTitlePhase] = useState<ActivityPhase>("idle");
   const [titleRunning, setTitleRunning] = useState(false);
-  useTerminalTitle(titlePhase, titleRunning);
+  const [titleToolNames, setTitleToolNames] = useState<string[]>([]);
+  useTerminalTitle({
+    phase: titlePhase,
+    isRunning: titleRunning,
+    userMessage: lastUserMessage,
+    activeToolNames: titleToolNames,
+    planMode,
+  });
 
   // Items scrolled into Static (history).  For restored sessions, skip the
   // banner and add restored items via useEffect so Ink's <Static> treats them
@@ -466,19 +485,19 @@ export function App(props: AppProps) {
   const startTaskRef = useRef<(title: string, prompt: string, taskId: string) => void>(() => {});
   const cwdRef = useRef(props.cwd);
   const [staticKey, setStaticKey] = useState(0);
-  const [lastUserMessage, setLastUserMessage] = useState("");
   const [doneStatus, setDoneStatus] = useState<{
     durationMs: number;
     toolsUsed: string[];
     verb: string;
   } | null>(null);
+  // Suppress "done" status when a plan overlay is about to open
+  const planOverlayPendingRef = useRef(false);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
   const [currentModel, setCurrentModel] = useState(props.model);
   const [currentProvider, setCurrentProvider] = useState(props.provider);
   const [currentTools, setCurrentTools] = useState(props.tools);
   const [thinkingEnabled, setThinkingEnabled] = useState(!!props.thinking);
   const messagesRef = useRef<Message[]>(props.messages);
-  const [planMode, setPlanMode] = useState(false);
   const [planAutoExpand, setPlanAutoExpand] = useState(false);
   const approvedPlanPathRef = useRef<string | undefined>(undefined);
   const nextIdRef = useRef(0);
@@ -544,8 +563,11 @@ export function App(props: AppProps) {
     if (props.onEnterPlanRef) {
       props.onEnterPlanRef.current = (reason?: string) => {
         setPlanMode(true);
-        const msg = reason ? `Plan mode activated: ${reason}` : "Plan mode activated";
-        setLiveItems((prev) => [...prev, { kind: "info", text: msg, id: getId() }]);
+        const msg = reason ? `Plan Mode Activated — ${reason}` : "Plan Mode Activated";
+        setLiveItems((prev) => [
+          ...prev,
+          { kind: "plan_transition", text: msg, active: true, id: getId() },
+        ]);
       };
     }
   }, [props.onEnterPlanRef]);
@@ -559,10 +581,14 @@ export function App(props: AppProps) {
         approvedPlanPathRef.current = planPath;
         // Use setTimeout to open pane after the current tool execution completes,
         // so the turn can finish and the UI transitions cleanly
+        // Flag that the plan overlay is about to open — suppresses the
+        // premature "done" status that fires when the agent loop finishes
+        planOverlayPendingRef.current = true;
         setTimeout(() => {
           stdout?.write("\x1b[2J\x1b[3J\x1b[H");
           setPlanAutoExpand(true);
           setOverlay("plan");
+          planOverlayPendingRef.current = false;
         }, 300);
         return (
           "Plan submitted. Exiting plan mode.\n" +
@@ -1060,6 +1086,9 @@ export function App(props: AppProps) {
           duration: `${durationMs}ms`,
           toolsUsed: toolsUsed.join(",") || "none",
         });
+        // Don't show "done" status when plan overlay is about to open —
+        // the agent loop finished but we're waiting for user plan review
+        if (planOverlayPendingRef.current) return;
         setDoneStatus({ durationMs, toolsUsed, verb: pickDurationVerb(toolsUsed) });
         playNotificationSound();
         // Two-phase flush to avoid Ink text clipping.
@@ -1187,10 +1216,12 @@ export function App(props: AppProps) {
   });
 
   // Sync terminal title with agent loop state
+  const activeToolNamesKey = agentLoop.activeToolCalls.map((tc) => tc.name).join(",");
   useEffect(() => {
     setTitlePhase(agentLoop.activityPhase);
     setTitleRunning(agentLoop.isRunning);
-  }, [agentLoop.activityPhase, agentLoop.isRunning]);
+    setTitleToolNames(agentLoop.activeToolCalls.map((tc) => tc.name));
+  }, [agentLoop.activityPhase, agentLoop.isRunning, activeToolNamesKey]);
 
   // Animated thinking border — derived from global animation tick
   const animTick = useAnimationTick();
@@ -1263,7 +1294,7 @@ export function App(props: AppProps) {
         setPlanMode(true);
         setLiveItems((prev) => [
           ...prev,
-          { kind: "info", text: "Plan mode activated", id: getId() },
+          { kind: "plan_transition", text: "Plan Mode Activated", active: true, id: getId() },
         ]);
         return;
       }
@@ -1271,7 +1302,12 @@ export function App(props: AppProps) {
         setPlanMode(false);
         setLiveItems((prev) => [
           ...prev,
-          { kind: "info", text: "Plan mode deactivated", id: getId() },
+          {
+            kind: "plan_transition",
+            text: "Plan Mode Deactivated",
+            active: false,
+            id: getId(),
+          },
         ]);
         return;
       }
@@ -1692,6 +1728,15 @@ export function App(props: AppProps) {
             </Text>
           </Box>
         );
+      case "plan_transition":
+        return (
+          <Box key={item.id} marginTop={1} flexShrink={1}>
+            <Text color={theme.planPrimary} bold wrap="wrap">
+              {item.active ? "⊞ " : "⊟ "}
+              {item.text}
+            </Text>
+          </Box>
+        );
       case "queued":
         return (
           <Box key={item.id} marginTop={1}>
@@ -1796,7 +1841,7 @@ export function App(props: AppProps) {
   const isOverlayView = isTaskView || isSkillsView || isPlanView;
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={columns}>
       {/* History — scrolled up, managed by Ink Static. */}
       <Static
         key={`${resizeKey}-${staticKey}`}
@@ -1898,6 +1943,7 @@ export function App(props: AppProps) {
             setStaticKey((k) => k + 1);
             setPlanAutoExpand(false);
             setOverlay(null);
+            setDoneStatus(null);
             // Send rejection + feedback to the agent
             const msg =
               `The plan at ${planPath} was rejected.\n\nFeedback: ${feedback}\n\n` +
@@ -1938,6 +1984,7 @@ export function App(props: AppProps) {
               }
               paddingLeft={1}
               paddingRight={1}
+              width={columns}
             >
               <ActivityIndicator
                 phase={agentLoop.activityPhase}
@@ -1993,7 +2040,12 @@ export function App(props: AppProps) {
               log("INFO", "plan", `Plan mode ${next ? "enabled" : "disabled"}`);
               setLiveItems((items) => [
                 ...items,
-                { kind: "info", text: `Plan mode ${next ? "on" : "off"}`, id: getId() },
+                {
+                  kind: "plan_transition",
+                  text: next ? "Plan Mode Activated" : "Plan Mode Deactivated",
+                  active: next,
+                  id: getId(),
+                },
               ]);
             }}
             cwd={props.cwd}
