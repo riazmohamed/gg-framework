@@ -289,10 +289,20 @@ export function InputArea({
     original: typeof internal_eventEmitter.emit | null;
   }>({ original: null });
 
+  // Track whether input has text so we can toggle mouse tracking.
+  // Only enable mouse tracking when there's text to navigate — when the input
+  // is empty, click-to-cursor is useless and disabling tracking lets the
+  // terminal handle CMD+click for opening links natively.
+  const hasInputTextRef = useRef(value.length > 0);
+
   useEffect(() => {
     if (!isActive || !internal_eventEmitter) return;
 
-    process.stdout.write(ENABLE_MOUSE);
+    // Only enable mouse tracking if there's text — when empty, let the
+    // terminal handle clicks natively (e.g., CMD+click to open links).
+    if (hasInputTextRef.current) {
+      process.stdout.write(ENABLE_MOUSE);
+    }
 
     // Safety: ensure mouse tracking is disabled even on crash/SIGINT/unexpected exit
     // so the terminal isn't left in a broken state sending escape sequences on every click.
@@ -309,7 +319,7 @@ export function InputArea({
     let mouseDisabled = false;
 
     const reenableMouse = () => {
-      if (mouseDisabled) {
+      if (mouseDisabled && hasInputTextRef.current) {
         process.stdout.write(ENABLE_MOUSE);
         mouseDisabled = false;
       }
@@ -342,15 +352,27 @@ export function InputArea({
 
           // Decode SGR button code with bitmask:
           // bits 0-1: button (0=left, 1=middle, 2=right, 3=release)
+          // bit 2 (4): shift held
+          // bit 3 (8): meta/alt held (CMD on macOS)
+          // bit 4 (16): control held
           // bit 5 (32): motion event
           // bit 6 (64): scroll wheel
           const button = btnCode & 3;
+          const hasModifier = (btnCode & 0b11100) !== 0; // shift, meta, or ctrl
           const isMotion = (btnCode & 32) !== 0;
           const isScroll = (btnCode & 64) !== 0;
 
           // On scroll: disable mouse tracking so the terminal handles it natively,
           // then re-enable after idle so click-to-cursor keeps working.
           if (isScroll) {
+            pauseMouseForScroll();
+            continue;
+          }
+
+          // When modifier keys are held (CMD+click, Ctrl+click, Shift+click),
+          // temporarily disable mouse tracking so the terminal can handle
+          // the click natively (e.g., opening links with CMD+click).
+          if (hasModifier) {
             pauseMouseForScroll();
             continue;
           }
@@ -450,6 +472,19 @@ export function InputArea({
       }
     };
   }, [isActive, internal_eventEmitter]);
+
+  // Toggle mouse tracking based on input text: disable when empty so the
+  // terminal handles CMD+click for links natively, enable when there's text
+  // so click-to-cursor works.
+  useEffect(() => {
+    const hasText = value.length > 0;
+    if (hasText !== hasInputTextRef.current) {
+      hasInputTextRef.current = hasText;
+      if (isActive) {
+        process.stdout.write(hasText ? ENABLE_MOUSE : DISABLE_MOUSE);
+      }
+    }
+  }, [value, isActive]);
 
   // Helper: delete selected text and return new value + cursor position.
   // Returns null if no selection is active.
