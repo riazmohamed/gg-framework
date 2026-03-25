@@ -299,7 +299,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     const currentModel = state?.session.getState().model ?? options.model;
     const modelInfo = MODELS.find((m) => m.id === currentModel);
 
-    let text = `*ogcoder* — remote coding agent\n\n`;
+    let text = `*OG Coder* — remote coding agent\n\n`;
     text += `Project: \`${path.basename(projectPath)}\`\n`;
     text += `Model: *${modelInfo?.name ?? currentModel}*\n\n`;
 
@@ -365,7 +365,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     const groupName = chatTitle ?? "this group";
     await bot.send(
       chatId,
-      `*ogcoder* joined *${groupName}*\n\n` +
+      `*OG Coder* joined *${groupName}*\n\n` +
         `Send /link to connect to a project\n` +
         `Send /help for all commands`,
     );
@@ -614,7 +614,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
       if (state.isProcessing) {
         await bot.send(
           chatId,
-          "ogcoder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
+          "OG Coder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
         );
         return;
       }
@@ -650,7 +650,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     if (state?.isProcessing) {
       await bot.send(
         chatId,
-        "ogcoder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
+        "OG Coder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
       );
       return;
     }
@@ -705,7 +705,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     if (state.isProcessing) {
       await bot.send(
         chatId,
-        "ogcoder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
+        "OG Coder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
       );
       return;
     }

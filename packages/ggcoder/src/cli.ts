@@ -62,8 +62,8 @@ const CLI_VERSION = (_require("../package.json") as { version: string }).version
 
 // ── Logo + gradient (mirrors Banner.tsx) ────────────────────────────
 const LOGO_LINES = [
-  " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
-  " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
+  " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
+  " \u2588  \u2588 \u2588 \u2580\u2588",
   " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
 ];
 const GRADIENT = [
@@ -110,17 +110,17 @@ function printHelp(): void {
   console.log(
     gradientLine(LOGO_LINES[0]) +
       gap +
-      primary.bold("GG Coder") +
+      primary.bold("OG Coder") +
       dim(` v${CLI_VERSION}`) +
       dim(" · By ") +
-      bold("Ken Kai"),
+      bold("Abu Khaled"),
   );
   console.log(gradientLine(LOGO_LINES[1]) + gap + dim("AI coding agent"));
   console.log(gradientLine(LOGO_LINES[2]));
   console.log();
 
   // Usage
-  console.log(primary("Usage:") + "  ggcoder " + dim("[options]") + " " + dim("[prompt]"));
+  console.log(primary("Usage:") + "  ogcoder " + dim("[options]") + " " + dim("[prompt]"));
   console.log();
 
   // Commands
@@ -164,7 +164,7 @@ function printHelp(): void {
     ["/session", "Switch or create sessions"],
     ["/new", "Start a new session"],
     ["/settings", "Open settings"],
-    ["/quit", "Exit ggcoder"],
+    ["/quit", "Exit OG Coder"],
   ];
   for (const [name, desc] of slashCmds) {
     console.log(`  ${accent(name.padEnd(20))} ${dim(desc)}`);
@@ -194,7 +194,7 @@ function main(): void {
   }
 
   // Intercept --help / -h before anything else so it works with subcommands
-  // (e.g. `ggcoder login --help` or `ggcoder --help`)
+  // (e.g. `ogcoder login --help` or `ogcoder --help`)
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
     printHelp();
     process.exit(0);
