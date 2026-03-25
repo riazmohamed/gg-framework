@@ -8,7 +8,7 @@ A modular TypeScript framework for building LLM-powered apps — from raw stream
 |---|---|---|
 | `packages/gg-ai` | `@abukhaled/gg-ai` | Unified LLM streaming API |
 | `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution |
-| `packages/ogcoder` | `@abukhaled/ogcoder` | CLI coding agent |
+| `packages/ggcoder` | `@abukhaled/ogcoder` | CLI coding agent |
 
 **Install**: `npm i -g @abukhaled/ogcoder`
 
@@ -30,7 +30,7 @@ packages/
   │       ├── agent.ts       # Agent class + AgentStream
   │       └── agent-loop.ts  # Pure async generator loop
   │
-  └── ogcoder/               # @abukhaled/ogcoder — CLI (ogcoder)
+  └── ggcoder/               # @abukhaled/ogcoder — CLI (ogcoder)
       └── src/
           ├── cli.ts         # CLI entry point
           ├── config.ts      # Configuration constants
@@ -114,7 +114,7 @@ If `npm i` gets ETARGET after publishing, clear cache: `npm cache clean --force`
 
 - Types → `types.ts` in each package
 - Providers → `providers/` directory in @abukhaled/gg-ai
-- Tools → `tools/` directory in @abukhaled/ogcoder, one file per tool
+- Tools → `tools/` directory in packages/ggcoder, one file per tool
 - UI components → `ui/components/`, one component per file
 - OAuth flows → `core/oauth/`, one file per provider
 - Tests → co-located with source files
