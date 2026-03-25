@@ -23,9 +23,9 @@
 
 | Package | npm | Purpose | Dependency Chain |
 |---------|-----|---------|------------------|
-| `@abukhaled/gg-ai` | Unified LLM streaming API | Core streaming layer for Anthropic, OpenAI, GLM, Moonshot | **Standalone** |
+| `@abukhaled/gg-ai` | Unified LLM streaming API | Core streaming layer for Anthropic, OpenAI (+ Codex) | **Standalone** |
 | `@abukhaled/gg-agent` | Multi-turn agentic loop | Tool execution, context overflow handling, multi-turn reasoning | Depends on `gg-ai` |
-| `@abukhaled/ogcoder` | Full CLI coding agent | Terminal UI, OAuth, file tools, MCP integration, slash commands | Depends on both |
+| `@abukhaled/ogcoder` | Full CLI coding agent | Terminal UI, OAuth, file tools, MCP, skills, plan mode, voice | Depends on both |
 
 **Stacking principle**: Each package works independently. Stack them together to build higher-level abstractions.
 
@@ -45,16 +45,18 @@
 
 - **Language**: TypeScript 5.9 (strict, ES2022, ESM)
 - **Package Manager**: pnpm with workspaces
-- **Build**: tsc (TypeScript compiler)
-- **Testing**: Vitest 4.0
+- **Build**: tsup (gg-ai, gg-agent) / tsc (ogcoder)
+- **Testing**: Vitest 4.1
 - **Linting**: ESLint 10 + typescript-eslint (flat config)
 - **Formatting**: Prettier 3.8
 - **CLI UI**: Ink 6 + React 19
 - **LLM SDKs**: `@anthropic-ai/sdk`, `openai`
 - **Schema Validation**: Zod v4
-- **CLI Utilities**: chalk, commander, marked-terminal
+- **CLI Utilities**: chalk, marked, marked-terminal, cli-highlight
 - **File Operations**: fast-glob, ignore (gitignore support)
 - **Model Context Protocol**: `@modelcontextprotocol/sdk`
+- **Media**: sharp (images), ogg-opus-decoder (voice), @huggingface/transformers
+- **Diff**: diff (unified diff generation)
 
 ### Project Structure
 
@@ -62,42 +64,171 @@
 packages/
 ├── gg-ai/
 │   ├── src/
-│   │   ├── types.ts          # Core types (StreamOptions, ContentBlock, Message)
-│   │   ├── stream.ts         # Main dispatch function
-│   │   ├── errors.ts         # GGAIError, ProviderError
-│   │   ├── providers/        # Anthropic, OpenAI, GLM, Moonshot implementations
-│   │   └── utils/            # EventStream, Zod-to-JSON-Schema
+│   │   ├── types.ts              # Core types (StreamOptions, ContentBlock, Message)
+│   │   ├── stream.ts             # Main dispatch function
+│   │   ├── errors.ts             # GGAIError, ProviderError
+│   │   ├── provider-registry.ts  # Provider registration system
+│   │   ├── providers/
+│   │   │   ├── anthropic.ts      # Anthropic streaming implementation
+│   │   │   ├── openai.ts         # OpenAI streaming implementation
+│   │   │   ├── openai-codex.ts   # OpenAI Codex endpoint adapter
+│   │   │   └── transform.ts      # Cross-provider normalization helpers
+│   │   ├── utils/
+│   │   │   ├── event-stream.ts   # Push-based async iterable
+│   │   │   └── zod-to-json-schema.ts # Zod → JSON Schema converter
+│   │   └── index.ts              # Package exports
+│   ├── tsup.config.ts            # Build config (tsup)
+│   ├── vitest.config.ts          # Test config
 │   └── package.json
 │
 ├── gg-agent/
 │   ├── src/
-│   │   ├── types.ts          # AgentTool, AgentEvent, AgentOptions
-│   │   ├── agent.ts          # Agent class wrapper
-│   │   ├── agent-loop.ts     # Core async generator loop
-│   │   └── index.ts          # Exports
+│   │   ├── types.ts              # AgentTool, AgentEvent, AgentOptions
+│   │   ├── agent.ts              # Agent class wrapper
+│   │   ├── agent-loop.ts         # Core async generator loop
+│   │   └── index.ts              # Package exports
+│   ├── tsup.config.ts            # Build config (tsup)
+│   ├── vitest.config.ts          # Test config
 │   └── package.json
 │
-└── ogcoder/
+└── ggcoder/                      # @abukhaled/ogcoder CLI
     ├── src/
-    │   ├── cli.ts            # Entry point (891 lines)
-    │   ├── config.ts         # App paths, constants
-    │   ├── session.ts        # Session state management
-    │   ├── system-prompt.ts  # System prompt generation
-    │   ├── ui/
-    │   │   ├── App.tsx       # Main React component (1732 lines)
-    │   │   ├── components/   # 25+ UI components (one per file)
-    │   │   ├── hooks/        # useAgentLoop, useSessionManager, etc.
-    │   │   └── theme/        # dark.json, light.json
-    │   ├── tools/            # Agentic tools (read, write, edit, bash, grep, find, ls, web-fetch, subagent, etc.)
+    │   ├── cli.ts                # Entry point
+    │   ├── config.ts             # App paths, constants
+    │   ├── interactive.ts        # Interactive mode launcher
+    │   ├── session.ts            # Session state management
+    │   ├── system-prompt.ts      # System prompt generation
+    │   ├── types.ts              # CLI-level types
+    │   ├── index.ts              # Package exports
+    │   │
     │   ├── core/
-    │   │   ├── oauth/        # PKCE flows for Anthropic, OpenAI
-    │   │   ├── mcp/          # Model Context Protocol client
-    │   │   ├── compaction/   # Context compaction & token counting
-    │   │   ├── agent-session.ts    # Session + agent coordination
-    │   │   ├── slash-commands.ts   # Command registry
-    │   │   ├── logger.ts     # Singleton debug logger
-    │   │   └── extensions/   # Extension system
-    │   └── modes/            # Execution modes (interactive, json, rpc, serve)
+    │   │   ├── agent-session.ts  # Session + agent coordination
+    │   │   ├── agents.ts         # Sub-agent management
+    │   │   ├── auth-storage.ts   # OAuth token persistence
+    │   │   ├── auto-update.ts    # CLI auto-update system
+    │   │   ├── custom-commands.ts # User-defined prompt commands
+    │   │   ├── event-bus.ts      # Cross-component event system
+    │   │   ├── file-lock.ts      # File locking utilities
+    │   │   ├── logger.ts         # Singleton debug logger
+    │   │   ├── model-registry.ts # Provider/model catalog
+    │   │   ├── process-manager.ts # Child process lifecycle
+    │   │   ├── prompt-commands.ts # Built-in prompt templates
+    │   │   ├── session-manager.ts # Session CRUD
+    │   │   ├── settings-manager.ts # User settings
+    │   │   ├── skills.ts         # Skill system (prompt-template commands)
+    │   │   ├── slash-commands.ts  # /command registry
+    │   │   ├── telegram.ts       # Telegram integration
+    │   │   ├── voice-transcriber.ts # Audio transcription
+    │   │   ├── oauth/
+    │   │   │   ├── anthropic.ts  # Anthropic PKCE flow
+    │   │   │   ├── openai.ts     # OpenAI PKCE flow
+    │   │   │   ├── pkce.ts       # PKCE utilities
+    │   │   │   └── types.ts      # OAuth types
+    │   │   ├── mcp/
+    │   │   │   ├── client.ts     # MCP client implementation
+    │   │   │   ├── defaults.ts   # Default MCP server configs
+    │   │   │   ├── types.ts      # MCP types
+    │   │   │   └── index.ts      # MCP exports
+    │   │   ├── compaction/
+    │   │   │   ├── compactor.ts  # Context compaction logic
+    │   │   │   └── token-estimator.ts # Token counting
+    │   │   ├── extensions/
+    │   │   │   ├── loader.ts     # Extension discovery/loading
+    │   │   │   └── types.ts      # Extension interfaces
+    │   │   └── index.ts          # Core exports
+    │   │
+    │   ├── tools/
+    │   │   ├── bash.ts           # Shell execution
+    │   │   ├── read.ts           # File reading
+    │   │   ├── write.ts          # File writing
+    │   │   ├── edit.ts           # Surgical text replacement
+    │   │   ├── edit-diff.ts      # Diff-based edit utilities
+    │   │   ├── find.ts           # Glob search
+    │   │   ├── grep.ts           # Regex search in files
+    │   │   ├── ls.ts             # Directory listing
+    │   │   ├── web-fetch.ts      # URL fetching + HTML stripping
+    │   │   ├── subagent.ts       # Spawn isolated sub-agent
+    │   │   ├── tasks.ts          # Task management tool
+    │   │   ├── task-output.ts    # Task output retrieval
+    │   │   ├── task-stop.ts      # Task cancellation
+    │   │   ├── enter-plan.ts     # Enter plan mode
+    │   │   ├── exit-plan.ts      # Exit plan mode
+    │   │   ├── skill.ts          # Skill invocation tool
+    │   │   ├── operations.ts     # Shared tool operations
+    │   │   ├── truncate.ts       # Output truncation logic
+    │   │   ├── path-utils.ts     # Path validation/resolution
+    │   │   └── index.ts          # Tool registration
+    │   │
+    │   ├── ui/
+    │   │   ├── App.tsx           # Main React component
+    │   │   ├── render.ts         # Ink/React app bootstrap
+    │   │   ├── login.tsx         # OAuth login UI
+    │   │   ├── sessions.ts       # Session selection UI
+    │   │   ├── activity-phrases.ts # Random activity messages
+    │   │   ├── live-item-flush.ts  # Live item batching
+    │   │   ├── spinner-frames.ts   # Spinner animation frames
+    │   │   ├── components/
+    │   │   │   ├── ActivityIndicator.tsx
+    │   │   │   ├── AnimationContext.tsx
+    │   │   │   ├── AssistantMessage.tsx
+    │   │   │   ├── BackgroundTasksBar.tsx
+    │   │   │   ├── Banner.tsx
+    │   │   │   ├── CompactionNotice.tsx
+    │   │   │   ├── DiffView.tsx
+    │   │   │   ├── Footer.tsx
+    │   │   │   ├── InputArea.tsx
+    │   │   │   ├── Markdown.tsx
+    │   │   │   ├── ModelSelector.tsx
+    │   │   │   ├── Overlay.tsx
+    │   │   │   ├── PlanApproval.tsx
+    │   │   │   ├── PlanBanner.tsx
+    │   │   │   ├── PlanOverlay.tsx
+    │   │   │   ├── SelectList.tsx
+    │   │   │   ├── ServerToolExecution.tsx
+    │   │   │   ├── SessionSelector.tsx
+    │   │   │   ├── SettingsSelector.tsx
+    │   │   │   ├── SkillsOverlay.tsx
+    │   │   │   ├── SlashCommandMenu.tsx
+    │   │   │   ├── Spinner.tsx
+    │   │   │   ├── StreamingArea.tsx
+    │   │   │   ├── SubAgentPanel.tsx
+    │   │   │   ├── TaskOverlay.tsx
+    │   │   │   ├── ThinkingBlock.tsx
+    │   │   │   ├── ThinkingIndicator.tsx
+    │   │   │   ├── ToolExecution.tsx
+    │   │   │   ├── ToolGroupExecution.tsx
+    │   │   │   ├── UserMessage.tsx
+    │   │   │   └── index.ts
+    │   │   ├── hooks/
+    │   │   │   ├── useAgentLoop.ts
+    │   │   │   ├── useSessionManager.ts
+    │   │   │   ├── useSlashCommands.ts
+    │   │   │   ├── useTerminalSize.ts
+    │   │   │   └── useTerminalTitle.ts
+    │   │   ├── theme/
+    │   │   │   ├── theme.ts      # Theme loading
+    │   │   │   └── detect-theme.ts # Terminal theme detection
+    │   │   └── utils/
+    │   │       ├── highlight.ts  # Syntax highlighting
+    │   │       └── table-text.ts # Table formatting
+    │   │
+    │   ├── modes/
+    │   │   ├── json-mode.ts      # JSON/JSONL output mode
+    │   │   ├── print-mode.ts     # Non-interactive print mode
+    │   │   ├── rpc-mode.ts       # RPC server mode
+    │   │   ├── serve-mode.ts     # HTTP server mode
+    │   │   └── index.ts          # Mode exports
+    │   │
+    │   └── utils/
+    │       ├── error-handler.ts  # Global error handling
+    │       ├── format.ts         # Text formatting
+    │       ├── git.ts            # Git helpers
+    │       ├── image.ts          # Image processing
+    │       ├── markdown.ts       # Markdown utilities
+    │       ├── process.ts        # Process utilities
+    │       ├── shell.ts          # Shell helpers
+    │       └── sound.ts          # Audio playback
+    │
     └── package.json
 ```
 
@@ -105,17 +236,19 @@ packages/
 
 - **No API keys**: Only OAuth tokens stored locally in `~/.gg/auth.json`
 - **Workspace dependencies**: All use `workspace:*` to stay in sync
-- **Version sync**: All 3 packages must have the same version number
+- **Version sync**: All 3 packages must have the same version number (currently 4.2.53)
+- **Build tools**: gg-ai and gg-agent use `tsup` (dual CJS+ESM), ogcoder uses `tsc` (ESM only)
 - **Debug logging**: Timestamped logs to `~/.gg/debug.log`, truncated on CLI restart
 - **Strict TypeScript**: `strict: true` in all tsconfigs
 - **ESLint flat config**: No `.eslintrc.json` — all in `eslint.config.js`
+- **pnpm build restrictions**: `onlyBuiltDependencies` set for `sharp`, `esbuild`, `onnxruntime-node`
 
 ---
 
 # Phase 1: Foundation (gg-ai)
 
 ## Goal
-Build a **unified LLM streaming API** that works across 4 providers (Anthropic, OpenAI, GLM, Moonshot) with a single entry point.
+Build a **unified LLM streaming API** that works across providers (Anthropic, OpenAI, OpenAI Codex) with a single entry point.
 
 ### Conceptual Requirements
 
@@ -132,7 +265,7 @@ Build a **unified LLM streaming API** that works across 4 providers (Anthropic, 
 #### Prompt 1: Define Core Types
 ```
 Create packages/gg-ai/src/types.ts with:
-- Provider type: "anthropic" | "openai" | "glm" | "moonshot"
+- Provider type: "anthropic" | "openai"
 - Message types: SystemMessage, UserMessage, AssistantMessage, ToolResultMessage
 - ContentPart types: TextContent, ThinkingContent, ImageContent, ToolCall, ToolResult
 - Tool interface with name, description, and Zod parameters
@@ -206,14 +339,12 @@ Create packages/gg-ai/src/providers/openai.ts with:
 - Note: OpenAI doesn't stream thinking — include that in response after streaming
 ```
 
-#### Prompt 8: Implement GLM & Moonshot Providers
+#### Prompt 8: Implement OpenAI Codex Provider
 ```
-Create packages/gg-ai/src/providers/glm.ts (or handle in openai.ts adapter) with:
-- GLM and Moonshot are OpenAI-compatible
-- GLM has two endpoints: coding (subscription) and regular (pay-per-token)
-- Add retry logic for GLM (check for "Insufficient balance" or "no resource package")
-- Moonshot base URL: https://api.moonshot.ai/v1
-- Both should use streamOpenAI as base, with endpoint adaptation
+Create packages/gg-ai/src/providers/openai-codex.ts with:
+- Adapter for OpenAI Codex endpoint (used with accountId)
+- Reuses streamOpenAI as base with Codex-specific endpoint routing
+- Handle Codex-specific features and response formats
 ```
 
 #### Prompt 9: Add Transform Layer
@@ -295,9 +426,9 @@ Create packages/gg-ai/src/index.ts with:
 
 ```bash
 cd packages/gg-ai
-pnpm build              # tsc output
-pnpm check              # Type check
-pnpm test               # Run tests
+pnpm build              # tsup output (ESM + CJS)
+pnpm check              # Type check (tsc --noEmit)
+pnpm test               # Run tests (vitest)
 cd ../..
 pnpm lint               # ESLint
 pnpm format:check       # Prettier
@@ -307,7 +438,7 @@ pnpm format:check       # Prettier
 - ✅ No type errors (`tsc --noEmit` passes)
 - ✅ All linting passes
 - ✅ All tests pass
-- ✅ Built `dist/` contains both `.js` and `.d.ts`
+- ✅ Built `dist/` contains `.js`, `.cjs`, and `.d.ts` (tsup dual-format output)
 - ✅ Can import from `@abukhaled/gg-ai` in another package
 
 ---
@@ -474,9 +605,9 @@ Create packages/gg-agent/src/index.ts with:
 
 ```bash
 cd packages/gg-agent
-pnpm build
-pnpm check
-pnpm test
+pnpm build              # tsup output (ESM + CJS)
+pnpm check              # Type check (tsc --noEmit)
+pnpm test               # Run tests (vitest)
 cd ../..
 pnpm lint
 pnpm format:check
@@ -485,6 +616,7 @@ pnpm format:check
 **Success criteria**:
 - ✅ All tests pass
 - ✅ No type errors
+- ✅ Built `dist/` contains `.js`, `.cjs`, and `.d.ts` (tsup dual-format output)
 - ✅ Can be imported by ogcoder
 - ✅ agentLoop works with real stream from gg-ai
 
@@ -579,14 +711,18 @@ Create packages/ogcoder/src/core/settings-manager.ts with:
 
 #### Prompt 8: Implement File Tools
 ```
-Create packages/ogcoder/src/tools/ with individual files:
+Create packages/ggcoder/src/tools/ with individual files:
 - read.ts: read(file_path, offset?, limit?) → returns file contents (truncates large files)
 - write.ts: write(file_path, content) → creates/overwrites file, creates parent dirs
 - edit.ts: edit(file_path, old_text, new_text) → surgical replacement (old_text must match exactly once)
+- edit-diff.ts: diff-based edit utilities for generating and applying unified diffs
 - find.ts: find(pattern, path?) → glob search respecting .gitignore
 - grep.ts: grep(pattern, path?, include?, case_insensitive?, max_results?) → regex search in files
 - ls.ts: ls(path?, all?) → directory listing with file types and sizes
 - bash.ts: bash(command, timeout?) → shell execution with exit code
+- truncate.ts: output truncation logic for long tool results
+- path-utils.ts: path validation and resolution helpers
+- operations.ts: shared tool operation utilities
 - All should use Zod for parameter validation
 - All should return structured results (not just strings)
 ```
@@ -602,25 +738,45 @@ Create packages/ogcoder/src/tools/web-fetch.ts with:
 
 #### Prompt 10: Implement Task System
 ```
-Create packages/ogcoder/src/tools/tasks.ts with:
+Create packages/ggcoder/src/tools/tasks.ts with:
 - tasks(action: "add"|"list"|"done"|"remove", id?, title?, prompt?) → task management
-- Store tasks in ~/.gg/tasks.json
-- support add, list, mark done, remove operations
+- Store tasks in session state
+- Support add, list, mark done, remove operations
 - Each task has { id, title, prompt, status, createdAt }
+
+Also create task-output.ts and task-stop.ts for:
+- task-output: retrieve output from background tasks
+- task-stop: cancel running background tasks
 ```
 
 #### Prompt 11: Implement Subagent Tool
 ```
-Create packages/ogcoder/src/tools/subagent.ts with:
+Create packages/ggcoder/src/tools/subagent.ts with:
 - subagent(prompt) → spawn isolated Agent with same auth/model
 - Return agent result
 - Use for parallel/recursive work
 - NOT async iterable — returns final result
 ```
 
-#### Prompt 12: Create Tool Index
+#### Prompt 12: Implement Plan Mode Tools
 ```
-Create packages/ogcoder/src/tools/index.ts with:
+Create packages/ggcoder/src/tools/enter-plan.ts and exit-plan.ts:
+- enter-plan: switch agent into plan mode (read-only, no file writes)
+- exit-plan: leave plan mode and resume normal execution
+- Plan mode allows the agent to research and propose changes before executing
+```
+
+#### Prompt 13: Implement Skill Tool
+```
+Create packages/ggcoder/src/tools/skill.ts with:
+- skill(name, args?) → invoke a registered skill (prompt-template command)
+- Skills are loaded from core/skills.ts and core/custom-commands.ts
+- Both built-in skills and user-defined commands from .gg/commands/
+```
+
+#### Prompt 14: Create Tool Index
+```
+Create packages/ggcoder/src/tools/index.ts with:
 - createTools(agentSession, fileSystem) → AgentTool[]
 - Return array of all tools with execute functions wired up
 - Tools should have proper error handling and validation
@@ -628,7 +784,7 @@ Create packages/ogcoder/src/tools/index.ts with:
 
 ### Phase 3c: System Prompt & Commands
 
-#### Prompt 13: Generate System Prompt
+#### Prompt 15: Generate System Prompt
 ```
 Create packages/ogcoder/src/system-prompt.ts with:
 - buildSystemPrompt(options) → string
@@ -642,7 +798,7 @@ Create packages/ogcoder/src/system-prompt.ts with:
   - File operation constraints (no destructive operations without asking)
 ```
 
-#### Prompt 14: Create Slash Commands
+#### Prompt 16: Create Slash Commands
 ```
 Create packages/ogcoder/src/core/slash-commands.ts with:
 - Registry pattern for commands: { name, aliases, description, usage, execute }
@@ -658,69 +814,165 @@ Create packages/ogcoder/src/core/slash-commands.ts with:
 - Execute function parses args and dispatches to handler
 ```
 
-#### Prompt 15: Create Prompt Commands
+#### Prompt 17: Create Prompt Commands & Skills
 ```
-Create packages/ogcoder/src/core/prompt-commands.ts with:
+Create packages/ggcoder/src/core/prompt-commands.ts with:
 - Built-in prompt templates (e.g., "fix", "test", "refactor")
-- Each is a multi-line prompt stored in ~.gg/commands/
+- Each is a multi-line prompt stored in ~/.gg/commands/
 - Support variables: {file}, {selection}, {language}
+
+Create packages/ggcoder/src/core/skills.ts with:
+- Skill system for registering and discovering prompt-template commands
+- Skills can be built-in or loaded from .gg/commands/ directory
+- Each skill has name, description, and execute function
+
+Create packages/ggcoder/src/core/custom-commands.ts with:
+- Loader for user-defined commands from .gg/commands/*.md
+- Parse frontmatter (name, description, aliases)
+- Convert to executable prompt templates
+```
+
+#### Prompt 18: Create Additional Core Modules
+```
+Create the following support modules in packages/ggcoder/src/core/:
+
+- model-registry.ts: Catalog of available providers and models
+  - Model capabilities (thinking, web search, vision, etc.)
+  - Context window sizes per model
+  - Default model selection
+
+- event-bus.ts: Cross-component event system
+  - Pub/sub for decoupled communication between core modules
+  - Events: model-switch, session-change, compaction, etc.
+
+- agents.ts: Sub-agent management
+  - Spawn and track background agent tasks
+  - Coordinate agent lifecycle and cleanup
+
+- auto-update.ts: CLI auto-update system
+  - Check npm for newer versions
+  - Prompt user to update
+
+- process-manager.ts: Child process lifecycle
+  - Track spawned processes (MCP servers, sub-agents)
+  - Cleanup on exit
+
+- file-lock.ts: File locking utilities
+  - Prevent concurrent writes to session files
+  - Lock/unlock with timeout
+
+- telegram.ts: Telegram integration
+  - Send notifications to Telegram
+  - Receive messages/commands
+
+- voice-transcriber.ts: Audio transcription
+  - Record audio from microphone
+  - Transcribe using local model (@huggingface/transformers)
+  - Decode ogg-opus audio (ogg-opus-decoder)
 ```
 
 ### Phase 3d: Terminal UI (Ink + React)
 
-#### Prompt 16: Create Base UI Components
+#### Prompt 19: Create Base UI Components
 ```
-Create packages/ogcoder/src/ui/components/ with individual React components:
-- Spinner.tsx: animated spinner (frames: | / - \)
-- TextBlock.tsx: markdown-formatted text with syntax highlighting
-- ToolCall.tsx: displays tool call (name, args, status)
-- ToolResult.tsx: displays tool result (success/error)
-- MessageBlock.tsx: renders assistant message with content
-- Input.tsx: single-line or multi-line input prompt
-- Select.tsx: choice selection (up/down arrows)
-- ProgressBar.tsx: progress with percentage
-- TokenCounter.tsx: shows input/output/cache tokens
-- Each component should be under 100 lines
+Create packages/ggcoder/src/ui/components/ with individual React components (30+ components):
+
+Core display:
+- Spinner.tsx: animated spinner with custom frames
+- Banner.tsx: startup banner with version, model info
+- Markdown.tsx: markdown-formatted text with syntax highlighting
+- DiffView.tsx: unified diff display with color coding
+- AssistantMessage.tsx: renders assistant message with content blocks
+- UserMessage.tsx: renders user input messages
+- ThinkingBlock.tsx: displays extended thinking content
+- ThinkingIndicator.tsx: animated thinking status
+- StreamingArea.tsx: live streaming text area
+
+Tool execution:
+- ToolExecution.tsx: displays single tool call (name, args, status, result)
+- ToolGroupExecution.tsx: groups parallel tool calls together
+- ServerToolExecution.tsx: displays server-side tool execution
+- SubAgentPanel.tsx: displays sub-agent progress and results
+
+Interactive:
+- InputArea.tsx: multi-line input with keyboard handling
+- SelectList.tsx: generic choice selection (up/down arrows)
+- ModelSelector.tsx: model/provider selection overlay
+- SessionSelector.tsx: session selection and management
+- SettingsSelector.tsx: settings editor overlay
+- SlashCommandMenu.tsx: autocomplete menu for /commands
+- Overlay.tsx: generic overlay/modal container
+- Footer.tsx: bottom bar with token counts and status
+
+Plan mode:
+- PlanApproval.tsx: plan review and approval UI
+- PlanBanner.tsx: plan mode indicator banner
+- PlanOverlay.tsx: full plan mode overlay
+
+Status:
+- ActivityIndicator.tsx: random activity phrases during processing
+- AnimationContext.tsx: shared animation state context
+- BackgroundTasksBar.tsx: shows running background tasks
+- CompactionNotice.tsx: context compaction notification
+- TaskOverlay.tsx: task list overlay
+- SkillsOverlay.tsx: available skills browser
+
+Each component should be under 100 lines. All exported from index.ts.
 ```
 
-#### Prompt 17: Create App State & Hooks
+#### Prompt 20: Create App State & Hooks
 ```
-Create packages/ogcoder/src/ui/hooks/ with:
-- useAgentLoop(options) → runs agent loop, yields events
-- useSessionManager() → CRUD on sessions
-- useSlashCommands(registry) → parses /command input
-- useTokenCounter() → tracks usage across turns
-- useTheme() → loads dark/light theme
+Create packages/ggcoder/src/ui/hooks/ with:
+- useAgentLoop.ts: runs agent loop, yields events, manages abort
+- useSessionManager.ts: CRUD on sessions
+- useSlashCommands.ts: parses /command input, autocomplete
+- useTerminalSize.ts: reactive terminal dimensions
+- useTerminalTitle.ts: dynamic terminal title updates
+
+Also create UI utilities:
+- ui/activity-phrases.ts: random activity messages during processing
+- ui/live-item-flush.ts: batches live item updates for performance
+- ui/spinner-frames.ts: spinner animation frame sets
+- ui/login.tsx: OAuth login flow UI component
+- ui/sessions.ts: session selection helpers
+- ui/utils/highlight.ts: syntax highlighting with cli-highlight
+- ui/utils/table-text.ts: table formatting for terminal output
+- ui/theme/theme.ts: theme loading and application
+- ui/theme/detect-theme.ts: auto-detect terminal light/dark theme
 ```
 
-#### Prompt 18: Create Main App Component
+#### Prompt 21: Create Main App Component
 ```
-Create packages/ogcoder/src/ui/App.tsx with (1700+ lines):
-- Main React component using Ink + react-dom
-- State: messages[], liveItems[], currentInput, tokenUsage
+Create packages/ggcoder/src/ui/App.tsx with:
+- Main React component using Ink
+- State: messages[], liveItems[], currentInput, tokenUsage, overlays
 - Input handler:
   - Parse slash commands first (check if starts with /)
-  - Parse prompt commands (check ~/.gg/commands/)
+  - Parse prompt commands (check ~/.gg/commands/ and skills)
   - Otherwise, send to agent
 - Agent loop consumer:
-  - Consume each event
-  - Update liveItems array
-  - Emit user message + assistant response
+  - Consume each AgentEvent
+  - Update liveItems array with tool calls, text, thinking
+  - Flush completed items to message history
   - Update token counts
 - Render:
-  - Token counter at top
+  - Banner at top
   - Message history (scrollable)
-  - Live items (current turn)
+  - Live items (current turn with streaming)
+  - Footer with token counts
   - Input field at bottom
+  - Overlays (model selector, settings, sessions, plans, tasks, skills)
 - Keyboard handlers:
-  - Ctrl+C → quit
+  - Ctrl+C → cancel/quit
   - Ctrl+L → clear
   - Shift+Enter → newline in input
+  - Tab → autocomplete slash commands
+  - Escape → dismiss overlays
 ```
 
-#### Prompt 19: Create Render Function
+#### Prompt 22: Create Render Function
 ```
-Create packages/ogcoder/src/ui/render.ts with:
+Create packages/ggcoder/src/ui/render.ts with:
 - renderApp(session, auth, settings) → runs React/Ink app
 - Setup React root using Ink
 - Handle process signals (SIGINT, SIGTERM)
@@ -729,35 +981,43 @@ Create packages/ogcoder/src/ui/render.ts with:
 
 ### Phase 3e: Execution Modes & CLI
 
-#### Prompt 20: Create Interactive Mode
+#### Prompt 23: Create Interactive Mode
 ```
-Create packages/ogcoder/src/modes/ with:
-- interactive.ts: runInteractive(session) → uses Ink/React terminal UI
-- Main execution path
+Create packages/ggcoder/src/interactive.ts with:
+- runInteractive(session) → uses Ink/React terminal UI
+- Main execution path — launches App.tsx via render.ts
 - All user input goes through React component
 ```
 
-#### Prompt 21: Create JSON Mode
+#### Prompt 24: Create Non-Interactive Modes
 ```
-Create modes/json-mode.ts with:
-- runJsonMode(prompt, session) → runs agent, emits JSON events
-- Emit AgentEvent as JSON per line (jsonl format)
-- Final result as JSON
-- Useful for programmatic consumption
+Create packages/ggcoder/src/modes/ with:
+
+- json-mode.ts: runJsonMode(prompt, session)
+  - Emit AgentEvent as JSON per line (jsonl format)
+  - Final result as JSON
+  - Useful for programmatic consumption
+
+- print-mode.ts: runPrintMode(prompt, session)
+  - Non-interactive single-prompt mode
+  - Runs agent to completion, prints result to stdout
+  - Useful for piping and scripting
+
+- rpc-mode.ts: RPC server mode
+  - Accept prompts via JSON-RPC protocol
+  - Stream responses back
+
+- serve-mode.ts: HTTP server mode
+  - Accept prompts via HTTP
+  - Stream responses as SSE or WebSocket
+  - Use session auth/model
+
+- index.ts: Mode exports and routing
 ```
 
-#### Prompt 22: Create RPC/Serve Mode
+#### Prompt 25: Create CLI Entry Point
 ```
-Create modes/rpc-mode.ts and modes/serve-mode.ts with:
-- HTTP server mode for remote agent execution
-- Accept prompts via HTTP
-- Stream responses as SSE or WebSocket
-- Use session auth/model
-```
-
-#### Prompt 23: Create CLI Entry Point
-```
-Create packages/ogcoder/src/cli.ts (891 lines) with:
+Create packages/ggcoder/src/cli.ts with:
 - #!/usr/bin/env node shebang
 - Parse CLI args: --model, --provider, --json, --version, etc.
 - Subcommands:
@@ -775,7 +1035,7 @@ Create packages/ogcoder/src/cli.ts (891 lines) with:
 
 ### Phase 3f: Advanced Features
 
-#### Prompt 24: Create MCP Integration
+#### Prompt 26: Create MCP Integration
 ```
 Create packages/ogcoder/src/core/mcp/ with:
 - MCPClientManager class
@@ -785,7 +1045,7 @@ Create packages/ogcoder/src/core/mcp/ with:
 - Include in agent tools array
 ```
 
-#### Prompt 25: Create Context Compaction
+#### Prompt 27: Create Context Compaction
 ```
 Create packages/ogcoder/src/core/compaction/ with:
 - Token estimator: estimate token count for messages
@@ -795,7 +1055,7 @@ Create packages/ogcoder/src/core/compaction/ with:
 - Use only for Anthropic (provider-specific)
 ```
 
-#### Prompt 26: Create Extension System
+#### Prompt 28: Create Extension System
 ```
 Create packages/ogcoder/src/core/extensions/ with:
 - Extension interface: { name, version, activate(context) }
@@ -804,6 +1064,19 @@ Create packages/ogcoder/src/core/extensions/ with:
   - Register tools
   - Register commands
   - Hook into events
+```
+
+#### Prompt 29: Create Utility Modules
+```
+Create packages/ggcoder/src/utils/ with:
+- error-handler.ts: Global error handling and crash reporting
+- format.ts: Text formatting utilities (truncation, wrapping)
+- git.ts: Git helpers (status, diff, branch detection)
+- image.ts: Image processing with sharp (resize, convert)
+- markdown.ts: Markdown parsing and rendering utilities
+- process.ts: Process management utilities
+- shell.ts: Shell helpers (command detection, env parsing)
+- sound.ts: Audio playback utilities
 ```
 
 ### Tests for Phase 3 (ogcoder)
@@ -861,10 +1134,10 @@ Create packages/ogcoder/src/core/extensions/ with:
 ### Build & Validate Phase 3
 
 ```bash
-cd packages/ogcoder
-pnpm build
-pnpm check
-pnpm test
+cd packages/ggcoder
+pnpm build              # tsc output (ESM only)
+pnpm check              # Type check (tsc --noEmit)
+pnpm test               # Run tests (vitest)
 cd ../..
 pnpm lint
 pnpm format:check
@@ -887,13 +1160,13 @@ pnpm format:check
 
 ```bash
 # Clone repo
-git clone https://github.com/abukhaled/gg-framework.git
+git clone https://github.com/KenKaiii/gg-framework.git
 cd gg-framework
 
 # Install dependencies
 pnpm install
 
-# Build all packages (tsc)
+# Build all packages (tsup for gg-ai/gg-agent, tsc for ogcoder)
 pnpm build
 
 # Type check without emit
@@ -918,7 +1191,7 @@ pnpm check && pnpm lint && pnpm format:check
 
 ### Prerequisites
 
-- All 3 `package.json` files have **same version** (e.g., `4.2.35`)
+- All 3 `package.json` files have **same version** (e.g., `4.2.53`)
 - npm token set: `npm set //registry.npmjs.org/:_authToken=<token>`
 - Token must be granular access token (can publish specific packages)
 
@@ -928,7 +1201,7 @@ pnpm check && pnpm lint && pnpm format:check
    ```json
    {
      "name": "@abukhaled/gg-ai",
-     "version": "4.2.36",  // ← increment
+     "version": "4.2.54",  // ← increment
      ...
    }
    ```
@@ -958,7 +1231,7 @@ pnpm check && pnpm lint && pnpm format:check
    npm view @abukhaled/ogcoder versions --json
 
    # Test install
-   npm i -g @abukhaled/ogcoder@4.2.36
+   npm i -g @abukhaled/ogcoder@latest
    ogcoder --help
    ```
 
@@ -1454,6 +1727,6 @@ Before publishing to npm:
 
 **Created**: March 15, 2026
 
-**Last Updated**: March 15, 2026
+**Last Updated**: March 25, 2026
 
 This guide covers building GG Framework from scratch through all 3 packages, with sequential AI prompts, testing strategies, and production deployment. Use this to teach others or rebuild the framework in new projects.
