@@ -1222,6 +1222,11 @@ export function App(props: AppProps) {
 
       // Handle /compact — compact conversation
       if (trimmed === "/compact" || trimmed === "/c") {
+        // Abort any in-flight agent work before mutating messages
+        if (agentLoop.isRunning) {
+          agentLoop.clearQueue();
+          agentLoop.abort();
+        }
         const compacted = await compactConversation(messagesRef.current);
         if (compacted !== messagesRef.current) {
           messagesRef.current = compacted;
@@ -1237,11 +1242,15 @@ export function App(props: AppProps) {
 
       // Handle /clear — reset session and clear terminal
       if (trimmed === "/clear") {
+        // Abort any in-flight agent work before clearing state
+        if (agentLoop.isRunning) {
+          agentLoop.clearQueue();
+          agentLoop.abort();
+        }
         // Clear terminal screen + scrollback — needed because Ink's <Static>
         // writes directly to stdout and can't be removed by clearing React state
         stdout?.write("\x1b[2J\x1b[3J\x1b[H");
         setHistory([{ kind: "banner", id: "banner" }]);
-        setLiveItems([]);
         setDoneStatus(null);
         messagesRef.current = messagesRef.current.slice(0, 1); // keep system prompt
         agentLoop.reset();
@@ -1285,6 +1294,12 @@ export function App(props: AppProps) {
         const promptText = builtinCmd?.prompt ?? customCmd?.prompt;
 
         if (promptText) {
+          // Abort any in-flight agent work before starting a new prompt command
+          if (agentLoop.isRunning) {
+            agentLoop.clearQueue();
+            agentLoop.abort();
+          }
+
           log(
             "INFO",
             "command",
@@ -1330,6 +1345,11 @@ export function App(props: AppProps) {
 
       // Check slash commands
       if (props.onSlashCommand && input.startsWith("/")) {
+        // Abort any in-flight agent work before executing session-level commands
+        if (agentLoop.isRunning) {
+          agentLoop.clearQueue();
+          agentLoop.abort();
+        }
         const result = await props.onSlashCommand(input);
         if (result !== null) {
           setLiveItems((prev) => [...prev, { kind: "info", text: result, id: getId() }]);
