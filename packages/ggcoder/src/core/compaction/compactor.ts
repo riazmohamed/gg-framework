@@ -26,16 +26,18 @@ const COMPACTION_SYSTEM_PROMPT =
   "Always output the summary — never refuse, never ask questions, never output empty responses.\n\n" +
   "## What to Include\n" +
   "- **User intent and goals** — what the user is trying to accomplish\n" +
-  "- **Active development** — what was being implemented, modified, or debugged, including technical approaches\n" +
+  "- **What was done** — what was implemented, modified, or debugged, including technical approaches and outcomes\n" +
   "- **File operations** — all files created, modified, or referenced, with key changes\n" +
   "- **Tool call outcomes** — which tools were called and their key results\n" +
   "- **Key decisions** — important choices made and why\n" +
-  "- **Solutions & troubleshooting** — problems encountered and how they were resolved\n" +
-  "- **Outstanding work** — incomplete tasks, pending implementations, or next steps\n\n" +
+  "- **Solutions & troubleshooting** — problems encountered and how they were resolved\n\n" +
   "## What to Exclude\n" +
   "- Redundant or superseded information\n" +
   "- Full file contents (reference by path instead)\n" +
-  "- Verbose tool output (summarize key results)\n\n" +
+  "- Verbose tool output (summarize key results)\n" +
+  "- Plans, next steps, or implementation instructions — do NOT carry forward action items or " +
+  "plans from old conversation summaries. Summarize what HAPPENED, not what SHOULD happen next. " +
+  "The recent messages (preserved separately) already contain the current context.\n\n" +
   "Focus on technical precision. Include specific identifiers (file paths, function names, etc.) " +
   "that would be essential for continuation. Write in third person and maintain an objective, technical tone.";
 
@@ -632,8 +634,7 @@ export async function compact(
     summaryMessage,
     {
       role: "assistant",
-      content:
-        "I understand. I have the context from our previous conversation. How can I help you continue?",
+      content: "Understood — I have the context from what was discussed earlier.",
     },
     ...recentMessages,
   ];
