@@ -106,6 +106,17 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     costTier: "medium",
   },
+  // ── Ollama (local) ────────────────────────────────────────
+  {
+    id: "qwen2.5-coder:32b",
+    name: "Qwen 2.5 Coder 32B",
+    provider: "ollama",
+    contextWindow: 32_768,
+    maxOutputTokens: 8_192,
+    supportsThinking: false,
+    supportsImages: false,
+    costTier: "low",
+  },
 ];
 
 export function getModel(id: string): ModelInfo | undefined {
@@ -120,6 +131,7 @@ export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.3-codex")!;
   if (provider === "glm") return MODELS.find((m) => m.id === "glm-5")!;
   if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k2.5")!;
+  if (provider === "ollama") return MODELS.find((m) => m.id === "qwen2.5-coder:32b")!;
   return MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
 }
 
@@ -139,7 +151,7 @@ export function getSummaryModel(provider: Provider, currentModelId: string): Mod
   if (provider === "anthropic") {
     return MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
   }
-  if (provider === "openai" || provider === "glm") {
+  if (provider === "openai" || provider === "glm" || provider === "ollama") {
     const low = getModelsForProvider(provider).find((m) => m.costTier === "low");
     if (low) return low;
   }

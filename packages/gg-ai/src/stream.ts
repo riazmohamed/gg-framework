@@ -41,6 +41,15 @@ providerRegistry.register("moonshot", {
     }),
 });
 
+providerRegistry.register("ollama", {
+  stream: (options) =>
+    streamOpenAI({
+      ...options,
+      apiKey: options.apiKey ?? "ollama",
+      baseUrl: options.baseUrl ?? "http://localhost:11434/v1",
+    }),
+});
+
 // ── Public API ─────────────────────────────────────────────
 
 /**

@@ -21,7 +21,8 @@ packages/
   │       ├── types.ts       # Core types (StreamOptions, ContentBlock, events)
   │       ├── errors.ts      # GGAIError, ProviderError
   │       ├── stream.ts      # Main stream() dispatch function
-  │       ├── providers/     # Anthropic, OpenAI streaming implementations
+  │       ├── provider-registry.ts # Provider registration system
+  │       ├── providers/     # Anthropic, OpenAI, OpenAI Codex implementations
   │       └── utils/         # EventStream, Zod-to-JSON-Schema
   │
   ├── gg-agent/              # @abukhaled/gg-agent — Agent loop with tool execution
@@ -34,20 +35,28 @@ packages/
       └── src/
           ├── cli.ts         # CLI entry point
           ├── config.ts      # Configuration constants
+          ├── interactive.ts # Interactive mode launcher
           ├── session.ts     # Session management
           ├── system-prompt.ts # System prompt generation
           ├── core/          # Auth, OAuth, settings, sessions, extensions
           │   ├── oauth/     # PKCE OAuth flows (anthropic, openai)
           │   ├── compaction/ # Context compaction & token estimation
           │   ├── mcp/       # Model Context Protocol client
-          │   └── extensions/ # Extension system
-          ├── tools/         # Agentic tools (bash, read, write, edit, grep, find, ls, web-fetch, subagent)
+          │   ├── extensions/ # Extension system
+          │   ├── model-registry.ts # Provider/model catalog
+          │   ├── event-bus.ts # Cross-component events
+          │   ├── agents.ts  # Sub-agent management
+          │   ├── skills.ts  # Skill system
+          │   ├── voice-transcriber.ts # Audio transcription
+          │   └── telegram.ts # Telegram integration
+          ├── tools/         # Agentic tools (bash, read, write, edit, grep, find, ls, web-fetch, subagent, plan, skill, tasks)
           ├── ui/            # Ink/React terminal UI components & hooks
-          │   ├── components/ # 25+ UI components (one per file)
-          │   ├── hooks/     # useAgentLoop, useSessionManager, useSlashCommands, etc.
-          │   └── theme/     # dark.json, light.json
-          ├── modes/         # Execution modes (interactive, print, json)
-          └── utils/         # Error handling, git, shell, formatting, image
+          │   ├── components/ # 28 UI components (one per file)
+          │   ├── hooks/     # useAgentLoop, useSessionManager, useSlashCommands, useTerminalSize, useTerminalTitle
+          │   ├── theme/     # Theme loading & detection
+          │   └── utils/     # Syntax highlighting, table formatting
+          ├── modes/         # Execution modes (interactive, print, json, rpc, serve)
+          └── utils/         # Error handling, git, shell, formatting, image, sound
 ```
 
 ## Package Dependencies
@@ -58,24 +67,27 @@ packages/
 
 - **Language**: TypeScript 5.9 (strict, ES2022, ESM)
 - **Package Manager**: pnpm workspaces
-- **Build**: tsc
-- **Test**: Vitest 4.0
+- **Build**: tsup (gg-ai, gg-agent) / tsc (ogcoder)
+- **Test**: Vitest 4.1
 - **Lint**: ESLint 10 + typescript-eslint (flat config)
 - **Format**: Prettier 3.8
 - **CLI UI**: Ink 6 + React 19
-- **Key deps**: `@anthropic-ai/sdk`, `openai`, `zod` (v4)
+- **Key deps**: `@anthropic-ai/sdk`, `openai`, `zod` (v4), `@modelcontextprotocol/sdk`, `sharp`, `@huggingface/transformers`
 
 ## Commands
 
 ```bash
 # Build & typecheck all packages
-pnpm build                          # tsc across all packages
+pnpm build                          # tsup (gg-ai, gg-agent) + tsc (ogcoder)
 pnpm check                          # tsc --noEmit across all packages
 
 # Per-package
 pnpm --filter @abukhaled/gg-ai build
 pnpm --filter @abukhaled/gg-agent build
 pnpm --filter @abukhaled/ogcoder build
+
+# Testing
+pnpm test                           # vitest across all packages
 ```
 
 ## Publishing to npm

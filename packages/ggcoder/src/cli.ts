@@ -422,6 +422,9 @@ async function runInkTUI(opts: {
     }
   }
 
+  // Ollama runs locally — always available, no auth needed
+  loggedInProviders.push("ollama");
+
   // Ensure project-local .gg directories exist
   const localGGDir = path.join(cwd, ".gg");
   await fs.promises.mkdir(path.join(localGGDir, "skills"), { recursive: true });
