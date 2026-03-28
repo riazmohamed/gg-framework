@@ -153,6 +153,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
         baseUrl: config.baseUrl,
         signal: ac.signal,
         accountId: creds.accountId,
+        clearToolUses: provider === "anthropic",
       });
 
       for await (const event of generator as AsyncIterable<AgentEvent>) {

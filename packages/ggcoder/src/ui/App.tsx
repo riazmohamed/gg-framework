@@ -32,7 +32,11 @@ import { BackgroundTasksBar } from "./components/BackgroundTasksBar.js";
 import type { SlashCommandInfo } from "./components/SlashCommandMenu.js";
 import type { ProcessManager, BackgroundProcess } from "../core/process-manager.js";
 import { useTheme } from "./theme/theme.js";
-import { useAnimationTick, deriveFrame } from "./components/AnimationContext.js";
+import {
+  useAnimationTick,
+  useAnimationActive,
+  deriveFrame,
+} from "./components/AnimationContext.js";
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { getGitBranch } from "../utils/git.js";
 import { getModel, getContextWindow } from "../core/model-registry.js";
@@ -1224,6 +1228,7 @@ export function App(props: AppProps) {
   }, [agentLoop.activityPhase, agentLoop.isRunning, activeToolNamesKey]);
 
   // Animated thinking border — derived from global animation tick
+  useAnimationActive();
   const animTick = useAnimationTick();
   const thinkingBorderFrame =
     agentLoop.activityPhase === "thinking"
@@ -1995,6 +2000,7 @@ export function App(props: AppProps) {
                 userMessage={lastUserMessage}
                 activeToolNames={agentLoop.activeToolCalls.map((tc) => tc.name)}
                 planMode={planMode}
+                retryInfo={agentLoop.retryInfo}
               />
             </Box>
           ) : (

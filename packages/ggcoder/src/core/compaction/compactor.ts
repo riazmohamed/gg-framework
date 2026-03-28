@@ -26,16 +26,18 @@ const COMPACTION_SYSTEM_PROMPT =
   "Always output the summary — never refuse, never ask questions, never output empty responses.\n\n" +
   "## What to Include\n" +
   "- **User intent and goals** — what the user is trying to accomplish\n" +
-  "- **Active development** — what was being implemented, modified, or debugged, including technical approaches\n" +
+  "- **What was done** — what was implemented, modified, or debugged, including technical approaches and outcomes\n" +
   "- **File operations** — all files created, modified, or referenced, with key changes\n" +
   "- **Tool call outcomes** — which tools were called and their key results\n" +
   "- **Key decisions** — important choices made and why\n" +
-  "- **Solutions & troubleshooting** — problems encountered and how they were resolved\n" +
-  "- **Outstanding work** — incomplete tasks, pending implementations, or next steps\n\n" +
+  "- **Solutions & troubleshooting** — problems encountered and how they were resolved\n\n" +
   "## What to Exclude\n" +
   "- Redundant or superseded information\n" +
   "- Full file contents (reference by path instead)\n" +
-  "- Verbose tool output (summarize key results)\n\n" +
+  "- Verbose tool output (summarize key results)\n" +
+  "- Plans, next steps, or implementation instructions — do NOT carry forward action items or " +
+  "plans from old conversation summaries. Summarize what HAPPENED, not what SHOULD happen next. " +
+  "The recent messages (preserved separately) already contain the current context.\n\n" +
   "Focus on technical precision. Include specific identifiers (file paths, function names, etc.) " +
   "that would be essential for continuation. Write in third person and maintain an objective, technical tone.";
 
@@ -93,7 +95,26 @@ export function findRecentCutPoint(messages: Message[], tokenBudget: number): nu
   }
 
   // Never cut before index 1 (preserve system message at 0)
-  return Math.max(1, cutIndex);
+  cutIndex = Math.max(1, cutIndex);
+
+  // Always keep at least the last user→assistant exchange so that compaction
+  // never produces an empty recentMessages array. Without this, the trailing-
+  // assistant-pop can strip the compaction ack, leaving only the summary and
+  // making `ggcoder continue` restore just 1 message.
+  if (cutIndex >= messages.length && messages.length > 2) {
+    // Find the last user message and keep everything from there onward
+    for (let i = messages.length - 1; i >= 1; i--) {
+      if (messages[i].role === "user") {
+        cutIndex = i;
+        break;
+      }
+    }
+    // Fallback: at minimum keep the last 2 messages
+    cutIndex = Math.min(cutIndex, messages.length - 2);
+    cutIndex = Math.max(1, cutIndex);
+  }
+
+  return cutIndex;
 }
 
 /**
@@ -632,8 +653,7 @@ export async function compact(
     summaryMessage,
     {
       role: "assistant",
-      content:
-        "I understand. I have the context from our previous conversation. How can I help you continue?",
+      content: "Understood — I have the context from what was discussed earlier.",
     },
     ...recentMessages,
   ];
@@ -646,7 +666,10 @@ export async function compact(
   // Ensure the conversation doesn't end with an assistant message.
   // Some models reject "assistant prefill" — the conversation must end
   // with a user (or tool) message so the LLM can generate a fresh response.
-  while (newMessages.length > 1 && newMessages[newMessages.length - 1].role === "assistant") {
+  // But never pop below 3 messages (system + summary + ack) — removing the
+  // compaction ack would leave only the summary, causing `ggcoder continue`
+  // to restore just 1 message instead of the full session.
+  while (newMessages.length > 3 && newMessages[newMessages.length - 1].role === "assistant") {
     newMessages.pop();
   }
 

@@ -83,6 +83,14 @@ export interface AgentDoneEvent {
   totalUsage: Usage;
 }
 
+export interface AgentRetryEvent {
+  type: "retry";
+  reason: "overloaded" | "rate_limit" | "empty_response" | "context_overflow";
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+}
+
 export interface AgentErrorEvent {
   type: "error";
   error: Error;
@@ -116,6 +124,7 @@ export type AgentEvent =
   | AgentServerToolCallEvent
   | AgentServerToolResultEvent
   | AgentSteeringMessageEvent
+  | AgentRetryEvent
   | AgentTurnEndEvent
   | AgentDoneEvent
   | AgentErrorEvent;
@@ -141,6 +150,10 @@ export interface AgentOptions {
   webSearch?: boolean;
   /** Enable server-side compaction (Anthropic only, beta). */
   compaction?: boolean;
+  /** Enable server-side clearing of old tool use/result pairs (Anthropic only, beta). */
+  clearToolUses?: boolean;
+  /** Max characters for a single tool result. Results exceeding this are truncated with a notice. */
+  maxToolResultChars?: number;
   /** Max consecutive pause_turn continuations before stopping (default: 5).
    *  Prevents infinite loops when server-side tools keep pausing. */
   maxContinuations?: number;

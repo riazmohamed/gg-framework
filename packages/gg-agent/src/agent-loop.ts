@@ -96,9 +96,10 @@ export async function* agentLoop(
   let overloadRetries = 0;
   let emptyResponseRetries = 0;
   const MAX_OVERFLOW_RETRIES = 3;
-  const MAX_OVERLOAD_RETRIES = 3;
+  const MAX_OVERLOAD_RETRIES = 10;
   const MAX_EMPTY_RESPONSE_RETRIES = 3;
-  const OVERLOAD_RETRY_DELAY_MS = 3_000;
+  const OVERLOAD_BASE_DELAY_MS = 2_000;
+  const OVERLOAD_MAX_DELAY_MS = 30_000;
 
   try {
     while (turn < maxTurns) {
@@ -133,6 +134,7 @@ export async function* agentLoop(
           accountId: options.accountId,
           cacheRetention: options.cacheRetention,
           compaction: options.compaction,
+          clearToolUses: options.clearToolUses,
         });
 
         // Suppress unhandled rejection if the iterator path throws first
@@ -170,6 +172,13 @@ export async function* agentLoop(
           options.transformContext
         ) {
           overflowRetries++;
+          yield {
+            type: "retry" as const,
+            reason: "context_overflow" as const,
+            attempt: overflowRetries,
+            maxAttempts: MAX_OVERFLOW_RETRIES,
+            delayMs: 0,
+          };
           const transformed = await options.transformContext(messages, { force: true });
           if (transformed !== messages) {
             messages.length = 0;
@@ -178,10 +187,21 @@ export async function* agentLoop(
           turn--; // Don't count the failed turn
           continue;
         }
-        // Overloaded / rate-limited: wait 3s and retry (up to 3 times)
+        // Overloaded / rate-limited: exponential backoff, retry up to 10 times
         if (overloadRetries < MAX_OVERLOAD_RETRIES && isOverloaded(err)) {
           overloadRetries++;
-          await new Promise((r) => setTimeout(r, OVERLOAD_RETRY_DELAY_MS));
+          const delayMs = Math.min(
+            OVERLOAD_BASE_DELAY_MS * 2 ** (overloadRetries - 1),
+            OVERLOAD_MAX_DELAY_MS,
+          );
+          yield {
+            type: "retry" as const,
+            reason: "overloaded" as const,
+            attempt: overloadRetries,
+            maxAttempts: MAX_OVERLOAD_RETRIES,
+            delayMs,
+          };
+          await new Promise((r) => setTimeout(r, delayMs));
           turn--; // Don't count the failed turn
           continue;
         }
@@ -207,6 +227,13 @@ export async function* agentLoop(
       ) {
         if (emptyResponseRetries < MAX_EMPTY_RESPONSE_RETRIES) {
           emptyResponseRetries++;
+          yield {
+            type: "retry" as const,
+            reason: "empty_response" as const,
+            attempt: emptyResponseRetries,
+            maxAttempts: MAX_EMPTY_RESPONSE_RETRIES,
+            delayMs: 0,
+          };
           turn--; // Don't count the failed turn
           continue;
         }
@@ -415,6 +442,24 @@ export async function* agentLoop(
             });
           }
         }
+        // Guard: cap oversized tool results before they enter conversation history.
+        // Uses head+tail strategy to preserve error messages / closing structure at the end.
+        if (options.maxToolResultChars) {
+          const HARD_MAX = 400_000; // absolute ceiling regardless of context window
+          const max = Math.min(options.maxToolResultChars, HARD_MAX);
+          for (const tr of toolResults) {
+            if (tr.content.length > max) {
+              // Keep 70% head + 30% tail to preserve errors/diagnostics at the end
+              const headChars = Math.floor(max * 0.7);
+              const tailChars = max - headChars;
+              const head = tr.content.slice(0, headChars);
+              const tail = tr.content.slice(-tailChars);
+              const omitted = tr.content.length - headChars - tailChars;
+              tr.content = head + `\n\n[... ${omitted} characters omitted ...]\n\n` + tail;
+            }
+          }
+        }
+
         messages.push({ role: "tool", content: toolResults });
       }
 

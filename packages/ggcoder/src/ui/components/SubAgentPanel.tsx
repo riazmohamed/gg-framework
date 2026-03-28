@@ -2,7 +2,7 @@ import React from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { SPINNER_FRAMES, SPINNER_INTERVAL } from "../spinner-frames.js";
-import { useAnimationTick, deriveFrame } from "./AnimationContext.js";
+import { useAnimationTick, useAnimationActive, deriveFrame } from "./AnimationContext.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 
 export interface SubAgentInfo {
@@ -57,6 +57,7 @@ const AgentRow = React.memo(
     const isRunning = agent.status === "running" && !aborted;
 
     // Derive spinner frame from global animation tick
+    useAnimationActive();
     const tick = useAnimationTick();
     const frame = deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length);
 

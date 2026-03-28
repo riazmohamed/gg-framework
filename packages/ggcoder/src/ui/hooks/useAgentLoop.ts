@@ -72,7 +72,14 @@ export interface AgentLoopOptions {
   ) => Message[] | Promise<Message[]>;
 }
 
-export type ActivityPhase = "waiting" | "thinking" | "generating" | "tools" | "idle";
+export type ActivityPhase = "waiting" | "thinking" | "generating" | "tools" | "retrying" | "idle";
+
+export interface RetryInfo {
+  reason: "overloaded" | "rate_limit" | "empty_response" | "context_overflow";
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+}
 
 export type UserContent = string | (TextContent | ImageContent)[];
 
@@ -95,6 +102,7 @@ export interface UseAgentLoopReturn {
   /** Latest turn's input tokens — reflects current context window usage */
   contextUsed: number;
   activityPhase: ActivityPhase;
+  retryInfo: RetryInfo | null;
   elapsedMs: number;
   thinkingMs: number;
   isThinking: boolean;
@@ -158,6 +166,7 @@ export function useAgentLoop(
   const [thinkingMs, setThinkingMs] = useState(0);
   const [isThinking, setIsThinking] = useState(false);
   const [streamedTokenEstimate, setStreamedTokenEstimate] = useState(0);
+  const [retryInfo, setRetryInfo] = useState<RetryInfo | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const queueRef = useRef<UserContent[]>([]);
@@ -168,7 +177,7 @@ export function useAgentLoop(
   const thinkingBufferRef = useRef("");
   const thinkingPendingRef = useRef("");
   const thinkingVisibleRef = useRef("");
-  const thinkingRevealTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // thinkingRevealTimerRef removed — unified into revealTimerRef
   const runStartRef = useRef(0);
   const toolsUsedRef = useRef<Set<string>>(new Set());
   const revealTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -180,6 +189,12 @@ export function useAgentLoop(
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const doneCalledRef = useRef(false);
 
+  // ── Unified reveal timer ───────────────────────────────────
+  // A single 33ms timer handles BOTH text and thinking reveals so they
+  // coalesce into one React state update per tick instead of two
+  // independent timers potentially firing in the same frame.
+  const emptyTicksRef = useRef(0);
+
   const stopReveal = useCallback(() => {
     if (revealTimerRef.current) {
       clearInterval(revealTimerRef.current);
@@ -187,102 +202,70 @@ export function useAgentLoop(
     }
   }, []);
 
-  const emptyTicksRef = useRef(0);
+  /** Advance a pending buffer by adaptive chunk size with word-boundary snapping. */
+  const revealChunk = (
+    pending: string,
+    minChars: number,
+    maxChars: number,
+    factor: number,
+  ): { revealed: string; remaining: string } => {
+    if (pending.length === 0) return { revealed: "", remaining: "" };
+    const buffered = pending.length;
+    const charsPerTick = Math.max(minChars, Math.min(maxChars, Math.ceil(buffered * factor)));
+    let endIndex = Math.min(charsPerTick, buffered);
+    if (endIndex < buffered) {
+      const breakChars = " \n.,;:`')]}>";
+      for (let i = endIndex; i >= Math.max(1, endIndex - 20); i--) {
+        if (breakChars.includes(pending[i])) {
+          endIndex = i + 1;
+          break;
+        }
+      }
+    }
+    return { revealed: pending.slice(0, endIndex), remaining: pending.slice(endIndex) };
+  };
 
   const startReveal = useCallback(() => {
     if (revealTimerRef.current) return;
     emptyTicksRef.current = 0;
     revealTimerRef.current = setInterval(() => {
-      const pending = textPendingRef.current;
-      if (pending.length === 0) {
-        // Auto-stop after 3 empty ticks to avoid unnecessary re-renders
+      const textPending = textPendingRef.current;
+      const thinkPending = thinkingPendingRef.current;
+
+      if (textPending.length === 0 && thinkPending.length === 0) {
         emptyTicksRef.current++;
-        if (emptyTicksRef.current >= 3) {
-          stopReveal();
-        }
+        if (emptyTicksRef.current >= 3) stopReveal();
         return;
       }
       emptyTicksRef.current = 0;
 
-      // Adaptive speed: continuous interpolation prevents jarring speed
-      // jumps at tier boundaries. Clamped to [12, 180] chars/tick at
-      // 33ms (~30fps) to balance smoothness vs catch-up speed.
-      const buffered = pending.length;
-      const charsPerTick = Math.max(12, Math.min(180, Math.ceil(buffered * 0.35)));
+      let textChanged = false;
+      let thinkChanged = false;
 
-      // Snap to a word boundary when possible so partial words don't
-      // flash on screen. Look back up to 20 chars for a natural break.
-      let endIndex = Math.min(charsPerTick, buffered);
-      if (endIndex < buffered) {
-        const breakChars = " \n.,;:`')]}>";
-        for (let i = endIndex; i >= Math.max(1, endIndex - 20); i--) {
-          if (breakChars.includes(pending[i])) {
-            endIndex = i + 1;
-            break;
-          }
-        }
+      // Reveal text (adaptive 12-180 chars/tick)
+      if (textPending.length > 0) {
+        const { revealed, remaining } = revealChunk(textPending, 12, 180, 0.35);
+        textPendingRef.current = remaining;
+        textVisibleRef.current += revealed;
+        textChanged = true;
       }
 
-      const reveal = pending.slice(0, endIndex);
-      textPendingRef.current = pending.slice(endIndex);
-      textVisibleRef.current += reveal;
-      setStreamingText(textVisibleRef.current);
+      // Reveal thinking (larger chunks, 20-300 chars/tick)
+      if (thinkPending.length > 0) {
+        const { revealed, remaining } = revealChunk(thinkPending, 20, 300, 0.4);
+        thinkingPendingRef.current = remaining;
+        thinkingVisibleRef.current += revealed;
+        thinkChanged = true;
+      }
+
+      // Batch both state updates into ONE render cycle
+      if (textChanged) setStreamingText(textVisibleRef.current);
+      if (thinkChanged) setStreamingThinking(thinkingVisibleRef.current);
     }, 33);
   }, [stopReveal]);
 
-  // ── Thinking reveal (throttled like text reveal) ──────────
-  // Without this, every thinking_delta event triggers setStreamingThinking
-  // immediately, causing rapid live-area height changes as text wraps to
-  // new lines — which makes Ink's cursor math misalign and the viewport jump.
-  const thinkingEmptyTicksRef = useRef(0);
-
-  const stopThinkingReveal = useCallback(() => {
-    if (thinkingRevealTimerRef.current) {
-      clearInterval(thinkingRevealTimerRef.current);
-      thinkingRevealTimerRef.current = null;
-    }
-  }, []);
-
-  const startThinkingReveal = useCallback(() => {
-    if (thinkingRevealTimerRef.current) return;
-    thinkingEmptyTicksRef.current = 0;
-    thinkingRevealTimerRef.current = setInterval(() => {
-      const pending = thinkingPendingRef.current;
-      if (pending.length === 0) {
-        thinkingEmptyTicksRef.current++;
-        if (thinkingEmptyTicksRef.current >= 3) {
-          stopThinkingReveal();
-        }
-        return;
-      }
-      thinkingEmptyTicksRef.current = 0;
-
-      // Larger chunks than text reveal — thinking text is dimmed/secondary
-      // so smooth animation matters less than keeping re-renders low.
-      const buffered = pending.length;
-      const charsPerTick = Math.max(20, Math.min(300, Math.ceil(buffered * 0.4)));
-
-      let endIndex = Math.min(charsPerTick, buffered);
-      if (endIndex < buffered) {
-        const breakChars = " \n.,;:`')]}>";
-        for (let i = endIndex; i >= Math.max(1, endIndex - 20); i--) {
-          if (breakChars.includes(pending[i])) {
-            endIndex = i + 1;
-            break;
-          }
-        }
-      }
-
-      const reveal = pending.slice(0, endIndex);
-      thinkingPendingRef.current = pending.slice(endIndex);
-      thinkingVisibleRef.current += reveal;
-      setStreamingThinking(thinkingVisibleRef.current);
-    }, 33);
-  }, [stopThinkingReveal]);
-
   const flushAllText = useCallback(() => {
     stopReveal();
-    stopThinkingReveal();
     if (textPendingRef.current.length > 0) {
       textVisibleRef.current += textPendingRef.current;
       textPendingRef.current = "";
@@ -293,7 +276,7 @@ export function useAgentLoop(
     }
     setStreamingText(textVisibleRef.current);
     setStreamingThinking(thinkingVisibleRef.current);
-  }, [stopReveal, stopThinkingReveal]);
+  }, [stopReveal]);
 
   const abort = useCallback(() => {
     abortRef.current?.abort();
@@ -422,6 +405,7 @@ export function useAgentLoop(
               onQueuedStart?.(merged);
               return [{ role: "user" as const, content: merged }];
             },
+            clearToolUses: options.provider === "anthropic",
           });
 
           for await (const event of generator as AsyncIterable<AgentEvent>) {
@@ -432,6 +416,7 @@ export function useAgentLoop(
                 startReveal();
                 if (phaseRef.current !== "generating") {
                   freezeThinking();
+                  if (phaseRef.current === "retrying") setRetryInfo(null);
                   phaseRef.current = "generating";
                   setActivityPhase("generating");
                 }
@@ -441,10 +426,11 @@ export function useAgentLoop(
                 thinkingBufferRef.current += event.text;
                 thinkingPendingRef.current += event.text;
                 charCountRef.current += event.text.length;
-                startThinkingReveal();
+                startReveal();
                 if (phaseRef.current !== "thinking") {
                   thinkingStartRef.current = Date.now();
                   setIsThinking(true);
+                  if (phaseRef.current === "retrying") setRetryInfo(null);
                   phaseRef.current = "thinking";
                   setActivityPhase("thinking");
                 }
@@ -524,7 +510,19 @@ export function useAgentLoop(
                 // onQueuedStart inside getSteeringMessages callback.
                 break;
 
+              case "retry":
+                phaseRef.current = "retrying";
+                setActivityPhase("retrying");
+                setRetryInfo({
+                  reason: event.reason,
+                  attempt: event.attempt,
+                  maxAttempts: event.maxAttempts,
+                  delayMs: event.delayMs,
+                });
+                break;
+
               case "turn_end":
+                setRetryInfo(null);
                 onTurnEnd?.(event.turn, event.stopReason, event.usage);
                 setCurrentTurn(event.turn);
                 setTotalTokens((prev) => ({
@@ -599,7 +597,6 @@ export function useAgentLoop(
           setIsRunning(false);
           abortRef.current = null;
           stopReveal();
-          stopThinkingReveal();
           if (elapsedTimerRef.current) {
             clearInterval(elapsedTimerRef.current);
             elapsedTimerRef.current = null;
@@ -673,8 +670,6 @@ export function useAgentLoop(
       onQueuedStart,
       startReveal,
       stopReveal,
-      startThinkingReveal,
-      stopThinkingReveal,
       flushAllText,
     ],
   );
@@ -683,14 +678,13 @@ export function useAgentLoop(
   useEffect(() => {
     return () => {
       stopReveal();
-      stopThinkingReveal();
       abortRef.current?.abort();
       if (elapsedTimerRef.current) {
         clearInterval(elapsedTimerRef.current);
         elapsedTimerRef.current = null;
       }
     };
-  }, [stopReveal, stopThinkingReveal]);
+  }, [stopReveal]);
 
   return {
     run,
@@ -707,6 +701,7 @@ export function useAgentLoop(
     totalTokens,
     contextUsed,
     activityPhase,
+    retryInfo,
     elapsedMs,
     thinkingMs,
     isThinking,

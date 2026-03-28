@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Text, Box, useInput, useStdin } from "ink";
 import type { EventEmitter } from "events";
 import { useTheme } from "../theme/theme.js";
-import { useAnimationTick, deriveFrame } from "./AnimationContext.js";
+import { useAnimationTick, useAnimationActive, deriveFrame } from "./AnimationContext.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import type { ImageAttachment } from "../../utils/image.js";
 import { extractImagePaths, readImageFile, getClipboardImage } from "../../utils/image.js";
@@ -164,6 +164,8 @@ export function InputArea({
   const theme = useTheme();
   const [value, setValue] = useState("");
   const [cursor, setCursor] = useState(0);
+  const cursorRef = useRef(cursor);
+  cursorRef.current = cursor;
   const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null);
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const historyRef = useRef<string[]>([]);
@@ -195,6 +197,7 @@ export function InputArea({
   );
 
   // Derive border pulse and cursor blink from global animation tick
+  useAnimationActive();
   const tick = useAnimationTick();
   const borderFrame = disabled ? 0 : deriveFrame(tick, 800, borderPulseColors.length);
   // Cursor blink: ~530ms period → visible for ~500ms, hidden for ~500ms
@@ -289,10 +292,20 @@ export function InputArea({
     original: typeof internal_eventEmitter.emit | null;
   }>({ original: null });
 
+  // Track whether input has text so we can toggle mouse tracking.
+  // Only enable mouse tracking when there's text to navigate — when the input
+  // is empty, click-to-cursor is useless and disabling tracking lets the
+  // terminal handle CMD+click for opening links natively.
+  const hasInputTextRef = useRef(value.length > 0);
+
   useEffect(() => {
     if (!isActive || !internal_eventEmitter) return;
 
-    process.stdout.write(ENABLE_MOUSE);
+    // Only enable mouse tracking if there's text — when empty, let the
+    // terminal handle clicks natively (e.g., CMD+click to open links).
+    if (hasInputTextRef.current) {
+      process.stdout.write(ENABLE_MOUSE);
+    }
 
     // Safety: ensure mouse tracking is disabled even on crash/SIGINT/unexpected exit
     // so the terminal isn't left in a broken state sending escape sequences on every click.
@@ -309,7 +322,7 @@ export function InputArea({
     let mouseDisabled = false;
 
     const reenableMouse = () => {
-      if (mouseDisabled) {
+      if (mouseDisabled && hasInputTextRef.current) {
         process.stdout.write(ENABLE_MOUSE);
         mouseDisabled = false;
       }
@@ -342,15 +355,27 @@ export function InputArea({
 
           // Decode SGR button code with bitmask:
           // bits 0-1: button (0=left, 1=middle, 2=right, 3=release)
+          // bit 2 (4): shift held
+          // bit 3 (8): meta/alt held (CMD on macOS)
+          // bit 4 (16): control held
           // bit 5 (32): motion event
           // bit 6 (64): scroll wheel
           const button = btnCode & 3;
+          const hasModifier = (btnCode & 0b11100) !== 0; // shift, meta, or ctrl
           const isMotion = (btnCode & 32) !== 0;
           const isScroll = (btnCode & 64) !== 0;
 
           // On scroll: disable mouse tracking so the terminal handles it natively,
           // then re-enable after idle so click-to-cursor keeps working.
           if (isScroll) {
+            pauseMouseForScroll();
+            continue;
+          }
+
+          // When modifier keys are held (CMD+click, Ctrl+click, Shift+click),
+          // temporarily disable mouse tracking so the terminal can handle
+          // the click natively (e.g., opening links with CMD+click).
+          if (hasModifier) {
             pauseMouseForScroll();
             continue;
           }
@@ -414,7 +439,9 @@ export function InputArea({
           let vlIndex = 0;
           let found = false;
           for (let h = 0; h < hardLines.length; h++) {
-            const wrapped = wrapLine(hardLines[h], cw > 0 ? cw : val.length + 1);
+            const hardLine = hardLines[h];
+            const wrapped = wrapLine(hardLine, cw > 0 ? cw : val.length + 1);
+            let hardLinePos = 0;
             for (let w = 0; w < wrapped.length; w++) {
               if (vlIndex === sl + clickedDisplayLine) {
                 setCursor(Math.min(charOffset + col, val.length));
@@ -423,6 +450,16 @@ export function InputArea({
                 break;
               }
               charOffset += wrapped[w].length;
+              hardLinePos += wrapped[w].length;
+              // Account for the space consumed by word-wrap break
+              if (
+                w < wrapped.length - 1 &&
+                hardLinePos < hardLine.length &&
+                hardLine[hardLinePos] === " "
+              ) {
+                charOffset++;
+                hardLinePos++;
+              }
               vlIndex++;
             }
             if (found) break;
@@ -450,6 +487,19 @@ export function InputArea({
       }
     };
   }, [isActive, internal_eventEmitter]);
+
+  // Toggle mouse tracking based on input text: disable when empty so the
+  // terminal handles CMD+click for links natively, enable when there's text
+  // so click-to-cursor works.
+  useEffect(() => {
+    const hasText = value.length > 0;
+    if (hasText !== hasInputTextRef.current) {
+      hasInputTextRef.current = hasText;
+      if (isActive) {
+        process.stdout.write(hasText ? ENABLE_MOUSE : DISABLE_MOUSE);
+      }
+    }
+  }, [value, isActive]);
 
   // Helper: delete selected text and return new value + cursor position.
   // Returns null if no selection is active.
@@ -770,18 +820,22 @@ export function InputArea({
           setValue(
             sel.newValue.slice(0, sel.newCursor) + normalized + sel.newValue.slice(sel.newCursor),
           );
-          setCursor(sel.newCursor + normalized.length);
+          const newCur = sel.newCursor + normalized.length;
+          setCursor(newCur);
+          cursorRef.current = newCur;
           setSelectionAnchor(null);
         } else {
-          setValue((v) => v.slice(0, cursor) + normalized + v.slice(cursor));
-          setCursor((c) => c + normalized.length);
+          const cur = cursorRef.current;
+          setValue((v) => v.slice(0, cur) + normalized + v.slice(cur));
+          setCursor(cur + normalized.length);
+          cursorRef.current = cur + normalized.length;
         }
 
         // Detect paste: Ink delivers pasted text as input.length > 1
         // For large pastes, Ink may split into multiple chunks, so we
         // accumulate and debounce to capture the full paste.
         if (input.length > 1) {
-          const pasteStart = sel ? sel.newCursor : cursor;
+          const pasteStart = sel ? sel.newCursor : cursorRef.current - normalized.length;
           setPasteText((prev) => {
             if (!prev) setPasteOffset(pasteStart);
             return prev + normalized;
@@ -808,22 +862,26 @@ export function InputArea({
     const hardLines = value.split("\n");
     let visualLineIndex = 0;
     for (let h = 0; h < hardLines.length; h++) {
-      const wrapped = wrapLine(hardLines[h], contentWidth);
+      const hardLine = hardLines[h];
+      const wrapped = wrapLine(hardLine, contentWidth);
+      let hardLinePos = 0; // track position within the original hard line
       for (let w = 0; w < wrapped.length; w++) {
         const lineLen = wrapped[w].length;
         const lineStart = pos;
         const lineEnd = pos + lineLen;
-        // Cursor is on this visual line if it falls within [lineStart, lineEnd]
-        // For the last wrapped segment of a hard line, also include the newline position
-        const isLastWrap = w === wrapped.length - 1;
-        const effectiveEnd = isLastWrap ? lineEnd : lineEnd;
-        if (cursor >= lineStart && cursor <= effectiveEnd) {
+        if (cursor >= lineStart && cursor <= lineEnd) {
           return { line: visualLineIndex, col: cursor - lineStart };
         }
         pos += lineLen;
+        hardLinePos += lineLen;
         // Account for the space consumed by word-wrap break
-        if (!isLastWrap) {
-          // wrapped lines don't consume extra chars unless word-broken
+        if (
+          w < wrapped.length - 1 &&
+          hardLinePos < hardLine.length &&
+          hardLine[hardLinePos] === " "
+        ) {
+          pos++;
+          hardLinePos++;
         }
         visualLineIndex++;
       }
@@ -929,22 +987,29 @@ export function InputArea({
 
             // Calculate the absolute character offset where this display line starts
             let lineStartOffset = 0;
-            for (let j = 0; j < startLine + i; j++) {
-              lineStartOffset += visualLines[j].length;
-            }
             const hardLines = value.split("\n");
             let offset = 0;
             let vlIndex = 0;
             for (let h = 0; h < hardLines.length && vlIndex <= startLine + i; h++) {
-              const wrapped = wrapLine(
-                hardLines[h],
-                contentWidth > 0 ? contentWidth : value.length + 1,
-              );
+              const hardLine = hardLines[h];
+              const cw = contentWidth > 0 ? contentWidth : value.length + 1;
+              const wrapped = wrapLine(hardLine, cw);
+              let hardLinePos = 0;
               for (let w = 0; w < wrapped.length && vlIndex <= startLine + i; w++) {
                 if (vlIndex === startLine + i) {
                   lineStartOffset = offset;
                 }
                 offset += wrapped[w].length;
+                hardLinePos += wrapped[w].length;
+                // Account for the space consumed by word-wrap break
+                if (
+                  w < wrapped.length - 1 &&
+                  hardLinePos < hardLine.length &&
+                  hardLine[hardLinePos] === " "
+                ) {
+                  offset++;
+                  hardLinePos++;
+                }
                 vlIndex++;
               }
               offset++; // newline

@@ -15,7 +15,7 @@ interface AssistantMessageProps {
 // "⏺ " prefix = 2 chars
 const PREFIX_WIDTH = 2;
 
-export function AssistantMessage({
+export const AssistantMessage = React.memo(function AssistantMessage({
   text,
   thinking,
   thinkingMs,
@@ -40,4 +40,4 @@ export function AssistantMessage({
       )}
     </Box>
   );
-}
+});

@@ -3,7 +3,11 @@ import { useStdout } from "ink";
 import type { ActivityPhase } from "./useAgentLoop.js";
 
 import { SPINNER_FRAMES, SPINNER_INTERVAL } from "../spinner-frames.js";
-import { useAnimationTick, deriveFrame } from "../components/AnimationContext.js";
+import {
+  useAnimationTick,
+  useAnimationActive,
+  deriveFrame,
+} from "../components/AnimationContext.js";
 import { PLANNING_PHRASES, selectPhrases, shuffleArray } from "../activity-phrases.js";
 
 const PHRASE_INTERVAL = 3000;
@@ -26,6 +30,7 @@ export function useTerminalTitle({
   const { stdout } = useStdout();
 
   // Derive spinner frame from global animation tick — no independent timer
+  useAnimationActive();
   const tick = useAnimationTick();
   const spinnerFrame = isRunning ? deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length) : 0;
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, memo } from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { Markdown } from "./Markdown.js";
@@ -17,7 +17,7 @@ interface StreamingAreaProps {
   planMode?: boolean;
 }
 
-export function StreamingArea({
+export const StreamingArea = memo(function StreamingArea({
   isRunning,
   streamingText,
   streamingThinking,
@@ -90,12 +90,14 @@ export function StreamingArea({
             </Text>
           </Box>
           <Box flexDirection="column" flexGrow={1} width={contentWidth}>
-            <Markdown>
-              {streamingText.trimStart() + (isRunning && cursorVisible ? "\u258D" : "")}
-            </Markdown>
+            {/* Pass width directly to avoid measureElement on every streaming tick.
+                Cursor rendered as a separate element so markdown is not re-parsed
+                on cursor blink toggle. */}
+            <Markdown width={contentWidth}>{streamingText.trimStart()}</Markdown>
+            {isRunning && <Text color={theme.textDim}>{cursorVisible ? "\u258D" : " "}</Text>}
           </Box>
         </Box>
       )}
     </Box>
   );
-}
+});

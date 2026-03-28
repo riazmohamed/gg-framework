@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useMemo } from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
-import type { ActivityPhase } from "../hooks/useAgentLoop.js";
+import type { ActivityPhase, RetryInfo } from "../hooks/useAgentLoop.js";
 
 import { SPINNER_FRAMES, SPINNER_INTERVAL } from "../spinner-frames.js";
 import { PLANNING_PHRASES, selectPhrases, shuffleArray } from "../activity-phrases.js";
+import { useAnimationTick, useAnimationActive, deriveFrame } from "./AnimationContext.js";
 
 // ── Color pulse cycle ─────────────────────────────────────
 
@@ -112,7 +113,15 @@ interface ActivityIndicatorProps {
   userMessage?: string;
   activeToolNames?: string[];
   planMode?: boolean;
+  retryInfo?: RetryInfo | null;
 }
+
+const RETRY_REASON_LABELS: Record<RetryInfo["reason"], string> = {
+  overloaded: "Provider overloaded",
+  rate_limit: "Rate limited",
+  empty_response: "Empty response",
+  context_overflow: "Context overflow, compacting",
+};
 
 export function ActivityIndicator({
   phase,
@@ -123,31 +132,21 @@ export function ActivityIndicator({
   userMessage = "",
   activeToolNames = [],
   planMode,
+  retryInfo,
 }: ActivityIndicatorProps) {
   const theme = useTheme();
 
-  // ── Single animation tick ────────────────────────────────
-  // Instead of 5 separate setIntervals (spinner, pulse, ellipsis, shimmer,
-  // phrase), we use ONE timer at the fastest cadence (SHIMMER_INTERVAL=100ms)
-  // and derive all animation frames via modular arithmetic.  This reduces
-  // Ink re-renders from ~5 independent state updates to 1 batched update
-  // per tick, which prevents live-area height miscalculations that cause
-  // viewport jumping.
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setTick((t) => t + 1);
-    }, SHIMMER_INTERVAL);
-    return () => clearInterval(timer);
-  }, []);
+  // Use the global animation tick instead of a local timer.
+  // This eliminates a duplicate 100ms setInterval that was causing
+  // independent re-renders on top of the global AnimationProvider tick.
+  useAnimationActive();
+  const tick = useAnimationTick();
 
   // Derive all animation frames from the single tick counter
-  const spinnerFrame =
-    Math.floor((tick * SHIMMER_INTERVAL) / SPINNER_INTERVAL) % SPINNER_FRAMES.length;
+  const spinnerFrame = deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length);
   const pulseColors = planMode ? PLAN_PULSE_COLORS : PULSE_COLORS;
-  const colorFrame = Math.floor((tick * SHIMMER_INTERVAL) / PULSE_INTERVAL) % pulseColors.length;
-  const ellipsisFrame =
-    Math.floor((tick * SHIMMER_INTERVAL) / ELLIPSIS_INTERVAL) % ELLIPSIS_FRAMES.length;
+  const colorFrame = deriveFrame(tick, PULSE_INTERVAL, pulseColors.length);
+  const ellipsisFrame = deriveFrame(tick, ELLIPSIS_INTERVAL, ELLIPSIS_FRAMES.length);
 
   // Phrase rotation — pick phrases based on phase + user message + active tools, shuffle, rotate
   const toolNamesKey = activeToolNames.sort().join(",");
@@ -175,6 +174,30 @@ export function ActivityIndicator({
   const paddedEllipsis = ellipsis + " ".repeat(3 - ellipsis.length);
 
   const meta = buildMetaSuffix(elapsedMs, thinkingMs, isThinking, tokenEstimate);
+
+  // ── Retry display ──────────────────────────────────────
+  if (phase === "retrying" && retryInfo) {
+    const retryLabel = RETRY_REASON_LABELS[retryInfo.reason];
+    const retryColor = "#f59e0b"; // amber
+    const delaySec =
+      retryInfo.delayMs > 0 ? ` waiting ${Math.round(retryInfo.delayMs / 1000)}s` : "";
+    return (
+      <Box>
+        <Text color={retryColor} bold>
+          {SPINNER_FRAMES[spinnerFrame]}{" "}
+        </Text>
+        <Text color={retryColor}>
+          {retryLabel} — retrying ({retryInfo.attempt}/{retryInfo.maxAttempts})
+        </Text>
+        <Text color={theme.textDim}>
+          {delaySec}
+          {"  ("}
+          {formatElapsed(elapsedMs)}
+          {")"}
+        </Text>
+      </Box>
+    );
+  }
 
   return (
     <Box>
