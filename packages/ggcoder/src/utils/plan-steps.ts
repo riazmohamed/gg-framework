@@ -17,18 +17,24 @@ export interface PlanStep {
 /**
  * Extract numbered steps from a plan markdown string.
  *
+ * Prefers steps from a canonical `## Steps` section if present.
+ * Falls back to scanning the entire document for top-level numbered items.
+ *
  * Looks for lines like:
  *   1. Do something
  *   2) Do something else
  *   3. **Bold step**
- *
- * Only top-level numbered items are extracted (not nested sub-items).
  */
 export function extractPlanSteps(planContent: string): PlanStep[] {
-  const steps: PlanStep[] = [];
-  const pattern = /^\s*(\d+)[.)]\s+\*{0,2}([^*\n]+)/gm;
+  // Try to find a canonical ## Steps section first
+  const stepsSection = extractStepsSection(planContent);
+  const source = stepsSection ?? planContent;
 
-  for (const match of planContent.matchAll(pattern)) {
+  const steps: PlanStep[] = [];
+  // Only match non-indented numbered items (0-2 spaces max) to skip sub-items
+  const pattern = /^(\d+)[.)]\s+\*{0,2}([^*\n]+)/gm;
+
+  for (const match of source.matchAll(pattern)) {
     let text = match[2]
       .trim()
       .replace(/\*{1,2}$/, "")
@@ -45,6 +51,31 @@ export function extractPlanSteps(planContent: string): PlanStep[] {
   }
 
   return steps;
+}
+
+/**
+ * Extract the content under a `## Steps` heading, stopping at the next
+ * heading of equal or higher level (or end of document).
+ */
+function extractStepsSection(planContent: string): string | undefined {
+  const match = planContent.match(/^##\s+Steps\s*$/m);
+  if (!match || match.index === undefined) return undefined;
+
+  const start = match.index + match[0].length;
+  // Find next heading of level 1-2 (or end of string)
+  const rest = planContent.slice(start);
+  const nextHeading = rest.match(/^#{1,2}\s/m);
+  const sectionContent = nextHeading?.index !== undefined ? rest.slice(0, nextHeading.index) : rest;
+  return sectionContent;
+}
+
+/**
+ * Strip [DONE:n] markers from text for display purposes.
+ * These markers are machine-readable signals for the progress widget,
+ * not meant to be shown to the user.
+ */
+export function stripDoneMarkers(text: string): string {
+  return text.replace(/\s*\[DONE:\d+\]\s*/gi, " ").replace(/  +/g, " ");
 }
 
 /**

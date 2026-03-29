@@ -54,6 +54,7 @@ import {
   extractPlanSteps,
   findCompletedMarkers,
   markStepsCompleted,
+  stripDoneMarkers,
   type PlanStep,
 } from "../utils/plan-steps.js";
 import type { MCPClientManager } from "../core/mcp/index.js";
@@ -866,7 +867,8 @@ export function App(props: AppProps) {
           if (flushed.length > 0) {
             setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
           }
-          return [{ kind: "assistant", text, thinking, thinkingMs, id: getId() }];
+          const displayText = planStepsRef.current.length > 0 ? stripDoneMarkers(text) : text;
+        return [{ kind: "assistant", text: displayText, thinking, thinkingMs, id: getId() }];
         });
       }, []),
       onToolStart: useCallback(

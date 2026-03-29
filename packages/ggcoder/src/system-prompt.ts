@@ -61,8 +61,21 @@ export async function buildSystemPrompt(
         `### Rules\n` +
         `- DO NOT use bash, edit, write (except to .gg/plans/), or subagent — they are restricted\n` +
         `- Be specific: list exact file paths, function names, line numbers\n` +
-        `- Include step-by-step implementation order with dependencies\n` +
-        `- Note risks and verification criteria`,
+        `- Note risks and verification criteria\n\n` +
+        `### Plan Format\n` +
+        `Your plan can have any structure (phases, analysis, notes, etc.) but it MUST end ` +
+        `with a section titled exactly \`## Steps\` containing a single flat numbered list of ` +
+        `implementation steps. This section is parsed by the progress widget — it is the ONLY ` +
+        `source of truth for step tracking. Do NOT put numbered lists elsewhere in the plan. ` +
+        `Use bullets or sub-headings for other sections.\n\n` +
+        `Example:\n` +
+        "```\n" +
+        `## Steps\n` +
+        `1. Create protocol types package with shared interfaces\n` +
+        `2. Set up monorepo with pnpm workspaces\n` +
+        `3. Migrate Expo Router to file-based routing\n` +
+        `...\n` +
+        "```",
     );
   }
 
@@ -85,8 +98,10 @@ export async function buildSystemPrompt(
           `- Do not deviate from the plan without user confirmation\n` +
           `- If you encounter issues not covered by the plan, ask the user\n\n` +
           `### Progress Tracking\n` +
-          `After completing each numbered step in the plan, output \`[DONE:n]\` (e.g. \`[DONE:1]\`, \`[DONE:2]\`) ` +
-          `in your response to mark it as complete. This updates the progress widget shown to the user.`,
+          `After completing each step from the plan's \`## Steps\` section, output \`[DONE:n]\` ` +
+          `(e.g. \`[DONE:1]\`, \`[DONE:2]\`) in your response to mark it as complete. ` +
+          `The step numbers correspond to the numbered list in the \`## Steps\` section. ` +
+          `This updates the progress widget shown to the user.`,
       );
     }
   }
