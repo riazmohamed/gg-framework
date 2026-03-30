@@ -46,7 +46,7 @@ import { buildSystemPrompt } from "./system-prompt.js";
 import { createTools } from "./tools/index.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import { setEstimatorModel } from "./core/compaction/token-estimator.js";
-import { getContextWindow } from "./core/model-registry.js";
+import { getContextWindow, getDefaultModel } from "./core/model-registry.js";
 import { MCPClientManager, getMCPServers } from "./core/mcp/index.js";
 import { discoverAgents } from "./core/agents.js";
 import { discoverSkills } from "./core/skills.js";
@@ -399,7 +399,6 @@ async function runInkTUI(opts: {
 
   const authStorage = new AuthStorage(paths.authFile);
   await authStorage.load();
-  const creds = await authStorage.resolveCredentials(provider);
 
   // Detect all logged-in providers and preload their credentials
   const allProviders: Provider[] = ["anthropic", "openai", "glm", "moonshot"];
@@ -424,6 +423,54 @@ async function runInkTUI(opts: {
 
   // Ollama runs locally — always available, no auth needed
   loggedInProviders.push("ollama");
+
+  // Resolve credentials for the selected provider.
+  // If the provider needs auth but isn't authenticated, fall back to another
+  // authenticated provider (or Ollama as a last resort) instead of crashing.
+  let creds: OAuthCredentials | undefined;
+  let effectiveProvider = provider;
+  let effectiveModel = model;
+
+  if (provider === "ollama") {
+    // Ollama is local — no credentials needed
+  } else if (credentialsByProvider[provider]) {
+    creds = await authStorage.resolveCredentials(provider);
+  } else {
+    // Selected provider has no auth — fall back to the first authenticated provider
+    const fallbackProvider = loggedInProviders.find((p) => credentialsByProvider[p]);
+    if (fallbackProvider) {
+      effectiveProvider = fallbackProvider;
+      effectiveModel = getDefaultModel(fallbackProvider).id;
+      creds = await authStorage.resolveCredentials(fallbackProvider);
+      log("WARN", "auth", `Provider "${provider}" not authenticated, falling back to "${fallbackProvider}"`);
+      console.log(
+        chalk.hex("#f59e0b")(
+          `⚠ Not logged in to ${provider}. Falling back to ${fallbackProvider} (${effectiveModel}).`,
+        ),
+      );
+      console.log(
+        chalk.hex("#6b7280")(`  Run "ogcoder login" to add more providers, or use /model to switch.\n`),
+      );
+    } else {
+      // No authenticated provider at all — fall back to Ollama
+      effectiveProvider = "ollama";
+      effectiveModel = getDefaultModel("ollama").id;
+      log("WARN", "auth", "No authenticated providers found, falling back to Ollama");
+      console.log(
+        chalk.hex("#f59e0b")(
+          `⚠ No authenticated providers. Falling back to Ollama (${effectiveModel}).`,
+        ),
+      );
+      console.log(
+        chalk.hex("#6b7280")(`  Run "ogcoder login" to authenticate a cloud provider.\n`),
+      );
+    }
+  }
+
+  // Update token estimator if we fell back to a different model
+  if (effectiveModel !== model) {
+    setEstimatorModel(effectiveModel);
+  }
 
   // Ensure project-local .gg directories exist
   const localGGDir = path.join(cwd, ".gg");
@@ -456,8 +503,8 @@ async function runInkTUI(opts: {
   const { tools, processManager } = createTools(cwd, {
     agents,
     skills,
-    provider,
-    model,
+    provider: effectiveProvider,
+    model: effectiveModel,
     planModeRef,
     onEnterPlan: (reason) => onEnterPlanRef.current(reason),
     onExitPlan: (planPath) => onExitPlanRef.current(planPath),
@@ -467,8 +514,8 @@ async function runInkTUI(opts: {
   const mcpManager = new MCPClientManager();
   try {
     const providerApiKey =
-      provider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
-    const mcpTools = await mcpManager.connectAll(getMCPServers(provider, providerApiKey));
+      effectiveProvider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
+    const mcpTools = await mcpManager.connectAll(getMCPServers(effectiveProvider, providerApiKey));
     tools.push(...mcpTools);
   } catch (err) {
     log(
@@ -512,13 +559,13 @@ async function runInkTUI(opts: {
 
         // Auto-compact on load if the restored session exceeds the context window.
         // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
-        const contextWindow = getContextWindow(model);
+        const contextWindow = getContextWindow(effectiveModel);
         if (shouldCompact(messages, contextWindow, 0.8)) {
           log("INFO", "session", `Restored session exceeds context — auto-compacting`);
           const compacted = await compact(messages, {
-            provider,
-            model,
-            apiKey: creds.accessToken,
+            provider: effectiveProvider,
+            model: effectiveModel,
+            apiKey: creds?.accessToken ?? "",
             contextWindow,
           });
           // Replace messages array contents with compacted messages
@@ -544,22 +591,22 @@ async function runInkTUI(opts: {
 
   // Create a new session file if we didn't reuse one
   if (!sessionPath) {
-    const session = await sessionManager.create(cwd, provider, model);
+    const session = await sessionManager.create(cwd, effectiveProvider, effectiveModel);
     sessionPath = session.path;
     log("INFO", "session", `New session created`, { path: sessionPath });
   }
 
   await renderApp({
-    provider,
-    model,
+    provider: effectiveProvider,
+    model: effectiveModel,
     tools,
     webSearch: true,
     messages,
     version: CLI_VERSION,
     maxTokens: 16384,
     thinking: opts.thinkingLevel,
-    apiKey: creds.accessToken,
-    accountId: creds.accountId,
+    apiKey: creds?.accessToken ?? "",
+    accountId: creds?.accountId,
     cwd,
     theme: opts.theme,
     loggedInProviders,

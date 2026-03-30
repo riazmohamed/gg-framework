@@ -66,6 +66,16 @@ export const MODELS: ModelInfo[] = [
   },
   // ── GLM (Z.AI) ───────────────────────────────────────────
   {
+    id: "glm-5.1",
+    name: "GLM-5.1",
+    provider: "glm",
+    contextWindow: 128_000,
+    maxOutputTokens: 16_384,
+    supportsThinking: true,
+    supportsImages: false,
+    costTier: "medium",
+  },
+  {
     id: "glm-5",
     name: "GLM-5",
     provider: "glm",
@@ -129,7 +139,7 @@ export function getModelsForProvider(provider: Provider): ModelInfo[] {
 
 export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.3-codex")!;
-  if (provider === "glm") return MODELS.find((m) => m.id === "glm-5")!;
+  if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.1")!;
   if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k2.5")!;
   if (provider === "ollama") return MODELS.find((m) => m.id === "qwen2.5-coder:32b")!;
   return MODELS.find((m) => m.id === "claude-sonnet-4-6")!;

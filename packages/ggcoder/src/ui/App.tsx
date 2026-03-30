@@ -795,9 +795,17 @@ export function App(props: AppProps) {
   // Resolve fresh OAuth credentials before each agent loop run.
   // Falls back to the static props when authStorage is not available.
   const resolveCredentials = useCallback(async () => {
+    // Ollama runs locally — no credentials needed
+    if (currentProvider === "ollama") {
+      return { apiKey: "", accountId: undefined };
+    }
     if (props.authStorage) {
-      const creds = await props.authStorage.resolveCredentials(currentProvider);
-      return { apiKey: creds.accessToken, accountId: creds.accountId };
+      try {
+        const creds = await props.authStorage.resolveCredentials(currentProvider);
+        return { apiKey: creds.accessToken, accountId: creds.accountId };
+      } catch {
+        // Provider not authenticated — use static props as fallback
+      }
     }
     return { apiKey: activeApiKey!, accountId: activeAccountId };
   }, [props.authStorage, currentProvider, activeApiKey, activeAccountId]);
