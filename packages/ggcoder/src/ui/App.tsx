@@ -40,7 +40,8 @@ import {
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { useTerminalProgress } from "./hooks/useTerminalProgress.js";
 import { getGitBranch } from "../utils/git.js";
-import { getModel, getContextWindow, getVisionModel } from "../core/model-registry.js";
+import { getModel, getContextWindow } from "../core/model-registry.js";
+import { createModelRouter } from "../core/model-router.js";
 import { SessionManager, type MessageEntry } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
 import { SettingsManager } from "../core/settings-manager.js";
@@ -888,6 +889,12 @@ export function App(props: AppProps) {
     return { apiKey: activeApiKey!, accountId: activeAccountId };
   }, [props.authStorage, currentProvider, activeApiKey, activeAccountId]);
 
+  // Build model router for auto-switching (e.g. vision model on image input)
+  const modelRouter = useMemo(
+    () => createModelRouter("vision", currentProvider, currentModel),
+    [currentProvider, currentModel],
+  );
+
   const agentLoop = useAgentLoop(
     messagesRef,
     {
@@ -902,6 +909,7 @@ export function App(props: AppProps) {
       accountId: activeAccountId,
       resolveCredentials,
       transformContext,
+      modelRouter,
     },
     {
       onComplete: useCallback(() => {
@@ -1623,8 +1631,6 @@ export function App(props: AppProps) {
 
       // ── Build user content (shared by normal + queued paths) ──
       const hasImages = inputImages.length > 0;
-      const modelInfo = getModel(currentModel);
-      const modelSupportsImages = modelInfo?.supportsImages ?? true;
       let userContent: string | (TextContent | ImageContent)[];
       if (hasImages) {
         const parts: (TextContent | ImageContent)[] = [];
@@ -1637,26 +1643,10 @@ export function App(props: AppProps) {
               type: "text",
               text: `<file name="${img.fileName}">\n${img.data}\n</file>`,
             });
-          } else if (modelSupportsImages || getVisionModel(currentProvider)) {
-            // Send native ImageContent — either the current model supports images,
-            // or the model router will auto-switch to a vision-capable model.
-            parts.push({ type: "image", mediaType: img.mediaType, data: img.data });
           } else {
-            // No vision model available at all: save image to temp file for MCP tool
-            const ext = img.mediaType.split("/")[1] ?? "png";
-            const tmpPath = `/tmp/ogcoder-img-${Date.now()}.${ext}`;
-            try {
-              writeFileSync(tmpPath, Buffer.from(img.data, "base64"));
-              parts.push({
-                type: "text",
-                text: `[User attached an image saved at: ${tmpPath} — use the image_analysis tool to view and analyze it]`,
-              });
-            } catch {
-              parts.push({
-                type: "text",
-                text: `[User attached an image but it could not be saved for analysis]`,
-              });
-            }
+            // Send native ImageContent — the model router will auto-switch
+            // to a vision-capable model if the current one doesn't support images.
+            parts.push({ type: "image", mediaType: img.mediaType, data: img.data });
           }
         }
         // If only text parts remain after stripping images, simplify to plain string
@@ -1843,7 +1833,11 @@ export function App(props: AppProps) {
       { name: "compact", aliases: ["c"], description: "Compact conversation" },
       { name: "clear", aliases: [], description: "Clear session and terminal" },
       { name: "quit", aliases: ["q", "exit"], description: "Exit the agent" },
-      { name: "teach-me", aliases: ["teach"], description: "Open the comprehensive guide on building this LLM agent framework" },
+      {
+        name: "teach-me",
+        aliases: ["teach"],
+        description: "Open the comprehensive guide on building this LLM agent framework",
+      },
       { name: "plan", aliases: [], description: "Toggle plan mode (on/off)" },
       { name: "plans", aliases: [], description: "Open plans pane" },
       ...PROMPT_COMMANDS.map((cmd) => ({

@@ -283,9 +283,10 @@ export function createBuiltinCommands(): SlashCommand[] {
         }
 
         // Return first 2000 characters + suggestion to view full file
-        const preview = guideContent.length > 2000
-          ? `${guideContent.slice(0, 2000)}\n\n...[truncated]\n\nView the full guide with: cat BUILD_GUIDE.md`
-          : guideContent;
+        const preview =
+          guideContent.length > 2000
+            ? `${guideContent.slice(0, 2000)}\n\n...[truncated]\n\nView the full guide with: cat BUILD_GUIDE.md`
+            : guideContent;
         return preview;
       },
     },

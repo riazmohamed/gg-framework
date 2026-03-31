@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # gg-framework
 
 A modular TypeScript framework for building LLM-powered apps — from raw streaming to full coding agent.
@@ -44,6 +48,7 @@ packages/
           │   ├── mcp/       # Model Context Protocol client
           │   ├── extensions/ # Extension system
           │   ├── model-registry.ts # Provider/model catalog
+          │   ├── model-router.ts # Per-turn model switching (vision, plan-execute, hybrid)
           │   ├── event-bus.ts # Cross-component events
           │   ├── agents.ts  # Sub-agent management
           │   ├── skills.ts  # Skill system
@@ -152,6 +157,12 @@ Fix ALL errors before continuing. Quick fixes:
 - **OAuth-only auth**: no API keys, PKCE OAuth flows, tokens in `~/.gg/auth.json`
 - **Zod schemas**: tool parameters defined with Zod, converted to JSON Schema at provider boundary
 - **Debug logging**: `~/.gg/debug.log` — timestamped log of startup, auth, tool calls, turn completions, errors. Truncated on each CLI restart. Singleton logger in `src/core/logger.ts`
+- **Model Router**: per-turn model switching in the agent loop — defined in `core/model-router.ts`, wired via `modelRouter` option in `agentLoop()`. Three modes:
+  - `vision` — auto-switch to a vision model when images are detected in messages
+  - `plan-execute` — use planner model for new user inputs, executor model for tool follow-ups
+  - `hybrid` (default) — vision takes priority, then plan-execute for text-only turns
+  - The router is created in `App.tsx` (interactive UI) and `AgentSession` (programmatic). It emits `model_switch` events that show a notification in the UI.
+  - **Critical**: when images exist anywhere in the conversation, the router stays on the vision model to avoid switching to a text-only model that can't handle image context.
 
 ## Slash Commands
 
@@ -178,7 +189,7 @@ To add a new UI command:
 
 Commands that don't need React state live in `createBuiltinCommands()` in `src/core/slash-commands.ts`. They receive a `SlashCommandContext` with methods like `switchModel`, `compact`, `newSession`, `quit`, etc.
 
-**Current registry commands:** `/model` (`/m`), `/compact` (`/c`), `/help` (`/h`, `/?`), `/settings` (`/config`), `/session` (`/s`), `/new` (`/n`), `/quit` (`/q`, `/exit`)
+**Current registry commands:** `/model` (`/m`), `/compact` (`/c`), `/help` (`/h`, `/?`), `/settings` (`/config`), `/session` (`/s`), `/new` (`/n`), `/quit` (`/q`, `/exit`), `/router`
 
 Note: `/model`, `/compact`, and `/quit` exist in both — the UI handlers in `App.tsx` take precedence since they're checked first.
 

@@ -1,5 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { agentLoop, type AgentEvent, type AgentTool } from "@abukhaled/gg-agent";
+import {
+  agentLoop,
+  type AgentEvent,
+  type AgentTool,
+  type ModelRouterResult,
+} from "@abukhaled/gg-agent";
 import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from "@abukhaled/gg-ai";
 
 /** Rough token estimate from message content (~4 chars per token). */
@@ -70,6 +75,12 @@ export interface AgentLoopOptions {
     messages: Message[],
     options?: { force?: boolean },
   ) => Message[] | Promise<Message[]>;
+  /** Per-turn model/provider router (e.g. auto-switch to vision model). */
+  modelRouter?: (
+    messages: Message[],
+    currentModel: string,
+    currentProvider: string,
+  ) => ModelRouterResult | null | Promise<ModelRouterResult | null>;
 }
 
 export type ActivityPhase = "waiting" | "thinking" | "generating" | "tools" | "retrying" | "idle";
@@ -319,6 +330,7 @@ export function useAgentLoop(
               return [{ role: "user" as const, content: merged }];
             },
             clearToolUses: options.provider === "anthropic",
+            modelRouter: options.modelRouter,
           });
 
           for await (const event of generator as AsyncIterable<AgentEvent>) {

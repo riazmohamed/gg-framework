@@ -93,6 +93,7 @@ export async function* agentLoop(
   const totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
   let turn = 0;
   let firstTurn = true;
+  let lastRouterModel: string | undefined;
   let consecutivePauses = 0;
   let overflowRetries = 0;
   let overloadRetries = 0;
@@ -154,7 +155,18 @@ export async function* agentLoop(
               reason: override.reason ?? "model router",
             } satisfies AgentModelSwitchEvent;
           }
+        } else if (lastRouterModel && lastRouterModel !== turnModel) {
+          // Router returned null — switched back to default model
+          yield {
+            type: "model_switch",
+            fromModel: lastRouterModel,
+            toModel: turnModel,
+            fromProvider: turnProvider,
+            toProvider: turnProvider,
+            reason: `Returning to ${turnModel}`,
+          } satisfies AgentModelSwitchEvent;
         }
+        lastRouterModel = turnModel;
       }
 
       // ── Call LLM with overflow recovery ──
