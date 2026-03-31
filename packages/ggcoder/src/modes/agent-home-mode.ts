@@ -199,45 +199,43 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
     const currentModel = state?.session.getState().model ?? options.model;
     const modelInfo = MODELS.find((m) => m.id === currentModel);
 
-    let text = "GG Coder — Agent Home\n\n";
-    text += `Project: ${path.basename(currentCwd)}\n`;
-    text += `Model: ${modelInfo?.name ?? currentModel}\n\n`;
+    let text = "";
+    text += `**GG Coder**\n`;
+    text += `Project: **${path.basename(currentCwd)}** \u00b7 Model: **${modelInfo?.name ?? currentModel}**\n\n`;
 
-    text += "Commands\n";
-    text += "/m — switch model\n";
-    text += "/link — switch project\n";
-    text += "/unlink — reset to default project\n";
-    text += "/status — current state\n";
-    text += "/cancel — abort current task\n";
-    text += "/help — this message\n";
+    text += `**Commands**\n`;
+    text += `\`/m\` \u2014 Switch model\n`;
+    text += `\`/link\` \u2014 Switch project\n`;
+    text += `\`/unlink\` \u2014 Reset to default project\n`;
+    text += `\`/status\` \u2014 Current state\n`;
+    text += `\`/cancel\` \u2014 Abort current task\n`;
+    text += `\`/help\` \u2014 This message\n\n`;
 
-    text += "\nSession Commands\n";
-    text += "/compact — compress context\n";
-    text += "/new — fresh session\n";
-    text += "/session — list sessions\n";
-    text += "/branch — fork conversation\n";
-    text += "/branches — list branches\n";
-    text += "/clear — clear session\n";
-    text += "/settings — show/modify settings\n";
+    text += `**Session**\n`;
+    text += `\`/compact\` \u2014 Compress context\n`;
+    text += `\`/new\` \u2014 Fresh session\n`;
+    text += `\`/session\` \u2014 List sessions\n`;
+    text += `\`/branch\` \u2014 Fork conversation\n`;
+    text += `\`/branches\` \u2014 List branches\n`;
+    text += `\`/clear\` \u2014 Clear session\n`;
+    text += `\`/settings\` \u2014 Show/modify settings\n`;
 
-    // Prompt-template commands
     if (PROMPT_COMMANDS.length > 0) {
-      text += "\nAgent Commands\n";
+      text += `\n**Agent**\n`;
       for (const cmd of PROMPT_COMMANDS) {
-        text += `/${cmd.name} — ${cmd.description}\n`;
+        text += `\`/${cmd.name}\` \u2014 ${cmd.description}\n`;
       }
     }
 
-    // Custom commands from .gg/commands/
     const customCmds = await loadCustomCommands(currentCwd);
     if (customCmds.length > 0) {
-      text += "\nCustom Commands\n";
+      text += `\n**Custom**\n`;
       for (const cmd of customCmds) {
-        text += `/${cmd.name} — ${cmd.description}\n`;
+        text += `\`/${cmd.name}\` \u2014 ${cmd.description}\n`;
       }
     }
 
-    text += "\nSend any message to start coding.";
+    text += `\n_Send any message to start coding._`;
     return text;
   }
 
@@ -263,7 +261,12 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
       pendingLinkSelections.delete(targetSessionId);
       const num = parseInt(trimmed, 10);
       if (isNaN(num) || num < 1 || num > pendingProjects.length) {
-        reply(stream, "Invalid selection. Send /link to try again.", isNewSession, targetSessionId);
+        reply(
+          stream,
+          "Invalid selection. Send `/link` to try again.",
+          isNewSession,
+          targetSessionId,
+        );
         return;
       }
       const selected = pendingProjects[num - 1]!;
@@ -271,7 +274,7 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
       pushSessions();
       reply(
         stream,
-        `Switched to ${path.basename(selected)}\n${selected}`,
+        `\u2713 Switched to **${path.basename(selected)}**`,
         isNewSession,
         targetSessionId,
       );
@@ -285,18 +288,18 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
       pendingModelSelections.delete(targetSessionId);
       const num = parseInt(trimmed, 10);
       if (isNaN(num) || num < 1 || num > pendingModels.length) {
-        reply(stream, "Invalid selection. Send /m to try again.", isNewSession, targetSessionId);
+        reply(stream, "Invalid selection. Send `/m` to try again.", isNewSession, targetSessionId);
         return;
       }
       const selected = pendingModels[num - 1]!;
       const state = await getOrCreateSession(targetSessionId);
       await state.session.switchModel(selected.provider, selected.id);
       pushSessions();
-      reply(stream, `Switched to ${selected.name}`, isNewSession, targetSessionId);
+      reply(stream, `\u2713 Switched to **${selected.name}**`, isNewSession, targetSessionId);
       return;
     }
 
-    // ── Command handling ─────────────────────────────────
+    // ── Command handling ──────────────────────────────────
     if (trimmed.startsWith("/")) {
       const parts = trimmed.split(/\s+/);
       const cmd = parts[0]!.slice(1).toLowerCase();
@@ -318,7 +321,9 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
         if (!state) {
           reply(
             stream,
-            `${projectName}\n\nPath: ${currentCwd}\nSession: not started\n\nSend a message to initialize.`,
+            `**${projectName}**\n\n` +
+              `Status: _Not started_\n\n` +
+              `_Send a message to initialize._`,
             isNewSession,
             targetSessionId,
           );
@@ -334,12 +339,12 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
 
         reply(
           stream,
-          `${projectName}\n\n` +
-            `Model: ${modelInfo?.name ?? sessionState.model}\n` +
-            `Messages: ${sessionState.messageCount}\n` +
-            `Context: ${contextStr}%\n` +
-            `Status: ${state.isProcessing ? "working..." : "idle"}\n\n` +
-            `${sessionState.cwd}`,
+          `**${projectName}**\n\n` +
+            `| | |\n|---|---|\n` +
+            `| Model | **${modelInfo?.name ?? sessionState.model}** |\n` +
+            `| Messages | ${sessionState.messageCount} |\n` +
+            `| Context | ${contextStr}% |\n` +
+            `| Status | ${state.isProcessing ? "Working..." : "Idle"} |`,
           isNewSession,
           targetSessionId,
         );
@@ -354,9 +359,9 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
           const newAc = new AbortController();
           state.ac = newAc;
           state.session.setSignal(newAc.signal);
-          reply(stream, "Cancelled.", isNewSession, targetSessionId);
+          reply(stream, "\u2713 Cancelled.", isNewSession, targetSessionId);
         } else {
-          reply(stream, "Nothing to cancel.", isNewSession, targetSessionId);
+          reply(stream, "_Nothing to cancel._", isNewSession, targetSessionId);
         }
         return;
       }
@@ -366,7 +371,7 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
         const state = await getOrCreateSession(targetSessionId);
         await state.session.newSession();
         pushSessions();
-        reply(stream, "── New session ──", isNewSession, targetSessionId);
+        reply(stream, "\u2713 **New session started.**", isNewSession, targetSessionId);
         return;
       }
 
@@ -383,7 +388,7 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
             const s = await getOrCreateSession(targetSessionId);
             await s.session.switchModel(selected.provider, selected.id);
             pushSessions();
-            reply(stream, `Switched to ${selected.name}`, isNewSession, targetSessionId);
+            reply(stream, `\u2713 Switched to **${selected.name}**`, isNewSession, targetSessionId);
             return;
           }
           // Try matching by name fragment
@@ -395,41 +400,28 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
             const s = await getOrCreateSession(targetSessionId);
             await s.session.switchModel(match.provider, match.id);
             pushSessions();
-            reply(stream, `Switched to ${match.name}`, isNewSession, targetSessionId);
+            reply(stream, `\u2713 Switched to **${match.name}**`, isNewSession, targetSessionId);
             return;
           }
           reply(
             stream,
-            `No model matching "${args}". Send /m to see the list.`,
+            `No model matching "${args}". Send \`/m\` to see the list.`,
             isNewSession,
             targetSessionId,
           );
           return;
         }
 
-        // No args — show numbered list grouped by provider
-        let listText = "Models\n";
-        let lastProvider = "";
+        // No args — show numbered list
+        let listText = `**Models**\n\n`;
         const modelList = [...MODELS];
         modelList.forEach((m, i) => {
-          if (m.provider !== lastProvider) {
-            lastProvider = m.provider;
-            const providerName =
-              m.provider === "anthropic"
-                ? "Anthropic"
-                : m.provider === "openai"
-                  ? "OpenAI"
-                  : m.provider === "glm"
-                    ? "Z.AI"
-                    : "Moonshot";
-            listText += `\n${providerName}\n`;
-          }
-          const active = m.id === currentModel ? "  <-" : "";
-          listText += `  ${i + 1}. ${m.name}${active}\n`;
+          const active = m.id === currentModel ? " \u2190" : "";
+          listText += `${i + 1}. ${m.name}${active}\n`;
         });
 
         pendingModelSelections.set(targetSessionId, modelList);
-        listText += "\nSend number or name to switch.";
+        listText += `\n_Send number or name to switch._`;
         reply(stream, listText, isNewSession, targetSessionId);
         return;
       }
@@ -442,7 +434,7 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
           pushSessions();
           reply(
             stream,
-            `Switched to ${path.basename(projectPath)}\n${projectPath}`,
+            `\u2713 Switched to **${path.basename(projectPath)}**`,
             isNewSession,
             targetSessionId,
           );
@@ -454,7 +446,7 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
         if (projects.length === 0) {
           reply(
             stream,
-            "No projects found.\n\nUse /link /absolute/path to link manually.",
+            "No projects found.\n\nUse `/link <path>` to link manually.",
             isNewSession,
             targetSessionId,
           );
@@ -465,14 +457,14 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
           sessionStates.get(targetSessionId)?.cwd ?? resolveProjectPath(targetSessionId);
         const lines = projects.map((p, i) => {
           const name = path.basename(p);
-          const active = p === currentCwd ? "  (current)" : "";
-          return `${i + 1}. ${name}${active}\n   ${p}`;
+          const marker = p === currentCwd ? " \u2190" : "";
+          return `${i + 1}. **${name}**${marker}`;
         });
 
         pendingLinkSelections.set(targetSessionId, projects);
         reply(
           stream,
-          `Select a project:\n\n${lines.join("\n\n")}\n\nSend the number to switch.`,
+          `**Projects**\n\n${lines.join("\n")}\n\n_Send the number to switch._`,
           isNewSession,
           targetSessionId,
         );
@@ -482,7 +474,7 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
       // ── /unlink ──
       if (cmd === "unlink") {
         if (!sessionProjects.has(targetSessionId)) {
-          reply(stream, "This session isn't linked to a project.", isNewSession, targetSessionId);
+          reply(stream, "_This session isn't linked to a project._", isNewSession, targetSessionId);
           return;
         }
         const existing = sessionStates.get(targetSessionId);
@@ -494,7 +486,7 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
         pushSessions();
         reply(
           stream,
-          `Unlinked.\n\nDefault project: ${path.basename(defaultCwd)}`,
+          `\u2713 Unlinked. Reset to **${path.basename(defaultCwd)}**`,
           isNewSession,
           targetSessionId,
         );
@@ -543,17 +535,18 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
         const tool = state.activeTools.get(toolCallId);
         state.activeTools.delete(toolCallId);
         if (tool) {
-          const icon = isError ? "x" : "v";
+          const icon = isError ? "\u2717" : "\u2713";
           const argsStr = formatArgs(tool.args);
           const duration = formatDuration(durationMs);
-          stream.token(`\n[${icon}] ${tool.name} ${argsStr} (${duration})\n`);
+          const argsPart = argsStr ? ` \`${argsStr}\`` : "";
+          stream.token(`\n${icon} **${tool.name}**${argsPart}  _${duration}_\n`);
         }
       }),
     );
 
     unsubs.push(
       bus.on("compaction_end", ({ originalCount, newCount }) => {
-        stream.token(`\n[Compacted: ${originalCount} -> ${newCount} messages]\n`);
+        stream.token(`\n\u2713 **Compacted** ${originalCount} \u2192 ${newCount} messages\n`);
       }),
     );
 
@@ -569,7 +562,7 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
       const contextStr =
         contextPctRaw > 0 && contextPctRaw < 1 ? "<1" : String(Math.round(contextPctRaw));
 
-      const footer = `\n\n---\n${contextStr}% context`;
+      const footer = `\n\n---\n_${contextStr}% context_`;
 
       reply(stream, finalText + footer, isNewSession, targetSessionId);
       pushSessions();
@@ -707,8 +700,7 @@ function formatArgs(args: Record<string, unknown>): string {
   if (entries.length === 0) return "";
   const [_key, value] = entries[0]!;
   const str = typeof value === "string" ? value : JSON.stringify(value);
-  const truncated = str.length > 60 ? str.slice(0, 57) + "..." : str;
-  return `\`${truncated}\``;
+  return str.length > 50 ? str.slice(0, 47) + "..." : str;
 }
 
 function formatDuration(ms: number): string {
