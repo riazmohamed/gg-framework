@@ -2279,30 +2279,21 @@ export function App(props: AppProps) {
               planMode={planMode}
             />
           )}
-          {/* Buddy row — with background tasks beside it when present */}
-          {(buddyEnabled || bgTasks.length > 0) && (
-            <Box flexDirection="row">
-              {buddyEnabled && (
-                <Box flexShrink={0}>
-                  <Buddy phase={agentLoop.activityPhase} />
-                </Box>
-              )}
-              {bgTasks.length > 0 && (
-                <Box flexGrow={1}>
-                  <BackgroundTasksBar
-                    tasks={bgTasks}
-                    focused={taskBarFocused}
-                    expanded={taskBarExpanded}
-                    selectedIndex={selectedTaskIndex}
-                    onExpand={handleTaskBarExpand}
-                    onCollapse={handleTaskBarCollapse}
-                    onKill={handleTaskKill}
-                    onExit={handleTaskBarExit}
-                    onNavigate={handleTaskNavigate}
-                  />
-                </Box>
-              )}
-            </Box>
+          {/* Buddy companion */}
+          {buddyEnabled && <Buddy phase={agentLoop.activityPhase} />}
+          {/* Background tasks bar */}
+          {bgTasks.length > 0 && (
+            <BackgroundTasksBar
+              tasks={bgTasks}
+              focused={taskBarFocused}
+              expanded={taskBarExpanded}
+              selectedIndex={selectedTaskIndex}
+              onExpand={handleTaskBarExpand}
+              onCollapse={handleTaskBarCollapse}
+              onKill={handleTaskKill}
+              onExit={handleTaskBarExit}
+              onNavigate={handleTaskNavigate}
+            />
           )}
         </>
       )}
