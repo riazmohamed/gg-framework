@@ -29,6 +29,15 @@ export interface BusEventMap {
   server_tool_call: { id: string; name: string; input: unknown };
   server_tool_result: { toolUseId: string; resultType: string; data: unknown };
 
+  // Model routing
+  model_switch: {
+    fromModel: string;
+    toModel: string;
+    fromProvider: string;
+    toProvider: string;
+    reason: string;
+  };
+
   // Session lifecycle
   session_start: { sessionId: string };
   model_change: { provider: string; model: string };
@@ -142,6 +151,15 @@ export class EventBus {
           toolUseId: event.toolUseId,
           resultType: event.resultType,
           data: event.data,
+        });
+        break;
+      case "model_switch":
+        this.emit("model_switch", {
+          fromModel: event.fromModel,
+          toModel: event.toModel,
+          fromProvider: event.fromProvider,
+          toProvider: event.toProvider,
+          reason: event.reason,
         });
         break;
       case "error":

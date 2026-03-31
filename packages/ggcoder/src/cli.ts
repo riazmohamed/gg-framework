@@ -466,14 +466,20 @@ async function runInkTUI(opts: {
       effectiveProvider = fallbackProvider;
       effectiveModel = getDefaultModel(fallbackProvider).id;
       creds = await authStorage.resolveCredentials(fallbackProvider);
-      log("WARN", "auth", `Provider "${provider}" not authenticated, falling back to "${fallbackProvider}"`);
+      log(
+        "WARN",
+        "auth",
+        `Provider "${provider}" not authenticated, falling back to "${fallbackProvider}"`,
+      );
       console.log(
         chalk.hex("#f59e0b")(
           `⚠ Not logged in to ${provider}. Falling back to ${fallbackProvider} (${effectiveModel}).`,
         ),
       );
       console.log(
-        chalk.hex("#6b7280")(`  Run "ogcoder login" to add more providers, or use /model to switch.\n`),
+        chalk.hex("#6b7280")(
+          `  Run "ogcoder login" to add more providers, or use /model to switch.\n`,
+        ),
       );
     } else {
       // No authenticated provider at all — fall back to Ollama

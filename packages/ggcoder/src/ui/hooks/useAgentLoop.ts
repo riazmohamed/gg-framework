@@ -130,6 +130,7 @@ export function useAgentLoop(
       durationMs: number,
       details?: unknown,
     ) => void;
+    onModelSwitch?: (fromModel: string, toModel: string, reason: string) => void;
     onServerToolCall?: (id: string, name: string, input: unknown) => void;
     onServerToolResult?: (toolUseId: string, resultType: string, data: unknown) => void;
     onTurnEnd?: (
@@ -153,6 +154,7 @@ export function useAgentLoop(
   const onToolStart = callbacks?.onToolStart;
   const onToolUpdate = callbacks?.onToolUpdate;
   const onToolEnd = callbacks?.onToolEnd;
+  const onModelSwitch = callbacks?.onModelSwitch;
   const onServerToolCall = callbacks?.onServerToolCall;
   const onServerToolResult = callbacks?.onServerToolResult;
   const onTurnEnd = callbacks?.onTurnEnd;
@@ -421,6 +423,10 @@ export function useAgentLoop(
                 break;
               }
 
+              case "model_switch":
+                onModelSwitch?.(event.fromModel, event.toModel, event.reason);
+                break;
+
               case "server_tool_call":
                 onServerToolCall?.(event.id, event.name, event.input);
                 break;
@@ -579,6 +585,7 @@ export function useAgentLoop(
       onToolStart,
       onToolUpdate,
       onToolEnd,
+      onModelSwitch,
       onServerToolCall,
       onServerToolResult,
       onTurnEnd,

@@ -40,7 +40,7 @@ import {
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { useTerminalProgress } from "./hooks/useTerminalProgress.js";
 import { getGitBranch } from "../utils/git.js";
-import { getModel, getContextWindow } from "../core/model-registry.js";
+import { getModel, getContextWindow, getVisionModel } from "../core/model-registry.js";
 import { SessionManager, type MessageEntry } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
 import { SettingsManager } from "../core/settings-manager.js";
@@ -1154,6 +1154,17 @@ export function App(props: AppProps) {
         },
         [],
       ),
+      onModelSwitch: useCallback((fromModel: string, toModel: string, reason: string) => {
+        log("INFO", "router", `Model switch: ${fromModel} -> ${toModel}`, { reason });
+        setLiveItems((prev) => [
+          ...prev,
+          {
+            kind: "info" as const,
+            text: `\u27F3 Switching to ${toModel} \u2014 ${reason}`,
+            id: getId(),
+          },
+        ]);
+      }, []),
       onServerToolCall: useCallback((id: string, name: string, input: unknown) => {
         log("INFO", "server_tool", `Server tool call: ${name}`, { id });
         // Flush completed items (including assistant text) to Static before
@@ -1626,10 +1637,12 @@ export function App(props: AppProps) {
               type: "text",
               text: `<file name="${img.fileName}">\n${img.data}\n</file>`,
             });
-          } else if (modelSupportsImages) {
+          } else if (modelSupportsImages || getVisionModel(currentProvider)) {
+            // Send native ImageContent — either the current model supports images,
+            // or the model router will auto-switch to a vision-capable model.
             parts.push({ type: "image", mediaType: img.mediaType, data: img.data });
           } else {
-            // GLM models: save image to temp file and instruct model to use vision MCP tool
+            // No vision model available at all: save image to temp file for MCP tool
             const ext = img.mediaType.split("/")[1] ?? "png";
             const tmpPath = `/tmp/ogcoder-img-${Date.now()}.${ext}`;
             try {

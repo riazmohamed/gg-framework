@@ -3,8 +3,9 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import sharp from "sharp";
 
-/** Anthropic's maximum image size in bytes (5 MB). */
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** Anthropic's 5 MB limit applies to the base64 string, not the decoded binary.
+ *  Raw buffer limit = floor(5 MB × 3/4) so the base64 stays under 5 MB. */
+const MAX_IMAGE_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4);
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 const TEXT_EXTENSIONS = new Set([".md", ".txt"]);

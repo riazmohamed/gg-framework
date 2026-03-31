@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import type { RouterMode } from "./model-router.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -18,6 +19,12 @@ export interface SlashCommandContext {
   branch: (stepsBack?: number) => Promise<string>;
   /** List all branches in the current session. */
   listBranches: () => Promise<string>;
+  /** Get current model routing mode. */
+  getRouterMode: () => RouterMode;
+  /** Set model routing mode. */
+  setRouterMode: (mode: RouterMode) => void;
+  /** Get router status info (current model, vision model, executor model). */
+  getRouterInfo: () => string;
 }
 
 export interface SlashCommand {
@@ -191,6 +198,25 @@ export function createBuiltinCommands(): SlashCommand[] {
       usage: "/branches",
       async execute(_args, ctx) {
         return ctx.listBranches();
+      },
+    },
+    {
+      name: "router",
+      aliases: ["r"],
+      description: "Show or configure model routing (vision/plan-execute/hybrid/off)",
+      usage: "/router [off|vision|plan-execute|hybrid]",
+      execute(args, ctx) {
+        const validModes: RouterMode[] = ["off", "vision", "plan-execute", "hybrid"];
+        if (!args) {
+          const mode = ctx.getRouterMode();
+          return `Model routing: ${mode}\n${ctx.getRouterInfo()}`;
+        }
+        const mode = args.trim() as RouterMode;
+        if (!validModes.includes(mode)) {
+          return `Invalid mode: ${mode}. Valid modes: ${validModes.join(", ")}`;
+        }
+        ctx.setRouterMode(mode);
+        return `Model routing set to: ${mode}`;
       },
     },
     {
