@@ -9,6 +9,7 @@ import {
   plainTextLength,
   wrapPlainTextLines,
 } from "../utils/table-text.js";
+import { markdownTokenCache, containsMarkdownSyntax } from "../utils/markdown-cache.js";
 
 /**
  * Render a markdown string as Ink components.
@@ -103,6 +104,11 @@ export const Markdown = React.memo(function Markdown({
   // stabilised body has changed by a meaningful amount (100+ chars) or
   // on the final value. This reduces expensive marked.lexer calls from
   // ~30/sec to ~5-10/sec during heavy streaming.
+  //
+  // Layered caching:
+  // 1. Plain-text fast path — skip marked.lexer() entirely for text with no markdown syntax
+  // 2. LRU cache (500 entries) — avoids re-parsing completed messages on scroll
+  // 3. Streaming throttle — skip re-parse if body grew < 100 chars
   const lastParsedBodyRef = useRef("");
   const lastTokensRef = useRef<Token[]>([]);
 
@@ -110,15 +116,38 @@ export const Markdown = React.memo(function Markdown({
     const body = stabilised.body;
     const delta = body.length - lastParsedBodyRef.current.length;
 
-    // Re-parse if: first render, body shrunk (edit/reset), or grew by 100+ chars
-    if (lastTokensRef.current.length === 0 || delta < 0 || delta >= 100) {
-      lastParsedBodyRef.current = body;
-      lastTokensRef.current = marked.lexer(body);
+    // Streaming throttle: skip if delta is small and we already have tokens
+    if (lastTokensRef.current.length > 0 && delta > 0 && delta < 100) {
       return lastTokensRef.current;
     }
 
-    // Still use the latest body for the next comparison, but return cached tokens
-    return lastTokensRef.current;
+    // Check LRU cache first (mainly benefits completed messages on re-render)
+    const cached = markdownTokenCache.get(body);
+    if (cached) {
+      lastParsedBodyRef.current = body;
+      lastTokensRef.current = cached;
+      return cached;
+    }
+
+    // Plain-text fast path: skip marked.lexer() for text with no markdown syntax
+    let result: Token[];
+    if (!containsMarkdownSyntax(body)) {
+      result = [
+        {
+          type: "paragraph",
+          raw: body,
+          text: body,
+          tokens: [{ type: "text", raw: body, text: body }],
+        } as Tokens.Paragraph,
+      ];
+    } else {
+      result = marked.lexer(body);
+    }
+
+    lastParsedBodyRef.current = body;
+    lastTokensRef.current = result;
+    markdownTokenCache.set(body, result);
+    return result;
   }, [stabilised.body]);
 
   return (
@@ -502,3 +531,98 @@ function renderInline(tokens: Token[], theme: Theme, parentStyle?: InlineStyle):
     }
   });
 }
+
+// ── Streaming Markdown ────────────────────────────────────────
+//
+// Splits text at the last top-level block boundary.  Everything before
+// the boundary is "stable" — memoized, never re-parsed.  Only the
+// final (unstable) block is re-parsed on each streaming delta, making
+// the cost O(unstable tail) instead of O(full text).
+
+/**
+ * Strip trailing incomplete table rows and unclosed code fences,
+ * identical to the stabilisation logic in <Markdown>.
+ */
+function stabilize(text: string): string {
+  const lines = text.split("\n");
+  if (lines.length > 0) {
+    const lastLine = lines[lines.length - 1];
+    if (lastLine.startsWith("|") && !lastLine.trimEnd().endsWith("|")) {
+      lines.pop();
+    }
+  }
+  let body = lines.join("\n");
+  const fencePattern = /^(`{3,}|~{3,})([^\n]*)/m;
+  let searchFrom = 0;
+  while (searchFrom < body.length) {
+    const openMatch = fencePattern.exec(body.slice(searchFrom));
+    if (!openMatch) break;
+    const openIdx = searchFrom + openMatch.index;
+    const fence = openMatch[1];
+    const afterOpen = body.indexOf("\n", openIdx);
+    if (afterOpen === -1) break;
+    const closePattern = new RegExp(`^${fence[0]}{${fence.length},}\\s*$`, "m");
+    const closeMatch = closePattern.exec(body.slice(afterOpen));
+    if (closeMatch) {
+      searchFrom = afterOpen + closeMatch.index + closeMatch[0].length;
+    } else {
+      body = body.slice(0, openIdx) + body.slice(afterOpen + 1);
+      break;
+    }
+  }
+  return body;
+}
+
+export const StreamingMarkdown = React.memo(function StreamingMarkdown({
+  children,
+  width,
+}: {
+  children: string;
+  width: number;
+}) {
+  const stableBoundaryRef = useRef(0);
+
+  const stripped = useMemo(() => stabilize(children), [children]);
+
+  // Find the last top-level block boundary and advance stableBoundaryRef monotonically
+  const { stablePrefix, unstableSuffix } = useMemo(() => {
+    const boundary = stableBoundaryRef.current;
+    const tail = stripped.substring(boundary);
+
+    // Skip full lexing if tail is short enough — not worth the split overhead
+    if (tail.length < 200) {
+      return { stablePrefix: stripped.substring(0, boundary), unstableSuffix: tail };
+    }
+
+    const tokens = containsMarkdownSyntax(tail) ? marked.lexer(tail) : [];
+
+    // Find last non-space content token
+    let lastContentIdx = tokens.length - 1;
+    while (lastContentIdx >= 0 && tokens[lastContentIdx]?.type === "space") {
+      lastContentIdx--;
+    }
+
+    // Sum raw lengths of all tokens except the last = stable advancement
+    let advance = 0;
+    for (let i = 0; i < lastContentIdx; i++) {
+      advance += tokens[i]!.raw.length;
+    }
+
+    // Only advance forward (monotonic)
+    if (advance > 0) {
+      stableBoundaryRef.current = boundary + advance;
+    }
+
+    return {
+      stablePrefix: stripped.substring(0, stableBoundaryRef.current),
+      unstableSuffix: stripped.substring(stableBoundaryRef.current),
+    };
+  }, [stripped]);
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      {stablePrefix && <Markdown width={width}>{stablePrefix}</Markdown>}
+      {unstableSuffix && <Markdown width={width}>{unstableSuffix}</Markdown>}
+    </Box>
+  );
+});

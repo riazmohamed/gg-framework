@@ -1,11 +1,16 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useRef } from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import type { ActivityPhase, RetryInfo } from "../hooks/useAgentLoop.js";
 
-import { SPINNER_FRAMES, SPINNER_INTERVAL } from "../spinner-frames.js";
+import { SPINNER_FRAMES, SPINNER_INTERVAL, REDUCED_MOTION_DOT } from "../spinner-frames.js";
 import { PLANNING_PHRASES, selectPhrases, shuffleArray } from "../activity-phrases.js";
-import { useAnimationTick, useAnimationActive, deriveFrame } from "./AnimationContext.js";
+import {
+  useAnimationTick,
+  useAnimationActive,
+  deriveFrame,
+  useReducedMotion,
+} from "./AnimationContext.js";
 
 // ── Color pulse cycle ─────────────────────────────────────
 
@@ -110,10 +115,16 @@ interface ActivityIndicatorProps {
   thinkingMs: number;
   isThinking: boolean;
   tokenEstimate: number;
+  /** Raw character count ref for smooth token animation (read every tick). */
+  charCountRef?: React.RefObject<number>;
+  /** Accumulated real tokens from completed turns. */
+  realTokensAccumRef?: React.RefObject<number>;
   userMessage?: string;
   activeToolNames?: string[];
   planMode?: boolean;
   retryInfo?: RetryInfo | null;
+  planDone?: number;
+  planTotal?: number;
 }
 
 const RETRY_REASON_LABELS: Record<RetryInfo["reason"], string> = {
@@ -129,12 +140,17 @@ export function ActivityIndicator({
   thinkingMs,
   isThinking,
   tokenEstimate,
+  charCountRef: charCountRefProp,
+  realTokensAccumRef: realTokensAccumRefProp,
   userMessage = "",
   activeToolNames = [],
   planMode,
   retryInfo,
+  planDone = 0,
+  planTotal = 0,
 }: ActivityIndicatorProps) {
   const theme = useTheme();
+  const reducedMotion = useReducedMotion();
 
   // Use the global animation tick instead of a local timer.
   // This eliminates a duplicate 100ms setInterval that was causing
@@ -142,8 +158,49 @@ export function ActivityIndicator({
   useAnimationActive();
   const tick = useAnimationTick();
 
+  // ── Smooth token counter animation ─────────────────────
+  // Smooths the TOTAL token estimate (real + estimated) so it never
+  // jumps — whether tokens arrive from streaming deltas or from
+  // turn_end replacing char estimates with real API counts.
+  //
+  // On each 100ms animation tick the displayed count catches up to
+  // the target at a speed that scales with the gap, producing a
+  // rolling-odometer effect.
+  const displayedTokensRef = useRef(0);
+  const currentChars = charCountRefProp?.current ?? 0;
+  const realTokens = realTokensAccumRefProp?.current ?? 0;
+  const targetTokens = charCountRefProp ? realTokens + Math.ceil(currentChars / 4) : tokenEstimate;
+
+  if (reducedMotion || !charCountRefProp) {
+    displayedTokensRef.current = targetTokens;
+  } else {
+    const gap = targetTokens - displayedTokensRef.current;
+    if (gap > 0) {
+      // Scale increment with gap size for smooth catch-up
+      let increment: number;
+      if (gap < 20) {
+        increment = 1;
+      } else if (gap < 50) {
+        increment = Math.max(2, Math.ceil(gap * 0.1));
+      } else if (gap < 200) {
+        increment = Math.max(5, Math.ceil(gap * 0.12));
+      } else {
+        // Large jump (e.g. turn_end real tokens) — faster catch-up
+        increment = Math.max(15, Math.ceil(gap * 0.08));
+      }
+      displayedTokensRef.current = Math.min(displayedTokensRef.current + increment, targetTokens);
+    } else if (gap < 0) {
+      // Reset happened (new run) — snap to target
+      displayedTokensRef.current = targetTokens;
+    }
+  }
+
+  const smoothTokenEstimate = displayedTokensRef.current;
+
   // Derive all animation frames from the single tick counter
-  const spinnerFrame = deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length);
+  const spinnerFrame = reducedMotion
+    ? 0
+    : deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length);
   const pulseColors = planMode ? PLAN_PULSE_COLORS : PULSE_COLORS;
   const colorFrame = deriveFrame(tick, PULSE_INTERVAL, pulseColors.length);
   const ellipsisFrame = deriveFrame(tick, ELLIPSIS_INTERVAL, ELLIPSIS_FRAMES.length);
@@ -173,7 +230,15 @@ export function ActivityIndicator({
   // Pad ellipsis to prevent text from shifting
   const paddedEllipsis = ellipsis + " ".repeat(3 - ellipsis.length);
 
-  const meta = buildMetaSuffix(elapsedMs, thinkingMs, isThinking, tokenEstimate);
+  const meta = buildMetaSuffix(elapsedMs, thinkingMs, isThinking, smoothTokenEstimate);
+
+  // ── Plan progress bar ──────────────────────────────────
+  const planBar = useMemo(() => {
+    if (planTotal <= 0) return null;
+    const barWidth = Math.min(planTotal, 20);
+    const filledWidth = Math.round((planDone / planTotal) * barWidth);
+    return "\u2588".repeat(filledWidth) + "\u2591".repeat(barWidth - filledWidth);
+  }, [planDone, planTotal]);
 
   // ── Retry display ──────────────────────────────────────
   if (phase === "retrying" && retryInfo) {
@@ -184,7 +249,7 @@ export function ActivityIndicator({
     return (
       <Box>
         <Text color={retryColor} bold>
-          {SPINNER_FRAMES[spinnerFrame]}{" "}
+          {reducedMotion ? REDUCED_MOTION_DOT : SPINNER_FRAMES[spinnerFrame]}{" "}
         </Text>
         <Text color={retryColor}>
           {retryLabel} — retrying ({retryInfo.attempt}/{retryInfo.maxAttempts})
@@ -202,15 +267,31 @@ export function ActivityIndicator({
   return (
     <Box>
       <Text color={spinnerColor} bold>
-        {SPINNER_FRAMES[spinnerFrame]}{" "}
+        {reducedMotion ? REDUCED_MOTION_DOT : SPINNER_FRAMES[spinnerFrame]}{" "}
       </Text>
-      <ShimmerText text={phrase} color={spinnerColor} shimmerPos={shimmerPos} />
-      <Text color={theme.textDim}>{paddedEllipsis}</Text>
+      {reducedMotion ? (
+        <Text dimColor color={spinnerColor}>
+          {phrase}
+        </Text>
+      ) : (
+        <ShimmerText text={phrase} color={spinnerColor} shimmerPos={shimmerPos} />
+      )}
+      <Text color={theme.textDim}>{reducedMotion ? "..." : paddedEllipsis}</Text>
       {meta && (
         <Text color={theme.textDim}>
           {"  ("}
           {meta}
           {")"}
+        </Text>
+      )}
+      {planBar && (
+        <Text>
+          {"  "}
+          <Text color={planDone === planTotal ? theme.success : theme.planPrimary}>{planBar}</Text>
+          <Text color={theme.textDim}>
+            {" "}
+            {planDone}/{planTotal}
+          </Text>
         </Text>
       )}
     </Box>

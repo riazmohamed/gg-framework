@@ -38,6 +38,7 @@ import {
   deriveFrame,
 } from "./components/AnimationContext.js";
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
+import { useTerminalProgress } from "./hooks/useTerminalProgress.js";
 import { getGitBranch } from "../utils/git.js";
 import { getModel, getContextWindow } from "../core/model-registry.js";
 import { SessionManager, type MessageEntry } from "../core/session-manager.js";
@@ -49,10 +50,18 @@ import { PROMPT_COMMANDS, getPromptCommand } from "../core/prompt-commands.js";
 import { loadCustomCommands, type CustomCommand } from "../core/custom-commands.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import type { Skill } from "../core/skills.js";
+import {
+  extractPlanSteps,
+  findCompletedMarkers,
+  markStepsCompleted,
+  stripDoneMarkers,
+  type PlanStep,
+} from "../utils/plan-steps.js";
 import type { MCPClientManager } from "../core/mcp/index.js";
 import { getMCPServers } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
 import { trimFlushedItems, flushOnTurnText, flushOnTurnEnd } from "./live-item-flush.js";
+import { Buddy } from "./buddy/Buddy.js";
 
 // ── Provider Error Hints ──────────────────────────────────
 
@@ -138,6 +147,7 @@ interface ToolDoneItem {
   result: string;
   isError: boolean;
   durationMs: number;
+  details?: unknown;
   id: string;
 }
 
@@ -285,6 +295,46 @@ function compactHistory(items: CompletedItem[]): CompletedItem[] {
 }
 
 // flushOnTurnText, flushOnTurnEnd are imported from ./live-item-flush.ts
+
+/** Check whether an item is still active (running spinner, pending result). */
+function isActiveItem(item: CompletedItem): boolean {
+  switch (item.kind) {
+    case "tool_start":
+    case "server_tool_start":
+    case "compacting":
+      return true;
+    case "tool_group":
+      return (item as ToolGroupItem).tools.some((t) => t.status === "running");
+    case "subagent_group":
+      return (item as SubAgentGroupItem).agents.some((a) => a.status === "running");
+    default:
+      return false;
+  }
+}
+
+/**
+ * Partition live items into completed (flushable to Static) and still-active.
+ * Completed items precede active ones — we flush the longest contiguous prefix
+ * of completed items to keep ordering stable.
+ */
+function partitionCompleted(items: CompletedItem[]): {
+  flushed: CompletedItem[];
+  remaining: CompletedItem[];
+} {
+  // Find the first active item — everything before it is safe to flush
+  const firstActiveIdx = items.findIndex(isActiveItem);
+  if (firstActiveIdx === -1) {
+    // All items are completed
+    return { flushed: items, remaining: [] };
+  }
+  if (firstActiveIdx === 0) {
+    return { flushed: [], remaining: items };
+  }
+  return {
+    flushed: items.slice(0, firstActiveIdx),
+    remaining: items.slice(firstActiveIdx),
+  };
+}
 
 // ── Duration summary ─────────────────────────────────────
 
@@ -504,12 +554,18 @@ export function App(props: AppProps) {
   const messagesRef = useRef<Message[]>(props.messages);
   const [planAutoExpand, setPlanAutoExpand] = useState(false);
   const approvedPlanPathRef = useRef<string | undefined>(undefined);
+  const planStepsRef = useRef<PlanStep[]>([]);
+  const [planSteps, setPlanSteps] = useState<PlanStep[]>([]);
   const nextIdRef = useRef(0);
   const sessionManagerRef = useRef(
     props.sessionsDir ? new SessionManager(props.sessionsDir) : null,
   );
   const sessionPathRef = useRef(props.sessionPath);
   const persistedIndexRef = useRef(messagesRef.current.length);
+  /** Last actual API-reported input token count (from turn_end). */
+  const lastActualTokensRef = useRef(0);
+  /** Timestamp of last compaction — used for time-based cooldown. */
+  const lastCompactionTimeRef = useRef(0);
 
   const getId = () => String(nextIdRef.current++);
 
@@ -626,13 +682,15 @@ export function App(props: AppProps) {
 
   // ── Compaction ─────────────────────────────────────────
 
-  // Load settings for auto-compaction
+  // Load settings for auto-compaction + buddy
   const settingsRef = useRef<SettingsManager | null>(null);
+  const [buddyEnabled, setBuddyEnabled] = useState(false);
   useEffect(() => {
     if (props.settingsFile) {
       const sm = new SettingsManager(props.settingsFile);
       sm.load().then(() => {
         settingsRef.current = sm;
+        setBuddyEnabled(sm.get("buddyEnabled") ?? false);
       });
     }
   }, [props.settingsFile]);
@@ -706,6 +764,11 @@ export function App(props: AppProps) {
    * transformContext callback for the agent loop.
    * Called before each LLM call and on context overflow.
    * Checks if auto-compaction is needed and runs it.
+   *
+   * Uses actual API-reported token counts (from previous turn_end) when
+   * available, falling back to the character-based estimate. A 30-second
+   * cooldown prevents repeated compaction — matching the pattern used by
+   * Mysti, openclaw, and other real-world agent frameworks.
    */
   const transformContext = useCallback(
     async (messages: Message[], options?: { force?: boolean }): Promise<Message[]> => {
@@ -715,14 +778,29 @@ export function App(props: AppProps) {
 
       // Force-compact on context overflow regardless of settings
       if (options?.force) {
-        return compactConversation(messages);
+        const result = await compactConversation(messages);
+        lastCompactionTimeRef.current = Date.now();
+        lastActualTokensRef.current = 0; // Reset stale pre-compaction count
+        return result;
       }
 
       if (!autoCompact) return messages;
 
+      // Time-based cooldown: skip if compaction ran within the last 30 seconds
+      if (Date.now() - lastCompactionTimeRef.current < 30_000) {
+        log("INFO", "compaction", `Skipping compaction — cooldown active`);
+        return messages;
+      }
+
       const contextWindow = getContextWindow(currentModel);
-      if (shouldCompact(messages, contextWindow, threshold)) {
-        return compactConversation(messages);
+      // Prefer actual API-reported tokens over char-based estimate
+      const actualTokens =
+        lastActualTokensRef.current > 0 ? lastActualTokensRef.current : undefined;
+      if (shouldCompact(messages, contextWindow, threshold, actualTokens)) {
+        const result = await compactConversation(messages);
+        lastCompactionTimeRef.current = Date.now();
+        lastActualTokensRef.current = 0; // Reset stale pre-compaction count
+        return result;
       }
       return messages;
     },
@@ -828,8 +906,34 @@ export function App(props: AppProps) {
     {
       onComplete: useCallback(() => {
         persistNewMessages();
-      }, [persistNewMessages]),
+        // Auto-clear plan progress and approved plan when all steps are completed
+        const steps = planStepsRef.current;
+        if (steps.length > 0 && steps.every((s) => s.completed)) {
+          planStepsRef.current = [];
+          setPlanSteps([]);
+          approvedPlanPathRef.current = undefined;
+          // Rebuild system prompt to remove the completed plan from context
+          void (async () => {
+            const newPrompt = await buildSystemPrompt(props.cwd, props.skills, planMode, undefined);
+            if (messagesRef.current[0]?.role === "system") {
+              messagesRef.current[0] = { role: "system" as const, content: newPrompt };
+            }
+          })();
+        }
+      }, [persistNewMessages, planMode, props.cwd, props.skills]),
       onTurnText: useCallback((text: string, thinking: string, thinkingMs: number) => {
+        // Track [DONE:n] markers for plan step progress
+        if (planStepsRef.current.length > 0) {
+          const completed = findCompletedMarkers(text);
+          if (completed.size > 0) {
+            const updated = markStepsCompleted(planStepsRef.current, completed);
+            if (updated !== planStepsRef.current) {
+              planStepsRef.current = updated;
+              setPlanSteps(updated);
+            }
+          }
+        }
+
         // Flush all completed items from the previous turn to Static history.
         // This keeps liveItems bounded per-turn, preventing Ink's live area from
         // growing unbounded, which makes Ink's live-area re-renders expensive.
@@ -838,12 +942,25 @@ export function App(props: AppProps) {
           if (flushed.length > 0) {
             setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
           }
-          return [{ kind: "assistant", text, thinking, thinkingMs, id: getId() }];
+          const displayText = planStepsRef.current.length > 0 ? stripDoneMarkers(text) : text;
+          return [{ kind: "assistant", text: displayText, thinking, thinkingMs, id: getId() }];
         });
       }, []),
       onToolStart: useCallback(
         (toolCallId: string, name: string, args: Record<string, unknown>) => {
           log("INFO", "tool", `Tool call started: ${name}`, { id: toolCallId });
+
+          // Flush completed items (assistant text, finished tools) to Static
+          // before adding tool UI. Keeping both in the live area makes it tall
+          // and causes Ink's cursor math to clip the top.
+          setLiveItems((prev) => {
+            const { flushed, remaining } = partitionCompleted(prev);
+            if (flushed.length > 0) {
+              setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
+            }
+            return remaining;
+          });
+
           if (name === "subagent") {
             // Create or update the sub-agent group item
             const newAgent: SubAgentInfo = {
@@ -961,7 +1078,13 @@ export function App(props: AppProps) {
 
               const next = [...prev];
               next[groupIdx] = { ...group, agents: updatedAgents };
-              return next;
+
+              // Flush completed items to Static to keep the live area small
+              const { flushed, remaining } = partitionCompleted(next);
+              if (flushed.length > 0) {
+                setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
+              }
+              return remaining;
             });
           } else {
             setLiveItems((prev) => {
@@ -971,10 +1094,11 @@ export function App(props: AppProps) {
                   item.kind === "tool_group" &&
                   (item as ToolGroupItem).tools.some((t) => t.toolCallId === toolCallId),
               );
+              let updated: CompletedItem[];
               if (groupIdx !== -1) {
                 const group = prev[groupIdx] as ToolGroupItem;
-                const next = [...prev];
-                next[groupIdx] = {
+                updated = [...prev];
+                updated[groupIdx] = {
                   ...group,
                   tools: group.tools.map((t) =>
                     t.toolCallId === toolCallId
@@ -982,33 +1106,49 @@ export function App(props: AppProps) {
                       : t,
                   ),
                 };
-                return next;
+              } else {
+                // Find the matching tool_start and replace it with tool_done
+                const startIdx = prev.findIndex(
+                  (item) => item.kind === "tool_start" && item.toolCallId === toolCallId,
+                );
+                if (startIdx !== -1) {
+                  const startItem = prev[startIdx] as ToolStartItem;
+                  const doneItem: ToolDoneItem = {
+                    kind: "tool_done",
+                    name,
+                    args: startItem.args,
+                    result,
+                    isError,
+                    durationMs,
+                    details,
+                    id: startItem.id,
+                  };
+                  updated = [...prev];
+                  updated[startIdx] = doneItem;
+                } else {
+                  // Fallback: just append
+                  updated = [
+                    ...prev,
+                    {
+                      kind: "tool_done",
+                      name,
+                      args: {},
+                      result,
+                      isError,
+                      durationMs,
+                      details,
+                      id: getId(),
+                    },
+                  ];
+                }
               }
 
-              // Find the matching tool_start and replace it with tool_done
-              const startIdx = prev.findIndex(
-                (item) => item.kind === "tool_start" && item.toolCallId === toolCallId,
-              );
-              if (startIdx !== -1) {
-                const startItem = prev[startIdx] as ToolStartItem;
-                const doneItem: ToolDoneItem = {
-                  kind: "tool_done",
-                  name,
-                  args: startItem.args,
-                  result,
-                  isError,
-                  durationMs,
-                  id: startItem.id,
-                };
-                const next = [...prev];
-                next[startIdx] = doneItem;
-                return next;
+              // Flush completed items to Static to keep the live area small
+              const { flushed, remaining } = partitionCompleted(updated);
+              if (flushed.length > 0) {
+                setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
               }
-              // Fallback: just append
-              return [
-                ...prev,
-                { kind: "tool_done", name, args: {}, result, isError, durationMs, id: getId() },
-              ];
+              return remaining;
             });
           }
         },
@@ -1016,21 +1156,30 @@ export function App(props: AppProps) {
       ),
       onServerToolCall: useCallback((id: string, name: string, input: unknown) => {
         log("INFO", "server_tool", `Server tool call: ${name}`, { id });
-        setLiveItems((prev) => [
-          ...prev,
-          {
-            kind: "server_tool_start",
-            serverToolCallId: id,
-            name,
-            input,
-            startedAt: Date.now(),
-            id: getId(),
-          },
-        ]);
+        // Flush completed items (including assistant text) to Static before
+        // adding server tool UI — same rationale as onToolStart.
+        setLiveItems((prev) => {
+          const { flushed, remaining } = partitionCompleted(prev);
+          if (flushed.length > 0) {
+            setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
+          }
+          return [
+            ...remaining,
+            {
+              kind: "server_tool_start",
+              serverToolCallId: id,
+              name,
+              input,
+              startedAt: Date.now(),
+              id: getId(),
+            },
+          ];
+        });
       }, []),
       onServerToolResult: useCallback((toolUseId: string, resultType: string, data: unknown) => {
         log("INFO", "server_tool", `Server tool result`, { toolUseId, resultType });
         setLiveItems((prev) => {
+          let updated: CompletedItem[];
           const startIdx = prev.findIndex(
             (item) => item.kind === "server_tool_start" && item.serverToolCallId === toolUseId,
           );
@@ -1045,22 +1194,28 @@ export function App(props: AppProps) {
               durationMs: Date.now() - startItem.startedAt,
               id: startItem.id,
             };
-            const next = [...prev];
-            next[startIdx] = doneItem;
-            return next;
+            updated = [...prev];
+            updated[startIdx] = doneItem;
+          } else {
+            updated = [
+              ...prev,
+              {
+                kind: "server_tool_done",
+                name: "unknown",
+                input: {},
+                resultType,
+                data,
+                durationMs: 0,
+                id: getId(),
+              },
+            ];
           }
-          return [
-            ...prev,
-            {
-              kind: "server_tool_done",
-              name: "unknown",
-              input: {},
-              resultType,
-              data,
-              durationMs: 0,
-              id: getId(),
-            },
-          ];
+          // Flush completed items to Static
+          const { flushed, remaining } = partitionCompleted(updated);
+          if (flushed.length > 0) {
+            setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
+          }
+          return remaining;
         });
       }, []),
       onTurnEnd: useCallback(
@@ -1081,6 +1236,9 @@ export function App(props: AppProps) {
             ...(usage.cacheRead != null && { cacheRead: String(usage.cacheRead) }),
             ...(usage.cacheWrite != null && { cacheWrite: String(usage.cacheWrite) }),
           });
+          // Track actual token count for compaction decisions
+          lastActualTokensRef.current =
+            usage.inputTokens + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
           // For tool-only turns (no text), flush completed items to Static so
           // liveItems doesn't grow unbounded across consecutive tool-only turns.
           setLiveItems((prev) => {
@@ -1235,6 +1393,9 @@ export function App(props: AppProps) {
     setTitleToolNames(agentLoop.activeToolCalls.map((tc) => tc.name));
   }, [agentLoop.activityPhase, agentLoop.isRunning, activeToolNamesKey]);
 
+  // Terminal progress bar (OSC 9;4) — pulsing bar in supported terminals
+  useTerminalProgress(agentLoop.isRunning, agentLoop.activeToolCalls.length > 0);
+
   // Animated thinking border — derived from global animation tick
   useAnimationActive();
   const animTick = useAnimationTick();
@@ -1296,7 +1457,14 @@ export function App(props: AppProps) {
         stdout?.write("\x1b[2J\x1b[3J\x1b[H");
         setHistory([{ kind: "banner", id: "banner" }]);
         setDoneStatus(null);
-        messagesRef.current = messagesRef.current.slice(0, 1); // keep system prompt
+        approvedPlanPathRef.current = undefined;
+        planStepsRef.current = [];
+        setPlanSteps([]);
+        // Rebuild system prompt without the approved plan
+        void (async () => {
+          const newPrompt = await buildSystemPrompt(props.cwd, props.skills, planMode, undefined);
+          messagesRef.current = [{ role: "system" as const, content: newPrompt }];
+        })();
         agentLoop.reset();
         setLiveItems([{ kind: "info", text: "Session cleared.", id: getId() }]);
         return;
@@ -1319,6 +1487,42 @@ export function App(props: AppProps) {
             kind: "plan_transition",
             text: "Plan Mode Deactivated",
             active: false,
+            id: getId(),
+          },
+        ]);
+        return;
+      }
+
+      // Handle /clearplan — dismiss the approved plan
+      if (trimmed === "/clearplan") {
+        approvedPlanPathRef.current = undefined;
+        planStepsRef.current = [];
+        setPlanSteps([]);
+        // Rebuild system prompt without the plan
+        void (async () => {
+          const newPrompt = await buildSystemPrompt(props.cwd, props.skills, planMode, undefined);
+          if (messagesRef.current[0]?.role === "system") {
+            messagesRef.current[0] = { role: "system" as const, content: newPrompt };
+          }
+        })();
+        setLiveItems([{ kind: "info", text: "Approved plan dismissed.", id: getId() }]);
+        return;
+      }
+
+      // Handle /buddy — toggle companion
+      if (trimmed === "/buddy") {
+        const next = !buddyEnabled;
+        setBuddyEnabled(next);
+        if (settingsRef.current) {
+          settingsRef.current.set("buddyEnabled", next);
+        }
+        setLiveItems((items) => [
+          ...items,
+          {
+            kind: "info" as const,
+            text: next
+              ? "Buddy enabled! Your companion will appear near the prompt."
+              : "Buddy disabled.",
             id: getId(),
           },
         ]);
@@ -1494,6 +1698,12 @@ export function App(props: AppProps) {
       };
       setLastUserMessage(input);
       setDoneStatus(null);
+      // Clear stale plan progress if there's no active approved plan
+      // (avoids lingering progress from a completed or abandoned plan run)
+      if (planStepsRef.current.length > 0 && !approvedPlanPathRef.current) {
+        planStepsRef.current = [];
+        setPlanSteps([]);
+      }
       setLiveItems([userItem]);
 
       // Run agent
@@ -1602,7 +1812,10 @@ export function App(props: AppProps) {
       if (props.settingsFile) {
         const sm = new SettingsManager(props.settingsFile);
         sm.load().then(async () => {
-          await sm.set("defaultProvider", newProvider);
+          await sm.set(
+            "defaultProvider",
+            newProvider as "anthropic" | "openai" | "glm" | "moonshot",
+          );
           await sm.set("defaultModel", newModelId);
         });
       }
@@ -1691,6 +1904,7 @@ export function App(props: AppProps) {
             args={item.args}
             result={item.result}
             isError={item.isError}
+            details={item.details}
           />
         );
       case "tool_group":
@@ -1915,6 +2129,15 @@ export function App(props: AppProps) {
             // Store approved plan path — will be injected into the new system prompt
             approvedPlanPathRef.current = planPath;
 
+            // Extract plan steps for progress tracking
+            void import("node:fs/promises").then(({ readFile }) =>
+              readFile(planPath, "utf-8").then((content) => {
+                const steps = extractPlanSteps(content);
+                planStepsRef.current = steps;
+                setPlanSteps(steps);
+              }),
+            );
+
             // Clear session for a fresh context focused on the plan
             stdout?.write("\x1b[2J\x1b[3J\x1b[H");
             setHistory([{ kind: "banner", id: "banner" }]);
@@ -2005,10 +2228,14 @@ export function App(props: AppProps) {
                 thinkingMs={agentLoop.thinkingMs}
                 isThinking={agentLoop.isThinking}
                 tokenEstimate={agentLoop.streamedTokenEstimate}
+                charCountRef={agentLoop.charCountRef}
+                realTokensAccumRef={agentLoop.realTokensAccumRef}
                 userMessage={lastUserMessage}
                 activeToolNames={agentLoop.activeToolCalls.map((tc) => tc.name)}
                 planMode={planMode}
                 retryInfo={agentLoop.retryInfo}
+                planDone={planSteps.filter((s) => s.completed).length}
+                planTotal={planSteps.length}
               />
             </Box>
           ) : (
@@ -2077,12 +2304,17 @@ export function App(props: AppProps) {
             <Footer
               model={currentModel}
               tokensIn={agentLoop.contextUsed}
+              linesAdded={agentLoop.linesChanged.added}
+              linesRemoved={agentLoop.linesChanged.removed}
               cwd={props.cwd}
               gitBranch={gitBranch}
               thinkingEnabled={thinkingEnabled}
               planMode={planMode}
             />
           )}
+          {/* Buddy companion */}
+          {buddyEnabled && <Buddy phase={agentLoop.activityPhase} />}
+          {/* Background tasks bar */}
           {bgTasks.length > 0 && (
             <BackgroundTasksBar
               tasks={bgTasks}
