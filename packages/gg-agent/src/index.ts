@@ -15,6 +15,7 @@ export type {
   AgentToolCallEndEvent,
   AgentServerToolCallEvent,
   AgentServerToolResultEvent,
+  AgentModelSwitchEvent,
   AgentSteeringMessageEvent,
   AgentRetryEvent,
   AgentTurnEndEvent,
@@ -23,4 +24,5 @@ export type {
   AgentEvent,
   AgentOptions,
   AgentResult,
+  ModelRouterResult,
 } from "./types.js";

@@ -64,22 +64,22 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     costTier: "low",
   },
-  // ── GLM (Z.AI) ───────────────────────────────────────────
+  // ── GLM (Z.AI) — Text ──────────────────────────────────────
   {
     id: "glm-5.1",
     name: "GLM-5.1",
     provider: "glm",
-    contextWindow: 128_000,
+    contextWindow: 205_000,
     maxOutputTokens: 16_384,
     supportsThinking: true,
     supportsImages: false,
-    costTier: "medium",
+    costTier: "high",
   },
   {
     id: "glm-5",
     name: "GLM-5",
     provider: "glm",
-    contextWindow: 128_000,
+    contextWindow: 205_000,
     maxOutputTokens: 16_384,
     supportsThinking: true,
     supportsImages: false,
@@ -89,11 +89,11 @@ export const MODELS: ModelInfo[] = [
     id: "glm-4.7",
     name: "GLM-4.7",
     provider: "glm",
-    contextWindow: 128_000,
+    contextWindow: 200_000,
     maxOutputTokens: 16_384,
     supportsThinking: true,
     supportsImages: false,
-    costTier: "low",
+    costTier: "medium",
   },
   {
     id: "glm-4.7-flash",
@@ -103,6 +103,37 @@ export const MODELS: ModelInfo[] = [
     maxOutputTokens: 16_384,
     supportsThinking: true,
     supportsImages: false,
+    costTier: "low",
+  },
+  // ── GLM (Z.AI) — Vision ───────────────────────────────────
+  {
+    id: "glm-4.6v",
+    name: "GLM-4.6V",
+    provider: "glm",
+    contextWindow: 128_000,
+    maxOutputTokens: 32_768,
+    supportsThinking: true,
+    supportsImages: true,
+    costTier: "medium",
+  },
+  {
+    id: "glm-4.6v-flashx",
+    name: "GLM-4.6V FlashX",
+    provider: "glm",
+    contextWindow: 128_000,
+    maxOutputTokens: 16_384,
+    supportsThinking: true,
+    supportsImages: true,
+    costTier: "low",
+  },
+  {
+    id: "glm-4.6v-flash",
+    name: "GLM-4.6V Flash",
+    provider: "glm",
+    contextWindow: 128_000,
+    maxOutputTokens: 16_384,
+    supportsThinking: false,
+    supportsImages: true,
     costTier: "low",
   },
   // ── Moonshot (Kimi) ──────────────────────────────────────
@@ -148,6 +179,34 @@ export function getDefaultModel(provider: Provider): ModelInfo {
 export function getContextWindow(modelId: string): number {
   const model = getModel(modelId);
   return model?.contextWindow ?? 200_000;
+}
+
+const TIER_RANK: Record<string, number> = { low: 0, medium: 1, high: 2 };
+
+/**
+ * Get the best vision-capable model for a provider.
+ * Prefers the most capable (highest costTier) vision model.
+ */
+export function getVisionModel(provider: Provider): ModelInfo | undefined {
+  const visionModels = getModelsForProvider(provider).filter((m) => m.supportsImages);
+  return visionModels.sort(
+    (a, b) => (TIER_RANK[b.costTier] ?? 0) - (TIER_RANK[a.costTier] ?? 0),
+  )[0];
+}
+
+/**
+ * Get a capable executor model for a provider (lighter than the current model).
+ * Prefers models with thinking support, picking a medium-tier model first.
+ */
+export function getExecutorModel(provider: Provider, currentModelId: string): ModelInfo {
+  const models = getModelsForProvider(provider).filter(
+    (m) => m.id !== currentModelId && m.supportsThinking,
+  );
+  return (
+    models.find((m) => m.costTier === "medium") ??
+    models.find((m) => m.costTier === "low") ??
+    getDefaultModel(provider)
+  );
 }
 
 /**

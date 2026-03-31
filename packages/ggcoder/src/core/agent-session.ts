@@ -14,7 +14,8 @@ import { SessionManager, type MessageEntry, type BranchInfo } from "./session-ma
 import { ExtensionLoader } from "./extensions/loader.js";
 import type { ExtensionContext } from "./extensions/types.js";
 import { shouldCompact, compact } from "./compaction/compactor.js";
-import { getContextWindow, MODELS } from "./model-registry.js";
+import { getContextWindow, getExecutorModel, getVisionModel, MODELS } from "./model-registry.js";
+import { createModelRouter, type RouterMode } from "./model-router.js";
 import { discoverSkills, type Skill } from "./skills.js";
 import { ensureAppDirs } from "../config.js";
 import { buildSystemPrompt } from "../system-prompt.js";
@@ -76,6 +77,7 @@ export class AgentSession {
   private baseUrl?: string;
   private maxTokens: number;
   private thinkingLevel?: ThinkingLevel;
+  private routerMode: RouterMode = "hybrid";
   private customSystemPrompt?: string;
 
   private sessionId = "";
@@ -298,6 +300,9 @@ export class AgentSession {
     let creds = await this.authStorage.resolveCredentials(this.provider);
 
     const runAgentLoop = async (apiKey: string, accountId?: string) => {
+      // Build model router based on provider capabilities and user preference
+      const modelRouter = createModelRouter(this.routerMode, this.provider, this.model);
+
       const generator = agentLoop(this.messages, {
         provider: this.provider,
         model: this.model,
@@ -313,6 +318,7 @@ export class AgentSession {
         clearToolUses: this.provider === "anthropic",
         // Single tool result shouldn't exceed 30% of context window (in chars)
         maxToolResultChars: Math.floor(getContextWindow(this.model) * 3.5 * 0.3),
+        modelRouter,
       });
 
       for await (const event of generator as AsyncIterable<AgentEvent>) {
@@ -387,6 +393,15 @@ export class AgentSession {
         );
       }
     }
+  }
+
+  getRouterMode(): RouterMode {
+    return this.routerMode;
+  }
+
+  setRouterMode(mode: RouterMode): void {
+    this.routerMode = mode;
+    log("INFO", "router", `Model routing set to: ${mode}`);
   }
 
   async compact(): Promise<void> {
@@ -624,6 +639,18 @@ export class AgentSession {
             `  ${i + 1}. ${b.leafId.slice(0, 8)} — ${b.entryCount} entries (${b.leafId === this.currentLeafId ? "active" : "inactive"})`,
         );
         return `${branches.length} branch(es):\n${lines.join("\n")}`;
+      },
+      getRouterMode: () => this.getRouterMode(),
+      setRouterMode: (mode) => this.setRouterMode(mode),
+      getRouterInfo: () => {
+        const visionModel = getVisionModel(this.provider);
+        const executorModel = getExecutorModel(this.provider, this.model);
+        const lines = [
+          `  Primary model: ${this.model}`,
+          `  Vision model:  ${visionModel?.name ?? "none"}`,
+          `  Executor model: ${executorModel.name}`,
+        ];
+        return lines.join("\n");
       },
     };
   }

@@ -36,6 +36,16 @@ export interface AgentTool<T extends z.ZodType = z.ZodType> extends Tool {
   ) => ToolExecuteResult | Promise<ToolExecuteResult>;
 }
 
+// ── Model Router ────────────────────────────────────────────
+
+export interface ModelRouterResult {
+  provider?: string;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  reason?: string;
+}
+
 // ── Agent Events ────────────────────────────────────────────
 
 export interface AgentTextDeltaEvent {
@@ -110,6 +120,15 @@ export interface AgentServerToolResultEvent {
   data: unknown;
 }
 
+export interface AgentModelSwitchEvent {
+  type: "model_switch";
+  fromModel: string;
+  toModel: string;
+  fromProvider: string;
+  toProvider: string;
+  reason: string;
+}
+
 export interface AgentSteeringMessageEvent {
   type: "steering_message";
   content: Message["content"];
@@ -123,6 +142,7 @@ export type AgentEvent =
   | AgentToolCallEndEvent
   | AgentServerToolCallEvent
   | AgentServerToolResultEvent
+  | AgentModelSwitchEvent
   | AgentSteeringMessageEvent
   | AgentRetryEvent
   | AgentTurnEndEvent
@@ -176,6 +196,17 @@ export interface AgentOptions {
    * on read.
    */
   getSteeringMessages?: () => Promise<Message[] | null> | Message[] | null;
+  /**
+   * Called before each LLM call to optionally override provider/model for this turn.
+   * Receives the current messages and can inspect content to decide routing
+   * (e.g. switch to a vision model when images are detected).
+   * Return null to use the default model. The override applies only to this turn.
+   */
+  modelRouter?: (
+    messages: Message[],
+    currentModel: string,
+    currentProvider: string,
+  ) => ModelRouterResult | null | Promise<ModelRouterResult | null>;
 }
 
 // ── Agent Result ────────────────────────────────────────────

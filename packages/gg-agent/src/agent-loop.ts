@@ -10,6 +10,7 @@ import {
 } from "@abukhaled/gg-ai";
 import type {
   AgentEvent,
+  AgentModelSwitchEvent,
   AgentOptions,
   AgentResult,
   AgentTool,
@@ -115,12 +116,40 @@ export async function* agentLoop(
         }
       }
 
+      // ── Model routing: allow per-turn model/provider override ──
+      let turnProvider = options.provider;
+      let turnModel = options.model;
+      let turnApiKey = options.apiKey;
+      let turnBaseUrl = options.baseUrl;
+
+      if (options.modelRouter) {
+        const override = await options.modelRouter(messages, turnModel, turnProvider);
+        if (override) {
+          const prevModel = turnModel;
+          const prevProvider = turnProvider;
+          if (override.provider) turnProvider = override.provider as typeof turnProvider;
+          if (override.model) turnModel = override.model;
+          if (override.apiKey) turnApiKey = override.apiKey;
+          if (override.baseUrl) turnBaseUrl = override.baseUrl;
+          if (turnModel !== prevModel || turnProvider !== prevProvider) {
+            yield {
+              type: "model_switch",
+              fromModel: prevModel,
+              toModel: turnModel,
+              fromProvider: prevProvider,
+              toProvider: turnProvider,
+              reason: override.reason ?? "model router",
+            } satisfies AgentModelSwitchEvent;
+          }
+        }
+      }
+
       // ── Call LLM with overflow recovery ──
       let response;
       try {
         const result = stream({
-          provider: options.provider,
-          model: options.model,
+          provider: turnProvider,
+          model: turnModel,
           messages,
           tools: options.tools,
           serverTools: options.serverTools,
@@ -128,8 +157,8 @@ export async function* agentLoop(
           maxTokens: options.maxTokens,
           temperature: options.temperature,
           thinking: options.thinking,
-          apiKey: options.apiKey,
-          baseUrl: options.baseUrl,
+          apiKey: turnApiKey,
+          baseUrl: turnBaseUrl,
           signal: options.signal,
           accountId: options.accountId,
           cacheRetention: options.cacheRetention,
