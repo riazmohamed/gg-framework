@@ -900,8 +900,15 @@ export function App(props: AppProps) {
           planStepsRef.current = [];
           setPlanSteps([]);
           approvedPlanPathRef.current = undefined;
+          // Rebuild system prompt to remove the completed plan from context
+          void (async () => {
+            const newPrompt = await buildSystemPrompt(props.cwd, props.skills, planMode, undefined);
+            if (messagesRef.current[0]?.role === "system") {
+              messagesRef.current[0] = { role: "system" as const, content: newPrompt };
+            }
+          })();
         }
-      }, [persistNewMessages]),
+      }, [persistNewMessages, planMode, props.cwd, props.skills]),
       onTurnText: useCallback((text: string, thinking: string, thinkingMs: number) => {
         // Track [DONE:n] markers for plan step progress
         if (planStepsRef.current.length > 0) {
@@ -1429,7 +1436,11 @@ export function App(props: AppProps) {
         approvedPlanPathRef.current = undefined;
         planStepsRef.current = [];
         setPlanSteps([]);
-        messagesRef.current = messagesRef.current.slice(0, 1); // keep system prompt
+        // Rebuild system prompt without the approved plan
+        void (async () => {
+          const newPrompt = await buildSystemPrompt(props.cwd, props.skills, planMode, undefined);
+          messagesRef.current = [{ role: "system" as const, content: newPrompt }];
+        })();
         agentLoop.reset();
         setLiveItems([{ kind: "info", text: "Session cleared.", id: getId() }]);
         return;
