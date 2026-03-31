@@ -77,7 +77,10 @@ export function createEditTool(
 
       const relPath = path.relative(cwd, resolved);
       const diff = generateDiff(normalized, newContent, relPath);
-      return diff;
+      return {
+        content: `Successfully replaced text in ${relPath}.`,
+        details: { diff },
+      };
     },
   };
 }

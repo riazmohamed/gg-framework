@@ -92,6 +92,8 @@ export async function* agentLoop(
 
   const totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
   let turn = 0;
+  let firstTurn = true;
+  let lastRouterModel: string | undefined;
   let consecutivePauses = 0;
   let overflowRetries = 0;
   let overloadRetries = 0;
@@ -106,6 +108,18 @@ export async function* agentLoop(
     while (turn < maxTurns) {
       options.signal?.throwIfAborted();
       turn++;
+
+      // ── Initial steering poll: catch messages queued before the first LLM call ──
+      if (firstTurn && options.getSteeringMessages) {
+        const steering = await options.getSteeringMessages();
+        if (steering && steering.length > 0) {
+          for (const msg of steering) {
+            yield { type: "steering_message" as const, content: msg.content };
+            messages.push(msg);
+          }
+        }
+      }
+      firstTurn = false;
 
       // ── Mid-loop context transform (compaction / truncation) ──
       if (options.transformContext) {
@@ -141,7 +155,18 @@ export async function* agentLoop(
               reason: override.reason ?? "model router",
             } satisfies AgentModelSwitchEvent;
           }
+        } else if (lastRouterModel && lastRouterModel !== turnModel) {
+          // Router returned null — switched back to default model
+          yield {
+            type: "model_switch",
+            fromModel: lastRouterModel,
+            toModel: turnModel,
+            fromProvider: turnProvider,
+            toProvider: turnProvider,
+            reason: `Returning to ${turnModel}`,
+          } satisfies AgentModelSwitchEvent;
         }
+        lastRouterModel = turnModel;
       }
 
       // ── Call LLM with overflow recovery ──
@@ -319,6 +344,17 @@ export async function* agentLoop(
               messages.push(msg);
             }
             continue; // Next iteration will call LLM with injected messages
+          }
+        }
+        // Follow-up: lower priority than steering — only when agent would otherwise stop.
+        if (options.getFollowUpMessages) {
+          const followUp = await options.getFollowUpMessages();
+          if (followUp && followUp.length > 0) {
+            for (const msg of followUp) {
+              yield { type: "follow_up_message" as const, content: msg.content };
+              messages.push(msg);
+            }
+            continue;
           }
         }
         yield {

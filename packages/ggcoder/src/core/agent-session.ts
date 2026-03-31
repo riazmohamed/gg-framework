@@ -77,7 +77,7 @@ export class AgentSession {
   private baseUrl?: string;
   private maxTokens: number;
   private thinkingLevel?: ThinkingLevel;
-  private routerMode: RouterMode = "hybrid";
+  private routerMode: RouterMode = "vision";
   private customSystemPrompt?: string;
 
   private sessionId = "";

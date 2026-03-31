@@ -17,6 +17,11 @@ function messageHasImages(msg: Message): boolean {
   return msg.content.some((c) => c.type === "image");
 }
 
+/** Check if any message in the conversation contains images. */
+function conversationHasImages(messages: Message[]): boolean {
+  return messages.some((m) => messageHasImages(m));
+}
+
 // ── Router Mode ────────────────────────────────────────────
 
 export type RouterMode = "off" | "vision" | "plan-execute" | "hybrid";
@@ -50,8 +55,8 @@ export function createVisionRouter(defaultModel: string, _defaultProvider: strin
       }
     }
 
-    // Switch back when no images and we're not on the default model
-    if (!hasImages && currentModel !== defaultModel) {
+    // Switch back when no images in the entire conversation and we're not on the default model
+    if (!hasImages && currentModel !== defaultModel && !conversationHasImages(messages)) {
       return { model: defaultModel, reason: `Returning to ${defaultModel}` };
     }
 
@@ -117,6 +122,10 @@ export function createHybridRouter(config: HybridRouterConfig) {
     // Vision routing takes priority — images must be handled by a vision model
     const visionResult = visionRouter(messages, currentModel, currentProvider);
     if (visionResult) return visionResult;
+
+    // If images exist anywhere in the conversation, stay on the vision model
+    // to avoid switching to a text-only model that can't handle image context
+    if (conversationHasImages(messages)) return null;
 
     // Then plan-execute routing for text-only turns
     return planExecRouter(messages, currentModel, currentProvider);

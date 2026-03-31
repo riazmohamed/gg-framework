@@ -11,6 +11,7 @@ export interface AppPaths {
   settingsFile: string;
   authFile: string;
   telegramFile: string;
+  agentHomeFile: string;
   logFile: string;
   skillsDir: string;
   extensionsDir: string;
@@ -25,6 +26,7 @@ export function getAppPaths(): AppPaths {
     settingsFile: path.join(agentDir, "settings.json"),
     authFile: path.join(agentDir, "auth.json"),
     telegramFile: path.join(agentDir, "telegram.json"),
+    agentHomeFile: path.join(agentDir, "agent-home.json"),
     logFile: path.join(agentDir, "debug.log"),
     skillsDir: path.join(agentDir, "skills"),
     extensionsDir: path.join(agentDir, "extensions"),
