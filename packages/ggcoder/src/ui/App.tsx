@@ -2195,6 +2195,8 @@ export function App(props: AppProps) {
                 thinkingMs={agentLoop.thinkingMs}
                 isThinking={agentLoop.isThinking}
                 tokenEstimate={agentLoop.streamedTokenEstimate}
+                charCountRef={agentLoop.charCountRef}
+                realTokensAccumRef={agentLoop.realTokensAccumRef}
                 userMessage={lastUserMessage}
                 activeToolNames={agentLoop.activeToolCalls.map((tc) => tc.name)}
                 planMode={planMode}
@@ -2269,8 +2271,6 @@ export function App(props: AppProps) {
             <Footer
               model={currentModel}
               tokensIn={agentLoop.contextUsed}
-              tokensOut={agentLoop.totalTokens.output}
-              sessionCost={agentLoop.sessionCost}
               linesAdded={agentLoop.linesChanged.added}
               linesRemoved={agentLoop.linesChanged.removed}
               cwd={props.cwd}
