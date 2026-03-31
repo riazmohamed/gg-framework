@@ -203,6 +203,7 @@ export function useAgentLoop(
   const realTokensAccumRef = useRef(0);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const doneCalledRef = useRef(false);
+  const lastRoutedModelRef = useRef<string | undefined>(undefined);
 
   const abort = useCallback(() => {
     abortRef.current?.abort();
@@ -290,6 +291,19 @@ export function useAgentLoop(
             setIsThinking(false);
           }
         };
+
+        // Emit switch-back cue if previous run used a different model
+        if (
+          lastRoutedModelRef.current &&
+          lastRoutedModelRef.current !== options.model
+        ) {
+          onModelSwitch?.(
+            lastRoutedModelRef.current,
+            options.model,
+            `Returning to ${options.model}`,
+          );
+          lastRoutedModelRef.current = undefined;
+        }
 
         // Push user message
         const userMsg: Message = { role: "user", content: content };
@@ -436,6 +450,7 @@ export function useAgentLoop(
               }
 
               case "model_switch":
+                lastRoutedModelRef.current = event.toModel;
                 onModelSwitch?.(event.fromModel, event.toModel, event.reason);
                 break;
 
