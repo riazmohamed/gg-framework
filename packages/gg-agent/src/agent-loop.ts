@@ -59,7 +59,9 @@ export function isBillingError(err: unknown): boolean {
     msg.includes("no resource package") ||
     msg.includes("quota exceeded") ||
     msg.includes("billing") ||
-    msg.includes("recharge")
+    msg.includes("recharge") ||
+    msg.includes("subscription plan") ||
+    msg.includes("does not yet include access")
   );
 }
 
