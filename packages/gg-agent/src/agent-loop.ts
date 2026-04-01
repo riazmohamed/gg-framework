@@ -18,7 +18,7 @@ import type {
   StructuredToolResult,
 } from "./types.js";
 
-const DEFAULT_MAX_TURNS = 100;
+const DEFAULT_MAX_TURNS = 200;
 
 /**
  * Detect abort errors — user-initiated cancellation or AbortSignal.
