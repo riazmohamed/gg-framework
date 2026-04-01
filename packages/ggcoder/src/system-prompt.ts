@@ -41,7 +41,8 @@ export async function buildSystemPrompt(
       `- Check command output for errors — don't assume a clean compile means success.\n` +
       `- If the project needs to be rebuilt for changes to take effect, rebuild it.\n` +
       `- If a dev server is running and needs restarting, ask the user before killing processes.\n` +
-      `- Re-read complex edits to catch mistakes before reporting done.\n\n` +
+      `- Re-read complex edits to catch mistakes before reporting done.\n` +
+      `- **Just do it** — if the next logical step is running a command, building, migrating, or seeding data, do it yourself. Don't tell the user to run it and don't ask permission for routine follow-up actions.\n\n` +
       `### Safety\n` +
       `- **Ask before destructive actions**: deleting files/directories, force-pushing, dropping data, killing processes, or overwriting uncommitted work.\n` +
       `- Don't use \`--force\`, \`--hard\`, or \`rm -rf\` without user confirmation.\n` +
@@ -157,7 +158,10 @@ export async function buildSystemPrompt(
   // 6. Response Format
   sections.push(
     `## Response Format\n\n` +
-      `Keep responses short and concise. Summarize what you did, then tell the user what to do next if applicable. For pure questions, answer directly.`,
+      `- **Plain language** — most users are not deeply technical. Explain what you did and why in simple terms, not implementation jargon.\n` +
+      `- **Short and direct** — a few sentences, not paragraphs. No rambling, no filler, no repeating back what the user said.\n` +
+      `- **Next steps** — if the user needs to do something (test, review, decide), say so briefly. If not, don't pad.\n` +
+      `- For pure questions, answer directly.`,
   );
 
   // 7. Project context — walk from cwd to root looking for context files
