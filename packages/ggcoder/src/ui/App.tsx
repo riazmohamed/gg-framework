@@ -1804,6 +1804,9 @@ export function App(props: AppProps) {
       });
 
       setCurrentModel(newModelId);
+      // Clear terminal + re-render Static so the Banner header shows the new model
+      stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+      setStaticKey((k) => k + 1);
       const modelInfo = getModel(newModelId);
       const displayName = modelInfo?.name ?? newModelId;
       setLiveItems((prev) => [
@@ -1823,7 +1826,7 @@ export function App(props: AppProps) {
         });
       }
     },
-    [props.settingsFile, props.mcpManager, props.credentialsByProvider, props.authStorage],
+    [props.settingsFile, props.mcpManager, props.credentialsByProvider, props.authStorage, stdout],
   );
 
   // All available slash commands for the command palette
@@ -1863,7 +1866,7 @@ export function App(props: AppProps) {
           <Banner
             key={item.id}
             version={props.version}
-            model={props.model}
+            model={currentModel}
             provider={props.provider}
             cwd={props.cwd}
             taskCount={taskCount}
