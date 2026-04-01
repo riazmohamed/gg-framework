@@ -293,10 +293,7 @@ export function useAgentLoop(
         };
 
         // Emit switch-back cue if previous run used a different model
-        if (
-          lastRoutedModelRef.current &&
-          lastRoutedModelRef.current !== options.model
-        ) {
+        if (lastRoutedModelRef.current && lastRoutedModelRef.current !== options.model) {
           onModelSwitch?.(
             lastRoutedModelRef.current,
             options.model,
