@@ -1,4 +1,4 @@
-import { stream, type Message, type Provider, type TextContent } from "@kenkaiiii/gg-ai";
+import { stream, type Message, type Provider, type TextContent, type ContentPart } from "@abukhaled/gg-ai";
 
 const TITLE_PROMPT = `Generate an extremely short title (3-7 words) summarizing what the user is asking for. Just the title, nothing else. No quotes, no punctuation at the end.`;
 
@@ -67,8 +67,8 @@ export async function generateSessionTitle(opts: {
       typeof msg.content === "string"
         ? msg.content
         : msg.content
-            .filter((c): c is TextContent => c.type === "text")
-            .map((c) => c.text)
+            .filter((c: ContentPart): c is TextContent => c.type === "text")
+            .map((c: TextContent) => c.text)
             .join("");
 
     return text.trim().replace(/[."]+$/, "") || "New conversation";
