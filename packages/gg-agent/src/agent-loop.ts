@@ -134,6 +134,9 @@ export async function* agentLoop(
         }
       }
 
+      // ── Repair tool pairing: ensure every tool_use has an adjacent tool_result ──
+      repairToolPairingAdjacent(messages);
+
       // ── Call LLM with overflow recovery ──
       let response;
       // Per-attempt abort controller: allows idle timeout to abort the stream
@@ -641,5 +644,54 @@ function sanitizeOrphanedServerTools(messages: Message[]): void {
       (msg as { content: ContentPart[] }).content = filtered;
     }
     break;
+  }
+}
+
+/**
+ * Ensure every assistant message with tool_call blocks is immediately followed
+ * by a tool message with matching tool_result entries. This prevents Anthropic
+ * API 400 errors ("tool_use ids found without tool_result blocks immediately
+ * after") that can occur after compaction, session restore, or abort recovery.
+ *
+ * Repairs in-place by inserting synthetic tool_result messages where needed.
+ */
+function repairToolPairingAdjacent(messages: Message[]): void {
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role !== "assistant") continue;
+    if (typeof msg.content === "string" || !Array.isArray(msg.content)) continue;
+
+    const toolCallIds = (msg.content as ContentPart[])
+      .filter((p) => p.type === "tool_call")
+      .map((p) => (p as ContentPart & { type: "tool_call"; id: string }).id);
+    if (toolCallIds.length === 0) continue;
+
+    const next = messages[i + 1];
+    if (next?.role === "tool" && Array.isArray(next.content)) {
+      // Tool message exists — check for missing results
+      const existingIds = new Set((next.content as ToolResult[]).map((r) => r.toolCallId));
+      const missing = toolCallIds.filter((id) => !existingIds.has(id));
+      if (missing.length > 0) {
+        for (const id of missing) {
+          (next.content as ToolResult[]).push({
+            type: "tool_result",
+            toolCallId: id,
+            content: "Tool execution was interrupted.",
+            isError: true,
+          });
+        }
+      }
+    } else {
+      // No tool message follows — insert a synthetic one
+      messages.splice(i + 1, 0, {
+        role: "tool" as const,
+        content: toolCallIds.map((id) => ({
+          type: "tool_result" as const,
+          toolCallId: id,
+          content: "Tool execution was interrupted.",
+          isError: true,
+        })),
+      });
+    }
   }
 }
