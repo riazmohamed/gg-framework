@@ -163,6 +163,7 @@ Fix ALL errors before continuing. Quick fixes:
   - `hybrid` (default) — vision takes priority, then plan-execute for text-only turns
   - The router is created in `App.tsx` (interactive UI) and `AgentSession` (programmatic). It emits `model_switch` events that show a notification in the UI.
   - **Critical**: when images exist anywhere in the conversation, the router stays on the vision model to avoid switching to a text-only model that can't handle image context.
+- **System Prompt Optimization**: Ollama (local LLMs without prompt caching) automatically skip heavy context files (CLAUDE.md, AGENTS.md, etc.) in `buildSystemPrompt()` to reduce token reprocessing. Cloud APIs get the full context since they have prompt caching. See `packages/ggcoder/src/system-prompt.ts`.
 
 ## Slash Commands
 
@@ -219,3 +220,24 @@ To add a new registry command:
 | Both UI + session access | `App.tsx` (can call session methods via props) |
 
 There is also support for **prompt-template commands** (built-in from `core/prompt-commands.ts` and custom from `.gg/commands/` directory).
+
+## Model Registry & Local Models
+
+Models are registered in `packages/ggcoder/src/core/model-registry.ts`. Each model entry:
+
+```ts
+{
+  id: "model-id",                    // Unique identifier (matches API model name)
+  name: "Display Name",              // User-facing name
+  provider: "anthropic" | "openai" | "ollama" | "glm" | "moonshot",
+  contextWindow: 200_000,            // Context window size
+  maxOutputTokens: 16_384,           // Max output tokens
+  supportsThinking: true | false,    // Extended thinking support
+  supportsImages: true | false,      // Image input support
+  costTier: "low" | "medium" | "high",
+}
+```
+
+**Adding Ollama models:** Ollama models use OpenAI-compatible API at `http://localhost:11434/v1`. Set `apiKey: "ollama"` and `baseUrl` defaults to Ollama endpoint in `packages/gg-ai/src/stream.ts`.
+
+**Performance note:** Smaller local models (7B, 14B) are significantly faster than larger ones (32B+) on CPU-only hardware. For local inference, prefer smaller models unless maximum capability is needed. System prompt optimization automatically reduces context overhead for Ollama.

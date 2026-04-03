@@ -44,7 +44,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
     globalSkillsDir: paths.skillsDir,
     projectDir: cwd,
   });
-  const systemPrompt = config.systemPrompt ?? (await buildSystemPrompt(cwd, skills));
+  const systemPrompt = config.systemPrompt ?? (await buildSystemPrompt(cwd, skills, false, undefined, provider));
 
   // Create tools
   const { tools, processManager } = createTools(cwd, { skills });

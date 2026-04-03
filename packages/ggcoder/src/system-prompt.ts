@@ -1,17 +1,20 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { Provider } from "@abukhaled/gg-ai";
 import { formatSkillsForPrompt, type Skill } from "./core/skills.js";
 
 const CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", ".cursorrules", "CONVENTIONS.md"];
 
 /**
  * Build the system prompt dynamically based on cwd and context.
+ * For Ollama (local LLM without prompt caching), skip heavy context files to reduce reprocessing overhead.
  */
 export async function buildSystemPrompt(
   cwd: string,
   skills?: Skill[],
   planMode?: boolean,
   approvedPlanPath?: string,
+  provider?: Provider,
 ): Promise<string> {
   const sections: string[] = [];
 
@@ -157,29 +160,32 @@ export async function buildSystemPrompt(
   );
 
   // 7. Project context — walk from cwd to root looking for context files
+  // Skip for Ollama to reduce reprocessing overhead (no prompt caching like Claude API)
   const contextParts: string[] = [];
-  let dir = cwd;
-  const visited = new Set<string>();
+  if (provider !== "ollama") {
+    let dir = cwd;
+    const visited = new Set<string>();
 
-  while (!visited.has(dir)) {
-    visited.add(dir);
-    for (const name of CONTEXT_FILES) {
-      const filePath = path.join(dir, name);
-      try {
-        const content = await fs.readFile(filePath, "utf-8");
-        const relPath = path.relative(cwd, filePath) || name;
-        contextParts.push(`### ${relPath}\n\n${content.trim()}`);
-      } catch {
-        // File doesn't exist, skip
+    while (!visited.has(dir)) {
+      visited.add(dir);
+      for (const name of CONTEXT_FILES) {
+        const filePath = path.join(dir, name);
+        try {
+          const content = await fs.readFile(filePath, "utf-8");
+          const relPath = path.relative(cwd, filePath) || name;
+          contextParts.push(`### ${relPath}\n\n${content.trim()}`);
+        } catch {
+          // File doesn't exist, skip
+        }
       }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
     }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
 
-  if (contextParts.length > 0) {
-    sections.push(`## Project Context\n\n${contextParts.join("\n\n")}`);
+    if (contextParts.length > 0) {
+      sections.push(`## Project Context\n\n${contextParts.join("\n\n")}`);
+    }
   }
 
   // 8. Skills

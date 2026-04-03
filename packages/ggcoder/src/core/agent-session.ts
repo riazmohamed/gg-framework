@@ -128,7 +128,8 @@ export class AgentSession {
     });
 
     // Build system prompt
-    const basePrompt = this.customSystemPrompt ?? (await buildSystemPrompt(this.cwd, this.skills));
+    const basePrompt =
+      this.customSystemPrompt ?? (await buildSystemPrompt(this.cwd, this.skills, false, undefined, this.provider));
     this.messages = [{ role: "system", content: basePrompt }];
 
     // Discover agents and create tools (with sub-agent support)
@@ -440,7 +441,8 @@ export class AgentSession {
   }
 
   async newSession(): Promise<void> {
-    const basePrompt = this.customSystemPrompt ?? (await buildSystemPrompt(this.cwd, this.skills));
+    const basePrompt =
+      this.customSystemPrompt ?? (await buildSystemPrompt(this.cwd, this.skills, false, undefined, this.provider));
     this.messages = [{ role: "system", content: basePrompt }];
     await this.createNewSession();
     this.eventBus.emit("session_start", { sessionId: this.sessionId });

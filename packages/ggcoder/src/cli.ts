@@ -519,7 +519,7 @@ async function runInkTUI(opts: {
   });
 
   // Build system prompt & tools (with sub-agent support)
-  const systemPrompt = await buildSystemPrompt(cwd, skills);
+  const systemPrompt = await buildSystemPrompt(cwd, skills, false, undefined, effectiveProvider);
 
   // Plan mode refs — shared between tools and UI
   const planModeRef = { current: false };
