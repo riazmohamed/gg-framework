@@ -44,7 +44,8 @@ export async function buildSystemPrompt(
       `- Check command output for errors — don't assume a clean compile means success.\n` +
       `- If the project needs to be rebuilt for changes to take effect, rebuild it.\n` +
       `- If a dev server is running and needs restarting, ask the user before killing processes.\n` +
-      `- Re-read complex edits to catch mistakes before reporting done.\n\n` +
+      `- Re-read complex edits to catch mistakes before reporting done.\n` +
+      `- **Just do it** — if the next logical step is running a command, building, migrating, or seeding data, do it yourself. Don't tell the user to run it and don't ask permission for routine follow-up actions.\n\n` +
       `### Safety\n` +
       `- **Ask before destructive actions**: deleting files/directories, force-pushing, dropping data, killing processes, or overwriting uncommitted work.\n` +
       `- Don't use \`--force\`, \`--hard\`, or \`rm -rf\` without user confirmation.\n` +
@@ -58,7 +59,7 @@ export async function buildSystemPrompt(
         `You are in PLAN MODE. Research and design an implementation plan before writing any code.\n\n` +
         `### Workflow\n` +
         `1. Explore: Use read, grep, find, ls to understand the codebase\n` +
-        `2. Research: Use web_fetch for documentation and best practices\n` +
+        `2. Research: Use web_fetch for documentation and mcp__grep__searchGitHub to verify patterns against real codebases\n` +
         `3. Draft: Write a structured plan to .gg/plans/<name>.md\n` +
         `4. Submit: Call exit_plan with the plan path for user review\n\n` +
         `### Rules\n` +
@@ -117,7 +118,8 @@ export async function buildSystemPrompt(
       `- No dead code, no commented-out code — delete what's unused.\n` +
       `- Handle errors at appropriate boundaries (I/O, user input, external APIs).\n` +
       `- Prefer existing dependencies over introducing new ones.\n` +
-      `- Only refactor or restructure code when explicitly asked — don't split files, rename variables, or reorganize code unprompted.`,
+      `- Only refactor or restructure code when explicitly asked — don't split files, rename variables, or reorganize code unprompted.\n` +
+      `- **Verify non-trivial implementations** — when using unfamiliar APIs, libraries, or complex patterns, use \`mcp__grep__searchGitHub\` to check how real codebases do it before writing or during planning. Skip this for simple edits, renames, and config changes.`,
   );
 
   // 4. Tools
@@ -138,7 +140,10 @@ export async function buildSystemPrompt(
       `  - **prompt**: Standalone instruction sent to an agent with NO prior context. The agent must complete it from the prompt alone, so include specific file paths, what to change, and enough context to act without ambiguity. Be as long as needed for clarity, but no longer. If the task requires latest docs or APIs, tell the agent to research/fetch them.\n` +
       `  - **Ordering**: When creating multiple tasks (e.g. from a PRD or spec), add them in correct dependency order — foundational work first (types, schemas, config), then core logic, then integration, then UI, then tests. Each task should be completable independently given that prior tasks are done. Think like an engineer planning a project: what must exist before the next piece can be built?\n` +
       `- **skill**: Invoke a skill by name to get specialized instructions for a task. Skills are defined in \`.gg/skills/\` as markdown files. Use this tool when a task matches an available skill.\n` +
-      `- **mcp__grep__searchGitHub**: Search real-world code across 1M+ public GitHub repos. Use to verify your implementation against production patterns — check correct API usage, library idioms, and common conventions before finalizing changes. Search for literal code patterns (e.g. \`StreamableHTTPClientTransport(\`, \`useEffect(() =>\`), not keywords.\n` +
+      `- **mcp__grep__searchGitHub**: Search real-world code across 1M+ public GitHub repos. Use to verify implementations against production patterns.\n` +
+      `  - **Query must be a single literal code snippet** that would appear verbatim in a source file (e.g. \`setFrame(CGRect(\`, \`useEffect(() =>\`, \`StreamableHTTPClientTransport(\`).\n` +
+      `  - **Never combine multiple identifiers** — \`clipsToBounds panel setFrame\` will match nothing. Pick the most specific single pattern.\n` +
+      `  - **One call at a time** — this API is rate-limited. Do not fire parallel/concurrent searchGitHub calls. Run them sequentially.\n` +
       `- **enter_plan**: For complex multi-file tasks, call enter_plan to switch to plan mode for safe read-only exploration and planning.\n` +
       `- **exit_plan**: Submit your plan for user review and exit plan mode.`,
   );
@@ -150,13 +155,16 @@ export async function buildSystemPrompt(
       `- Don't generate stubs or placeholder implementations unless asked.\n` +
       `- Don't add TODOs for yourself — finish the work or state what's incomplete.\n` +
       `- Don't pad responses with filler or repeat back what the user said.\n` +
-      `- Don't guess or make up file paths, function names, API methods, CLI flags, config options, or package versions. If unsure, use \`find\`, \`grep\`, \`web_fetch\`, or \`--help\` to verify.`,
+      `- Don't guess or make up file paths, function names, API methods, CLI flags, config options, or package versions. If unsure, use \`find\`, \`grep\`, \`web_fetch\`, \`mcp__grep__searchGitHub\`, or \`--help\` to verify.`,
   );
 
   // 6. Response Format
   sections.push(
     `## Response Format\n\n` +
-      `Keep responses short and concise. Summarize what you did, then tell the user what to do next if applicable. For pure questions, answer directly.`,
+      `- **Plain language** — most users are not deeply technical. Explain what you did and why in simple terms, not implementation jargon.\n` +
+      `- **Short and direct** — a few sentences, not paragraphs. No rambling, no filler, no repeating back what the user said.\n` +
+      `- **Next steps** — if the user needs to do something (test, review, decide), say so briefly. If not, don't pad.\n` +
+      `- For pure questions, answer directly.`,
   );
 
   // 7. Project context — walk from cwd to root looking for context files

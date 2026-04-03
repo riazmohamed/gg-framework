@@ -19,7 +19,7 @@ import type {
   StructuredToolResult,
 } from "./types.js";
 
-const DEFAULT_MAX_TURNS = 100;
+const DEFAULT_MAX_TURNS = 200;
 
 /**
  * Detect abort errors — user-initiated cancellation or AbortSignal.
@@ -60,7 +60,9 @@ export function isBillingError(err: unknown): boolean {
     msg.includes("no resource package") ||
     msg.includes("quota exceeded") ||
     msg.includes("billing") ||
-    msg.includes("recharge")
+    msg.includes("recharge") ||
+    msg.includes("subscription plan") ||
+    msg.includes("does not yet include access")
   );
 }
 
@@ -98,11 +100,15 @@ export async function* agentLoop(
   let overflowRetries = 0;
   let overloadRetries = 0;
   let emptyResponseRetries = 0;
+  let stallRetries = 0;
   const MAX_OVERFLOW_RETRIES = 3;
   const MAX_OVERLOAD_RETRIES = 10;
-  const MAX_EMPTY_RESPONSE_RETRIES = 3;
+  const MAX_EMPTY_RESPONSE_RETRIES = 2;
+  const MAX_STALL_RETRIES = 2;
   const OVERLOAD_BASE_DELAY_MS = 2_000;
   const OVERLOAD_MAX_DELAY_MS = 30_000;
+  const STREAM_IDLE_TIMEOUT_MS = 45_000; // 45s without any stream event = stall
+  const STREAM_HARD_TIMEOUT_MS = 120_000; // 2min absolute cap per LLM call
 
   try {
     while (turn < maxTurns) {
@@ -169,8 +175,40 @@ export async function* agentLoop(
         lastRouterModel = turnModel;
       }
 
+      // ── Repair tool pairing: ensure every tool_use has an adjacent tool_result ──
+      repairToolPairingAdjacent(messages);
+
       // ── Call LLM with overflow recovery ──
       let response;
+      // Per-attempt abort controller: allows idle timeout to abort the stream
+      // without affecting the caller's signal. The caller's abort is forwarded.
+      const streamController = new AbortController();
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+      let hardTimer: ReturnType<typeof setTimeout> | null = null;
+      let idleTimedOut = false;
+
+      // Forward caller abort to the per-attempt controller
+      const forwardAbort = () => streamController.abort();
+      options.signal?.addEventListener("abort", forwardAbort, { once: true });
+
+      // Idle timeout: abort the stream if no events arrive within the window.
+      // This catches mid-stream server stalls where the connection stays open
+      // but the server stops sending data (overload, network issues, etc.).
+      const resetIdleTimer = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          idleTimedOut = true;
+          streamController.abort();
+        }, STREAM_IDLE_TIMEOUT_MS);
+      };
+
+      // Hard timeout: absolute cap per LLM call. Safety net for streams that
+      // keep sending sparse events (e.g. keep-alive pings) but never complete.
+      hardTimer = setTimeout(() => {
+        idleTimedOut = true;
+        streamController.abort();
+      }, STREAM_HARD_TIMEOUT_MS);
+
       try {
         const result = stream({
           provider: turnProvider,
@@ -184,7 +222,7 @@ export async function* agentLoop(
           thinking: options.thinking,
           apiKey: turnApiKey,
           baseUrl: turnBaseUrl,
-          signal: options.signal,
+          signal: streamController.signal,
           accountId: options.accountId,
           cacheRetention: options.cacheRetention,
           compaction: options.compaction,
@@ -194,8 +232,10 @@ export async function* agentLoop(
         // Suppress unhandled rejection if the iterator path throws first
         result.response.catch(() => {});
 
-        // Forward streaming deltas
+        // Forward streaming deltas — reset idle timer on each event
+        resetIdleTimer();
         for await (const event of result) {
+          resetIdleTimer();
           if (event.type === "text_delta") {
             yield { type: "text_delta" as const, text: event.text };
           } else if (event.type === "thinking_delta") {
@@ -259,17 +299,37 @@ export async function* agentLoop(
           turn--; // Don't count the failed turn
           continue;
         }
+        // Stream stall: the API connection hung mid-stream without closing.
+        // Retry with a short delay — the server may have recovered.
+        if (idleTimedOut && !options.signal?.aborted && stallRetries < MAX_STALL_RETRIES) {
+          stallRetries++;
+          yield {
+            type: "retry" as const,
+            reason: "stream_stall" as const,
+            attempt: stallRetries,
+            maxAttempts: MAX_STALL_RETRIES,
+            delayMs: 1_000,
+          };
+          await new Promise((r) => setTimeout(r, 1_000));
+          turn--; // Don't count the failed turn
+          continue;
+        }
         // Abort errors (user cancellation) — exit loop cleanly instead of
         // crashing the process with an unhandled rejection.
         if (isAbortError(err) || options.signal?.aborted) {
           break;
         }
         throw err;
+      } finally {
+        if (idleTimer) clearTimeout(idleTimer);
+        if (hardTimer) clearTimeout(hardTimer);
+        options.signal?.removeEventListener("abort", forwardAbort);
       }
 
       // Reset retry counters after successful call
       overflowRetries = 0;
       overloadRetries = 0;
+      stallRetries = 0;
 
       // Detect empty/degenerate responses — the API occasionally returns 0 tokens
       // with no content (e.g. stream interruption, transient server issue).
@@ -625,5 +685,54 @@ function sanitizeOrphanedServerTools(messages: Message[]): void {
       (msg as { content: ContentPart[] }).content = filtered;
     }
     break;
+  }
+}
+
+/**
+ * Ensure every assistant message with tool_call blocks is immediately followed
+ * by a tool message with matching tool_result entries. This prevents Anthropic
+ * API 400 errors ("tool_use ids found without tool_result blocks immediately
+ * after") that can occur after compaction, session restore, or abort recovery.
+ *
+ * Repairs in-place by inserting synthetic tool_result messages where needed.
+ */
+function repairToolPairingAdjacent(messages: Message[]): void {
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role !== "assistant") continue;
+    if (typeof msg.content === "string" || !Array.isArray(msg.content)) continue;
+
+    const toolCallIds = (msg.content as ContentPart[])
+      .filter((p) => p.type === "tool_call")
+      .map((p) => (p as ContentPart & { type: "tool_call"; id: string }).id);
+    if (toolCallIds.length === 0) continue;
+
+    const next = messages[i + 1];
+    if (next?.role === "tool" && Array.isArray(next.content)) {
+      // Tool message exists — check for missing results
+      const existingIds = new Set((next.content as ToolResult[]).map((r) => r.toolCallId));
+      const missing = toolCallIds.filter((id) => !existingIds.has(id));
+      if (missing.length > 0) {
+        for (const id of missing) {
+          (next.content as ToolResult[]).push({
+            type: "tool_result",
+            toolCallId: id,
+            content: "Tool execution was interrupted.",
+            isError: true,
+          });
+        }
+      }
+    } else {
+      // No tool message follows — insert a synthetic one
+      messages.splice(i + 1, 0, {
+        role: "tool" as const,
+        content: toolCallIds.map((id) => ({
+          type: "tool_result" as const,
+          toolCallId: id,
+          content: "Tool execution was interrupted.",
+          isError: true,
+        })),
+      });
+    }
   }
 }

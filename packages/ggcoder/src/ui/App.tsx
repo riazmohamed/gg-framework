@@ -648,7 +648,11 @@ export function App(props: AppProps) {
           stdout?.write("\x1b[2J\x1b[3J\x1b[H");
           setPlanAutoExpand(true);
           setOverlay("plan");
-          planOverlayPendingRef.current = false;
+          // Don't clear planOverlayPendingRef here — keep it true until
+          // the user actually approves/rejects the plan. Clearing it on a
+          // timer causes a race where agent_done fires after the 300ms
+          // timeout but before the user interacts, triggering a premature
+          // completion sound.
         }, 300);
         return (
           "Plan submitted. Exiting plan mode.\n" +
@@ -1000,10 +1004,16 @@ export function App(props: AppProps) {
         // Flush all completed items from the previous turn to Static history.
         // This keeps liveItems bounded per-turn, preventing Ink's live area from
         // growing unbounded, which makes Ink's live-area re-renders expensive.
+        //
+        // Items are queued in pendingFlushRef (not sent to setHistory directly)
+        // so the Static write happens in a SEPARATE render cycle from the
+        // live-area change — avoiding both Ink cursor-math clipping and the
+        // brief duplicate that occurred when setHistory was nested inside the
+        // setLiveItems updater.
         setLiveItems((prev) => {
           const flushed = flushOnTurnText(prev);
           if (flushed.length > 0) {
-            setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
+            pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
           }
           const displayText = planStepsRef.current.length > 0 ? stripDoneMarkers(text) : text;
           return [{ kind: "assistant", text: displayText, thinking, thinkingMs, id: getId() }];
@@ -1019,7 +1029,7 @@ export function App(props: AppProps) {
           setLiveItems((prev) => {
             const { flushed, remaining } = partitionCompleted(prev);
             if (flushed.length > 0) {
-              setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
+              pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
             }
             return remaining;
           });
@@ -1145,7 +1155,7 @@ export function App(props: AppProps) {
               // Flush completed items to Static to keep the live area small
               const { flushed, remaining } = partitionCompleted(next);
               if (flushed.length > 0) {
-                setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
+                pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
               }
               return remaining;
             });
@@ -1209,7 +1219,7 @@ export function App(props: AppProps) {
               // Flush completed items to Static to keep the live area small
               const { flushed, remaining } = partitionCompleted(updated);
               if (flushed.length > 0) {
-                setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
+                pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
               }
               return remaining;
             });
@@ -1235,7 +1245,7 @@ export function App(props: AppProps) {
         setLiveItems((prev) => {
           const { flushed, remaining } = partitionCompleted(prev);
           if (flushed.length > 0) {
-            setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
+            pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
           }
           return [
             ...remaining,
@@ -1287,7 +1297,7 @@ export function App(props: AppProps) {
           // Flush completed items to Static
           const { flushed, remaining } = partitionCompleted(updated);
           if (flushed.length > 0) {
-            setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
+            pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
           }
           return remaining;
         });
@@ -1318,7 +1328,7 @@ export function App(props: AppProps) {
           setLiveItems((prev) => {
             const { flushed, remaining } = flushOnTurnEnd(prev, stopReason);
             if (flushed.length > 0) {
-              setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
+              pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
             }
             return remaining;
           });
@@ -1343,7 +1353,7 @@ export function App(props: AppProps) {
         // a live-area height change in the same frame.
         setLiveItems((prev) => {
           if (prev.length > 0) {
-            pendingFlushRef.current = prev;
+            pendingFlushRef.current = [...pendingFlushRef.current, ...prev];
           }
           return [];
         });
@@ -1427,7 +1437,7 @@ export function App(props: AppProps) {
             : content.filter((c) => c.type === "image").length || undefined;
         setLiveItems((prev) => {
           if (prev.length > 0) {
-            setHistory((h) => compactHistory([...h, ...trimFlushedItems(prev)]));
+            pendingFlushRef.current = [...pendingFlushRef.current, ...prev];
           }
           return [];
         });
@@ -1635,7 +1645,7 @@ export function App(props: AppProps) {
           // Move live items into history before starting
           setLiveItems((prev) => {
             if (prev.length > 0) {
-              setHistory((h) => compactHistory([...h, ...trimFlushedItems(prev)]));
+              pendingFlushRef.current = [...pendingFlushRef.current, ...prev];
             }
             return [];
           });
@@ -1735,7 +1745,7 @@ export function App(props: AppProps) {
       // Move any remaining live items into history (Static) before starting new turn
       setLiveItems((prev) => {
         if (prev.length > 0) {
-          setHistory((h) => compactHistory([...h, ...trimFlushedItems(prev)]));
+          pendingFlushRef.current = [...pendingFlushRef.current, ...prev];
         }
         return [];
       });
@@ -2184,12 +2194,15 @@ export function App(props: AppProps) {
           cwd={props.cwd}
           autoExpandNewest={planAutoExpand}
           onClose={() => {
+            planOverlayPendingRef.current = false;
             stdout?.write("\x1b[2J\x1b[3J\x1b[H");
             setStaticKey((k) => k + 1);
             setPlanAutoExpand(false);
             setOverlay(null);
           }}
           onApprove={(planPath) => {
+            // Plan overlay dismissed — allow future onDone to fire normally
+            planOverlayPendingRef.current = false;
             // Store approved plan path — will be injected into the new system prompt
             approvedPlanPathRef.current = planPath;
 
@@ -2239,6 +2252,7 @@ export function App(props: AppProps) {
             })();
           }}
           onReject={(planPath, feedback) => {
+            planOverlayPendingRef.current = false;
             stdout?.write("\x1b[2J\x1b[3J\x1b[H");
             setStaticKey((k) => k + 1);
             setPlanAutoExpand(false);
@@ -2368,8 +2382,6 @@ export function App(props: AppProps) {
             <Footer
               model={currentModel}
               tokensIn={agentLoop.contextUsed}
-              linesAdded={agentLoop.linesChanged.added}
-              linesRemoved={agentLoop.linesChanged.removed}
               cwd={props.cwd}
               gitBranch={gitBranch}
               thinkingEnabled={thinkingEnabled}

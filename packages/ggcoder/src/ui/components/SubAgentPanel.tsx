@@ -65,7 +65,11 @@ const AgentRow = React.memo(
     const branch = isLast ? "└─" : "├─";
     const continuation = isLast ? "   " : "│  ";
 
-    const taskDisplay = agent.task.length > 50 ? agent.task.slice(0, 47) + "…" : agent.task;
+    // Extract a clean, single-line display name from the task.
+    // Strip markdown bold markers and take only the first line to prevent
+    // multi-line prompts from leaking into the tree view.
+    const firstLine = agent.task.split("\n")[0].replace(/\*\*/g, "");
+    const taskDisplay = firstLine.length > 60 ? firstLine.slice(0, 57) + "…" : firstLine;
 
     const totalTokens = agent.tokenUsage.input + agent.tokenUsage.output;
 

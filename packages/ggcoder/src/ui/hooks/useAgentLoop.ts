@@ -86,7 +86,7 @@ export interface AgentLoopOptions {
 export type ActivityPhase = "waiting" | "thinking" | "generating" | "tools" | "retrying" | "idle";
 
 export interface RetryInfo {
-  reason: "overloaded" | "rate_limit" | "empty_response" | "context_overflow";
+  reason: "overloaded" | "rate_limit" | "empty_response" | "context_overflow" | "stream_stall";
   attempt: number;
   maxAttempts: number;
   delayMs: number;
@@ -340,7 +340,9 @@ export function useAgentLoop(
               onQueuedStart?.(merged);
               return [{ role: "user" as const, content: merged }];
             },
-            clearToolUses: options.provider === "anthropic",
+            // clearToolUses disabled — causes model to output unsolicited context
+            // summaries ("KEY CONTEXT TO REMEMBER") when it sees gaps from stripped
+            // tool blocks. Normal client-side compaction handles context management.
             modelRouter: options.modelRouter,
           });
 

@@ -316,7 +316,7 @@ export class AgentSession {
         signal: this.opts.signal,
         accountId,
         cacheRetention: "short",
-        clearToolUses: this.provider === "anthropic",
+        // clearToolUses disabled — causes model to output unsolicited context summaries
         // Single tool result shouldn't exceed 30% of context window (in chars)
         maxToolResultChars: Math.floor(getContextWindow(this.model) * 3.5 * 0.3),
         modelRouter,

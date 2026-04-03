@@ -651,13 +651,22 @@ export async function compact(
     content: `[Previous conversation summary]\n\n${summaryText}${fileTrackingSection}`,
   };
 
+  // Skip the assistant ack when recentMessages starts with an assistant message
+  // to prevent consecutive assistant messages that the Anthropic API rejects.
+  // This happens when findRecentCutPoint backs up from a tool to an assistant.
+  const skipAck = recentMessages.length > 0 && recentMessages[0].role === "assistant";
+
   const newMessages: Message[] = [
     systemMessage,
     summaryMessage,
-    {
-      role: "assistant",
-      content: "Understood — I have the context from what was discussed earlier.",
-    },
+    ...(skipAck
+      ? []
+      : [
+          {
+            role: "assistant" as const,
+            content: "Understood — I have the context from what was discussed earlier.",
+          },
+        ]),
     ...recentMessages,
   ];
 
@@ -669,10 +678,14 @@ export async function compact(
   // Ensure the conversation doesn't end with an assistant message.
   // Some models reject "assistant prefill" — the conversation must end
   // with a user (or tool) message so the LLM can generate a fresh response.
-  // But never pop below 3 messages (system + summary + ack) — removing the
-  // compaction ack would leave only the summary, causing `ggcoder continue`
+  // Never pop below the base messages (system + summary [+ ack]) — removing
+  // those would leave only the summary, causing `ggcoder continue`
   // to restore just 1 message instead of the full session.
-  while (newMessages.length > 3 && newMessages[newMessages.length - 1].role === "assistant") {
+  const minMessages = skipAck ? 2 : 3;
+  while (
+    newMessages.length > minMessages &&
+    newMessages[newMessages.length - 1].role === "assistant"
+  ) {
     newMessages.pop();
   }
 

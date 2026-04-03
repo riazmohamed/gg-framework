@@ -271,17 +271,9 @@ function getToolHeaderParts(
     }
     default: {
       if (name.startsWith("mcp__")) {
-        // Show all args as key: "value" pairs
-        const argParts = Object.entries(args)
-          .filter(([, v]) => v !== undefined && v !== null && v !== "")
-          .map(([k, v]) => {
-            const s = String(v);
-            const truncated = s.length > 40 ? s.slice(0, 37) + "…" : s;
-            return `${k}: "${truncated}"`;
-          });
-        const detail = argParts.join(", ");
-        const truncDetail = detail.length > 80 ? detail.slice(0, 77) + "…" : detail;
-        return { label: displayName, detail: truncDetail };
+        // Pick the most meaningful arg as the detail (skip long blobs)
+        const detail = getMCPDetailArg(args);
+        return { label: displayName, detail };
       }
       return { label: displayName, detail: "" };
     }
@@ -290,11 +282,15 @@ function getToolHeaderParts(
 
 function toolDisplayName(name: string): string {
   if (name.startsWith("mcp__")) {
-    // mcp__grep__searchGitHub → "grep - searchGitHub (MCP)"
+    // mcp__grep__searchGitHub → "searchGitHub"
+    // mcp__zai_vision__analyze_image → "analyze_image"
     const parts = name.split("__");
-    const server = parts[1] ?? "mcp";
-    const toolFn = parts[2] ?? "";
-    return `${server} - ${toolFn} (MCP)`;
+    const toolFn = parts[2] ?? parts[1] ?? "mcp";
+    // Convert snake_case to Title Case: analyze_image → Analyze Image
+    return toolFn
+      .split("_")
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ");
   }
   switch (name) {
     case "bash":
@@ -322,6 +318,36 @@ function toolDisplayName(name: string): string {
     default:
       return name.charAt(0).toUpperCase() + name.slice(1);
   }
+}
+
+// ── MCP detail arg extraction ─────────────────────────────
+
+/** Pick the single most meaningful arg for the MCP tool header. */
+function getMCPDetailArg(args: Record<string, unknown>): string {
+  const entries = Object.entries(args).filter(([, v]) => v !== undefined && v !== null && v !== "");
+  if (entries.length === 0) return "";
+
+  // Prefer short, descriptive keys over long blobs
+  const preferred = ["query", "prompt", "url", "path", "pattern", "name", "command", "repo"];
+  let best: [string, unknown] | undefined;
+  for (const key of preferred) {
+    const found = entries.find(([k]) => k.toLowerCase() === key);
+    if (found) {
+      best = found;
+      break;
+    }
+  }
+  // Fall back to shortest non-path string arg
+  if (!best) {
+    best = entries
+      .filter(([, v]) => typeof v === "string")
+      .sort((a, b) => String(a[1]).length - String(b[1]).length)[0];
+  }
+  if (!best) best = entries[0];
+
+  const val = String(best[1]);
+  const truncated = val.length > 50 ? val.slice(0, 47) + "…" : val;
+  return truncated;
 }
 
 // ── Inline summary for compact tools ───────────────────────
