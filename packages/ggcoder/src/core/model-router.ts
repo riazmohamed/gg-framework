@@ -1,6 +1,12 @@
 import type { Message, Provider } from "@abukhaled/gg-ai";
 import type { ModelRouterResult } from "@abukhaled/gg-agent";
-import { getModel, getVisionModel, getExecutorModel } from "./model-registry.js";
+import {
+  getModel,
+  getVisionModel,
+  getVideoCapableModel,
+  getDocumentCapableModel,
+  getExecutorModel,
+} from "./model-registry.js";
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -20,6 +26,28 @@ function messageHasImages(msg: Message): boolean {
 /** Check if any message in the conversation contains images. */
 function conversationHasImages(messages: Message[]): boolean {
   return messages.some((m) => messageHasImages(m));
+}
+
+function messageHasVideo(msg: Message): boolean {
+  if (msg.role !== "user") return false;
+  if (!Array.isArray(msg.content)) return false;
+  return msg.content.some((c) => c.type === "video");
+}
+
+/** Check if any message in the conversation contains video. */
+function conversationHasVideo(messages: Message[]): boolean {
+  return messages.some((m) => messageHasVideo(m));
+}
+
+function messageHasDocuments(msg: Message): boolean {
+  if (msg.role !== "user") return false;
+  if (!Array.isArray(msg.content)) return false;
+  return msg.content.some((c) => c.type === "document");
+}
+
+/** Check if any message in the conversation contains documents. */
+function conversationHasDocuments(messages: Message[]): boolean {
+  return messages.some((m) => messageHasDocuments(m));
 }
 
 // ── Router Mode ────────────────────────────────────────────
@@ -43,6 +71,8 @@ export function createVisionRouter(defaultModel: string, _defaultProvider: strin
     if (!lastUserMsg) return null;
 
     const hasImages = messageHasImages(lastUserMsg);
+    const hasVideo = messageHasVideo(lastUserMsg);
+    const hasDocuments = messageHasDocuments(lastUserMsg);
     const currentModelInfo = getModel(currentModel);
 
     if (hasImages && !currentModelInfo?.supportsImages) {
@@ -55,8 +85,33 @@ export function createVisionRouter(defaultModel: string, _defaultProvider: strin
       }
     }
 
-    // Switch back when no images in the entire conversation and we're not on the default model
-    if (!hasImages && currentModel !== defaultModel && !conversationHasImages(messages)) {
+    if (hasVideo && !currentModelInfo?.supportsVideo) {
+      const videoModel = getVideoCapableModel(currentProvider as Provider);
+      if (videoModel) {
+        return {
+          model: videoModel.id,
+          reason: `Video detected — routing to ${videoModel.name}`,
+        };
+      }
+    }
+
+    if (hasDocuments && !currentModelInfo?.supportsDocuments) {
+      const documentModel = getDocumentCapableModel(currentProvider as Provider);
+      if (documentModel) {
+        return {
+          model: documentModel.id,
+          reason: `Document detected — routing to ${documentModel.name}`,
+        };
+      }
+    }
+
+    // Switch back only when no rich media anywhere in the conversation
+    const hasAnyMedia =
+      conversationHasImages(messages) ||
+      conversationHasVideo(messages) ||
+      conversationHasDocuments(messages);
+
+    if (!hasAnyMedia && currentModel !== defaultModel) {
       return { model: defaultModel, reason: `Returning to ${defaultModel}` };
     }
 
@@ -123,9 +178,15 @@ export function createHybridRouter(config: HybridRouterConfig) {
     const visionResult = visionRouter(messages, currentModel, currentProvider);
     if (visionResult) return visionResult;
 
-    // If images exist anywhere in the conversation, stay on the vision model
-    // to avoid switching to a text-only model that can't handle image context
-    if (conversationHasImages(messages)) return null;
+    // If images, video, or documents exist anywhere in the conversation, stay on the vision model
+    // to avoid switching to a text-only model that can't handle multimodal context
+    if (
+      conversationHasImages(messages) ||
+      conversationHasVideo(messages) ||
+      conversationHasDocuments(messages)
+    ) {
+      return null;
+    }
 
     // Then plan-execute routing for text-only turns
     return planExecRouter(messages, currentModel, currentProvider);

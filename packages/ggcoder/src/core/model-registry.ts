@@ -8,6 +8,8 @@ export interface ModelInfo {
   maxOutputTokens: number;
   supportsThinking: boolean;
   supportsImages: boolean;
+  supportsVideo?: boolean;
+  supportsDocuments?: boolean;
   costTier: "low" | "medium" | "high";
 }
 
@@ -104,6 +106,8 @@ export const MODELS: ModelInfo[] = [
     maxOutputTokens: 128_000,
     supportsThinking: true,
     supportsImages: true,
+    supportsVideo: true,
+    supportsDocuments: true,
     costTier: "high",
   },
   {
@@ -178,6 +182,26 @@ const TIER_RANK: Record<string, number> = { low: 0, medium: 1, high: 2 };
 export function getVisionModel(provider: Provider): ModelInfo | undefined {
   const visionModels = getModelsForProvider(provider).filter((m) => m.supportsImages);
   return visionModels.sort(
+    (a, b) => (TIER_RANK[b.costTier] ?? 0) - (TIER_RANK[a.costTier] ?? 0),
+  )[0];
+}
+
+/**
+ * Get the best video-capable model for a provider.
+ * Prefers the most capable (highest costTier) video model.
+ */
+export function getVideoCapableModel(provider: Provider): ModelInfo | undefined {
+  const videoModels = getModelsForProvider(provider).filter((m) => m.supportsVideo);
+  return videoModels.sort((a, b) => (TIER_RANK[b.costTier] ?? 0) - (TIER_RANK[a.costTier] ?? 0))[0];
+}
+
+/**
+ * Get the best document-capable model for a provider.
+ * Prefers the most capable (highest costTier) document model.
+ */
+export function getDocumentCapableModel(provider: Provider): ModelInfo | undefined {
+  const documentModels = getModelsForProvider(provider).filter((m) => m.supportsDocuments);
+  return documentModels.sort(
     (a, b) => (TIER_RANK[b.costTier] ?? 0) - (TIER_RANK[a.costTier] ?? 0),
   )[0];
 }

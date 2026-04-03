@@ -47,19 +47,37 @@ export function toAnthropicMessages(
         content:
           typeof msg.content === "string"
             ? msg.content
-            : msg.content.map((part) => {
+            : msg.content.map((part): Anthropic.ContentBlockParam => {
                 if (part.type === "text") return { type: "text" as const, text: part.text };
+                if (part.type === "image") {
+                  return {
+                    type: "image" as const,
+                    source: {
+                      type: "base64" as const,
+                      media_type: part.mediaType as
+                        | "image/jpeg"
+                        | "image/png"
+                        | "image/gif"
+                        | "image/webp",
+                      data: part.data,
+                    },
+                  };
+                }
+                if (part.type === "document") {
+                  return {
+                    type: "document" as const,
+                    source: {
+                      type: "base64" as const,
+                      media_type: "application/pdf" as const,
+                      data: part.data,
+                    },
+                    ...(part.name ? { title: part.name } : {}),
+                  } as Anthropic.DocumentBlockParam;
+                }
+                // "video" — Anthropic does not support video; skip by returning placeholder text
                 return {
-                  type: "image" as const,
-                  source: {
-                    type: "base64" as const,
-                    media_type: part.mediaType as
-                      | "image/jpeg"
-                      | "image/png"
-                      | "image/gif"
-                      | "image/webp",
-                    data: part.data,
-                  },
+                  type: "text" as const,
+                  text: "[Video content not supported by this provider]",
                 };
               }),
       });
@@ -270,18 +288,68 @@ export function toOpenAIMessages(
     if (msg.role === "user") {
       // For GLM: if the previous message is a tool result, merge text into it
       // to avoid a standalone user message that causes reasoning_content to be dropped.
+      // Multimodal content (video/documents) cannot be merged and must be a separate message.
       if (mergeToolResultText && out.length > 0 && out[out.length - 1]!.role === "tool") {
-        const userText =
-          typeof msg.content === "string"
-            ? msg.content
-            : msg.content
-                .filter((p): p is TextContent => p.type === "text")
-                .map((p) => p.text)
-                .join("");
-        if (userText) {
-          // Append text to the last tool message's content
+        const textParts: TextContent[] = [];
+        const multimodalParts: ContentPart[] = [];
+
+        if (typeof msg.content === "string") {
+          textParts.push({ type: "text", text: msg.content });
+        } else {
+          for (const part of msg.content) {
+            if (part.type === "text") {
+              textParts.push(part);
+            } else {
+              multimodalParts.push(part);
+            }
+          }
+        }
+
+        // Merge text into the last tool message if present
+        if (textParts.length > 0) {
+          const userText = textParts.map((p) => p.text).join("");
           const lastTool = out[out.length - 1] as OpenAI.ChatCompletionToolMessageParam;
           lastTool.content = (lastTool.content ?? "") + "\n\n" + userText;
+        }
+
+        // If there's multimodal content, push it as a separate user message
+        if (multimodalParts.length > 0) {
+          out.push({
+            role: "user",
+            content: multimodalParts.map((part): OpenAI.ChatCompletionContentPart => {
+              if (part.type === "image") {
+                return {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:${part.mediaType};base64,${part.data}`,
+                  },
+                };
+              }
+              if (part.type === "video") {
+                return {
+                  type: "video_url",
+                  video_url: {
+                    url: `data:${part.mediaType};base64,${part.data}`,
+                  },
+                } as unknown as OpenAI.ChatCompletionContentPart;
+              }
+              if (part.type === "document") {
+                return {
+                  type: "file",
+                  file: {
+                    file_data: `data:${part.mediaType};base64,${part.data}`,
+                    ...(part.name ? { filename: part.name } : {}),
+                  },
+                } as OpenAI.ChatCompletionContentPart;
+              }
+              // Should not reach here — only multimodal parts are in this array
+              return { type: "text", text: "" };
+            }),
+          });
+        }
+
+        // Skip normal user message push since we handled it above
+        if (textParts.length > 0 || multimodalParts.length > 0) {
           continue;
         }
       }
@@ -290,19 +358,39 @@ export function toOpenAIMessages(
       } else {
         out.push({
           role: "user",
-          content: msg.content.map(
-            (
-              part,
-            ): OpenAI.ChatCompletionContentPartImage | OpenAI.ChatCompletionContentPartText => {
-              if (part.type === "text") return { type: "text", text: part.text };
+          content: msg.content.map((part): OpenAI.ChatCompletionContentPart => {
+            if (part.type === "text") return { type: "text", text: part.text };
+            if (part.type === "image") {
               return {
                 type: "image_url",
                 image_url: {
                   url: `data:${part.mediaType};base64,${part.data}`,
                 },
               };
-            },
-          ),
+            }
+            if (part.type === "video") {
+              // GLM-5V Turbo accepts video via a non-standard `video_url` content part.
+              // This format is not in the OpenAI SDK types, so we cast through unknown.
+              return {
+                type: "video_url",
+                video_url: {
+                  url: `data:${part.mediaType};base64,${part.data}`,
+                },
+              } as unknown as OpenAI.ChatCompletionContentPart;
+            }
+            if (part.type === "document") {
+              // OpenAI SDK v6 supports file content parts via ChatCompletionContentPart.File
+              return {
+                type: "file",
+                file: {
+                  file_data: `data:${part.mediaType};base64,${part.data}`,
+                  ...(part.name ? { filename: part.name } : {}),
+                },
+              } as OpenAI.ChatCompletionContentPart;
+            }
+            // Unreachable in practice — TypeScript exhausts the union above
+            return { type: "text", text: "" };
+          }),
         });
       }
       continue;

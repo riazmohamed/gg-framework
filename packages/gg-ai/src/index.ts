@@ -13,6 +13,8 @@ export type {
   TextContent,
   ThinkingContent,
   ImageContent,
+  VideoContent,
+  DocumentContent,
   ToolCall,
   ToolResult,
   ServerToolCall,

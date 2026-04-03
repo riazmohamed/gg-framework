@@ -31,6 +31,19 @@ export interface ImageContent {
   data: string; // base64
 }
 
+export interface VideoContent {
+  type: "video";
+  mediaType: string;
+  data: string; // base64
+}
+
+export interface DocumentContent {
+  type: "document";
+  mediaType: string;
+  data: string; // base64
+  name?: string;
+}
+
 export interface ToolCall {
   type: "tool_call";
   id: string;
@@ -69,6 +82,8 @@ export type ContentPart =
   | TextContent
   | ThinkingContent
   | ImageContent
+  | VideoContent
+  | DocumentContent
   | ToolCall
   | ServerToolCall
   | ServerToolResult
@@ -83,7 +98,7 @@ export interface SystemMessage {
 
 export interface UserMessage {
   role: "user";
-  content: string | (TextContent | ImageContent)[];
+  content: string | (TextContent | ImageContent | VideoContent | DocumentContent)[];
 }
 
 export interface AssistantMessage {
