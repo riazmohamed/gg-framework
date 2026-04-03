@@ -122,13 +122,13 @@ export async function* agentLoop(
   const MAX_OVERFLOW_RETRIES = 3;
   const MAX_OVERLOAD_RETRIES = 10;
   const MAX_EMPTY_RESPONSE_RETRIES = 2;
-  const MAX_STALL_RETRIES = 8;
-  const STALL_BASE_DELAY_MS = 2_000;
-  const STALL_MAX_DELAY_MS = 30_000;
+  const MAX_STALL_RETRIES = 5;
+  const STALL_DELAY_MS = 1_000; // Brief pause before retry — just enough to avoid tight loops
   const OVERLOAD_BASE_DELAY_MS = 2_000;
   const OVERLOAD_MAX_DELAY_MS = 30_000;
-  const STREAM_IDLE_TIMEOUT_MS = 45_000; // 45s without any stream event = stall
-  const STREAM_HARD_TIMEOUT_MS = 120_000; // 2min absolute cap per LLM call
+  const STREAM_FIRST_EVENT_TIMEOUT_MS = 45_000; // 45s to get first event (Opus thinks long)
+  const STREAM_IDLE_TIMEOUT_MS = 10_000; // 10s between events once streaming starts
+  const STREAM_HARD_TIMEOUT_MS = 90_000; // 90s absolute cap per LLM call
 
   try {
     while (turn < maxTurns) {
@@ -196,20 +196,24 @@ export async function* agentLoop(
       const forwardAbort = () => streamController.abort();
       options.signal?.addEventListener("abort", forwardAbort, { once: true });
 
-      // Idle timeout: abort the stream if no events arrive within the window.
-      // This catches mid-stream server stalls where the connection stays open
-      // but the server stops sending data (overload, network issues, etc.).
+      // Two-phase idle timeout:
+      //  - Before first event: STREAM_FIRST_EVENT_TIMEOUT_MS (45s) — Opus can
+      //    take 30s+ to start on large contexts, that's not a stall.
+      //  - After first event: STREAM_IDLE_TIMEOUT_MS (10s) — once streaming has
+      //    started, 10s of silence is a dead connection. Retry fast.
+      let hasReceivedEvent = false;
       const resetIdleTimer = () => {
         if (idleTimer) clearTimeout(idleTimer);
+        const timeoutMs = hasReceivedEvent ? STREAM_IDLE_TIMEOUT_MS : STREAM_FIRST_EVENT_TIMEOUT_MS;
         idleTimer = setTimeout(() => {
           diag("idle_timeout_fired", {
-            events: typeof streamEventCount !== "undefined" ? streamEventCount : 0,
-            sinceLastEventMs:
-              typeof lastEventTime !== "undefined" ? Date.now() - lastEventTime : -1,
+            events: streamEventCount,
+            sinceLastEventMs: Date.now() - lastEventTime,
+            phase: hasReceivedEvent ? "mid_stream" : "first_event",
           });
           idleTimedOut = true;
           streamController.abort();
-        }, STREAM_IDLE_TIMEOUT_MS);
+        }, timeoutMs);
       };
 
       // Hard timeout: absolute cap per LLM call. Safety net for streams that
@@ -250,11 +254,16 @@ export async function* agentLoop(
 
         // Forward streaming deltas — reset idle timer on each event
         streamEventCount = 0;
+        hasReceivedEvent = false;
         lastEventTime = Date.now();
         streamCallStart = Date.now();
         resetIdleTimer();
         for await (const event of result) {
           streamEventCount++;
+          if (!hasReceivedEvent) {
+            hasReceivedEvent = true;
+            // Switch to the shorter mid-stream timeout now that events are flowing
+          }
           const now = Date.now();
           const gap = now - lastEventTime;
           // Log first event and any suspiciously long gaps
@@ -347,10 +356,7 @@ export async function* agentLoop(
         // (especially during Anthropic capacity issues that affect many clients).
         if (idleTimedOut && !options.signal?.aborted && stallRetries < MAX_STALL_RETRIES) {
           stallRetries++;
-          const delayMs = Math.min(
-            STALL_BASE_DELAY_MS * 2 ** (stallRetries - 1),
-            STALL_MAX_DELAY_MS,
-          );
+          const delayMs = STALL_DELAY_MS;
           yield {
             type: "retry" as const,
             reason: "stream_stall" as const,
