@@ -1,6 +1,6 @@
 {
   "name": "@kenkaiiii/gg-agent",
-  "version": "4.2.89",
+  "version": "4.2.90",
   "type": "module",
   "description": "Agentic loop system with tool execution for LLMs",
   "license": "MIT",
