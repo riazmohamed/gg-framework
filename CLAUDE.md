@@ -1,140 +1,59 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Project
 
-# gg-framework
+**gg-framework** — Modular TypeScript monorepo for building LLM-powered apps, from raw streaming to a full CLI coding agent.
 
-A modular TypeScript framework for building LLM-powered apps — from raw streaming to full coding agent.
-
-## npm Packages
-
-| Package | npm Name | Description |
+| Package | npm | Description |
 |---|---|---|
-| `packages/gg-ai` | `@abukhaled/gg-ai` | Unified LLM streaming API |
+| `packages/gg-ai` | `@abukhaled/gg-ai` | Unified LLM streaming API (Anthropic, OpenAI) |
 | `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution |
-| `packages/ggcoder` | `@abukhaled/ogcoder` | CLI coding agent |
+| `packages/ggcoder` | `@abukhaled/ogcoder` | CLI coding agent (`ogcoder` binary) |
 
-**Install**: `npm i -g @abukhaled/ogcoder`
+**Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder`
 
 ## Project Structure
 
 ```
 packages/
-  ├── gg-ai/                 # @abukhaled/gg-ai — Unified LLM streaming API
-  │   └── src/
-  │       ├── types.ts       # Core types (StreamOptions, ContentBlock, events)
-  │       ├── errors.ts      # GGAIError, ProviderError
-  │       ├── stream.ts      # Main stream() dispatch function
-  │       ├── provider-registry.ts # Provider registration system
-  │       ├── providers/     # Anthropic, OpenAI, OpenAI Codex implementations
-  │       └── utils/         # EventStream, Zod-to-JSON-Schema
-  │
-  ├── gg-agent/              # @abukhaled/gg-agent — Agent loop with tool execution
-  │   └── src/
-  │       ├── types.ts       # AgentTool, AgentEvent, AgentOptions
-  │       ├── agent.ts       # Agent class + AgentStream
-  │       └── agent-loop.ts  # Pure async generator loop
-  │
-  └── ggcoder/               # @abukhaled/ogcoder — CLI (ogcoder)
-      └── src/
-          ├── cli.ts         # CLI entry point
-          ├── config.ts      # Configuration constants
-          ├── interactive.ts # Interactive mode launcher
-          ├── session.ts     # Session management
-          ├── system-prompt.ts # System prompt generation
-          ├── core/          # Auth, OAuth, settings, sessions, extensions
-          │   ├── oauth/     # PKCE OAuth flows (anthropic, openai)
-          │   ├── compaction/ # Context compaction & token estimation
-          │   ├── mcp/       # Model Context Protocol client
-          │   ├── extensions/ # Extension system
-          │   ├── model-registry.ts # Provider/model catalog
-          │   ├── model-router.ts # Per-turn model switching (vision, plan-execute, hybrid)
-          │   ├── event-bus.ts # Cross-component events
-          │   ├── agents.ts  # Sub-agent management
-          │   ├── skills.ts  # Skill system
-          │   ├── voice-transcriber.ts # Audio transcription
-          │   └── telegram.ts # Telegram integration
-          ├── tools/         # Agentic tools (bash, read, write, edit, grep, find, ls, web-fetch, subagent, plan, skill, tasks)
-          ├── ui/            # Ink/React terminal UI components & hooks
-          │   ├── components/ # 28 UI components (one per file)
-          │   ├── hooks/     # useAgentLoop, useSessionManager, useSlashCommands, useTerminalSize, useTerminalTitle
-          │   ├── theme/     # Theme loading & detection
-          │   └── utils/     # Syntax highlighting, table formatting
-          ├── modes/         # Execution modes (interactive, print, json, rpc, serve)
-          └── utils/         # Error handling, git, shell, formatting, image, sound
+├── gg-ai/src/              # Streaming API
+│   ├── types.ts            # StreamOptions, ContentBlock, events
+│   ├── stream.ts           # Main stream() dispatch
+│   ├── providers/          # anthropic, openai, openai-codex, palsu (mock)
+│   └── utils/              # EventStream, Zod-to-JSON-Schema
+├── gg-agent/src/           # Agent engine
+│   ├── types.ts            # AgentTool, AgentEvent, AgentOptions
+│   ├── agent.ts            # Agent class + AgentStream
+│   └── agent-loop.ts       # Pure async generator loop
+└── ggcoder/src/            # CLI app (~100 files)
+    ├── cli.ts              # Entry point
+    ├── core/               # OAuth, MCP, compaction, model registry, extensions, agents
+    ├── tools/              # 27 tool files (bash, read, write, edit, grep, find, etc.)
+    ├── ui/components/      # 35 React/Ink components (one per file)
+    ├── ui/hooks/           # 8 hooks (useAgentLoop, useSessionManager, etc.)
+    ├── modes/              # Execution modes (interactive, rpc, serve, agent-home)
+    └── utils/              # Git, shell, formatting, image, sound
 ```
-
-## Package Dependencies
-
-`@abukhaled/gg-ai` (standalone) → `@abukhaled/gg-agent` (depends on ai) → `@abukhaled/ogcoder` (depends on both)
 
 ## Tech Stack
 
-- **Language**: TypeScript 5.9 (strict, ES2022, ESM)
-- **Package Manager**: pnpm workspaces
+- **TypeScript** 5.9 (strict, ES2022, ESM) · **pnpm** workspaces
 - **Build**: tsup (gg-ai, gg-agent) / tsc (ogcoder)
-- **Test**: Vitest 4.1
-- **Lint**: ESLint 10 + typescript-eslint (flat config)
-- **Format**: Prettier 3.8
-- **CLI UI**: Ink 6 + React 19
-- **Key deps**: `@anthropic-ai/sdk`, `openai`, `zod` (v4), `@modelcontextprotocol/sdk`, `sharp`, `@huggingface/transformers`
+- **Test**: Vitest 4.1 · **Lint**: ESLint 10 + typescript-eslint · **Format**: Prettier 3.8
+- **UI**: Ink 6 + React 19
+- **Key deps**: `@anthropic-ai/sdk`, `openai`, `zod` v4, `@modelcontextprotocol/sdk`, `sharp`
 
 ## Commands
 
 ```bash
-# Build & typecheck all packages
-pnpm build                          # tsup (gg-ai, gg-agent) + tsc (ogcoder)
-pnpm check                          # tsc --noEmit across all packages
-
-# Per-package
-pnpm --filter @abukhaled/gg-ai build
-pnpm --filter @abukhaled/gg-agent build
-pnpm --filter @abukhaled/ogcoder build
-
-# Testing
-pnpm test                           # vitest across all packages
+pnpm build            # Build all packages
+pnpm check            # tsc --noEmit (all packages)
+pnpm lint             # ESLint
+pnpm lint:fix         # ESLint --fix
+pnpm format           # Prettier write
+pnpm format:check     # Prettier check
+pnpm test             # Vitest (all packages)
 ```
-
-## Publishing to npm
-
-Must use `pnpm publish` (not `npm publish`) so `workspace:*` references resolve to real versions.
-
-### Steps
-
-1. Bump version in all 3 `package.json` files (keep them in sync)
-2. Build all packages: `pnpm build`
-3. Publish in dependency order:
-
-```bash
-pnpm --filter @abukhaled/gg-ai publish --no-git-checks
-pnpm --filter @abukhaled/gg-agent publish --no-git-checks
-pnpm --filter @abukhaled/ogcoder publish --no-git-checks
-```
-
-### Auth
-
-- npm granular access token must be set: `npm set //registry.npmjs.org/:_authToken=<token>`
-- All packages use `"publishConfig": { "access": "public" }` (required for scoped packages)
-- `--no-git-checks` skips git dirty/tag checks (needed since we don't tag releases)
-
-### Verify
-
-```bash
-npm view @abukhaled/ogcoder versions --json   # check published versions
-npm i -g @abukhaled/ogcoder@<version>         # test install
-ogcoder --help                                # verify CLI works
-```
-
-If `npm i` gets ETARGET after publishing, clear cache: `npm cache clean --force`
-
-## Organization Rules
-
-- Types → `types.ts` in each package
-- Providers → `providers/` directory in @abukhaled/gg-ai
-- Tools → `tools/` directory in packages/ggcoder, one file per tool
-- UI components → `ui/components/`, one component per file
-- OAuth flows → `core/oauth/`, one file per provider
-- Tests → co-located with source files
 
 ## Code Quality — Zero Tolerance
 
@@ -144,100 +63,38 @@ After editing ANY file, run:
 pnpm check && pnpm lint && pnpm format:check
 ```
 
-Fix ALL errors before continuing. Quick fixes:
-- `pnpm lint:fix` — auto-fix ESLint issues
-- `pnpm format` — auto-fix Prettier formatting
-- Use `/fix` to run all checks and spawn parallel agents to fix issues
+Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`.
+
+## Organization Rules
+
+- Types → `types.ts` in each package
+- Providers → `providers/` in gg-ai, one file per provider
+- Tools → `tools/` in ggcoder, one file per tool
+- UI components → `ui/components/`, one component per file
+- OAuth flows → `core/oauth/`, one file per provider
+- Tests → co-located with source files
 
 ## Key Patterns
 
-- **StreamResult/AgentStream**: dual-nature objects — async iterable (`for await`) + thenable (`await`)
-- **EventStream**: push-based async iterable in `@abukhaled/gg-ai/utils/event-stream.ts`
-- **agentLoop**: pure async generator — call LLM, yield deltas, execute tools, loop on tool_use
-- **OAuth-only auth**: no API keys, PKCE OAuth flows, tokens in `~/.gg/auth.json`
-- **Zod schemas**: tool parameters defined with Zod, converted to JSON Schema at provider boundary
-- **Debug logging**: `~/.gg/debug.log` — timestamped log of startup, auth, tool calls, turn completions, errors. Truncated on each CLI restart. Singleton logger in `src/core/logger.ts`
-- **Model Router**: per-turn model switching in the agent loop — defined in `core/model-router.ts`, wired via `modelRouter` option in `agentLoop()`. Three modes:
-  - `vision` — auto-switch to a vision model when images are detected in messages
-  - `plan-execute` — use planner model for new user inputs, executor model for tool follow-ups
-  - `hybrid` (default) — vision takes priority, then plan-execute for text-only turns
-  - The router is created in `App.tsx` (interactive UI) and `AgentSession` (programmatic). It emits `model_switch` events that show a notification in the UI.
-  - **Critical**: when images exist anywhere in the conversation, the router stays on the vision model to avoid switching to a text-only model that can't handle image context.
-- **System Prompt Optimization**: Ollama (local LLMs without prompt caching) automatically skip heavy context files (CLAUDE.md, AGENTS.md, etc.) in `buildSystemPrompt()` to reduce token reprocessing. Cloud APIs get the full context since they have prompt caching. See `packages/ggcoder/src/system-prompt.ts`.
+- **StreamResult/AgentStream**: async iterable (`for await`) + thenable (`await`)
+- **agentLoop**: async generator — call LLM, yield deltas, execute tools, loop on tool_use
+- **Model Router**: per-turn model switching (vision/plan-execute/hybrid) in `core/model-router.ts`
+- **OAuth-only auth**: PKCE flows, tokens in `~/.gg/auth.json` — no raw API keys
+- **Zod schemas**: tool params defined with Zod, converted to JSON Schema at provider boundary
+- **Debug log**: `~/.gg/debug.log` — singleton logger in `core/logger.ts`
+
+## Publishing
+
+Publish in dependency order with `pnpm publish`:
+
+```bash
+pnpm build
+pnpm --filter @abukhaled/gg-ai publish --no-git-checks
+pnpm --filter @abukhaled/gg-agent publish --no-git-checks
+pnpm --filter @abukhaled/ogcoder publish --no-git-checks
+```
 
 ## Slash Commands
 
-There are two kinds of slash commands:
-
-### 1. UI-handled commands (in `App.tsx`)
-
-Commands that need direct access to React state (UI, overlays, token counters) are handled inline in `handleSubmit` in `src/ui/App.tsx`. These short-circuit before the slash command registry.
-
-**Current UI commands:** `/model` (`/m`), `/compact` (`/c`), `/quit` (`/q`, `/exit`), `/clear`
-
-To add a new UI command:
-1. Add a condition in `handleSubmit` after the existing checks:
-   ```tsx
-   if (trimmed === "/mycommand") {
-     // manipulate React state directly
-     setLiveItems([{ kind: "info", text: "Done.", id: getId() }]);
-     return;
-   }
-   ```
-2. If the command needs to reset agent state, call `agentLoop.reset()`.
-
-### 2. Registry commands (in `core/slash-commands.ts`)
-
-Commands that don't need React state live in `createBuiltinCommands()` in `src/core/slash-commands.ts`. They receive a `SlashCommandContext` with methods like `switchModel`, `compact`, `newSession`, `quit`, etc.
-
-**Current registry commands:** `/model` (`/m`), `/compact` (`/c`), `/help` (`/h`, `/?`), `/settings` (`/config`), `/session` (`/s`), `/new` (`/n`), `/quit` (`/q`, `/exit`), `/router`
-
-Note: `/model`, `/compact`, and `/quit` exist in both — the UI handlers in `App.tsx` take precedence since they're checked first.
-
-To add a new registry command:
-1. Add an entry to the array in `createBuiltinCommands()`:
-   ```ts
-   {
-     name: "mycommand",
-     aliases: ["mc"],
-     description: "Does something useful",
-     usage: "/mycommand [args]",
-     execute(args, ctx) {
-       // Use ctx methods or return a string to display
-       return "Result text";
-     },
-   },
-   ```
-2. If the command needs new capabilities, add the method to `SlashCommandContext` interface and wire it up in `AgentSession.createSlashCommandContext()`.
-
-### When to use which
-
-| Need | Where |
-|---|---|
-| Modify UI state (history, overlays, live items) | `App.tsx` |
-| Reset token counters | `App.tsx` (call `agentLoop.reset()`) |
-| Access agent session (messages, auth, settings) | `slash-commands.ts` registry |
-| Both UI + session access | `App.tsx` (can call session methods via props) |
-
-There is also support for **prompt-template commands** (built-in from `core/prompt-commands.ts` and custom from `.gg/commands/` directory).
-
-## Model Registry & Local Models
-
-Models are registered in `packages/ggcoder/src/core/model-registry.ts`. Each model entry:
-
-```ts
-{
-  id: "model-id",                    // Unique identifier (matches API model name)
-  name: "Display Name",              // User-facing name
-  provider: "anthropic" | "openai" | "ollama" | "glm" | "moonshot",
-  contextWindow: 200_000,            // Context window size
-  maxOutputTokens: 16_384,           // Max output tokens
-  supportsThinking: true | false,    // Extended thinking support
-  supportsImages: true | false,      // Image input support
-  costTier: "low" | "medium" | "high",
-}
-```
-
-**Adding Ollama models:** Ollama models use OpenAI-compatible API at `http://localhost:11434/v1`. Set `apiKey: "ollama"` and `baseUrl` defaults to Ollama endpoint in `packages/gg-ai/src/stream.ts`.
-
-**Performance note:** Smaller local models (7B, 14B) are significantly faster than larger ones (32B+) on CPU-only hardware. For local inference, prefer smaller models unless maximum capability is needed. System prompt optimization automatically reduces context overhead for Ollama.
+- **UI-handled** (`App.tsx`): `/model`, `/compact`, `/quit`, `/clear` — direct React state
+- **Registry** (`core/slash-commands.ts`): `/help`, `/settings`, `/session`, `/new`, `/router`
