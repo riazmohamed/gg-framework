@@ -925,7 +925,13 @@ export function App(props: AppProps) {
           approvedPlanPathRef.current = undefined;
           // Rebuild system prompt to remove the completed plan from context
           void (async () => {
-            const newPrompt = await buildSystemPrompt(props.cwd, props.skills, planMode, undefined, props.provider);
+            const newPrompt = await buildSystemPrompt(
+              props.cwd,
+              props.skills,
+              planMode,
+              undefined,
+              props.provider,
+            );
             if (messagesRef.current[0]?.role === "system") {
               messagesRef.current[0] = { role: "system" as const, content: newPrompt };
             }
@@ -1543,7 +1549,13 @@ export function App(props: AppProps) {
         setPlanSteps([]);
         // Rebuild system prompt without the approved plan
         void (async () => {
-          const newPrompt = await buildSystemPrompt(props.cwd, props.skills, planMode, undefined, props.provider);
+          const newPrompt = await buildSystemPrompt(
+            props.cwd,
+            props.skills,
+            planMode,
+            undefined,
+            props.provider,
+          );
           messagesRef.current = [{ role: "system" as const, content: newPrompt }];
         })();
         agentLoop.reset();
@@ -1583,7 +1595,13 @@ export function App(props: AppProps) {
         setPlanSteps([]);
         // Rebuild system prompt without the plan
         void (async () => {
-          const newPrompt = await buildSystemPrompt(props.cwd, props.skills, planMode, undefined, props.provider);
+          const newPrompt = await buildSystemPrompt(
+            props.cwd,
+            props.skills,
+            planMode,
+            undefined,
+            props.provider,
+          );
           if (messagesRef.current[0]?.role === "system") {
             messagesRef.current[0] = { role: "system" as const, content: newPrompt };
           }
@@ -2225,7 +2243,13 @@ export function App(props: AppProps) {
 
             // Rebuild system prompt with the approved plan, then reset the session
             void (async () => {
-              const newPrompt = await buildSystemPrompt(props.cwd, props.skills, false, planPath, props.provider);
+              const newPrompt = await buildSystemPrompt(
+                props.cwd,
+                props.skills,
+                false,
+                planPath,
+                props.provider,
+              );
               messagesRef.current = [{ role: "system" as const, content: newPrompt }];
               agentLoop.reset();
               persistedIndexRef.current = messagesRef.current.length;
