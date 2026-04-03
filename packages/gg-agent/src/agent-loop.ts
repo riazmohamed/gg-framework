@@ -102,7 +102,9 @@ export async function* agentLoop(
   const MAX_OVERFLOW_RETRIES = 3;
   const MAX_OVERLOAD_RETRIES = 10;
   const MAX_EMPTY_RESPONSE_RETRIES = 2;
-  const MAX_STALL_RETRIES = 2;
+  const MAX_STALL_RETRIES = 8;
+  const STALL_BASE_DELAY_MS = 2_000;
+  const STALL_MAX_DELAY_MS = 30_000;
   const OVERLOAD_BASE_DELAY_MS = 2_000;
   const OVERLOAD_MAX_DELAY_MS = 30_000;
   const STREAM_IDLE_TIMEOUT_MS = 45_000; // 45s without any stream event = stall
@@ -259,19 +261,36 @@ export async function* agentLoop(
           continue;
         }
         // Stream stall: the API connection hung mid-stream without closing.
-        // Retry with a short delay — the server may have recovered.
+        // Retry with exponential backoff — the server may need time to recover
+        // (especially during Anthropic capacity issues that affect many clients).
         if (idleTimedOut && !options.signal?.aborted && stallRetries < MAX_STALL_RETRIES) {
           stallRetries++;
+          const delayMs = Math.min(
+            STALL_BASE_DELAY_MS * 2 ** (stallRetries - 1),
+            STALL_MAX_DELAY_MS,
+          );
           yield {
             type: "retry" as const,
             reason: "stream_stall" as const,
             attempt: stallRetries,
             maxAttempts: MAX_STALL_RETRIES,
-            delayMs: 1_000,
+            delayMs,
           };
-          await new Promise((r) => setTimeout(r, 1_000));
+          await new Promise((r) => setTimeout(r, delayMs));
           turn--; // Don't count the failed turn
           continue;
+        }
+        // Stream stall retries exhausted — surface a clear error so the UI
+        // can distinguish "gave up after stalls" from "completed normally".
+        if (idleTimedOut && !options.signal?.aborted) {
+          yield {
+            type: "error" as const,
+            error: new Error(
+              `The API provider's stream stalled ${MAX_STALL_RETRIES} times — the provider may be experiencing capacity issues. ` +
+                `Your conversation is preserved. Send another message to retry.`,
+            ),
+          };
+          break;
         }
         // Abort errors (user cancellation) — exit loop cleanly instead of
         // crashing the process with an unhandled rejection.

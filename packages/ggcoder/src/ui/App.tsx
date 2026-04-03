@@ -2276,6 +2276,15 @@ export function App(props: AppProps) {
                 planTotal={planSteps.length}
               />
             </Box>
+          ) : agentLoop.stallError ? (
+            <Box marginTop={1} flexDirection="column">
+              <Text color={theme.warning}>
+                {"⚠ API provider stream interrupted — retries exhausted."}
+              </Text>
+              <Text color={theme.textDim}>
+                {"  Your conversation is preserved. Send a message to continue."}
+              </Text>
+            </Box>
           ) : (
             doneStatus && (
               <Box marginTop={1}>

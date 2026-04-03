@@ -103,6 +103,8 @@ export interface UseAgentLoopReturn {
   contextUsed: number;
   activityPhase: ActivityPhase;
   retryInfo: RetryInfo | null;
+  /** Non-null when the agent stopped due to an unrecoverable stream error (e.g. stall retries exhausted). */
+  stallError: string | null;
   elapsedMs: number;
   thinkingMs: number;
   isThinking: boolean;
@@ -172,6 +174,7 @@ export function useAgentLoop(
   const [isThinking, setIsThinking] = useState(false);
   const [streamedTokenEstimate, setStreamedTokenEstimate] = useState(0);
   const [retryInfo, setRetryInfo] = useState<RetryInfo | null>(null);
+  const [stallError, setStallError] = useState<string | null>(null);
   const [linesChanged, setLinesChanged] = useState({ added: 0, removed: 0 });
 
   const abortRef = useRef<AbortController | null>(null);
@@ -249,6 +252,7 @@ export function useAgentLoop(
         setThinkingMs(0);
         setIsThinking(false);
         setStreamedTokenEstimate(0);
+        setStallError(null);
         setIsRunning(true);
 
         // Start elapsed timer (ticks every 1000ms — less frequent to reduce
@@ -436,9 +440,16 @@ export function useAgentLoop(
                 // onQueuedStart inside getSteeringMessages callback.
                 break;
 
+              case "error":
+                // Stream error (e.g. stall retries exhausted) — surface to UI
+                // so the user sees a clear failure instead of fake completion.
+                setStallError(event.error.message);
+                break;
+
               case "retry":
                 phaseRef.current = "retrying";
                 setActivityPhase("retrying");
+                setStallError(null); // clear any previous error on retry
                 setRetryInfo({
                   reason: event.reason,
                   attempt: event.attempt,
@@ -617,6 +628,7 @@ export function useAgentLoop(
     contextUsed,
     activityPhase,
     retryInfo,
+    stallError,
     elapsedMs,
     thinkingMs,
     isThinking,
