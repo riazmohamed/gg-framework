@@ -104,11 +104,11 @@ export async function* agentLoop(
   const MAX_OVERFLOW_RETRIES = 3;
   const MAX_OVERLOAD_RETRIES = 10;
   const MAX_EMPTY_RESPONSE_RETRIES = 2;
-  const MAX_STALL_RETRIES = 2;
+  const MAX_STALL_RETRIES = 3;
   const OVERLOAD_BASE_DELAY_MS = 2_000;
   const OVERLOAD_MAX_DELAY_MS = 30_000;
-  const STREAM_IDLE_TIMEOUT_MS = 45_000; // 45s without any stream event = stall
-  const STREAM_HARD_TIMEOUT_MS = 120_000; // 2min absolute cap per LLM call
+  const STREAM_IDLE_TIMEOUT_MS = 90_000; // 90s without any stream event = stall (increased to handle extended thinking)
+  const STREAM_HARD_TIMEOUT_MS = 600_000; // 10min absolute cap per LLM call (increased to allow extended thinking/research)
 
   try {
     while (turn < maxTurns) {
