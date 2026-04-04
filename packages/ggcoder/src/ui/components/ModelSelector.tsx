@@ -22,13 +22,21 @@ export function ModelSelector({
 
   const currentValue = `${currentProvider}:${currentModel}`;
 
+  const providerLabel: Record<string, string> = {
+    anthropic: "Anthropic",
+    openai: "OpenAI",
+    glm: "Z.AI",
+    moonshot: "Moonshot",
+    xiaomi: "Xiaomi",
+  };
+
   const items = filtered.map((m) => {
     const value = `${m.provider}:${m.id}`;
     const isCurrent = value === currentValue;
     return {
-      label: `${isCurrent ? "* " : "  "}${m.provider}:${m.id}`,
+      label: `${isCurrent ? "* " : "  "}${m.id}`,
       value,
-      description: `${m.name} (${m.costTier})`,
+      description: `${providerLabel[m.provider] ?? m.provider}`,
     };
   });
 

@@ -1898,8 +1898,8 @@ export function App(props: AppProps) {
           <Banner
             key={item.id}
             version={props.version}
-            model={props.model}
-            provider={props.provider}
+            model={currentModel}
+            provider={currentProvider}
             cwd={props.cwd}
             taskCount={taskCount}
           />
