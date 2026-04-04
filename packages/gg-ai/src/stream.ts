@@ -50,6 +50,14 @@ providerRegistry.register("ollama", {
     }),
 });
 
+providerRegistry.register("xiaomi", {
+  stream: (options) =>
+    streamOpenAI({
+      ...options,
+      baseUrl: options.baseUrl ?? "https://token-plan-ams.xiaomimimo.com/v1",
+    }),
+});
+
 // ── Public API ─────────────────────────────────────────────
 
 /**

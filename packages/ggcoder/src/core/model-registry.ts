@@ -151,6 +151,43 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     costTier: "medium",
   },
+  // ── Xiaomi MiMo ────────────────────────────────────────
+  {
+    id: "mimo-v2-pro",
+    name: "MiMo V2 Pro",
+    provider: "xiaomi",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    supportsDocuments: true,
+    costTier: "high",
+  },
+  {
+    id: "mimo-v2-omni",
+    name: "MiMo V2 Omni",
+    provider: "xiaomi",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    supportsDocuments: true,
+    costTier: "high",
+  },
+  {
+    id: "mimo-v2-flash",
+    name: "MiMo V2 Flash",
+    provider: "xiaomi",
+    contextWindow: 500_000,
+    maxOutputTokens: 128_000,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    supportsDocuments: true,
+    costTier: "low",
+  },
 ];
 
 export function getModel(id: string): ModelInfo | undefined {
@@ -165,6 +202,7 @@ export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.3-codex")!;
   if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.1")!;
   if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k2.5")!;
+  if (provider === "xiaomi") return MODELS.find((m) => m.id === "mimo-v2-pro")!;
   return MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
 }
 
@@ -232,7 +270,12 @@ export function getSummaryModel(provider: Provider, currentModelId: string): Mod
   if (provider === "anthropic") {
     return MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
   }
-  if (provider === "openai" || provider === "glm" || provider === "ollama") {
+  if (
+    provider === "openai" ||
+    provider === "glm" ||
+    provider === "ollama" ||
+    provider === "xiaomi"
+  ) {
     const low = getModelsForProvider(provider).find((m) => m.costTier === "low");
     if (low) return low;
   }

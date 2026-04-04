@@ -127,7 +127,7 @@ function printHelp(): void {
   // Commands
   console.log(primary("Commands:"));
   const cmds: [string, string][] = [
-    ["login", "Log in to an AI provider (Anthropic, OpenAI)"],
+    ["login", "Log in to an AI provider (Anthropic, OpenAI, GLM, Moonshot, Xiaomi)"],
     ["logout", "Log out and clear stored credentials"],
     ["sessions", "Browse and resume previous sessions"],
     ["continue", "Resume the most recent session"],
@@ -146,7 +146,7 @@ function printHelp(): void {
   const opts: [string, string][] = [
     ["-h, --help", "Show this help message"],
     ["-v, --version", "Show version number"],
-    ["--provider <name>", "AI provider (anthropic, openai, glm, moonshot)"],
+    ["--provider <name>", "AI provider (anthropic, openai, glm, moonshot, xiaomi)"],
     ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-4.1)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Override the system prompt"],
@@ -425,7 +425,7 @@ async function runInkTUI(opts: {
   await authStorage.load();
 
   // Detect all logged-in providers and preload their credentials
-  const allProviders: Provider[] = ["anthropic", "openai", "glm", "moonshot"];
+  const allProviders: Provider[] = ["anthropic", "openai", "glm", "moonshot", "xiaomi"];
   const loggedInProviders: Provider[] = [];
   const credentialsByProvider: Record<string, { accessToken: string; accountId?: string }> = {};
 
@@ -704,8 +704,9 @@ async function runLogin(): Promise<void> {
     };
 
     let creds;
-    if (provider === "glm" || provider === "moonshot") {
-      const keyLabel = provider === "glm" ? "Z.AI" : "Moonshot";
+    if (provider === "glm" || provider === "moonshot" || provider === "xiaomi") {
+      const keyLabel =
+        provider === "glm" ? "Z.AI" : provider === "moonshot" ? "Moonshot" : "Xiaomi MiMo";
       const apiKey = await rl.question(chalk.hex("#60a5fa")(`Paste your ${keyLabel} API key: `));
       if (!apiKey.trim()) {
         console.log(chalk.hex("#ef4444")("No API key provided. Login cancelled."));
@@ -1256,6 +1257,7 @@ function displayName(provider: Provider): string {
   if (provider === "anthropic") return "Anthropic";
   if (provider === "glm") return "Z.AI (GLM)";
   if (provider === "moonshot") return "Moonshot";
+  if (provider === "xiaomi") return "Xiaomi MiMo";
   return "OpenAI";
 }
 
