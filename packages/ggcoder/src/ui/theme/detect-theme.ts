@@ -64,6 +64,11 @@ const cursorPositionPattern = new RegExp(ESC + "\\[\\d+;\\d+R");
 
 function queryOSC11(): Promise<"dark" | "light" | null> {
   return new Promise((resolve) => {
+    // Skip OSC 11 query — it can cause terminal input issues in some emulators
+    // Fall back to environment variables and system detection instead
+    resolve(null);
+    return;
+
     // Skip for multiplexers — they don't forward OSC queries
     const term = process.env["TERM"] ?? "";
     if (term.startsWith("screen") || term.startsWith("tmux")) {
@@ -85,6 +90,8 @@ function queryOSC11(): Promise<"dark" | "light" | null> {
       if (settled) return;
       settled = true;
       process.stdin.removeListener("data", onData);
+      // Clear the buffer to prevent escape sequences from appearing as user input
+      buffer = "";
       try {
         process.stdin.setRawMode(wasRaw);
       } catch {
