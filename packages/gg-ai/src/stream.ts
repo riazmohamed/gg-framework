@@ -6,9 +6,8 @@ import { streamOpenAI } from "./providers/openai.js";
 import { streamOpenAICodex } from "./providers/openai-codex.js";
 import { providerRegistry } from "./provider-registry.js";
 
-/** Z.AI has two API systems — some accounts work on one, some on the other. */
+/** GLM coding plan endpoint */
 const GLM_CODING_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
-const GLM_REGULAR_BASE_URL = "https://api.z.ai/api/paas/v4";
 
 // ── Register built-in providers ────────────────────────────
 
@@ -29,7 +28,13 @@ providerRegistry.register("openai", {
 providerRegistry.register("glm", {
   stream: (options) => {
     if (options.baseUrl) return streamOpenAI(options);
-    return streamGLMWithFallback(options);
+    // Always use GLM coding plan endpoint for yearly plan access
+    const codingApiKey = options.glmCodingApiKey || options.apiKey;
+    return streamOpenAI({
+      ...options,
+      apiKey: codingApiKey,
+      baseUrl: GLM_CODING_BASE_URL,
+    });
   },
 });
 
@@ -96,51 +101,3 @@ export function stream(options: StreamOptions): StreamResult {
  * regular endpoint. Z.AI inconsistently provisions accounts — some work on
  * /api/coding/paas/v4, others on /api/paas/v4, even on the same plan.
  */
-function streamGLMWithFallback(options: StreamOptions): StreamResult {
-  const result = new StreamResult();
-
-  runGLMWithFallback(options, result).catch((err) => {
-    result.abort(err instanceof Error ? err : new Error(String(err)));
-  });
-
-  return result;
-}
-
-async function runGLMWithFallback(options: StreamOptions, result: StreamResult): Promise<void> {
-  const codingResult = streamOpenAI({ ...options, baseUrl: GLM_CODING_BASE_URL });
-  // Suppress unhandled rejection — the for-await path throws first
-  codingResult.response.catch(() => {});
-
-  try {
-    for await (const event of codingResult) {
-      result.push(event);
-    }
-    result.complete(await codingResult.response);
-  } catch (err) {
-    // Check if it's a 429 billing error — if so, try regular endpoint as fallback
-    const isBillingError =
-      err instanceof Error &&
-      (err.message.includes("429") ||
-        err.message.includes("Insufficient balance") ||
-        err.message.includes("no resource package") ||
-        err.message.includes("recharge"));
-
-    if (!isBillingError) {
-      // Not a billing error — don't retry, just fail
-      result.abort(err instanceof Error ? err : new Error(String(err)));
-      return;
-    }
-
-    // Coding endpoint failed with billing error — try regular endpoint as fallback
-    const regularResult = streamOpenAI({ ...options, baseUrl: GLM_REGULAR_BASE_URL });
-    regularResult.response.catch(() => {});
-    try {
-      for await (const event of regularResult) {
-        result.push(event);
-      }
-      result.complete(await regularResult.response);
-    } catch (fallbackErr) {
-      result.abort(fallbackErr instanceof Error ? fallbackErr : new Error(String(fallbackErr)));
-    }
-  }
-}

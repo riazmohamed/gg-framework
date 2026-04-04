@@ -241,6 +241,8 @@ export interface StreamOptions {
   cacheRetention?: CacheRetention;
   /** OpenAI ChatGPT account ID (from OAuth JWT) for codex endpoint */
   accountId?: string;
+  /** GLM coding plan API key (separate from regular apiKey). Used only for GLM coding endpoint. */
+  glmCodingApiKey?: string;
   /** Enable provider-native web search. Each provider uses its own format:
    *  - Anthropic: server tool `web_search_20250305`
    *  - Moonshot: `builtin_function` `$web_search`
