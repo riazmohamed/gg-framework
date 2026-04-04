@@ -401,7 +401,8 @@ export function toOpenAIMessages(
         typeof msg.content !== "string"
           ? msg.content
               .filter(
-                (p): p is Extract<ContentPart, { type: "tool_call" }> => p.type === "tool_call",
+                (p): p is Extract<ContentPart, { type: "tool_call" }> =>
+                  p.type === "tool_call" && !!p.name,
               )
               .map(
                 (tc): OpenAI.ChatCompletionMessageToolCall => ({
@@ -434,8 +435,10 @@ export function toOpenAIMessages(
       };
       // Attach reasoning_content for multi-turn coherence (non-standard field).
       // Moonshot requires reasoning_content on ALL assistant messages with tool_calls
-      // when thinking is enabled — even if empty.
-      if (thinkingParts || toolCalls?.length) {
+      // when thinking is enabled — even if empty. Only for providers that support it.
+      const supportsReasoningContent =
+        options?.provider === "glm" || options?.provider === "moonshot";
+      if (supportsReasoningContent && (thinkingParts || toolCalls?.length)) {
         (assistantMsg as unknown as Record<string, unknown>).reasoning_content =
           thinkingParts || " ";
       }

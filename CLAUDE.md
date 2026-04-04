@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## Project
 
 **gg-framework** — Modular TypeScript monorepo for building LLM-powered apps, from raw streaming to a full CLI coding agent.
@@ -12,47 +14,21 @@
 
 **Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder`
 
-## Project Structure
-
-```
-packages/
-├── gg-ai/src/              # Streaming API
-│   ├── types.ts            # StreamOptions, ContentBlock, events
-│   ├── stream.ts           # Main stream() dispatch
-│   ├── providers/          # anthropic, openai, openai-codex, palsu (mock)
-│   └── utils/              # EventStream, Zod-to-JSON-Schema
-├── gg-agent/src/           # Agent engine
-│   ├── types.ts            # AgentTool, AgentEvent, AgentOptions
-│   ├── agent.ts            # Agent class + AgentStream
-│   └── agent-loop.ts       # Pure async generator loop
-└── ggcoder/src/            # CLI app (~100 files)
-    ├── cli.ts              # Entry point
-    ├── core/               # OAuth, MCP, compaction, model registry, extensions, agents
-    ├── tools/              # 27 tool files (bash, read, write, edit, grep, find, etc.)
-    ├── ui/components/      # 35 React/Ink components (one per file)
-    ├── ui/hooks/           # 8 hooks (useAgentLoop, useSessionManager, etc.)
-    ├── modes/              # Execution modes (interactive, rpc, serve, agent-home)
-    └── utils/              # Git, shell, formatting, image, sound
-```
-
-## Tech Stack
-
-- **TypeScript** 5.9 (strict, ES2022, ESM) · **pnpm** workspaces
-- **Build**: tsup (gg-ai, gg-agent) / tsc (ogcoder)
-- **Test**: Vitest 4.1 · **Lint**: ESLint 10 + typescript-eslint · **Format**: Prettier 3.8
-- **UI**: Ink 6 + React 19
-- **Key deps**: `@anthropic-ai/sdk`, `openai`, `zod` v4, `@modelcontextprotocol/sdk`, `sharp`
-
 ## Commands
 
 ```bash
-pnpm build            # Build all packages
-pnpm check            # tsc --noEmit (all packages)
-pnpm lint             # ESLint
-pnpm lint:fix         # ESLint --fix
-pnpm format           # Prettier write
-pnpm format:check     # Prettier check
-pnpm test             # Vitest (all packages)
+pnpm build                          # Build all packages (tsup for gg-ai/gg-agent, tsc for ogcoder)
+pnpm check                          # tsc --noEmit (all packages)
+pnpm lint                           # ESLint
+pnpm lint:fix                       # ESLint --fix
+pnpm format                         # Prettier write
+pnpm format:check                   # Prettier check
+pnpm test                           # Vitest (all packages)
+
+# Single package
+pnpm --filter @abukhaled/gg-ai test          # Test one package
+pnpm --filter @abukhaled/ogcoder test -- src/tools/read.test.ts  # Single test file
+pnpm test -- -t "should read files"          # Test by name pattern
 ```
 
 ## Code Quality — Zero Tolerance
@@ -65,27 +41,52 @@ pnpm check && pnpm lint && pnpm format:check
 
 Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`.
 
+## Architecture
+
+### Data Flow
+
+`stream()` (gg-ai) → `agentLoop()` (gg-agent) → tools + session (ggcoder)
+
+### gg-ai: Provider-Agnostic Streaming
+
+- **Provider registry** (`provider-registry.ts` + `stream.ts`): Map-based dispatch. Built-in providers registered at module load: `anthropic` → `streamAnthropic()`, all others (openai, glm, moonshot, ollama, xiaomi) → `streamOpenAI()` with provider-specific baseUrl/config.
+- **Message transform** (`providers/transform.ts`): Converts unified `Message[]` to provider format. Key quirks:
+  - Anthropic: `toolu_*` IDs, `thinking` content blocks with signatures, tool results wrapped in user messages
+  - OpenAI-compat: IDs remapped to `call_*` prefix, `reasoning_content` field (GLM/Moonshot only), tool results as `tool` role
+  - GLM: merges user text into preceding tool messages to preserve thinking context
+- **StreamResult**: dual-interface — async iterable (`for await`) AND thenable (`await` for final response)
+- **Zod → JSON Schema** (`utils/zod-to-json-schema.ts`): `z.toJSONSchema(schema)` with `$schema` key stripped
+
+### gg-agent: Agent Loop
+
+`agentLoop()` is a pure async generator in `agent-loop.ts`:
+
+1. Poll steering messages → 2. Transform context (compaction) → 3. Route model → 4. Repair tool pairing → 5. Call LLM with timeouts → 6. Extract & execute tools in parallel → 7. Loop on `tool_use` stop reason
+
+**Error recovery**: context overflow → force compact + retry (3x), overload 429/529 → exponential backoff 2-30s (10x), stream stall 90s → retry (3x), empty response → retry (2x), abort → graceful exit.
+
+### ggcoder: CLI Application
+
+- **Tools** (`tools/`): Factory functions returning `AgentTool<ZodSchema>`. Each tool gets `ToolOperations` interface for I/O abstraction (local fs by default, injectable for remote).
+- **MCP** (`core/mcp/`): Servers configured with command (stdio) or url (HTTP/SSE with fallback). Tools wrapped as `AgentTool` with `mcp__${server}__${tool}` naming. Rate-limited (2s min gap).
+- **Model router** (`core/model-router.ts`): Per-turn model switching. Modes: `vision` (auto-switch on images/video/docs), `plan-execute` (heavy planner + light executor), `hybrid` (vision priority, then plan-execute).
+- **Compaction** (`core/compaction/compactor.ts`): Triggers at 80% context usage. Keeps system message + recent ~20K tokens intact. Middle section summarized via LLM (tool calls → text, thinking stripped, results truncated). Falls back to extractive summary on failure.
+- **Sessions** (`core/session-manager.ts`): Append-only JSONL with DAG structure (leafId for branching). Streams line-by-line for large files. `repairToolPairs()` fixes interrupted sessions on restore.
+- **Auth**: OAuth PKCE only, tokens in `~/.gg/auth.json` — no raw API keys.
+- **UI**: Ink 6 + React 19. Slash commands split between UI-handled (`App.tsx`: `/model`, `/compact`, `/quit`, `/clear`) and registry (`core/slash-commands.ts`: `/help`, `/settings`, `/session`, `/new`, `/router`).
+
 ## Organization Rules
 
 - Types → `types.ts` in each package
 - Providers → `providers/` in gg-ai, one file per provider
 - Tools → `tools/` in ggcoder, one file per tool
-- UI components → `ui/components/`, one component per file
-- OAuth flows → `core/oauth/`, one file per provider
+- UI components → `ui/components/`, one per file
+- OAuth flows → `core/oauth/`, one per provider
 - Tests → co-located with source files
-
-## Key Patterns
-
-- **StreamResult/AgentStream**: async iterable (`for await`) + thenable (`await`)
-- **agentLoop**: async generator — call LLM, yield deltas, execute tools, loop on tool_use
-- **Model Router**: per-turn model switching (vision/plan-execute/hybrid) in `core/model-router.ts`
-- **OAuth-only auth**: PKCE flows, tokens in `~/.gg/auth.json` — no raw API keys
-- **Zod schemas**: tool params defined with Zod, converted to JSON Schema at provider boundary
-- **Debug log**: `~/.gg/debug.log` — singleton logger in `core/logger.ts`
 
 ## Publishing
 
-Publish in dependency order with `pnpm publish`:
+Publish in dependency order:
 
 ```bash
 pnpm build
@@ -93,8 +94,3 @@ pnpm --filter @abukhaled/gg-ai publish --no-git-checks
 pnpm --filter @abukhaled/gg-agent publish --no-git-checks
 pnpm --filter @abukhaled/ogcoder publish --no-git-checks
 ```
-
-## Slash Commands
-
-- **UI-handled** (`App.tsx`): `/model`, `/compact`, `/quit`, `/clear` — direct React state
-- **Registry** (`core/slash-commands.ts`): `/help`, `/settings`, `/session`, `/new`, `/router`
