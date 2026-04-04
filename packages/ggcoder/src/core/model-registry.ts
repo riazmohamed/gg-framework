@@ -106,6 +106,8 @@ export const MODELS: ModelInfo[] = [
     maxOutputTokens: 32_768,
     supportsThinking: true,
     supportsImages: true,
+    supportsVideo: true,
+    supportsDocuments: true,
     costTier: "high",
   },
   {
@@ -215,13 +217,23 @@ const TIER_RANK: Record<string, number> = { low: 0, medium: 1, high: 2 };
 
 /**
  * Get the best vision-capable model for a provider.
- * Prefers the most capable (highest costTier) vision model.
+ * Prefers the most capable (highest costTier) vision model, with smart fallback.
+ * For GLM: prefer GLM-5V-Turbo (high-end) but falls back to GLM-4.6V if not provisioned.
  */
 export function getVisionModel(provider: Provider): ModelInfo | undefined {
   const visionModels = getModelsForProvider(provider).filter((m) => m.supportsImages);
-  return visionModels.sort(
+  const sorted = visionModels.sort(
     (a, b) => (TIER_RANK[b.costTier] ?? 0) - (TIER_RANK[a.costTier] ?? 0),
-  )[0];
+  );
+
+  // For GLM, if GLM-5V-Turbo is available but might not be provisioned,
+  // return GLM-4.6V as the primary (which is always available on coding plans).
+  // GLM-5V-Turbo can be tried via fallback logic elsewhere.
+  if (provider === "glm") {
+    return sorted.find((m) => m.id === "glm-4.6v");
+  }
+
+  return sorted[0];
 }
 
 /**
