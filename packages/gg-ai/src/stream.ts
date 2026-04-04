@@ -116,8 +116,22 @@ async function runGLMWithFallback(options: StreamOptions, result: StreamResult):
       result.push(event);
     }
     result.complete(await codingResult.response);
-  } catch {
-    // Coding endpoint failed — try regular endpoint
+  } catch (err) {
+    // Check if it's a 429 billing error — if so, try regular endpoint as fallback
+    const isBillingError =
+      err instanceof Error &&
+      (err.message.includes("429") ||
+        err.message.includes("Insufficient balance") ||
+        err.message.includes("no resource package") ||
+        err.message.includes("recharge"));
+
+    if (!isBillingError) {
+      // Not a billing error — don't retry, just fail
+      result.abort(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+
+    // Coding endpoint failed with billing error — try regular endpoint as fallback
     const regularResult = streamOpenAI({ ...options, baseUrl: GLM_REGULAR_BASE_URL });
     regularResult.response.catch(() => {});
     try {
