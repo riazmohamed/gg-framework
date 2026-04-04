@@ -43,7 +43,11 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     model: options.model,
     messages,
     stream: true,
-    ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
+    ...(options.maxTokens
+      ? options.provider === "xiaomi"
+        ? { max_completion_tokens: options.maxTokens }
+        : { max_tokens: options.maxTokens }
+      : {}),
     ...(effectiveTemp != null && !options.thinking ? { temperature: effectiveTemp } : {}),
     ...(options.topP != null ? { top_p: options.topP } : {}),
     ...(options.stop ? { stop: options.stop } : {}),
@@ -65,8 +69,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       tools.push({ type: "builtin_function", function: { name: "$web_search" } });
       raw.tools = tools;
     }
-    // Xiaomi: web search + max_completion_tokens handled via fetch wrapper
-    // in stream.ts to bypass OpenAI SDK validation of non-standard tool types.
+    // Xiaomi: web search requires account-level webSearchEnabled flag
     // GLM (Z.AI): web search is provided via MCP servers, not inline tools
     // OpenAI: Chat Completions API does not support web search
   }
