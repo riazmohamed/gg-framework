@@ -199,6 +199,10 @@ export const MODELS: ModelInfo[] = [
     costTier: "medium",
   },
   // ── Xiaomi MiMo ────────────────────────────────────────
+  // Note: MiMo V2 Pro is text-only in practice — even though Xiaomi markets
+  // it as multimodal, the endpoint we hit doesn't accept image content. The
+  // vision router will auto-switch to mimo-v2-omni for image/video/document
+  // turns and snap back to pro afterward.
   {
     id: "mimo-v2-pro",
     name: "MiMo V2 Pro",
@@ -206,9 +210,9 @@ export const MODELS: ModelInfo[] = [
     contextWindow: 1_000_000,
     maxOutputTokens: 128_000,
     supportsThinking: true,
-    supportsImages: true,
-    supportsVideo: true,
-    supportsDocuments: true,
+    supportsImages: false,
+    supportsVideo: false,
+    supportsDocuments: false,
     costTier: "high",
   },
   {

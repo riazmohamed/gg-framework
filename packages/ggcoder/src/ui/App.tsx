@@ -904,11 +904,30 @@ export function App(props: AppProps) {
     return { apiKey: activeApiKey!, accountId: activeAccountId };
   }, [props.authStorage, currentProvider, activeApiKey, activeAccountId]);
 
-  // Build model router for auto-switching (e.g. vision model on image input)
-  const modelRouter = useMemo(
-    () => createModelRouter("vision", currentProvider, currentModel),
-    [currentProvider, currentModel],
-  );
+  // Build model router for auto-switching (e.g. vision model on image input).
+  // Pass the logged-in providers and their credentials so the router can fall
+  // back to another provider's vision model (e.g. MiniMax → Claude/GLM-4.6V)
+  // for a single turn and snap back afterward.
+  const modelRouter = useMemo(() => {
+    const providerCredentials: Partial<
+      Record<Provider, { apiKey: string; baseUrl?: string; accountId?: string }>
+    > = {};
+    const loggedIn = props.loggedInProviders ?? [];
+    for (const p of loggedIn) {
+      const creds = props.credentialsByProvider?.[p];
+      if (creds?.accessToken) {
+        providerCredentials[p] = {
+          apiKey: creds.accessToken,
+          baseUrl: creds.baseUrl,
+          accountId: creds.accountId,
+        };
+      }
+    }
+    return createModelRouter("vision", currentProvider, currentModel, {
+      loggedInProviders: loggedIn,
+      providerCredentials,
+    });
+  }, [currentProvider, currentModel, props.loggedInProviders, props.credentialsByProvider]);
 
   const agentLoop = useAgentLoop(
     messagesRef,
