@@ -392,6 +392,16 @@ export function useAgentLoop(
                 break;
 
               case "tool_call_start": {
+                // Flush any pending throttled text BEFORE the tool call renders.
+                // Without this, text accumulated in textVisibleRef since the last
+                // 16ms flush won't appear in the UI until after the tool completes,
+                // making the assistant's message look cut off.
+                if (streamFlushTimer) {
+                  clearTimeout(streamFlushTimer);
+                  streamFlushTimer = null;
+                }
+                flushStreamState();
+
                 freezeThinking();
                 if (phaseRef.current !== "tools") {
                   phaseRef.current = "tools";

@@ -2169,6 +2169,9 @@ export function App(props: AppProps) {
             setOverlay(null);
           }}
           onApprove={(planPath) => {
+            log("INFO", "plan", "Plan approved — transitioning to implementation", {
+              planPath,
+            });
             // Plan overlay dismissed — allow future onDone to fire normally
             planOverlayPendingRef.current = false;
             // Store approved plan path — will be injected into the new system prompt
@@ -2294,7 +2297,8 @@ export function App(props: AppProps) {
               </Text>
             </Box>
           ) : (
-            doneStatus && (
+            doneStatus &&
+            !agentLoop.isRunning && (
               <Box marginTop={1}>
                 <Text color={theme.success}>
                   {"✻ "}

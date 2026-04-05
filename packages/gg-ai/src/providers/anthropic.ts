@@ -19,41 +19,27 @@ import {
   toAnthropicTools,
 } from "./transform.js";
 
-// Cache Anthropic clients by config fingerprint so the same client (and its
-// underlying HTTP/2 connection pool) is reused across turns.  Creating a new
-// client per turn pollutes the global connection pool — after ~10 rapid
-// streaming requests the pool can accumulate stale HTTP/2 state, causing
-// subsequent requests to hang with zero events from the API.
-const clientCache = new Map<string, Anthropic>();
-
-function getOrCreateClient(options: StreamOptions): Anthropic {
+function createClient(options: StreamOptions): Anthropic {
   const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
-  // Key on the fields that affect client construction
-  const key = `${options.apiKey ?? ""}|${options.baseUrl ?? ""}|${isOAuth}`;
-  let client = clientCache.get(key);
-  if (!client) {
-    client = new Anthropic({
-      ...(isOAuth
-        ? { apiKey: null as unknown as string, authToken: options.apiKey }
-        : { apiKey: options.apiKey }),
-      ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
-      ...(options.fetch ? { fetch: options.fetch } : {}),
-      // Disable SDK-level retries — the agent loop handles retries itself with
-      // stall detection and context compaction.  SDK retries on abort just cycle
-      // through the already-aborted signal, wasting time.
-      maxRetries: 0,
-      ...(isOAuth
-        ? {
-            defaultHeaders: {
-              "user-agent": "claude-cli/2.1.75",
-              "x-app": "cli",
-            },
-          }
-        : {}),
-    });
-    clientCache.set(key, client);
-  }
-  return client;
+  return new Anthropic({
+    ...(isOAuth
+      ? { apiKey: null as unknown as string, authToken: options.apiKey }
+      : { apiKey: options.apiKey }),
+    ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    // Allow SDK retries for connection-level failures (socket hang up, 500s,
+    // connection refused).  Our stall detection handles abort-initiated retries
+    // separately — SDK retries only fire on genuine transport errors.
+    maxRetries: 2,
+    ...(isOAuth
+      ? {
+          defaultHeaders: {
+            "user-agent": "claude-cli/2.1.75",
+            "x-app": "cli",
+          },
+        }
+      : {}),
+  });
 }
 
 export function streamAnthropic(options: StreamOptions): StreamResult {
@@ -61,7 +47,7 @@ export function streamAnthropic(options: StreamOptions): StreamResult {
 }
 
 async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, StreamResponse> {
-  const client = getOrCreateClient(options);
+  const client = createClient(options);
   const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
 
   const cacheControl = toAnthropicCacheControl(options.cacheRetention, options.baseUrl);
@@ -125,10 +111,20 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     stream: true,
   } as Anthropic.MessageCreateParams;
 
+  // Adaptive thinking models (Opus 4.6, Sonnet 4.6) don't need the
+  // interleaved-thinking beta — they have it built in.
+  const hasAdaptiveThinking =
+    options.model.includes("opus-4-6") ||
+    options.model.includes("opus-4.6") ||
+    options.model.includes("sonnet-4-6") ||
+    options.model.includes("sonnet-4.6");
+
   const betaHeaders = [
     ...(isOAuth ? ["claude-code-20250219", "oauth-2025-04-20"] : []),
     ...(options.compaction ? ["compact-2026-01-12"] : []),
     ...(options.clearToolUses ? ["context-management-2025-06-27"] : []),
+    "fine-grained-tool-streaming-2025-05-14",
+    ...(!hasAdaptiveThinking ? ["interleaved-thinking-2025-05-14"] : []),
   ];
 
   const stream = client.messages.stream(params, {
@@ -291,9 +287,6 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
               input: stc.input,
             };
           } else if (accum.type === "redacted_thinking" && accum.raw) {
-            // Preserve encrypted thinking block as raw content for round-tripping.
-            // The Anthropic API requires redacted_thinking blocks to be sent back
-            // verbatim in subsequent requests when thinking is enabled.
             contentParts.push({ type: "raw", data: accum.raw });
             yield keepalive;
           } else {

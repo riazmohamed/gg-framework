@@ -16,22 +16,12 @@ import {
   toOpenAITools,
 } from "./transform.js";
 
-// Cache OpenAI clients by config fingerprint (same rationale as Anthropic —
-// avoid polluting the global HTTP connection pool with per-turn clients).
-const clientCache = new Map<string, OpenAI>();
-
-function getOrCreateClient(options: StreamOptions): OpenAI {
-  const key = `${options.apiKey ?? ""}|${options.baseUrl ?? ""}`;
-  let client = clientCache.get(key);
-  if (!client) {
-    client = new OpenAI({
-      apiKey: options.apiKey,
-      ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
-      ...(options.fetch ? { fetch: options.fetch } : {}),
-    });
-    clientCache.set(key, client);
-  }
-  return client;
+function createClient(options: StreamOptions): OpenAI {
+  return new OpenAI({
+    apiKey: options.apiKey,
+    ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+  });
 }
 
 export function streamOpenAI(options: StreamOptions): StreamResult {
@@ -41,7 +31,7 @@ export function streamOpenAI(options: StreamOptions): StreamResult {
 async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, StreamResponse> {
   const providerName = options.provider ?? "openai";
 
-  const client = getOrCreateClient(options);
+  const client = createClient(options);
 
   // GLM and Moonshot use a custom `thinking` body param instead of `reasoning_effort`
   const usesThinkingParam =
@@ -57,7 +47,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     model: options.model,
     messages,
     stream: true,
-    ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
+    ...(options.maxTokens ? { max_completion_tokens: options.maxTokens } : {}),
     ...(effectiveTemp != null && !options.thinking ? { temperature: effectiveTemp } : {}),
     ...(options.topP != null ? { top_p: options.topP } : {}),
     ...(options.stop ? { stop: options.stop } : {}),
@@ -256,6 +246,13 @@ function toError(err: unknown, provider: string = "openai"): ProviderError {
     let msg = err.message;
     const body = err.error as Record<string, unknown> | undefined;
     if (body) {
+      // Friendly message for codex-mini-latest requiring Pro/Max subscription
+      const modelName = (body.model as string) || "";
+      const _code = (body.code as string) || "";
+      const message = (body.message as string) || "";
+      if (modelName === "codex-mini-latest" || message.includes("codex-mini-latest")) {
+        msg = `codex-mini-latest requires an OpenAI Pro or Max subscription. You currently have access to GPT-5.4 and GPT-5.4 Mini with your account.`;
+      }
       // Append raw error body so debug logs capture the exact API response
       msg += ` | body: ${JSON.stringify(body)}`;
     }

@@ -90,6 +90,20 @@ export function isBillingError(err: unknown): boolean {
  * HTTP 429 (rate limit) or 529/503 (overloaded).
  * Excludes billing/quota errors which won't resolve with a retry.
  */
+/**
+ * Detect tool pairing errors — orphaned tool_use or tool_result blocks.
+ * These are 400 errors that can be recovered by repairing the message history.
+ */
+export function isToolPairingError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return (
+    (msg.includes("tool_use") && msg.includes("tool_result")) ||
+    msg.includes("unexpected `tool_use_id`") ||
+    msg.includes("tool_use ids found without")
+  );
+}
+
 export function isOverloaded(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (isBillingError(err)) return false;
@@ -115,6 +129,7 @@ export async function* agentLoop(
   let turn = 0;
   let firstTurn = true;
   let consecutivePauses = 0;
+  let toolPairingRepaired = false;
   let overflowRetries = 0;
   let overloadRetries = 0;
   let emptyResponseRetries = 0;
@@ -157,7 +172,13 @@ export async function* agentLoop(
           }
         }
       }
-      diag("turn_start", { turn, messages: messages.length, chars: msgChars });
+      diag("turn_start", {
+        turn,
+        messages: messages.length,
+        chars: msgChars,
+        provider: options.provider,
+        model: options.model,
+      });
 
       // ── Initial steering poll: catch messages queued before the first LLM call ──
       if (firstTurn && options.getSteeringMessages) {
@@ -202,6 +223,13 @@ export async function* agentLoop(
       let streamEventCount = 0;
       let lastEventTime = Date.now();
       let streamCallStart = Date.now();
+      // Track event types for diagnostics — shows what arrived before a stall
+      const eventTypeCounts: Record<string, number> = {};
+      let lastEventType = "";
+      // Track consumer processing time — helps distinguish "API stopped sending"
+      // from "our consumer was slow to pull the next event"
+      let lastYieldEndTime = Date.now();
+      let maxConsumerLagMs = 0;
 
       // Forward caller abort to the per-attempt controller
       const forwardAbort = () => streamController.abort();
@@ -227,11 +255,14 @@ export async function* agentLoop(
           diag("idle_timeout_fired", {
             events: streamEventCount,
             sinceLastEventMs: Date.now() - lastEventTime,
+            lastEventType,
+            maxConsumerLagMs,
             phase: hasReceivedEvent
               ? "mid_stream"
               : hasReceivedThinking
                 ? "post_thinking"
                 : "first_event",
+            eventTypes: eventTypeCounts,
           });
           idleTimedOut = true;
           streamController.abort();
@@ -283,7 +314,16 @@ export async function* agentLoop(
         streamCallStart = Date.now();
         resetIdleTimer();
         for await (const event of result) {
+          // Measure consumer lag: time between finishing previous yield and
+          // receiving this event.  High lag means React rendering is starving
+          // the stream consumer.  Low lag means the API was slow to send.
+          const pullTime = Date.now();
+          const consumerLag = pullTime - lastYieldEndTime;
+          if (consumerLag > maxConsumerLagMs) maxConsumerLagMs = consumerLag;
+
           streamEventCount++;
+          eventTypeCounts[event.type] = (eventTypeCounts[event.type] ?? 0) + 1;
+          lastEventType = event.type;
 
           // Only flip to mid-stream timeout on confirmed output events — text
           // deltas and completed tool calls.  Everything else (keepalive,
@@ -357,9 +397,15 @@ export async function* agentLoop(
               data: event.data,
             };
           }
+          lastYieldEndTime = Date.now();
         }
 
-        diag("stream_done", { events: streamEventCount, totalMs: Date.now() - streamCallStart });
+        diag("stream_done", {
+          events: streamEventCount,
+          totalMs: Date.now() - streamCallStart,
+          maxConsumerLagMs,
+          eventTypes: eventTypeCounts,
+        });
         response = await result.response;
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -369,6 +415,9 @@ export async function* agentLoop(
           totalMs: Date.now() - streamCallStart,
           idleTimedOut,
           aborted: !!options.signal?.aborted,
+          eventTypes: eventTypeCounts,
+          provider: options.provider,
+          model: options.model,
         });
         // Context overflow: force-compact via transformContext and retry (up to 3 times)
         if (
@@ -377,6 +426,11 @@ export async function* agentLoop(
           options.transformContext
         ) {
           overflowRetries++;
+          diag("retry", {
+            reason: "context_overflow",
+            attempt: overflowRetries,
+            maxAttempts: MAX_OVERFLOW_RETRIES,
+          });
           yield {
             type: "retry" as const,
             reason: "context_overflow" as const,
@@ -399,6 +453,12 @@ export async function* agentLoop(
             OVERLOAD_BASE_DELAY_MS * 2 ** (overloadRetries - 1),
             OVERLOAD_MAX_DELAY_MS,
           );
+          diag("retry", {
+            reason: "overloaded",
+            attempt: overloadRetries,
+            maxAttempts: MAX_OVERLOAD_RETRIES,
+            delayMs,
+          });
           yield {
             type: "retry" as const,
             reason: "overloaded" as const,
@@ -441,6 +501,13 @@ export async function* agentLoop(
             }
           } else {
             const delayMs = Math.min(STALL_DELAY_MS * 2 ** (stallRetries - 1), 8_000);
+            diag("retry", {
+              reason: "stream_stall",
+              attempt: stallRetries,
+              maxAttempts: MAX_STALL_RETRIES,
+              delayMs,
+              events: streamEventCount,
+            });
             yield {
               type: "retry" as const,
               reason: "stream_stall" as const,
@@ -456,6 +523,11 @@ export async function* agentLoop(
         // Stream stall retries exhausted — surface a clear error so the UI
         // can distinguish "gave up after stalls" from "completed normally".
         if (idleTimedOut && !options.signal?.aborted) {
+          diag("stall_exhausted", {
+            stallRetries: MAX_STALL_RETRIES,
+            provider: options.provider,
+            model: options.model,
+          });
           yield {
             type: "error" as const,
             error: new Error(
@@ -465,11 +537,28 @@ export async function* agentLoop(
           };
           break;
         }
+        // Tool pairing 400: orphaned tool_result or tool_use in message history.
+        // Run repair and retry once — if repair can't fix it, surface the error.
+        if (isToolPairingError(err) && !toolPairingRepaired) {
+          toolPairingRepaired = true;
+          diag("tool_pairing_repair", { error: errMsg.slice(0, 200) });
+          repairToolPairingAdjacent(messages);
+          turn--;
+          continue;
+        }
         // Abort errors (user cancellation) — exit loop cleanly instead of
         // crashing the process with an unhandled rejection.
         if (isAbortError(err) || options.signal?.aborted) {
+          diag("aborted", { turn, provider: options.provider, model: options.model });
           break;
         }
+        // Unhandled error — log before throwing so the crash is traceable
+        diag("unhandled_error", {
+          error: errMsg.slice(0, 500),
+          turn,
+          provider: options.provider,
+          model: options.model,
+        });
         throw err;
       } finally {
         if (idleTimer) clearTimeout(idleTimer);
@@ -496,6 +585,14 @@ export async function* agentLoop(
       if (!hasActionableContent) {
         if (emptyResponseRetries < MAX_EMPTY_RESPONSE_RETRIES) {
           emptyResponseRetries++;
+          diag("retry", {
+            reason: "empty_response",
+            attempt: emptyResponseRetries,
+            maxAttempts: MAX_EMPTY_RESPONSE_RETRIES,
+            provider: options.provider,
+            model: options.model,
+            contentTypes: contentArr?.map((p) => p.type).join(",") ?? "empty",
+          });
           yield {
             type: "retry" as const,
             reason: "empty_response" as const,
@@ -888,6 +985,30 @@ function repairToolPairingAdjacent(messages: Message[]): void {
           isError: true,
         })),
       });
+    }
+  }
+
+  // Reverse repair: strip tool_result entries whose tool_use_id has no matching
+  // tool_call in the preceding assistant message. This can happen when compaction
+  // or stall recovery removes an assistant message but leaves its tool_result behind.
+  const toolCallIdSet = new Set<string>();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      for (const p of msg.content as ContentPart[]) {
+        if (p.type === "tool_call") toolCallIdSet.add((p as ToolCall).id);
+      }
+    }
+    if (msg.role === "tool" && Array.isArray(msg.content)) {
+      const results = msg.content as ToolResult[];
+      const filtered = results.filter((r) => toolCallIdSet.has(r.toolCallId));
+      if (filtered.length === 0) {
+        // Entire tool message is orphaned — remove it
+        messages.splice(i, 1);
+        i--;
+      } else if (filtered.length < results.length) {
+        (msg as { content: ToolResult[] }).content = filtered;
+      }
     }
   }
 }

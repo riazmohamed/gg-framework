@@ -80,6 +80,13 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         `Ensure your account has an active subscription at https://chatgpt.com/settings`;
     }
 
+    // Friendly hint for codex-mini-latest requiring Pro/Max subscription
+    if (response.status === 404 && text.includes("does not exist")) {
+      message +=
+        `\n\nHint: codex-mini-latest requires an OpenAI Pro ($200/mo) or Max subscription. ` +
+        `GPT-5.4 and GPT-5.4 Mini work with any active ChatGPT plan.`;
+    }
+
     throw new ProviderError("openai", message, {
       statusCode: response.status,
     });
