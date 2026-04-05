@@ -75,6 +75,28 @@ providerRegistry.register("minimax", {
       compaction: false,
       clearToolUses: false,
       serverTools: undefined,
+      // Strip image/video/document content blocks — MiniMax's Anthropic-compat
+      // endpoint silently drops multimodal content and the model then reports
+      // it "can't see" the image. Vision on MiniMax is only exposed through a
+      // separate Image Understanding MCP server, not this chat endpoint.
+      messages: options.messages.map((m) => {
+        if (m.role !== "user" || !Array.isArray(m.content)) return m;
+        const filtered = m.content.filter(
+          (p) => p.type !== "image" && p.type !== "video" && p.type !== "document",
+        );
+        const dropped = m.content.length - filtered.length;
+        if (dropped === 0) return m;
+        return {
+          ...m,
+          content: [
+            ...filtered,
+            {
+              type: "text" as const,
+              text: `[${dropped} attachment(s) removed — MiniMax's Anthropic-compatible endpoint does not support image/video/document input. Switch to a vision-capable model (e.g. Claude, GLM-4.6V, or MiMo) to analyze attachments.]`,
+            },
+          ],
+        };
+      }),
     }),
 });
 

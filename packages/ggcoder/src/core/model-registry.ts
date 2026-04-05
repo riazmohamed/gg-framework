@@ -163,6 +163,10 @@ export const MODELS: ModelInfo[] = [
     costTier: "low",
   },
   // ── MiniMax ───────────────────────────────────────────────
+  // Note: MiniMax's Anthropic-compatible endpoint does NOT support image
+  // content blocks even though the underlying M2.7 model is multimodal.
+  // Vision is gated behind MiniMax's separate Image Understanding MCP
+  // server. Keep supportsImages: false so the vision router skips it.
   {
     id: "MiniMax-M2.7",
     name: "MiniMax M2.7",
