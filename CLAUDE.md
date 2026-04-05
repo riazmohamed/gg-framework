@@ -6,11 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **gg-framework** — Modular TypeScript monorepo for building LLM-powered apps, from raw streaming to a full CLI coding agent.
 
-| Package | npm | Description |
-|---|---|---|
-| `packages/gg-ai` | `@abukhaled/gg-ai` | Unified LLM streaming API (Anthropic, OpenAI) |
-| `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution |
-| `packages/ggcoder` | `@abukhaled/ogcoder` | CLI coding agent (`ogcoder` binary) |
+| Package             | npm                   | Description                                   |
+| ------------------- | --------------------- | --------------------------------------------- |
+| `packages/gg-ai`    | `@abukhaled/gg-ai`    | Unified LLM streaming API (Anthropic, OpenAI) |
+| `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution                |
+| `packages/ggcoder`  | `@abukhaled/ogcoder`  | CLI coding agent (`ogcoder` binary)           |
 
 **Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder`
 
@@ -49,7 +49,7 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 
 ### gg-ai: Provider-Agnostic Streaming
 
-- **Provider registry** (`provider-registry.ts` + `stream.ts`): Map-based dispatch. Built-in providers registered at module load: `anthropic` → `streamAnthropic()`, all others (openai, glm, moonshot, ollama, xiaomi) → `streamOpenAI()` with provider-specific baseUrl/config.
+- **Provider registry** (`provider-registry.ts` + `stream.ts`): Map-based dispatch. Built-in providers registered at module load: `anthropic` and `minimax` → `streamAnthropic()` (MiniMax uses an Anthropic-compatible endpoint); `openai`, `glm`, `moonshot`, `xiaomi`, `ollama` → `streamOpenAI()` with provider-specific baseUrl/config.
 - **Message transform** (`providers/transform.ts`): Converts unified `Message[]` to provider format. Key quirks:
   - Anthropic: `toolu_*` IDs, `thinking` content blocks with signatures, tool results wrapped in user messages
   - OpenAI-compat: IDs remapped to `call_*` prefix, `reasoning_content` field (GLM/Moonshot only), tool results as `tool` role
@@ -63,7 +63,7 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 
 1. Poll steering messages → 2. Transform context (compaction) → 3. Route model → 4. Repair tool pairing → 5. Call LLM with timeouts → 6. Extract & execute tools in parallel → 7. Loop on `tool_use` stop reason
 
-**Error recovery**: context overflow → force compact + retry (3x), overload 429/529 → exponential backoff 2-30s (10x), stream stall 90s → retry (3x), empty response → retry (2x), abort → graceful exit.
+**Error recovery**: context overflow → force compact + retry (3x), overload 429/529 → exponential backoff 2-30s (10x), stream stall → retry (5x) with tiered timeouts (45s first-event, 30s idle, 90s hard cap pre-output, 5min once output is flowing, 5-10min for thinking-heavy models), empty response → retry (2x), abort → graceful exit.
 
 ### ggcoder: CLI Application
 
@@ -72,7 +72,7 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 - **Model router** (`core/model-router.ts`): Per-turn model switching. Modes: `vision` (auto-switch on images/video/docs), `plan-execute` (heavy planner + light executor), `hybrid` (vision priority, then plan-execute).
 - **Compaction** (`core/compaction/compactor.ts`): Triggers at 80% context usage. Keeps system message + recent ~20K tokens intact. Middle section summarized via LLM (tool calls → text, thinking stripped, results truncated). Falls back to extractive summary on failure.
 - **Sessions** (`core/session-manager.ts`): Append-only JSONL with DAG structure (leafId for branching). Streams line-by-line for large files. `repairToolPairs()` fixes interrupted sessions on restore.
-- **Auth**: OAuth PKCE only, tokens in `~/.gg/auth.json` — no raw API keys.
+- **Auth**: OAuth PKCE for Anthropic and OpenAI; static API keys for GLM, Moonshot, Xiaomi, MiniMax, and Ollama. All credentials stored in `~/.gg/auth.json`.
 - **UI**: Ink 6 + React 19. Slash commands split between UI-handled (`App.tsx`: `/model`, `/compact`, `/quit`, `/clear`) and registry (`core/slash-commands.ts`: `/help`, `/settings`, `/session`, `/new`, `/router`).
 
 ## Organization Rules
