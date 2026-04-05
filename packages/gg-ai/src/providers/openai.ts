@@ -1,5 +1,11 @@
 import OpenAI from "openai";
-import type { ContentPart, StreamOptions, StreamResponse, ToolCall } from "../types.js";
+import type {
+  ContentPart,
+  StreamEvent,
+  StreamOptions,
+  StreamResponse,
+  ToolCall,
+} from "../types.js";
 import { ProviderError } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import {
@@ -10,22 +16,26 @@ import {
   toOpenAITools,
 } from "./transform.js";
 
-export function streamOpenAI(options: StreamOptions): StreamResult {
-  const result = new StreamResult();
-  const providerName = options.provider ?? "openai";
-  runStream(options, result).catch((err) => result.abort(toError(err, providerName)));
-  return result;
-}
-
-async function runStream(options: StreamOptions, result: StreamResult): Promise<void> {
-  const client = new OpenAI({
+function createClient(options: StreamOptions): OpenAI {
+  return new OpenAI({
     apiKey: options.apiKey,
     ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
     ...(options.fetch ? { fetch: options.fetch } : {}),
   });
+}
+
+export function streamOpenAI(options: StreamOptions): StreamResult {
+  return new StreamResult(runStream(options));
+}
+
+async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, StreamResponse> {
+  const providerName = options.provider ?? "openai";
+
+  const client = createClient(options);
 
   // GLM and Moonshot use a custom `thinking` body param instead of `reasoning_effort`
-  const usesThinkingParam = options.provider === "glm" || options.provider === "moonshot";
+  const usesThinkingParam =
+    options.provider === "glm" || options.provider === "moonshot" || options.provider === "xiaomi";
 
   const messages = toOpenAIMessages(options.messages, { provider: options.provider });
 
@@ -37,7 +47,7 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
     model: options.model,
     messages,
     stream: true,
-    ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
+    ...(options.maxTokens ? { max_completion_tokens: options.maxTokens } : {}),
     ...(effectiveTemp != null && !options.thinking ? { temperature: effectiveTemp } : {}),
     ...(options.topP != null ? { top_p: options.topP } : {}),
     ...(options.stop ? { stop: options.stop } : {}),
@@ -59,20 +69,48 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
       tools.push({ type: "builtin_function", function: { name: "$web_search" } });
       raw.tools = tools;
     }
+    // Xiaomi: web search requires account-level webSearchEnabled flag
     // GLM (Z.AI): web search is provided via MCP servers, not inline tools
     // OpenAI: Chat Completions API does not support web search
   }
 
-  // Inject custom thinking param for GLM/Moonshot (not part of OpenAI spec)
+  // Inject custom thinking param for GLM/Moonshot/Xiaomi (not part of OpenAI spec)
   if (usesThinkingParam) {
-    (params as unknown as Record<string, unknown>).thinking = options.thinking
-      ? { type: "enabled" }
-      : { type: "disabled" };
+    if (options.thinking) {
+      (params as unknown as Record<string, unknown>).thinking = { type: "enabled" };
+    } else {
+      // All providers (GLM, Moonshot, Xiaomi MiMo) support explicit disabled.
+      // MiMo is an always-on reasoning model — without { type: "disabled" } it
+      // returns reasoning_content and may produce thinking-only responses with
+      // no actionable output, causing the agent loop to silently end.
+      (params as unknown as Record<string, unknown>).thinking = { type: "disabled" };
+    }
   }
 
-  const stream = await client.chat.completions.create(params, {
-    signal: options.signal ?? undefined,
-  });
+  // Dump request body for stall diagnosis when GGAI_DUMP_REQUEST is set
+  if (
+    (globalThis as Record<string, unknown>).process &&
+    ((globalThis as Record<string, unknown>).process as Record<string, Record<string, string>>).env
+      ?.GGAI_DUMP_REQUEST
+  ) {
+    const fs = await import("fs");
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const dumpPath = `/tmp/ggai-request-${ts}.json`;
+    fs.writeFileSync(dumpPath, JSON.stringify(params, null, 2));
+    fs.appendFileSync(
+      "/tmp/ggai-requests.log",
+      `[${ts}] ${dumpPath} messages=${params.messages.length}\n`,
+    );
+  }
+
+  let stream: AsyncIterable<OpenAI.ChatCompletionChunk>;
+  try {
+    stream = (await client.chat.completions.create(params, {
+      signal: options.signal ?? undefined,
+    })) as AsyncIterable<OpenAI.ChatCompletionChunk>;
+  } catch (err) {
+    throw toError(err, providerName);
+  }
 
   const contentParts: ContentPart[] = [];
   const toolCallAccum = new Map<number, { id: string; name: string; argsJson: string }>();
@@ -83,7 +121,7 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
   let cacheRead = 0;
   let finishReason: string | null = null;
 
-  for await (const chunk of stream as AsyncIterable<OpenAI.ChatCompletionChunk>) {
+  for await (const chunk of stream) {
     const choice = chunk.choices?.[0];
 
     if (chunk.usage) {
@@ -105,17 +143,24 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
 
     const delta = choice.delta;
 
-    // Reasoning/thinking delta (GLM, Moonshot)
+    // Reasoning/thinking delta (GLM, Moonshot, Xiaomi MiMo, DeepSeek)
+    // Always accumulate reasoning_content for round-tripping in multi-turn
+    // conversations (models like DeepSeek Reasoner require it on assistant
+    // messages).  Only yield thinking_delta to the UI when thinking is enabled
+    // — reasoning models like MiMo always return reasoning_content even when
+    // thinking is "off", which would cause a permanent "Thinking" indicator.
     const reasoningContent = (delta as Record<string, unknown>).reasoning_content;
     if (typeof reasoningContent === "string" && reasoningContent) {
       thinkingAccum += reasoningContent;
-      result.push({ type: "thinking_delta", text: reasoningContent });
+      if (options.thinking) {
+        yield { type: "thinking_delta", text: reasoningContent };
+      }
     }
 
     // Text delta
     if (delta.content) {
       textAccum += delta.content;
-      result.push({ type: "text_delta", text: delta.content });
+      yield { type: "text_delta", text: delta.content };
     }
 
     // Tool call deltas
@@ -134,18 +179,20 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
         if (tc.function?.name) accum.name = tc.function.name;
         if (tc.function?.arguments) {
           accum.argsJson += tc.function.arguments;
-          result.push({
+          yield {
             type: "toolcall_delta",
             id: accum.id,
             name: accum.name,
             argsJson: tc.function.arguments,
-          });
+          };
         }
       }
     }
   }
 
-  // Finalize thinking content (GLM, Moonshot reasoning_content)
+  // Finalize thinking content (GLM, Moonshot, Xiaomi reasoning_content)
+  // Always include in response for multi-turn round-tripping, even when
+  // thinking display is off — toOpenAIMessages sends it as reasoning_content.
   if (thinkingAccum) {
     contentParts.push({ type: "thinking", text: thinkingAccum });
   }
@@ -170,12 +217,12 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
       args,
     };
     contentParts.push(toolCall);
-    result.push({
+    yield {
       type: "toolcall_done",
       id: tc.id,
       name: tc.name,
       args,
-    });
+    };
   }
 
   const stopReason = normalizeOpenAIStopReason(finishReason);
@@ -189,8 +236,8 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
     usage: { inputTokens, outputTokens, ...(cacheRead > 0 && { cacheRead }) },
   };
 
-  result.push({ type: "done", stopReason });
-  result.complete(response);
+  yield { type: "done", stopReason };
+  return response;
 }
 
 function toError(err: unknown, provider: string = "openai"): ProviderError {
@@ -199,6 +246,13 @@ function toError(err: unknown, provider: string = "openai"): ProviderError {
     let msg = err.message;
     const body = err.error as Record<string, unknown> | undefined;
     if (body) {
+      // Friendly message for codex-mini-latest requiring Pro/Max subscription
+      const modelName = (body.model as string) || "";
+      const _code = (body.code as string) || "";
+      const message = (body.message as string) || "";
+      if (modelName === "codex-mini-latest" || message.includes("codex-mini-latest")) {
+        msg = `codex-mini-latest requires an OpenAI Pro or Max subscription. You currently have access to GPT-5.4 and GPT-5.4 Mini with your account.`;
+      }
       // Append raw error body so debug logs capture the exact API response
       msg += ` | body: ${JSON.stringify(body)}`;
     }

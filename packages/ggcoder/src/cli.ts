@@ -41,8 +41,9 @@ import { formatUserError } from "./utils/error-handler.js";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { AuthStorage } from "./core/auth-storage.js";
 import { SessionManager } from "./core/session-manager.js";
-import { ensureAppDirs, getAppPaths } from "./config.js";
+import { ensureAppDirs, getAppPaths, loadSavedSettings } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
+import { setStreamDiagnostic } from "@abukhaled/gg-agent";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createTools } from "./tools/index.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
@@ -146,7 +147,7 @@ function printHelp(): void {
   const opts: [string, string][] = [
     ["-h, --help", "Show this help message"],
     ["-v, --version", "Show version number"],
-    ["--provider <name>", "AI provider (anthropic, openai, glm, moonshot, xiaomi)"],
+    ["--provider <name>", "AI provider (anthropic, openai, glm, moonshot, xiaomi, ollama)"],
     ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-4.1)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Override the system prompt"],
@@ -350,32 +351,21 @@ function main(): void {
   }
 
   // Load saved settings for model/provider persistence
-  let savedProvider: "anthropic" | "openai" | "glm" | "moonshot" | undefined;
-  let savedModel: string | undefined;
-  let savedThinkingEnabled = false;
-  let savedTheme: "auto" | "dark" | "light" = "auto";
-  try {
-    const raw = JSON.parse(fs.readFileSync(getAppPaths().settingsFile, "utf-8"));
-    if (raw.defaultProvider) savedProvider = raw.defaultProvider;
-    if (raw.defaultModel) savedModel = raw.defaultModel;
-    if (raw.thinkingEnabled === true) savedThinkingEnabled = true;
-    if (raw.theme === "dark" || raw.theme === "light" || raw.theme === "auto")
-      savedTheme = raw.theme;
-  } catch {
-    // No settings file or invalid JSON — use defaults
-  }
+  const saved = loadSavedSettings();
+  const savedTheme = saved.theme;
 
-  const provider: "anthropic" | "openai" | "glm" | "moonshot" = savedProvider ?? "anthropic";
+  const provider: Provider = saved.provider ?? "anthropic";
 
   function getHardcodedDefault(p: string): string {
-    if (p === "openai") return "gpt-5.3-codex";
+    if (p === "openai") return "gpt-5.4";
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.5";
+    if (p === "minimax") return "MiniMax-M2.7";
     return "claude-opus-4-6";
   }
 
-  const model: string = savedModel ?? getHardcodedDefault(provider);
-  const thinkingLevel: ThinkingLevel | undefined = savedThinkingEnabled ? "medium" : undefined;
+  const model: string = saved.model ?? getHardcodedDefault(provider);
+  const thinkingLevel: ThinkingLevel | undefined = saved.thinkingEnabled ? "medium" : undefined;
 
   // Interactive mode (Ink TUI)
   const cwd = process.cwd();
@@ -421,13 +411,29 @@ async function runInkTUI(opts: {
     thinking: opts.thinkingLevel,
   });
 
+  // Wire stream stall diagnostics into the debug log
+  setStreamDiagnostic((phase, data) => {
+    log("INFO", "stream", phase, data as Record<string, unknown>);
+  });
+
   const authStorage = new AuthStorage(paths.authFile);
   await authStorage.load();
 
   // Detect all logged-in providers and preload their credentials
-  const allProviders: Provider[] = ["anthropic", "openai", "glm", "moonshot", "xiaomi"];
+  const allProviders: Provider[] = [
+    "anthropic",
+    "openai",
+    "glm",
+    "moonshot",
+    "xiaomi",
+    "minimax",
+    "ollama",
+  ];
   const loggedInProviders: Provider[] = [];
-  const credentialsByProvider: Record<string, { accessToken: string; accountId?: string }> = {};
+  const credentialsByProvider: Record<
+    string,
+    { accessToken: string; accountId?: string; baseUrl?: string }
+  > = {};
 
   for (const p of allProviders) {
     const stored = await authStorage.getCredentials(p);
@@ -438,6 +444,7 @@ async function runInkTUI(opts: {
         credentialsByProvider[p] = {
           accessToken: resolved.accessToken,
           accountId: resolved.accountId,
+          baseUrl: resolved.baseUrl,
         };
       } catch {
         // Token refresh failed — still mark as logged in
@@ -704,18 +711,41 @@ async function runLogin(): Promise<void> {
     };
 
     let creds;
-    if (provider === "glm" || provider === "moonshot" || provider === "xiaomi") {
+    if (
+      provider === "glm" ||
+      provider === "moonshot" ||
+      provider === "xiaomi" ||
+      provider === "minimax"
+    ) {
       const keyLabel =
-        provider === "glm" ? "Z.AI" : provider === "moonshot" ? "Moonshot" : "Xiaomi MiMo";
+        provider === "glm"
+          ? "Z.AI"
+          : provider === "xiaomi"
+            ? "Xiaomi MiMo"
+            : provider === "minimax"
+              ? "MiniMax"
+              : "Moonshot";
       const apiKey = await rl.question(chalk.hex("#60a5fa")(`Paste your ${keyLabel} API key: `));
       if (!apiKey.trim()) {
         console.log(chalk.hex("#ef4444")("No API key provided. Login cancelled."));
         return;
       }
+      let baseUrl: string | undefined;
+      if (provider === "xiaomi") {
+        const urlInput = await rl.question(
+          chalk.hex("#60a5fa")(
+            `Base URL ${chalk.hex("#6b7280")("(Enter for default, or paste token plan URL)")}: `,
+          ),
+        );
+        if (urlInput.trim()) {
+          baseUrl = urlInput.trim();
+        }
+      }
       creds = {
         accessToken: apiKey.trim(),
         refreshToken: "",
         expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000 * 100, // ~100 years
+        ...(baseUrl ? { baseUrl } : {}),
       } satisfies OAuthCredentials;
     } else {
       creds =
@@ -763,33 +793,20 @@ async function runSessions(): Promise<void> {
     process.exit(0);
   }
 
-  // Load saved settings for provider/model/theme
-  let savedProvider: "anthropic" | "openai" | "glm" | "moonshot" | undefined;
-  let savedModel: string | undefined;
-  let savedThinkingEnabled = false;
-  let savedTheme: "auto" | "dark" | "light" = "auto";
-  try {
-    const raw = JSON.parse(fs.readFileSync(paths.settingsFile, "utf-8"));
-    if (raw.defaultProvider) savedProvider = raw.defaultProvider;
-    if (raw.defaultModel) savedModel = raw.defaultModel;
-    if (raw.thinkingEnabled === true) savedThinkingEnabled = true;
-    if (raw.theme === "dark" || raw.theme === "light" || raw.theme === "auto")
-      savedTheme = raw.theme;
-  } catch {
-    // No settings file — use defaults
-  }
+  const saved2 = loadSavedSettings(paths.settingsFile);
 
-  const provider: "anthropic" | "openai" | "glm" | "moonshot" = savedProvider ?? "anthropic";
+  const provider: Provider = saved2.provider ?? "anthropic";
 
   function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.3-codex";
+    if (p === "openai") return "gpt-5.4";
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.5";
+    if (p === "minimax") return "MiniMax-M2.7";
     return "claude-opus-4-6";
   }
 
-  const model = savedModel ?? getDefault(provider);
-  const thinkingLevel: ThinkingLevel | undefined = savedThinkingEnabled ? "medium" : undefined;
+  const model = saved2.model ?? getDefault(provider);
+  const thinkingLevel: ThinkingLevel | undefined = saved2.thinkingEnabled ? "medium" : undefined;
 
   closeLogger();
 
@@ -799,7 +816,7 @@ async function runSessions(): Promise<void> {
     cwd,
     thinkingLevel,
     resumeSessionPath: selectedPath,
-    theme: savedTheme,
+    theme: saved2.theme,
   });
 }
 
@@ -1018,31 +1035,21 @@ async function runServe(): Promise<void> {
     process.exit(1);
   }
 
-  // Load saved settings
-  let savedProvider: "anthropic" | "openai" | "glm" | "moonshot" | undefined;
-  let savedModel: string | undefined;
-  let savedThinkingEnabled = false;
-  try {
-    const raw = JSON.parse(fs.readFileSync(getAppPaths().settingsFile, "utf-8"));
-    if (raw.defaultProvider) savedProvider = raw.defaultProvider;
-    if (raw.defaultModel) savedModel = raw.defaultModel;
-    if (raw.thinkingEnabled === true) savedThinkingEnabled = true;
-  } catch {
-    // No settings file
-  }
+  const saved3 = loadSavedSettings();
 
   const provider: Provider =
-    (serveValues.provider as Provider | undefined) ?? savedProvider ?? "anthropic";
+    (serveValues.provider as Provider | undefined) ?? saved3.provider ?? "anthropic";
 
   function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.3-codex";
+    if (p === "openai") return "gpt-5.4";
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.5";
+    if (p === "minimax") return "MiniMax-M2.7";
     return "claude-opus-4-6";
   }
 
-  const model = serveValues.model ?? savedModel ?? getDefault(provider);
-  const thinkingLevel: ThinkingLevel | undefined = savedThinkingEnabled ? "medium" : undefined;
+  const model = serveValues.model ?? saved3.model ?? getDefault(provider);
+  const thinkingLevel: ThinkingLevel | undefined = saved3.thinkingEnabled ? "medium" : undefined;
 
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, {
@@ -1206,31 +1213,21 @@ async function runAgentHome(): Promise<void> {
     process.exit(1);
   }
 
-  // Load saved settings
-  let savedProvider: "anthropic" | "openai" | "glm" | "moonshot" | undefined;
-  let savedModel: string | undefined;
-  let savedThinkingEnabled = false;
-  try {
-    const raw = JSON.parse(fs.readFileSync(getAppPaths().settingsFile, "utf-8"));
-    if (raw.defaultProvider) savedProvider = raw.defaultProvider;
-    if (raw.defaultModel) savedModel = raw.defaultModel;
-    if (raw.thinkingEnabled === true) savedThinkingEnabled = true;
-  } catch {
-    // No settings file
-  }
+  const saved4 = loadSavedSettings();
 
   const provider: Provider =
-    (ahValues.provider as Provider | undefined) ?? savedProvider ?? "anthropic";
+    (ahValues.provider as Provider | undefined) ?? saved4.provider ?? "anthropic";
 
   function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.3-codex";
+    if (p === "openai") return "gpt-5.4";
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.5";
+    if (p === "minimax") return "MiniMax-M2.7";
     return "claude-opus-4-6";
   }
 
-  const model = ahValues.model ?? savedModel ?? getDefault(provider);
-  const thinkingLevel: ThinkingLevel | undefined = savedThinkingEnabled ? "medium" : undefined;
+  const model = ahValues.model ?? saved4.model ?? getDefault(provider);
+  const thinkingLevel: ThinkingLevel | undefined = saved4.thinkingEnabled ? "medium" : undefined;
 
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, {
@@ -1255,9 +1252,11 @@ async function runAgentHome(): Promise<void> {
 
 function displayName(provider: Provider): string {
   if (provider === "anthropic") return "Anthropic";
+  if (provider === "xiaomi") return "Xiaomi (MiMo)";
   if (provider === "glm") return "Z.AI (GLM)";
   if (provider === "moonshot") return "Moonshot";
-  if (provider === "xiaomi") return "Xiaomi MiMo";
+  if (provider === "minimax") return "MiniMax";
+  if (provider === "ollama") return "Ollama";
   return "OpenAI";
 }
 

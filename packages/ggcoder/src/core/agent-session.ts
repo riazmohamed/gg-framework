@@ -14,7 +14,13 @@ import { SessionManager, type MessageEntry, type BranchInfo } from "./session-ma
 import { ExtensionLoader } from "./extensions/loader.js";
 import type { ExtensionContext } from "./extensions/types.js";
 import { shouldCompact, compact } from "./compaction/compactor.js";
-import { getContextWindow, getExecutorModel, getVisionModel, MODELS } from "./model-registry.js";
+import {
+  getContextWindow,
+  getExecutorModel,
+  getModel,
+  getVisionModel,
+  MODELS,
+} from "./model-registry.js";
 import { createModelRouter, type RouterMode } from "./model-router.js";
 import { discoverSkills, type Skill } from "./skills.js";
 import { ensureAppDirs } from "../config.js";
@@ -94,7 +100,7 @@ export class AgentSession {
     this.model = options.model;
     this.cwd = options.cwd;
     this.baseUrl = options.baseUrl;
-    this.maxTokens = options.maxTokens ?? 16384;
+    this.maxTokens = options.maxTokens ?? getModel(options.model)?.maxOutputTokens ?? 16384;
     this.thinkingLevel = options.thinkingLevel;
     this.customSystemPrompt = options.systemPrompt;
   }

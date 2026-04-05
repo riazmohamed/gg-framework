@@ -73,11 +73,12 @@ export class AuthStorage {
       throw new NotLoggedInError(provider);
     }
 
-    // GLM, Moonshot, Xiaomi, and Ollama use static API keys — no refresh needed
+    // GLM, Moonshot, Xiaomi, MiniMax, and Ollama use static API keys — no refresh needed
     if (
       provider === "glm" ||
       provider === "moonshot" ||
       provider === "xiaomi" ||
+      provider === "minimax" ||
       provider === "ollama"
     ) {
       return creds;

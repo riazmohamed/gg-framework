@@ -96,7 +96,16 @@ export function createReadTool(
         return `Binary file: ${resolved} (${ext}, ${stat.size} bytes)`;
       }
 
-      const raw = await ops.readFile(resolved);
+      let raw: string;
+      try {
+        raw = await ops.readFile(resolved);
+      } catch (err: unknown) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return `File not found: ${resolved}`;
+        if (code === "EACCES") return `Permission denied: ${resolved}`;
+        if (code === "EISDIR") return `Is a directory, not a file: ${resolved}`;
+        throw err;
+      }
       let lines = raw.split("\n");
 
       // Apply offset/limit

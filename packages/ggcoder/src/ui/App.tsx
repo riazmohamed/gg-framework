@@ -479,7 +479,10 @@ export interface AppProps {
   showTokenUsage?: boolean;
   onSlashCommand?: (input: string) => Promise<string | null>;
   loggedInProviders?: Provider[];
-  credentialsByProvider?: Record<string, { accessToken: string; accountId?: string }>;
+  credentialsByProvider?: Record<
+    string,
+    { accessToken: string; accountId?: string; baseUrl?: string }
+  >;
   initialHistory?: CompletedItem[];
   sessionsDir?: string;
   sessionPath?: string;
@@ -571,11 +574,20 @@ export function App(props: AppProps) {
   // Two-phase flush: items waiting to be moved to Static history after the
   // live area has been cleared and Ink has committed the smaller output.
   const pendingFlushRef = useRef<CompletedItem[]>([]);
+  const [flushGeneration, setFlushGeneration] = useState(0);
+
+  /** Queue items for two-phase flush and signal the drain effect. */
+  const queueFlush = useCallback((items: CompletedItem[]) => {
+    if (items.length === 0) return;
+    pendingFlushRef.current = [...pendingFlushRef.current, ...items];
+    setFlushGeneration((g) => g + 1);
+  }, []);
 
   // Derive credentials for the current provider
   const currentCreds = props.credentialsByProvider?.[currentProvider];
   const activeApiKey = currentCreds?.accessToken ?? props.apiKey;
   const activeAccountId = currentCreds?.accountId ?? props.accountId;
+  const activeBaseUrl = currentCreds?.baseUrl ?? props.baseUrl;
 
   // Load git branch
   useEffect(() => {
@@ -908,7 +920,7 @@ export function App(props: AppProps) {
       maxTokens: props.maxTokens,
       thinking: thinkingEnabled ? (props.thinking ?? "medium") : undefined,
       apiKey: activeApiKey,
-      baseUrl: props.baseUrl,
+      baseUrl: activeBaseUrl,
       accountId: activeAccountId,
       resolveCredentials,
       transformContext,
@@ -969,7 +981,7 @@ export function App(props: AppProps) {
               userMessage: userText,
               assistantPreview: assistantText.slice(0, 200),
               apiKey: activeApiKey,
-              baseUrl: props.baseUrl,
+              baseUrl: activeBaseUrl,
               accountId: activeAccountId,
               resolveCredentials,
             }).then(
@@ -991,7 +1003,7 @@ export function App(props: AppProps) {
         currentProvider,
         activeApiKey,
         activeAccountId,
-        props.baseUrl,
+        activeBaseUrl,
         resolveCredentials,
       ]),
       onTurnText: useCallback((text: string, thinking: string, thinkingMs: number) => {
@@ -1019,7 +1031,7 @@ export function App(props: AppProps) {
         setLiveItems((prev) => {
           const flushed = flushOnTurnText(prev);
           if (flushed.length > 0) {
-            pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
+            queueFlush(flushed);
           }
           const displayText = planStepsRef.current.length > 0 ? stripDoneMarkers(text) : text;
           return [{ kind: "assistant", text: displayText, thinking, thinkingMs, id: getId() }];
@@ -1035,7 +1047,7 @@ export function App(props: AppProps) {
           setLiveItems((prev) => {
             const { flushed, remaining } = partitionCompleted(prev);
             if (flushed.length > 0) {
-              pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
+              queueFlush(flushed);
             }
             return remaining;
           });
@@ -1161,7 +1173,7 @@ export function App(props: AppProps) {
               // Flush completed items to Static to keep the live area small
               const { flushed, remaining } = partitionCompleted(next);
               if (flushed.length > 0) {
-                pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
+                queueFlush(flushed);
               }
               return remaining;
             });
@@ -1225,7 +1237,7 @@ export function App(props: AppProps) {
               // Flush completed items to Static to keep the live area small
               const { flushed, remaining } = partitionCompleted(updated);
               if (flushed.length > 0) {
-                pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
+                queueFlush(flushed);
               }
               return remaining;
             });
@@ -1251,7 +1263,7 @@ export function App(props: AppProps) {
         setLiveItems((prev) => {
           const { flushed, remaining } = partitionCompleted(prev);
           if (flushed.length > 0) {
-            pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
+            queueFlush(flushed);
           }
           return [
             ...remaining,
@@ -1303,7 +1315,7 @@ export function App(props: AppProps) {
           // Flush completed items to Static
           const { flushed, remaining } = partitionCompleted(updated);
           if (flushed.length > 0) {
-            pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
+            queueFlush(flushed);
           }
           return remaining;
         });
@@ -1334,7 +1346,7 @@ export function App(props: AppProps) {
           setLiveItems((prev) => {
             const { flushed, remaining } = flushOnTurnEnd(prev, stopReason);
             if (flushed.length > 0) {
-              pendingFlushRef.current = [...pendingFlushRef.current, ...flushed];
+              queueFlush(flushed);
             }
             return remaining;
           });
@@ -1358,9 +1370,7 @@ export function App(props: AppProps) {
         // separate render cycle so the Static write never coincides with
         // a live-area height change in the same frame.
         setLiveItems((prev) => {
-          if (prev.length > 0) {
-            pendingFlushRef.current = [...pendingFlushRef.current, ...prev];
-          }
+          if (prev.length > 0) queueFlush(prev);
           return [];
         });
 
@@ -1442,9 +1452,7 @@ export function App(props: AppProps) {
             ? undefined
             : content.filter((c) => c.type === "image").length || undefined;
         setLiveItems((prev) => {
-          if (prev.length > 0) {
-            pendingFlushRef.current = [...pendingFlushRef.current, ...prev];
-          }
+          if (prev.length > 0) queueFlush(prev);
           return [];
         });
         const userItem: UserItem = {
@@ -1473,7 +1481,7 @@ export function App(props: AppProps) {
       pendingFlushRef.current = [];
       setHistory((h) => compactHistory([...h, ...trimFlushedItems(items)]));
     }
-  });
+  }, [flushGeneration]);
 
   // Sync terminal title with agent loop state
   useEffect(() => {
@@ -1949,7 +1957,7 @@ export function App(props: AppProps) {
             key={item.id}
             version={props.version}
             model={currentModel}
-            provider={props.provider}
+            provider={currentProvider}
             cwd={props.cwd}
             taskCount={taskCount}
           />
@@ -2219,6 +2227,9 @@ export function App(props: AppProps) {
             setOverlay(null);
           }}
           onApprove={(planPath) => {
+            log("INFO", "plan", "Plan approved — transitioning to implementation", {
+              planPath,
+            });
             // Plan overlay dismissed — allow future onDone to fire normally
             planOverlayPendingRef.current = false;
             // Store approved plan path — will be injected into the new system prompt
@@ -2340,8 +2351,18 @@ export function App(props: AppProps) {
                 planTotal={planSteps.length}
               />
             </Box>
+          ) : agentLoop.stallError ? (
+            <Box marginTop={1} flexDirection="column">
+              <Text color={theme.warning}>
+                {"⚠ API provider stream interrupted — retries exhausted."}
+              </Text>
+              <Text color={theme.textDim}>
+                {"  Your conversation is preserved. Send a message to continue."}
+              </Text>
+            </Box>
           ) : (
-            doneStatus && (
+            doneStatus &&
+            !agentLoop.isRunning && (
               <Box marginTop={1}>
                 <Text color={theme.success}>
                   {"✻ "}

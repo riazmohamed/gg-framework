@@ -22,6 +22,26 @@ import type {
 const DEFAULT_MAX_TURNS = 200;
 
 /**
+ * Lightweight stream diagnostic callback. When set, the agent loop calls this
+ * at every phase boundary with timing and state info. This lets the hosting
+ * app (ggcoder, come-alive, etc.) log stall diagnostics without the agent
+ * package needing fs/process dependencies.
+ */
+export type StreamDiagnosticFn = (phase: string, data?: Record<string, unknown>) => void;
+
+/** Global diagnostic hook — set by the hosting app before calling agentLoop. */
+let _diagFn: StreamDiagnosticFn | null = null;
+
+/** Register a diagnostic callback for stream stall tracing. */
+export function setStreamDiagnostic(fn: StreamDiagnosticFn | null): void {
+  _diagFn = fn;
+}
+
+function diag(phase: string, data?: Record<string, unknown>): void {
+  _diagFn?.(phase, data);
+}
+
+/**
  * Detect abort errors — user-initiated cancellation or AbortSignal.
  * These should be caught and handled gracefully, not re-thrown.
  */
@@ -71,6 +91,20 @@ export function isBillingError(err: unknown): boolean {
  * HTTP 429 (rate limit) or 529/503 (overloaded).
  * Excludes billing/quota errors which won't resolve with a retry.
  */
+/**
+ * Detect tool pairing errors — orphaned tool_use or tool_result blocks.
+ * These are 400 errors that can be recovered by repairing the message history.
+ */
+export function isToolPairingError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return (
+    (msg.includes("tool_use") && msg.includes("tool_result")) ||
+    msg.includes("unexpected `tool_use_id`") ||
+    msg.includes("tool_use ids found without")
+  );
+}
+
 export function isOverloaded(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (isBillingError(err)) return false;
@@ -97,6 +131,7 @@ export async function* agentLoop(
   let firstTurn = true;
   let lastRouterModel: string | undefined;
   let consecutivePauses = 0;
+  let toolPairingRepaired = false;
   let overflowRetries = 0;
   let overloadRetries = 0;
   let emptyResponseRetries = 0;
@@ -104,16 +139,48 @@ export async function* agentLoop(
   const MAX_OVERFLOW_RETRIES = 3;
   const MAX_OVERLOAD_RETRIES = 10;
   const MAX_EMPTY_RESPONSE_RETRIES = 2;
-  const MAX_STALL_RETRIES = 3;
+  const MAX_STALL_RETRIES = 5;
+  const STALL_DELAY_MS = 1_000; // Brief pause before retry — just enough to avoid tight loops
   const OVERLOAD_BASE_DELAY_MS = 2_000;
   const OVERLOAD_MAX_DELAY_MS = 30_000;
-  const STREAM_IDLE_TIMEOUT_MS = 90_000; // 90s without any stream event = stall (increased to handle extended thinking)
-  const STREAM_HARD_TIMEOUT_MS = 600_000; // 10min absolute cap per LLM call (increased to allow extended thinking/research)
+  const STREAM_FIRST_EVENT_TIMEOUT_MS = 45_000; // 45s to get first event (Opus thinks long)
+  const STREAM_IDLE_TIMEOUT_MS = 30_000; // 30s between events once streaming starts
+  // Anthropic models can pause 10-20s mid-stream while computing the next chunk
+  // (e.g. generating tool call args for a large write).  10s was too aggressive
+  // and caused false "stream stalled" errors, especially in plan mode.
+  const STREAM_HARD_TIMEOUT_MS = 90_000; // 90s absolute cap before output starts
+  // Once output events (text_delta) are actively streaming, extend the hard
+  // timeout — long responses (plan mode, detailed explanations) can legitimately
+  // take 2-3+ minutes while events flow continuously.
+  const STREAM_OUTPUT_HARD_TIMEOUT_MS = 300_000; // 5min hard cap once output is flowing
+  // Reasoning models (MiMo) can pause 3-5 minutes between thinking and output
+  // generation.  Once we've seen thinking events, extend timeouts significantly.
+  const STREAM_THINKING_IDLE_TIMEOUT_MS = 300_000; // 5min idle after thinking
+  const STREAM_THINKING_HARD_TIMEOUT_MS = 600_000; // 10min hard cap with thinking
 
   try {
     while (turn < maxTurns) {
       options.signal?.throwIfAborted();
       turn++;
+
+      // Estimate message payload size for diagnostics
+      let msgChars = 0;
+      for (const m of messages) {
+        if (typeof m.content === "string") msgChars += m.content.length;
+        else if (Array.isArray(m.content)) {
+          for (const p of m.content) {
+            if ("text" in p && typeof p.text === "string") msgChars += p.text.length;
+            if ("content" in p && typeof p.content === "string") msgChars += p.content.length;
+          }
+        }
+      }
+      diag("turn_start", {
+        turn,
+        messages: messages.length,
+        chars: msgChars,
+        provider: options.provider,
+        model: options.model,
+      });
 
       // ── Initial steering poll: catch messages queued before the first LLM call ──
       if (firstTurn && options.getSteeringMessages) {
@@ -129,11 +196,17 @@ export async function* agentLoop(
 
       // ── Mid-loop context transform (compaction / truncation) ──
       if (options.transformContext) {
+        diag("transform_start");
         const transformed = await options.transformContext(messages);
         if (transformed !== messages) {
+          diag("transform_compacted", {
+            before: messages.length,
+            after: transformed.length,
+          });
           messages.length = 0;
           messages.push(...transformed);
         }
+        diag("transform_end");
       }
 
       // ── Model routing: allow per-turn model/provider override ──
@@ -187,29 +260,71 @@ export async function* agentLoop(
       let hardTimer: ReturnType<typeof setTimeout> | null = null;
       let idleTimedOut = false;
 
+      // Stream event counters — declared here so timeout callbacks can access them
+      let streamEventCount = 0;
+      let lastEventTime = Date.now();
+      let streamCallStart = Date.now();
+      // Track event types for diagnostics — shows what arrived before a stall
+      const eventTypeCounts: Record<string, number> = {};
+      let lastEventType = "";
+      // Track consumer processing time — helps distinguish "API stopped sending"
+      // from "our consumer was slow to pull the next event"
+      let lastYieldEndTime = Date.now();
+      let maxConsumerLagMs = 0;
+
       // Forward caller abort to the per-attempt controller
       const forwardAbort = () => streamController.abort();
       options.signal?.addEventListener("abort", forwardAbort, { once: true });
 
-      // Idle timeout: abort the stream if no events arrive within the window.
-      // This catches mid-stream server stalls where the connection stays open
-      // but the server stops sending data (overload, network issues, etc.).
+      // Three-phase idle timeout:
+      //  - Before first event: STREAM_FIRST_EVENT_TIMEOUT_MS (45s) — Opus can
+      //    take 30s+ to start on large contexts, that's not a stall.
+      //  - After output event (text_delta, server_toolcall): STREAM_IDLE_TIMEOUT_MS
+      //    (10s) — once output is streaming, 10s of silence is dead. Retry fast.
+      //  - After thinking events only: STREAM_THINKING_IDLE_TIMEOUT_MS (5min) —
+      //    reasoning models (MiMo) can pause minutes between thinking and output.
+      let hasReceivedEvent = false;
+      let hasReceivedThinking = false;
       const resetIdleTimer = () => {
         if (idleTimer) clearTimeout(idleTimer);
+        const timeoutMs = hasReceivedEvent
+          ? STREAM_IDLE_TIMEOUT_MS
+          : hasReceivedThinking
+            ? STREAM_THINKING_IDLE_TIMEOUT_MS
+            : STREAM_FIRST_EVENT_TIMEOUT_MS;
         idleTimer = setTimeout(() => {
+          diag("idle_timeout_fired", {
+            events: streamEventCount,
+            sinceLastEventMs: Date.now() - lastEventTime,
+            lastEventType,
+            maxConsumerLagMs,
+            phase: hasReceivedEvent
+              ? "mid_stream"
+              : hasReceivedThinking
+                ? "post_thinking"
+                : "first_event",
+            eventTypes: eventTypeCounts,
+          });
           idleTimedOut = true;
           streamController.abort();
-        }, STREAM_IDLE_TIMEOUT_MS);
+        }, timeoutMs);
       };
 
       // Hard timeout: absolute cap per LLM call. Safety net for streams that
       // keep sending sparse events (e.g. keep-alive pings) but never complete.
+      // Extended dynamically when thinking events arrive (see thinking_delta handler).
+      let hardTimeoutMs = STREAM_HARD_TIMEOUT_MS;
       hardTimer = setTimeout(() => {
+        diag("hard_timeout_fired", {
+          events: typeof streamEventCount !== "undefined" ? streamEventCount : 0,
+        });
         idleTimedOut = true;
         streamController.abort();
-      }, STREAM_HARD_TIMEOUT_MS);
+      }, hardTimeoutMs);
 
       try {
+        diag("stream_call");
+        streamCallStart = Date.now();
         const result = stream({
           provider: turnProvider,
           model: turnModel,
@@ -228,13 +343,81 @@ export async function* agentLoop(
           compaction: options.compaction,
           clearToolUses: options.clearToolUses,
         });
+        diag("stream_created", { setupMs: Date.now() - streamCallStart });
 
         // Suppress unhandled rejection if the iterator path throws first
         result.response.catch(() => {});
 
         // Forward streaming deltas — reset idle timer on each event
+        streamEventCount = 0;
+        hasReceivedEvent = false;
+        lastEventTime = Date.now();
+        streamCallStart = Date.now();
         resetIdleTimer();
         for await (const event of result) {
+          // Measure consumer lag: time between finishing previous yield and
+          // receiving this event.  High lag means React rendering is starving
+          // the stream consumer.  Low lag means the API was slow to send.
+          const pullTime = Date.now();
+          const consumerLag = pullTime - lastYieldEndTime;
+          if (consumerLag > maxConsumerLagMs) maxConsumerLagMs = consumerLag;
+
+          streamEventCount++;
+          eventTypeCounts[event.type] = (eventTypeCounts[event.type] ?? 0) + 1;
+          lastEventType = event.type;
+
+          // Only flip to mid-stream timeout on confirmed output events — text
+          // deltas and completed tool calls.  Everything else (keepalive,
+          // thinking_delta, toolcall_delta, toolcall_done, done) keeps the
+          // longer first-event / post-thinking timeout.  Reasoning models
+          // (MiMo) can stream hundreds of thinking events then pause minutes
+          // before producing output.
+          if (
+            (event.type === "text_delta" || event.type === "server_toolcall") &&
+            !hasReceivedEvent
+          ) {
+            hasReceivedEvent = true;
+            // Extend hard timeout now that output is actively streaming.
+            // Long responses (plan mode, detailed code) can exceed 90s while
+            // events flow continuously — the idle timeout (10s) catches real stalls.
+            if (hardTimer && hardTimeoutMs < STREAM_OUTPUT_HARD_TIMEOUT_MS) {
+              clearTimeout(hardTimer);
+              hardTimeoutMs = STREAM_OUTPUT_HARD_TIMEOUT_MS;
+              hardTimer = setTimeout(() => {
+                diag("hard_timeout_fired", { events: streamEventCount });
+                idleTimedOut = true;
+                streamController.abort();
+              }, hardTimeoutMs);
+            }
+          }
+          // Track thinking events — extends idle timeout and hard timeout
+          // so reasoning models aren't killed during thinking→output transition.
+          if (event.type === "thinking_delta" && !hasReceivedThinking) {
+            hasReceivedThinking = true;
+            // Extend the hard timeout now that we know the model is reasoning
+            if (hardTimer) clearTimeout(hardTimer);
+            hardTimeoutMs = STREAM_THINKING_HARD_TIMEOUT_MS;
+            hardTimer = setTimeout(() => {
+              diag("hard_timeout_fired", { events: streamEventCount });
+              idleTimedOut = true;
+              streamController.abort();
+            }, hardTimeoutMs);
+          }
+
+          const now = Date.now();
+          const gap = now - lastEventTime;
+          // Log first event and any suspiciously long gaps
+          if (streamEventCount === 1) {
+            diag("first_event", { type: event.type, ttfMs: now - streamCallStart });
+          } else if (gap > 3000) {
+            diag("slow_gap", {
+              type: event.type,
+              gapMs: gap,
+              eventNum: streamEventCount,
+              sinceStartMs: now - streamCallStart,
+            });
+          }
+          lastEventTime = now;
           resetIdleTimer();
           if (event.type === "text_delta") {
             yield { type: "text_delta" as const, text: event.text };
@@ -255,10 +438,28 @@ export async function* agentLoop(
               data: event.data,
             };
           }
+          lastYieldEndTime = Date.now();
         }
 
+        diag("stream_done", {
+          events: streamEventCount,
+          totalMs: Date.now() - streamCallStart,
+          maxConsumerLagMs,
+          eventTypes: eventTypeCounts,
+        });
         response = await result.response;
       } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        diag("stream_error", {
+          error: errMsg.slice(0, 200),
+          events: streamEventCount,
+          totalMs: Date.now() - streamCallStart,
+          idleTimedOut,
+          aborted: !!options.signal?.aborted,
+          eventTypes: eventTypeCounts,
+          provider: options.provider,
+          model: options.model,
+        });
         // Context overflow: force-compact via transformContext and retry (up to 3 times)
         if (
           overflowRetries < MAX_OVERFLOW_RETRIES &&
@@ -266,6 +467,11 @@ export async function* agentLoop(
           options.transformContext
         ) {
           overflowRetries++;
+          diag("retry", {
+            reason: "context_overflow",
+            attempt: overflowRetries,
+            maxAttempts: MAX_OVERFLOW_RETRIES,
+          });
           yield {
             type: "retry" as const,
             reason: "context_overflow" as const,
@@ -288,6 +494,12 @@ export async function* agentLoop(
             OVERLOAD_BASE_DELAY_MS * 2 ** (overloadRetries - 1),
             OVERLOAD_MAX_DELAY_MS,
           );
+          diag("retry", {
+            reason: "overloaded",
+            attempt: overloadRetries,
+            maxAttempts: MAX_OVERLOAD_RETRIES,
+            delayMs,
+          });
           yield {
             type: "retry" as const,
             reason: "overloaded" as const,
@@ -300,25 +512,94 @@ export async function* agentLoop(
           continue;
         }
         // Stream stall: the API connection hung mid-stream without closing.
-        // Retry with a short delay — the server may have recovered.
+        // Two recovery strategies:
+        //  1. Zero events (connection-level hang): the request itself may be
+        //     problematic.  Force-compact the context to change the payload
+        //     before retrying — the same request will likely hang again.
+        //  2. Partial events: transient network blip — simple retry with backoff.
         if (idleTimedOut && !options.signal?.aborted && stallRetries < MAX_STALL_RETRIES) {
           stallRetries++;
-          yield {
-            type: "retry" as const,
-            reason: "stream_stall" as const,
-            attempt: stallRetries,
-            maxAttempts: MAX_STALL_RETRIES,
-            delayMs: 1_000,
-          };
-          await new Promise((r) => setTimeout(r, 1_000));
+          const zeroEvents = streamEventCount === 0;
+          // Force-compact on zero-event stalls to change the request payload.
+          // Only attempt once (first zero-event stall) to avoid thrashing.
+          if (zeroEvents && stallRetries <= 2 && options.transformContext) {
+            diag("stall_compact", { attempt: stallRetries, events: streamEventCount });
+            yield {
+              type: "retry" as const,
+              reason: "stream_stall" as const,
+              attempt: stallRetries,
+              maxAttempts: MAX_STALL_RETRIES,
+              delayMs: 0,
+            };
+            const transformed = await options.transformContext(messages, { force: true });
+            if (transformed !== messages) {
+              diag("stall_compact_done", {
+                before: messages.length,
+                after: transformed.length,
+              });
+              messages.length = 0;
+              messages.push(...transformed);
+            }
+          } else {
+            const delayMs = Math.min(STALL_DELAY_MS * 2 ** (stallRetries - 1), 8_000);
+            diag("retry", {
+              reason: "stream_stall",
+              attempt: stallRetries,
+              maxAttempts: MAX_STALL_RETRIES,
+              delayMs,
+              events: streamEventCount,
+            });
+            yield {
+              type: "retry" as const,
+              reason: "stream_stall" as const,
+              attempt: stallRetries,
+              maxAttempts: MAX_STALL_RETRIES,
+              delayMs,
+            };
+            await new Promise((r) => setTimeout(r, delayMs));
+          }
           turn--; // Don't count the failed turn
+          continue;
+        }
+        // Stream stall retries exhausted — surface a clear error so the UI
+        // can distinguish "gave up after stalls" from "completed normally".
+        if (idleTimedOut && !options.signal?.aborted) {
+          diag("stall_exhausted", {
+            stallRetries: MAX_STALL_RETRIES,
+            provider: options.provider,
+            model: options.model,
+          });
+          yield {
+            type: "error" as const,
+            error: new Error(
+              `The API provider's stream stalled ${MAX_STALL_RETRIES} times — the provider may be experiencing capacity issues. ` +
+                `Your conversation is preserved. Send another message to retry.`,
+            ),
+          };
+          break;
+        }
+        // Tool pairing 400: orphaned tool_result or tool_use in message history.
+        // Run repair and retry once — if repair can't fix it, surface the error.
+        if (isToolPairingError(err) && !toolPairingRepaired) {
+          toolPairingRepaired = true;
+          diag("tool_pairing_repair", { error: errMsg.slice(0, 200) });
+          repairToolPairingAdjacent(messages);
+          turn--;
           continue;
         }
         // Abort errors (user cancellation) — exit loop cleanly instead of
         // crashing the process with an unhandled rejection.
         if (isAbortError(err) || options.signal?.aborted) {
+          diag("aborted", { turn, provider: options.provider, model: options.model });
           break;
         }
+        // Unhandled error — log before throwing so the crash is traceable
+        diag("unhandled_error", {
+          error: errMsg.slice(0, 500),
+          turn,
+          provider: options.provider,
+          model: options.model,
+        });
         throw err;
       } finally {
         if (idleTimer) clearTimeout(idleTimer);
@@ -332,15 +613,27 @@ export async function* agentLoop(
       stallRetries = 0;
 
       // Detect empty/degenerate responses — the API occasionally returns 0 tokens
-      // with no content (e.g. stream interruption, transient server issue).
-      // Retry instead of treating as completion.
-      if (
-        response.usage.outputTokens === 0 &&
-        (response.message.content === "" ||
-          (Array.isArray(response.message.content) && response.message.content.length === 0))
-      ) {
+      // with no content, or "thinks" without producing actionable output.
+      // Reasoning models (MiMo, DeepSeek) may report outputTokens > 0 from
+      // thinking alone while producing no text or tool calls — still a dud.
+      const contentArr = Array.isArray(response.message.content) ? response.message.content : null;
+      const hasActionableContent =
+        response.message.content !== "" &&
+        contentArr !== null &&
+        contentArr.some(
+          (p) => p.type === "text" || p.type === "tool_call" || p.type === "server_tool_call",
+        );
+      if (!hasActionableContent) {
         if (emptyResponseRetries < MAX_EMPTY_RESPONSE_RETRIES) {
           emptyResponseRetries++;
+          diag("retry", {
+            reason: "empty_response",
+            attempt: emptyResponseRetries,
+            maxAttempts: MAX_EMPTY_RESPONSE_RETRIES,
+            provider: options.provider,
+            model: options.model,
+            contentTypes: contentArr?.map((p) => p.type).join(",") ?? "empty",
+          });
           yield {
             type: "retry" as const,
             reason: "empty_response" as const,
@@ -733,6 +1026,30 @@ function repairToolPairingAdjacent(messages: Message[]): void {
           isError: true,
         })),
       });
+    }
+  }
+
+  // Reverse repair: strip tool_result entries whose tool_use_id has no matching
+  // tool_call in the preceding assistant message. This can happen when compaction
+  // or stall recovery removes an assistant message but leaves its tool_result behind.
+  const toolCallIdSet = new Set<string>();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      for (const p of msg.content as ContentPart[]) {
+        if (p.type === "tool_call") toolCallIdSet.add((p as ToolCall).id);
+      }
+    }
+    if (msg.role === "tool" && Array.isArray(msg.content)) {
+      const results = msg.content as ToolResult[];
+      const filtered = results.filter((r) => toolCallIdSet.has(r.toolCallId));
+      if (filtered.length === 0) {
+        // Entire tool message is orphaned — remove it
+        messages.splice(i, 1);
+        i--;
+      } else if (filtered.length < results.length) {
+        (msg as { content: ToolResult[] }).content = filtered;
+      }
     }
   }
 }

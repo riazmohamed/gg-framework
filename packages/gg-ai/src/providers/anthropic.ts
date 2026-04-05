@@ -3,6 +3,7 @@ import type {
   ContentPart,
   ServerToolCall,
   ServerToolResult,
+  StreamEvent,
   StreamOptions,
   StreamResponse,
   ToolCall,
@@ -18,21 +19,18 @@ import {
   toAnthropicTools,
 } from "./transform.js";
 
-export function streamAnthropic(options: StreamOptions): StreamResult {
-  const result = new StreamResult();
-  runStream(options, result).catch((err) => result.abort(toError(err)));
-  return result;
-}
-
-async function runStream(options: StreamOptions, result: StreamResult): Promise<void> {
+function createClient(options: StreamOptions): Anthropic {
   const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
-
-  const client = new Anthropic({
+  return new Anthropic({
     ...(isOAuth
       ? { apiKey: null as unknown as string, authToken: options.apiKey }
       : { apiKey: options.apiKey }),
     ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
     ...(options.fetch ? { fetch: options.fetch } : {}),
+    // Allow SDK retries for connection-level failures (socket hang up, 500s,
+    // connection refused).  Our stall detection handles abort-initiated retries
+    // separately — SDK retries only fire on genuine transport errors.
+    maxRetries: 2,
     ...(isOAuth
       ? {
           defaultHeaders: {
@@ -42,6 +40,15 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
         }
       : {}),
   });
+}
+
+export function streamAnthropic(options: StreamOptions): StreamResult {
+  return new StreamResult(runStream(options));
+}
+
+async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, StreamResponse> {
+  const client = createClient(options);
+  const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
 
   const cacheControl = toAnthropicCacheControl(options.cacheRetention, options.baseUrl);
   const { system: rawSystem, messages } = toAnthropicMessages(options.messages, cacheControl);
@@ -104,10 +111,20 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
     stream: true,
   } as Anthropic.MessageCreateParams;
 
+  // Adaptive thinking models (Opus 4.6, Sonnet 4.6) don't need the
+  // interleaved-thinking beta — they have it built in.
+  const hasAdaptiveThinking =
+    options.model.includes("opus-4-6") ||
+    options.model.includes("opus-4.6") ||
+    options.model.includes("sonnet-4-6") ||
+    options.model.includes("sonnet-4.6");
+
   const betaHeaders = [
     ...(isOAuth ? ["claude-code-20250219", "oauth-2025-04-20"] : []),
     ...(options.compaction ? ["compact-2026-01-12"] : []),
     ...(options.clearToolUses ? ["context-management-2025-06-27"] : []),
+    "fine-grained-tool-streaming-2025-05-14",
+    ...(!hasAdaptiveThinking ? ["interleaved-thinking-2025-05-14"] : []),
   ];
 
   const stream = client.messages.stream(params, {
@@ -115,134 +132,241 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
     ...(betaHeaders.length ? { headers: { "anthropic-beta": betaHeaders.join(",") } } : {}),
   });
 
+  // ── Accumulation state ──────────────────────────────────
   const contentParts: ContentPart[] = [];
-  // Track the current tool call being streamed (by content block index)
-  let currentToolId = "";
-  let currentToolName = "";
 
-  stream.on("text", (text) => {
-    result.push({ type: "text_delta", text });
-  });
-
-  stream.on("thinking", (thinkingDelta) => {
-    result.push({ type: "thinking_delta", text: thinkingDelta });
-  });
-
-  stream.on("streamEvent", (event) => {
-    if (event.type === "content_block_start") {
-      // When a new tool_use content block starts, capture its id and name
-      if (event.content_block.type === "tool_use") {
-        currentToolId = event.content_block.id;
-        currentToolName = event.content_block.name;
-      }
-      // Track server_tool_use blocks
-      if (event.content_block.type === "server_tool_use") {
-        currentToolId = event.content_block.id;
-        currentToolName = event.content_block.name;
-      }
+  // Per-block accumulators indexed by content_block_start index
+  const blocks = new Map<
+    number,
+    {
+      type: string;
+      text: string;
+      thinking: string;
+      signature: string;
+      toolId: string;
+      toolName: string;
+      argsJson: string;
+      input: unknown;
+      raw: Record<string, unknown> | null;
     }
-  });
+  >();
 
-  stream.on("inputJson", (delta) => {
-    result.push({
-      type: "toolcall_delta",
-      id: currentToolId,
-      name: currentToolName,
-      argsJson: delta,
-    });
-  });
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheRead: number | undefined;
+  let cacheWrite: number | undefined;
+  let stopReason: string | null = null;
 
-  stream.on("contentBlock", (block) => {
-    if (block.type === "text") {
-      contentParts.push({ type: "text", text: block.text });
-    } else if (block.type === "thinking") {
-      contentParts.push({ type: "thinking", text: block.thinking, signature: block.signature });
-    } else if (block.type === "tool_use") {
-      const tc: ToolCall = {
-        type: "tool_call",
-        id: block.id,
-        name: block.name,
-        args: block.input as Record<string, unknown>,
-      };
-      contentParts.push(tc);
-      result.push({
-        type: "toolcall_done",
-        id: tc.id,
-        name: tc.name,
-        args: tc.args,
-      });
-    } else if (block.type === "server_tool_use") {
-      const stc: ServerToolCall = {
-        type: "server_tool_call",
-        id: block.id,
-        name: block.name,
-        input: block.input,
-      };
-      contentParts.push(stc);
-      result.push({
-        type: "server_toolcall",
-        id: stc.id,
-        name: stc.name,
-        input: stc.input,
-      });
-    } else {
-      const raw = block as unknown as Record<string, unknown>;
-      const blockType = raw.type as string;
-      if (blockType === "web_search_tool_result") {
-        // Server tool result blocks
-        const str: ServerToolResult = {
-          type: "server_tool_result",
-          toolUseId: raw.tool_use_id as string,
-          resultType: blockType,
-          data: raw,
-        };
-        contentParts.push(str);
-        result.push({
-          type: "server_toolresult",
-          toolUseId: str.toolUseId,
-          resultType: str.resultType,
-          data: str.data,
-        });
-      } else {
-        // Preserve unknown blocks (e.g. compaction) for round-tripping
-        contentParts.push({ type: "raw", data: raw });
-      }
-    }
-  });
+  const keepalive = { type: "keepalive" as const };
 
   try {
-    const finalMessage = await stream.finalMessage();
-    const stopReason = normalizeAnthropicStopReason(finalMessage.stop_reason);
+    for await (const event of stream as AsyncIterable<Anthropic.MessageStreamEvent>) {
+      switch (event.type) {
+        case "message_start": {
+          const usage = event.message.usage;
+          inputTokens = usage.input_tokens;
+          const usageAny = usage as unknown as Record<string, unknown>;
+          if (usageAny.cache_read_input_tokens != null) {
+            cacheRead = usageAny.cache_read_input_tokens as number;
+          }
+          if (usageAny.cache_creation_input_tokens != null) {
+            cacheWrite = usageAny.cache_creation_input_tokens as number;
+          }
+          yield keepalive;
+          break;
+        }
 
-    const response: StreamResponse = {
-      message: {
-        role: "assistant",
-        content: contentParts.length > 0 ? contentParts : "",
-      },
-      stopReason,
-      usage: {
-        inputTokens: finalMessage.usage.input_tokens,
-        outputTokens: finalMessage.usage.output_tokens,
-        ...((finalMessage.usage as unknown as Record<string, unknown>).cache_read_input_tokens !=
-          null && {
-          cacheRead: (finalMessage.usage as unknown as Record<string, unknown>)
-            .cache_read_input_tokens as number,
-        }),
-        ...((finalMessage.usage as unknown as Record<string, unknown>)
-          .cache_creation_input_tokens != null && {
-          cacheWrite: (finalMessage.usage as unknown as Record<string, unknown>)
-            .cache_creation_input_tokens as number,
-        }),
-      },
-    };
+        case "content_block_start": {
+          const block = event.content_block;
+          const idx = event.index;
+          const accum = {
+            type: block.type,
+            text: "",
+            thinking: "",
+            signature: "",
+            toolId: "",
+            toolName: "",
+            argsJson: "",
+            input: undefined as unknown,
+            raw: null as Record<string, unknown> | null,
+          };
 
-    result.push({ type: "done", stopReason });
-    result.complete(response);
+          if (block.type === "tool_use") {
+            accum.toolId = block.id;
+            accum.toolName = block.name;
+          } else if (block.type === "server_tool_use") {
+            accum.toolId = (block as unknown as { id: string }).id;
+            accum.toolName = (block as unknown as { name: string }).name;
+            accum.input = (block as unknown as { input: unknown }).input;
+          } else if (block.type === "redacted_thinking") {
+            // Encrypted thinking block — capture the raw data for round-tripping.
+            // The API requires these to be sent back verbatim in multi-turn conversations.
+            accum.raw = block as unknown as Record<string, unknown>;
+          }
+
+          blocks.set(idx, accum);
+          yield keepalive;
+          break;
+        }
+
+        case "content_block_delta": {
+          const accum = blocks.get(event.index);
+          if (!accum) break;
+
+          const delta = event.delta as unknown as Record<string, unknown>;
+          const deltaType = delta.type as string;
+
+          if (deltaType === "text_delta") {
+            const text = delta.text as string;
+            accum.text += text;
+            yield { type: "text_delta", text };
+          } else if (deltaType === "thinking_delta") {
+            const text = delta.thinking as string;
+            accum.thinking += text;
+            yield { type: "thinking_delta", text };
+          } else if (deltaType === "input_json_delta") {
+            const partialJson = delta.partial_json as string;
+            accum.argsJson += partialJson;
+            yield {
+              type: "toolcall_delta",
+              id: accum.toolId,
+              name: accum.toolName,
+              argsJson: partialJson,
+            };
+          } else if (deltaType === "signature_delta") {
+            accum.signature = delta.signature as string;
+          }
+          break;
+        }
+
+        case "content_block_stop": {
+          const accum = blocks.get(event.index);
+          if (!accum) break;
+
+          if (accum.type === "text") {
+            contentParts.push({ type: "text", text: accum.text });
+          } else if (accum.type === "thinking") {
+            contentParts.push({
+              type: "thinking",
+              text: accum.thinking,
+              signature: accum.signature,
+            });
+            yield keepalive;
+          } else if (accum.type === "tool_use") {
+            let args: Record<string, unknown> = {};
+            try {
+              args = JSON.parse(accum.argsJson) as Record<string, unknown>;
+            } catch {
+              // malformed JSON — keep empty
+            }
+            const tc: ToolCall = {
+              type: "tool_call",
+              id: accum.toolId,
+              name: accum.toolName,
+              args,
+            };
+            contentParts.push(tc);
+            yield {
+              type: "toolcall_done",
+              id: tc.id,
+              name: tc.name,
+              args: tc.args,
+            };
+          } else if (accum.type === "server_tool_use") {
+            const stc: ServerToolCall = {
+              type: "server_tool_call",
+              id: accum.toolId,
+              name: accum.toolName,
+              input: accum.input,
+            };
+            contentParts.push(stc);
+            yield {
+              type: "server_toolcall",
+              id: stc.id,
+              name: stc.name,
+              input: stc.input,
+            };
+          } else if (accum.type === "redacted_thinking" && accum.raw) {
+            contentParts.push({ type: "raw", data: accum.raw });
+            yield keepalive;
+          } else {
+            // Retrieve the full block from the SDK's accumulated message
+            // for block types we don't explicitly accumulate (e.g. web_search_tool_result)
+            const msg = stream.currentMessage;
+            const rawBlock = msg?.content[event.index] as unknown as
+              | Record<string, unknown>
+              | undefined;
+            if (rawBlock) {
+              const blockType = rawBlock.type as string;
+              if (blockType === "web_search_tool_result") {
+                const str: ServerToolResult = {
+                  type: "server_tool_result",
+                  toolUseId: rawBlock.tool_use_id as string,
+                  resultType: blockType,
+                  data: rawBlock,
+                };
+                contentParts.push(str);
+                yield {
+                  type: "server_toolresult",
+                  toolUseId: str.toolUseId,
+                  resultType: str.resultType,
+                  data: str.data,
+                };
+              } else {
+                // Preserve unknown blocks (e.g. compaction) for round-tripping
+                contentParts.push({ type: "raw", data: rawBlock });
+              }
+            }
+          }
+
+          blocks.delete(event.index);
+          break;
+        }
+
+        case "message_delta": {
+          const delta = event.delta as unknown as Record<string, unknown>;
+          if (delta.stop_reason) {
+            stopReason = delta.stop_reason as string;
+          }
+          const usage = event.usage as unknown as Record<string, unknown> | undefined;
+          if (usage?.output_tokens != null) {
+            outputTokens = usage.output_tokens as number;
+          }
+          yield keepalive;
+          break;
+        }
+
+        // message_stop — loop exits naturally
+
+        default:
+          // Unhandled event types (e.g. "ping" heartbeats) — yield keepalive
+          // so the idle timer in the agent loop resets on any API activity.
+          yield keepalive;
+          break;
+      }
+    }
   } catch (err) {
-    const error = toError(err);
-    result.push({ type: "error", error });
-    result.abort(error);
+    throw toError(err);
   }
+
+  const normalizedStop = normalizeAnthropicStopReason(stopReason);
+
+  const response: StreamResponse = {
+    message: {
+      role: "assistant",
+      content: contentParts.length > 0 ? contentParts : "",
+    },
+    stopReason: normalizedStop,
+    usage: {
+      inputTokens,
+      outputTokens,
+      ...(cacheRead != null && { cacheRead }),
+      ...(cacheWrite != null && { cacheWrite }),
+    },
+  };
+
+  yield { type: "done", stopReason: normalizedStop };
+  return response;
 }
 
 function toError(err: unknown): ProviderError {

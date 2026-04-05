@@ -124,6 +124,10 @@ export function toAnthropicMessages(
                 return null as unknown as Anthropic.ContentBlockParam;
               })
               .filter(Boolean);
+      // Skip assistant messages with no content blocks (can happen when all
+      // blocks are filtered — e.g. thinking-only responses from non-Anthropic
+      // providers where signature is missing and text is empty)
+      if (Array.isArray(content) && content.length === 0) continue;
       out.push({ role: "assistant", content });
       continue;
     }
@@ -428,19 +432,22 @@ export function toOpenAIMessages(
               .join("")
           : undefined;
 
+      const contentValue = parts || textParts || null;
+      const hasToolCalls = toolCalls && toolCalls.length > 0;
+      // Skip assistant messages with no content and no tool_calls (can happen
+      // with thinking-only responses) — providers like Xiaomi reject these.
+      if (!contentValue && !hasToolCalls) continue;
+
       const assistantMsg: OpenAI.ChatCompletionAssistantMessageParam = {
         role: "assistant",
-        content: parts || textParts || null,
-        ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
+        content: contentValue,
+        ...(hasToolCalls ? { tool_calls: toolCalls } : {}),
       };
-      // Attach reasoning_content for multi-turn coherence (non-standard field).
-      // Moonshot requires reasoning_content on ALL assistant messages with tool_calls
-      // when thinking is enabled — even if empty. Only for providers that support it.
-      const supportsReasoningContent =
-        options?.provider === "glm" || options?.provider === "moonshot";
-      if (supportsReasoningContent && (thinkingParts || toolCalls?.length)) {
-        (assistantMsg as unknown as Record<string, unknown>).reasoning_content =
-          thinkingParts || " ";
+      // Attach reasoning_content for multi-turn thinking coherence (non-standard field).
+      // Only send when the model actually returned thinking content — never fabricate
+      // empty/space values, as GLM silently hangs and other providers may reject them.
+      if (thinkingParts) {
+        (assistantMsg as unknown as Record<string, unknown>).reasoning_content = thinkingParts;
       }
       out.push(assistantMsg);
       continue;

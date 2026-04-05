@@ -114,6 +114,8 @@ export interface UseAgentLoopReturn {
   contextUsed: number;
   activityPhase: ActivityPhase;
   retryInfo: RetryInfo | null;
+  /** Non-null when the agent stopped due to an unrecoverable stream error (e.g. stall retries exhausted). */
+  stallError: string | null;
   elapsedMs: number;
   thinkingMs: number;
   isThinking: boolean;
@@ -185,6 +187,7 @@ export function useAgentLoop(
   const [isThinking, setIsThinking] = useState(false);
   const [streamedTokenEstimate, setStreamedTokenEstimate] = useState(0);
   const [retryInfo, setRetryInfo] = useState<RetryInfo | null>(null);
+  const [stallError, setStallError] = useState<string | null>(null);
   const [linesChanged, setLinesChanged] = useState({ added: 0, removed: 0 });
 
   const abortRef = useRef<AbortController | null>(null);
@@ -243,6 +246,32 @@ export function useAgentLoop(
         abortRef.current = ac;
         let wasAborted = false;
 
+        // Throttled streaming text flush — accumulate deltas in refs (zero-cost),
+        // only call setState at ~16ms intervals to avoid saturating the event loop
+        // with React renders during fast token streaming.
+        let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
+        let streamTextDirty = false;
+        let streamThinkingDirty = false;
+        const STREAM_FLUSH_MS = 16; // ~1 frame at 60fps
+
+        const flushStreamState = () => {
+          streamFlushTimer = null;
+          if (streamTextDirty) {
+            setStreamingText(textVisibleRef.current);
+            streamTextDirty = false;
+          }
+          if (streamThinkingDirty) {
+            setStreamingThinking(thinkingVisibleRef.current);
+            streamThinkingDirty = false;
+          }
+        };
+
+        const scheduleStreamFlush = () => {
+          if (streamFlushTimer === null) {
+            streamFlushTimer = setTimeout(flushStreamState, STREAM_FLUSH_MS);
+          }
+        };
+
         // Reset state
         doneCalledRef.current = false;
         textVisibleRef.current = "";
@@ -263,6 +292,7 @@ export function useAgentLoop(
         setThinkingMs(0);
         setIsThinking(false);
         setStreamedTokenEstimate(0);
+        setStallError(null);
         setIsRunning(true);
 
         // Start elapsed timer (ticks every 1000ms — less frequent to reduce
@@ -349,9 +379,18 @@ export function useAgentLoop(
           for await (const event of generator as AsyncIterable<AgentEvent>) {
             switch (event.type) {
               case "text_delta":
+                // First text_delta in a turn — flush any buffered thinking to
+                // the visible display.  This ensures ThinkingBlock only appears
+                // when the model actually produces text output, not on
+                // tool-call-only turns where reasoning models think silently.
+                if (!textVisibleRef.current && thinkingBufferRef.current) {
+                  thinkingVisibleRef.current = thinkingBufferRef.current;
+                  streamThinkingDirty = true;
+                }
                 textVisibleRef.current += event.text;
                 charCountRef.current += event.text.length;
-                setStreamingText(textVisibleRef.current);
+                streamTextDirty = true;
+                scheduleStreamFlush();
                 if (phaseRef.current !== "generating") {
                   freezeThinking();
                   if (phaseRef.current === "retrying") setRetryInfo(null);
@@ -362,9 +401,12 @@ export function useAgentLoop(
 
               case "thinking_delta":
                 thinkingBufferRef.current += event.text;
-                thinkingVisibleRef.current += event.text;
+                // Don't push to thinkingVisibleRef yet — defer display until
+                // we know text output follows.  Reasoning models (MiMo) think
+                // on every turn including tool-call-only turns, which causes a
+                // persistent "Thinking" block in the UI.  The visible ref is
+                // flushed when the first text_delta arrives (see below).
                 charCountRef.current += event.text.length;
-                setStreamingThinking(thinkingVisibleRef.current);
                 if (phaseRef.current !== "thinking") {
                   thinkingStartRef.current = Date.now();
                   setIsThinking(true);
@@ -375,6 +417,16 @@ export function useAgentLoop(
                 break;
 
               case "tool_call_start": {
+                // Flush any pending throttled text BEFORE the tool call renders.
+                // Without this, text accumulated in textVisibleRef since the last
+                // 16ms flush won't appear in the UI until after the tool completes,
+                // making the assistant's message look cut off.
+                if (streamFlushTimer) {
+                  clearTimeout(streamFlushTimer);
+                  streamFlushTimer = null;
+                }
+                flushStreamState();
+
                 freezeThinking();
                 if (phaseRef.current !== "tools") {
                   phaseRef.current = "tools";
@@ -466,9 +518,16 @@ export function useAgentLoop(
                 // onQueuedStart inside getSteeringMessages callback.
                 break;
 
+              case "error":
+                // Stream error (e.g. stall retries exhausted) — surface to UI
+                // so the user sees a clear failure instead of fake completion.
+                setStallError(event.error.message);
+                break;
+
               case "retry":
                 phaseRef.current = "retrying";
                 setActivityPhase("retrying");
+                setStallError(null); // clear any previous error on retry
                 setRetryInfo({
                   reason: event.reason,
                   attempt: event.attempt,
@@ -478,6 +537,12 @@ export function useAgentLoop(
                 break;
 
               case "turn_end": {
+                // Flush any throttled streaming text before processing turn end
+                if (streamFlushTimer) {
+                  clearTimeout(streamFlushTimer);
+                  streamFlushTimer = null;
+                }
+                flushStreamState();
                 setRetryInfo(null);
                 onTurnEnd?.(event.turn, event.stopReason, event.usage);
                 setCurrentTurn(event.turn);
@@ -648,6 +713,7 @@ export function useAgentLoop(
     contextUsed,
     activityPhase,
     retryInfo,
+    stallError,
     elapsedMs,
     thinkingMs,
     isThinking,

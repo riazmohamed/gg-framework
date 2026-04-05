@@ -1,18 +1,27 @@
 import type { StreamOptions } from "./types.js";
 import { GGAIError } from "./errors.js";
-import { StreamResult } from "./utils/event-stream.js";
+import type { StreamResult } from "./utils/event-stream.js";
 import { streamAnthropic } from "./providers/anthropic.js";
 import { streamOpenAI } from "./providers/openai.js";
 import { streamOpenAICodex } from "./providers/openai-codex.js";
 import { providerRegistry } from "./provider-registry.js";
 
-/** GLM coding plan endpoint */
+/** Z.AI coding API endpoint — the primary endpoint for all GLM models. */
 const GLM_CODING_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
 
 // ── Register built-in providers ────────────────────────────
 
 providerRegistry.register("anthropic", {
   stream: (options) => streamAnthropic(options),
+});
+
+providerRegistry.register("xiaomi", {
+  stream: (options) =>
+    streamOpenAI({
+      ...options,
+      baseUrl: options.baseUrl ?? "https://token-plan-sgp.xiaomimimo.com/v1",
+      webSearch: false,
+    }),
 });
 
 providerRegistry.register("openai", {
@@ -55,11 +64,17 @@ providerRegistry.register("ollama", {
     }),
 });
 
-providerRegistry.register("xiaomi", {
+providerRegistry.register("minimax", {
   stream: (options) =>
-    streamOpenAI({
+    streamAnthropic({
       ...options,
-      baseUrl: options.baseUrl ?? "https://token-plan-ams.xiaomimimo.com/v1",
+      baseUrl: options.baseUrl ?? "https://api.minimax.io/anthropic",
+      // MiniMax's Anthropic-compatible API does not support Anthropic-specific
+      // server tools (web_search), context_management, or server-side tools.
+      webSearch: false,
+      compaction: false,
+      clearToolUses: false,
+      serverTools: undefined,
     }),
 });
 
@@ -93,11 +108,3 @@ export function stream(options: StreamOptions): StreamResult {
   }
   return entry.stream(options);
 }
-
-// ── GLM fallback logic ────────────────────────────────────
-
-/**
- * Try the coding endpoint first; if it fails for any reason, retry with the
- * regular endpoint. Z.AI inconsistently provisions accounts — some work on
- * /api/coding/paas/v4, others on /api/paas/v4, even on the same plan.
- */

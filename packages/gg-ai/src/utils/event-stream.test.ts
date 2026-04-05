@@ -138,11 +138,12 @@ describe("EventStream", () => {
 
 describe("StreamResult", () => {
   it("async iteration works with for-await", async () => {
-    const result = new StreamResult();
-
-    result.push(makeEvent("hello"));
-    result.push(makeEvent("world"));
-    result.complete(makeResponse());
+    async function* gen(): AsyncGenerator<StreamEvent, StreamResponse> {
+      yield makeEvent("hello");
+      yield makeEvent("world");
+      return makeResponse();
+    }
+    const result = new StreamResult(gen());
 
     const collected: StreamEvent[] = [];
     for await (const event of result) {
@@ -155,10 +156,11 @@ describe("StreamResult", () => {
   });
 
   it("thenable - await directly returns response", async () => {
-    const result = new StreamResult();
-
-    result.push(makeEvent("data"));
-    result.complete(makeResponse("end_turn"));
+    async function* gen(): AsyncGenerator<StreamEvent, StreamResponse> {
+      yield makeEvent("data");
+      return makeResponse("end_turn");
+    }
+    const result = new StreamResult(gen());
 
     const response = await result;
 
@@ -167,40 +169,140 @@ describe("StreamResult", () => {
   });
 
   it("complete resolves the response promise", async () => {
-    const result = new StreamResult();
     const mockResponse = makeResponse("stop");
-
-    result.push(makeEvent("x"));
-    result.complete(mockResponse);
+    async function* gen(): AsyncGenerator<StreamEvent, StreamResponse> {
+      yield makeEvent("x");
+      return mockResponse;
+    }
+    const result = new StreamResult(gen());
 
     const response = await result.response;
 
     expect(response).toBe(mockResponse);
   });
 
-  it("abort rejects the response promise", async () => {
-    const result = new StreamResult();
-    const error = new Error("provider error");
+  it("generator error rejects the response promise", async () => {
+    async function* gen(): AsyncGenerator<StreamEvent, StreamResponse> {
+      yield makeEvent("partial");
+      throw new Error("provider error");
+    }
+    const result = new StreamResult(gen());
 
-    result.push(makeEvent("partial"));
-    result.abort(error);
+    // Consume iterator to trigger the error
+    const collected: StreamEvent[] = [];
+    await expect(async () => {
+      for await (const event of result) {
+        collected.push(event);
+      }
+    }).rejects.toThrow("provider error");
 
     await expect(result.response).rejects.toThrow("provider error");
   });
 
-  it("then drains events when awaited directly without a consumer", async () => {
-    const result = new StreamResult();
+  it("then returns response when awaited directly without a consumer", async () => {
+    async function* gen(): AsyncGenerator<StreamEvent, StreamResponse> {
+      yield makeEvent("a");
+      yield makeEvent("b");
+      yield makeEvent("c");
+      return makeResponse();
+    }
+    const result = new StreamResult(gen());
 
-    // Push several events - these need to be drained for the stream to complete
-    result.push(makeEvent("a"));
-    result.push(makeEvent("b"));
-    result.push(makeEvent("c"));
-    result.complete(makeResponse());
-
-    // Await directly (uses .then) - should drain events internally
+    // Await directly (uses .then) — pump runs eagerly, no drain needed
     const response = await result;
 
     expect(response).toBeDefined();
     expect((response as unknown as { stopReason: string }).stopReason).toBe("end_turn");
   });
+});
+
+describe("StreamResult - stall regression tests", () => {
+  it("does not stall when events arrive between drain and wait", async () => {
+    // Reproduce the old "lost wakeup" bug:
+    // In the push-based EventStream, events pushed between queue splice
+    // and promise registration could be lost, causing a permanent hang.
+    async function* gen(): AsyncGenerator<StreamEvent, StreamResponse> {
+      yield makeEvent("first");
+      // Microtask gap — in old EventStream, push() during this gap could be lost
+      await Promise.resolve();
+      yield makeEvent("second");
+      await Promise.resolve();
+      yield makeEvent("third");
+      return makeResponse();
+    }
+    const result = new StreamResult(gen());
+
+    const collected: StreamEvent[] = [];
+    for await (const event of result) {
+      collected.push(event);
+    }
+
+    // Old push-based code could hang here — pull-based completes reliably
+    expect(collected).toHaveLength(3);
+    expect((collected[0] as unknown as { text: string }).text).toBe("first");
+    expect((collected[2] as unknown as { text: string }).text).toBe("third");
+  });
+
+  it("for-await and response promise do not interfere", async () => {
+    // Reproduce the old "dual consumer" bug:
+    // In the push-based EventStream, both for-await and then() would
+    // create iterators sharing a single resolve field, causing one to hang.
+    async function* gen(): AsyncGenerator<StreamEvent, StreamResponse> {
+      yield makeEvent("a");
+      yield makeEvent("b");
+      return makeResponse();
+    }
+    const result = new StreamResult(gen());
+
+    const collected: StreamEvent[] = [];
+    for await (const event of result) {
+      collected.push(event);
+    }
+
+    // Old code: then() would overwrite resolve, hanging the iterator
+    const response = await result.response;
+    expect(collected).toHaveLength(2);
+    expect((response as unknown as { stopReason: string }).stopReason).toBe("end_turn");
+  });
+
+  it("generator error surfaces without hanging", async () => {
+    // Reproduce: provider throws mid-stream. Must not hang — must propagate.
+    async function* gen(): AsyncGenerator<StreamEvent, StreamResponse> {
+      yield makeEvent("partial");
+      throw new Error("server stall");
+    }
+    const result = new StreamResult(gen());
+
+    const collected: StreamEvent[] = [];
+    await expect(async () => {
+      for await (const event of result) {
+        collected.push(event);
+      }
+    }).rejects.toThrow("server stall");
+
+    expect(collected).toHaveLength(1);
+    await expect(result.response).rejects.toThrow("server stall");
+  });
+
+  it("stream completes without stalling (timeout guard)", async () => {
+    // Real-ish delay pattern: if the stream infrastructure has a stall bug,
+    // this test will hang and hit the timeout.
+    async function* gen(): AsyncGenerator<StreamEvent, StreamResponse> {
+      for (let i = 0; i < 10; i++) {
+        yield makeEvent(`chunk-${i}`);
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      return makeResponse();
+    }
+    const result = new StreamResult(gen());
+
+    const collected: StreamEvent[] = [];
+    for await (const event of result) {
+      collected.push(event);
+    }
+
+    expect(collected).toHaveLength(10);
+    const response = await result.response;
+    expect(response).toBeDefined();
+  }, 10_000);
 });

@@ -8,6 +8,6 @@ import path from "node:path";
  */
 export async function writeOverflow(content: string, prefix: string): Promise<string> {
   const filePath = path.join(os.tmpdir(), `gg-${prefix}-${Date.now()}.txt`);
-  await fs.writeFile(filePath, content, "utf-8");
+  await fs.writeFile(filePath, content, { encoding: "utf-8", mode: 0o600 });
   return filePath;
 }

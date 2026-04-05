@@ -35,7 +35,7 @@ export function Ratchet({ children, lock: _lock = "always" }: Props): React.Reac
       maxHeight.current = Math.min(height, termRows);
       setMinHeight(maxHeight.current);
     }
-  });
+  }, [children]);
 
   return (
     <Box minHeight={minHeight} ref={outerRef}>

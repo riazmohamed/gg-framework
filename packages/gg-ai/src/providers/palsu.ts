@@ -3,7 +3,9 @@ import type {
   ContentPart,
   Message,
   StopReason,
+  StreamEvent,
   StreamOptions,
+  StreamResponse,
   Usage,
 } from "../types.js";
 import { StreamResult } from "../utils/event-stream.js";
@@ -23,7 +25,7 @@ export type PalsuResponseFactory = (
 
 export type PalsuResponse = AssistantMessage | PalsuResponseFactory;
 
-// ── Helper Constructors ───────────────────────────────────
+// ── Helper Constructors ──────────────��────────────────────
 
 /** Create an assistant message with a single text block. */
 export function palsuText(text: string): AssistantMessage {
@@ -57,7 +59,7 @@ export function palsuAssistantMessage(
   return { role: "assistant", content, _stopReason: options?.stopReason };
 }
 
-// ── Streaming Simulation ──────────────────────────────────
+// ── Streaming Simulation ────────────���─────────────────────
 
 const DEFAULT_CHUNK_SIZE = 20;
 
@@ -74,16 +76,14 @@ interface CacheUsage {
   cacheWrite: number;
 }
 
-function simulateStream(
+async function* simulateStream(
   message: AssistantMessage,
   stopReason: StopReason,
-  result: StreamResult,
   signal?: AbortSignal,
   cacheUsage?: CacheUsage,
-): void {
+): AsyncGenerator<StreamEvent, StreamResponse> {
   if (signal?.aborted) {
-    result.abort(new Error("aborted"));
-    return;
+    throw new Error("aborted");
   }
 
   const content =
@@ -97,23 +97,22 @@ function simulateStream(
 
   for (const part of content) {
     if (signal?.aborted) {
-      result.abort(new Error("aborted"));
-      return;
+      throw new Error("aborted");
     }
 
     if (part.type === "text") {
       const chunks = chunkText(part.text, DEFAULT_CHUNK_SIZE);
       for (const chunk of chunks) {
-        result.push({ type: "text_delta", text: chunk });
+        yield { type: "text_delta", text: chunk };
         outputChars += chunk.length;
       }
     } else if (part.type === "thinking") {
-      result.push({ type: "thinking_delta", text: part.text });
+      yield { type: "thinking_delta", text: part.text };
       outputChars += part.text.length;
     } else if (part.type === "tool_call") {
       const argsJson = JSON.stringify(part.args);
-      result.push({ type: "toolcall_delta", id: part.id, name: part.name, argsJson });
-      result.push({ type: "toolcall_done", id: part.id, name: part.name, args: part.args });
+      yield { type: "toolcall_delta", id: part.id, name: part.name, argsJson };
+      yield { type: "toolcall_done", id: part.id, name: part.name, args: part.args };
       outputChars += argsJson.length;
     }
   }
@@ -127,11 +126,11 @@ function simulateStream(
     ...(cacheUsage?.cacheWrite ? { cacheWrite: cacheUsage.cacheWrite } : {}),
   };
 
-  result.push({ type: "done", stopReason });
-  result.complete({ message, stopReason, usage });
+  yield { type: "done", stopReason };
+  return { message, stopReason, usage };
 }
 
-// ── Prompt Cache Simulation ──────────────────────────────
+// ── Prompt Cache Simulation ���─────────────────────────────
 
 function computeCacheUsage(current: string, previous: string | null): CacheUsage {
   if (!previous) {
@@ -282,8 +281,6 @@ export function registerPalsuProvider(config?: PalsuProviderConfig): PalsuProvid
         ms?.defaultResponse ??
         defaultResponse;
 
-      const result = new StreamResult();
-
       // Compute cache usage before streaming (needs messages serialized)
       let cacheUsage: CacheUsage | undefined;
       if (enableCache) {
@@ -292,24 +289,23 @@ export function registerPalsuProvider(config?: PalsuProviderConfig): PalsuProvid
         lastMessagesSerialized = serialized;
       }
 
-      // Resolve factory (sync or async) then stream
-      const rawMessage =
-        typeof responseDef === "function"
-          ? responseDef(options.messages, options, state)
-          : responseDef;
+      const gen = (async function* (): AsyncGenerator<StreamEvent, StreamResponse> {
+        // Resolve factory (sync or async) then stream
+        const rawMessage =
+          typeof responseDef === "function"
+            ? responseDef(options.messages, options, state)
+            : responseDef;
+        const message = await Promise.resolve(rawMessage);
 
-      Promise.resolve(rawMessage).then(
-        (message) => {
-          const hasToolCalls =
-            Array.isArray(message.content) && message.content.some((p) => p.type === "tool_call");
-          const explicitStop = (message as { _stopReason?: StopReason })._stopReason;
-          const stopReason = explicitStop ?? (hasToolCalls ? "tool_use" : "end_turn");
-          simulateStream(message, stopReason, result, options.signal, cacheUsage);
-        },
-        (err) => result.abort(err instanceof Error ? err : new Error(String(err))),
-      );
+        const hasToolCalls =
+          Array.isArray(message.content) && message.content.some((p) => p.type === "tool_call");
+        const explicitStop = (message as { _stopReason?: StopReason })._stopReason;
+        const stopReason = explicitStop ?? (hasToolCalls ? "tool_use" : "end_turn");
 
-      return result;
+        return yield* simulateStream(message, stopReason, options.signal, cacheUsage);
+      })();
+
+      return new StreamResult(gen);
     },
   });
 
