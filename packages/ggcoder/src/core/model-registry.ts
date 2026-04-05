@@ -45,17 +45,6 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     costTier: "low",
   },
-  // ── Xiaomi (MiMo) ──────────────────────────────────────
-  {
-    id: "mimo-v2-pro",
-    name: "MiMo-V2-Pro",
-    provider: "xiaomi",
-    contextWindow: 1_000_000,
-    maxOutputTokens: 131_072,
-    supportsThinking: true,
-    supportsImages: false,
-    costTier: "medium",
-  },
   // ── OpenAI (Codex) ─────────────────────────────────────
   {
     id: "gpt-5.4",
