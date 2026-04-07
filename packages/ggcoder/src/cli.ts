@@ -191,11 +191,12 @@ function printHelp(): void {
 }
 
 function main(): void {
-  // Silent auto-update check (throttled, non-blocking on failure)
-  const updateMessage = checkAndAutoUpdate(CLI_VERSION);
-  if (updateMessage) {
-    console.error(chalk.hex("#60a5fa")(updateMessage));
-  }
+  // Silent auto-update check — fire-and-forget in the background so it never
+  // blocks startup (the old synchronous check could stall for 3-4 seconds on
+  // slow networks or when an npm install was triggered).
+  checkAndAutoUpdate(CLI_VERSION).then((msg) => {
+    if (msg) console.error(chalk.hex("#60a5fa")(msg));
+  });
 
   // Intercept --help / -h before anything else so it works with subcommands
   // (e.g. `ogcoder login --help` or `ogcoder --help`)
@@ -419,7 +420,7 @@ async function runInkTUI(opts: {
   const authStorage = new AuthStorage(paths.authFile);
   await authStorage.load();
 
-  // Detect all logged-in providers and preload their credentials
+  // Detect all logged-in providers and preload their credentials (in parallel)
   const allProviders: Provider[] = [
     "anthropic",
     "openai",
@@ -435,22 +436,24 @@ async function runInkTUI(opts: {
     { accessToken: string; accountId?: string; baseUrl?: string }
   > = {};
 
-  for (const p of allProviders) {
-    const stored = await authStorage.getCredentials(p);
-    if (stored) {
-      loggedInProviders.push(p);
-      try {
-        const resolved = await authStorage.resolveCredentials(p);
-        credentialsByProvider[p] = {
-          accessToken: resolved.accessToken,
-          accountId: resolved.accountId,
-          baseUrl: resolved.baseUrl,
-        };
-      } catch {
-        // Token refresh failed — still mark as logged in
+  await Promise.all(
+    allProviders.map(async (p) => {
+      const stored = await authStorage.getCredentials(p);
+      if (stored) {
+        loggedInProviders.push(p);
+        try {
+          const resolved = await authStorage.resolveCredentials(p);
+          credentialsByProvider[p] = {
+            accessToken: resolved.accessToken,
+            accountId: resolved.accountId,
+            baseUrl: resolved.baseUrl,
+          };
+        } catch {
+          // Token refresh failed — still mark as logged in
+        }
       }
-    }
-  }
+    }),
+  );
 
   // Ollama runs locally — always available, no auth needed
   loggedInProviders.push("ollama");
@@ -509,21 +512,15 @@ async function runInkTUI(opts: {
     setEstimatorModel(effectiveModel);
   }
 
-  // Ensure project-local .gg directories exist
+  // Ensure project-local .gg directories exist and discover agents/skills — all in parallel
   const localGGDir = path.join(cwd, ".gg");
-  await fs.promises.mkdir(path.join(localGGDir, "skills"), { recursive: true });
-  await fs.promises.mkdir(path.join(localGGDir, "commands"), { recursive: true });
-  await fs.promises.mkdir(path.join(localGGDir, "agents"), { recursive: true });
-
-  // Discover agents and skills
-  const agents = await discoverAgents({
-    globalAgentsDir: paths.agentsDir,
-    projectDir: cwd,
-  });
-  const skills = await discoverSkills({
-    globalSkillsDir: paths.skillsDir,
-    projectDir: cwd,
-  });
+  const [, , , agents, skills] = await Promise.all([
+    fs.promises.mkdir(path.join(localGGDir, "skills"), { recursive: true }),
+    fs.promises.mkdir(path.join(localGGDir, "commands"), { recursive: true }),
+    fs.promises.mkdir(path.join(localGGDir, "agents"), { recursive: true }),
+    discoverAgents({ globalAgentsDir: paths.agentsDir, projectDir: cwd }),
+    discoverSkills({ globalSkillsDir: paths.skillsDir, projectDir: cwd }),
+  ]);
 
   // Build system prompt & tools (with sub-agent support)
   const systemPrompt = await buildSystemPrompt(cwd, skills, false, undefined, effectiveProvider);

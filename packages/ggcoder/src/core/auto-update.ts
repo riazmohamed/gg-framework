@@ -1,4 +1,4 @@
-import { execSync, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -95,54 +95,53 @@ function detectInstallInfo(): InstallInfo {
   };
 }
 
-function fetchLatestVersionSync(): string | null {
-  // Use a child process to fetch from npm registry with timeout
-  // We use node -e to avoid needing fetch in the parent process synchronously
+async function fetchLatestVersion(): Promise<string | null> {
   try {
-    const script = `
-      const c = new AbortController();
-      const t = setTimeout(() => c.abort(), ${FETCH_TIMEOUT_MS});
-      fetch("${REGISTRY_URL}", { signal: c.signal })
-        .then(r => r.json())
-        .then(d => { clearTimeout(t); process.stdout.write(d.version || ""); })
-        .catch(() => { clearTimeout(t); process.exit(1); });
-    `;
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
-      encoding: "utf-8",
-      timeout: FETCH_TIMEOUT_MS + 1000,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const version = result.stdout?.trim();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    const res = await fetch(REGISTRY_URL, { signal: controller.signal });
+    clearTimeout(timer);
+    const data = (await res.json()) as { version?: string };
+    const version = data.version?.trim();
     return version && /^\d+\.\d+\.\d+/.test(version) ? version : null;
   } catch {
     return null;
   }
 }
 
-function performUpdate(command: string): boolean {
-  try {
-    execSync(command, {
+function performUpdate(command: string): Promise<boolean> {
+  const [cmd, ...args] = command.split(" ");
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, {
       stdio: "pipe",
-      timeout: 60_000,
       env: { ...process.env, npm_config_loglevel: "silent" },
     });
-    return true;
-  } catch {
-    return false;
-  }
+    const timeout = setTimeout(() => {
+      child.kill();
+      resolve(false);
+    }, 60_000);
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      resolve(code === 0);
+    });
+    child.on("error", () => {
+      clearTimeout(timeout);
+      resolve(false);
+    });
+  });
 }
 
 /**
  * Check for updates and silently auto-update if a newer version is available.
- * Called at CLI startup. Non-blocking on failure — the CLI always proceeds.
+ * Fully async so it never blocks CLI startup.
  *
  * Returns a message to display if an update happened, or null.
  */
-export function checkAndAutoUpdate(currentVersion: string): string | null {
+export async function checkAndAutoUpdate(currentVersion: string): Promise<string | null> {
   try {
     if (!shouldCheck()) return null;
 
-    const latestVersion = fetchLatestVersionSync();
+    const latestVersion = await fetchLatestVersion();
 
     // Always record that we checked
     writeState({
@@ -156,7 +155,7 @@ export function checkAndAutoUpdate(currentVersion: string): string | null {
     const info = detectInstallInfo();
     if (!info.updateCommand) return null;
 
-    const success = performUpdate(info.updateCommand);
+    const success = await performUpdate(info.updateCommand);
 
     if (success) {
       return `Updated ${PACKAGE_NAME} ${currentVersion} \u2192 ${latestVersion}`;
