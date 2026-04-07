@@ -8,6 +8,7 @@ import {
 } from "@abukhaled/gg-agent";
 import { ProviderError } from "@abukhaled/gg-ai";
 import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from "@abukhaled/gg-ai";
+import { isScrollPaused, onScrollResume } from "../scroll-pause.js";
 
 /** Rough token estimate from message content (~4 chars per token). */
 function estimateTokens(msgs: Message[]): number {
@@ -280,9 +281,19 @@ export function useAgentLoop(
 
         const scheduleStreamFlush = () => {
           if (streamFlushTimer === null) {
+            // While the user is scrolling, skip scheduling — text accumulates
+            // in refs at zero cost and will be flushed when scrolling stops.
+            if (isScrollPaused()) return;
             streamFlushTimer = setTimeout(flushStreamState, STREAM_FLUSH_MS);
           }
         };
+
+        // When scrolling stops, flush any accumulated streaming state
+        const unsubScrollResume = onScrollResume(() => {
+          if (streamTextDirty || streamThinkingDirty) {
+            flushStreamState();
+          }
+        });
 
         // Reset state
         doneCalledRef.current = false;
@@ -673,6 +684,9 @@ export function useAgentLoop(
             const durationMs = Date.now() - runStartRef.current;
             onDone?.(durationMs, [...toolsUsedRef.current]);
           }
+
+          // Clean up scroll-resume listener
+          unsubScrollResume();
 
           // Notify parent of new messages
           const newMsgs = messages.current.slice(startIndex);

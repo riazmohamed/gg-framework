@@ -8,6 +8,7 @@ import type { ImageAttachment } from "../../utils/image.js";
 import { extractImagePaths, readImageFile, getClipboardImage } from "../../utils/image.js";
 import { SlashCommandMenu, filterCommands, type SlashCommandInfo } from "./SlashCommandMenu.js";
 import { log } from "../../core/logger.js";
+import { setScrollPaused } from "../scroll-pause.js";
 
 const MAX_VISIBLE_LINES = 5;
 const PROMPT = "❯ ";
@@ -333,8 +334,12 @@ export function InputArea({
         process.stdout.write(DISABLE_MOUSE);
         mouseDisabled = true;
       }
+      setScrollPaused(true);
       if (scrollTimer) clearTimeout(scrollTimer);
-      scrollTimer = setTimeout(reenableMouse, 300);
+      scrollTimer = setTimeout(() => {
+        reenableMouse();
+        setScrollPaused(false);
+      }, 1500);
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -478,6 +483,7 @@ export function InputArea({
 
     return () => {
       if (scrollTimer) clearTimeout(scrollTimer);
+      setScrollPaused(false);
       process.stdout.write(DISABLE_MOUSE);
       process.removeListener("exit", onProcessExit);
       // Restore original emit
