@@ -366,14 +366,15 @@ export async function* agentLoop(
           eventTypeCounts[event.type] = (eventTypeCounts[event.type] ?? 0) + 1;
           lastEventType = event.type;
 
-          // Only flip to mid-stream timeout on confirmed output events — text
-          // deltas and completed tool calls.  Everything else (keepalive,
-          // thinking_delta, toolcall_delta, toolcall_done, done) keeps the
-          // longer first-event / post-thinking timeout.  Reasoning models
-          // (MiMo) can stream hundreds of thinking events then pause minutes
-          // before producing output.
+          // Flip to mid-stream timeout on confirmed output events — text
+          // deltas, completed tool calls, and tool call deltas (large file
+          // writes can stream toolcall_delta for minutes without any text_delta).
+          // Reasoning models (MiMo) are handled separately below — they can
+          // stream hundreds of thinking events then pause minutes before output.
           if (
-            (event.type === "text_delta" || event.type === "server_toolcall") &&
+            (event.type === "text_delta" ||
+              event.type === "server_toolcall" ||
+              event.type === "toolcall_delta") &&
             !hasReceivedEvent
           ) {
             hasReceivedEvent = true;
@@ -436,6 +437,11 @@ export async function* agentLoop(
               toolUseId: event.toolUseId,
               resultType: event.resultType,
               data: event.data,
+            };
+          } else if (event.type === "toolcall_delta") {
+            yield {
+              type: "toolcall_delta" as const,
+              chars: event.argsJson?.length ?? 0,
             };
           }
           lastYieldEndTime = Date.now();
@@ -511,53 +517,28 @@ export async function* agentLoop(
           turn--; // Don't count the failed turn
           continue;
         }
-        // Stream stall: the API connection hung mid-stream without closing.
-        // Two recovery strategies:
-        //  1. Zero events (connection-level hang): the request itself may be
-        //     problematic.  Force-compact the context to change the payload
-        //     before retrying — the same request will likely hang again.
-        //  2. Partial events: transient network blip — simple retry with backoff.
+        // Stream stall: the API connection hung without closing.
+        // Retry with exponential backoff — most stalls are transient server-side
+        // issues, not payload-dependent. First 2 retries are silent (hidden retries).
         if (idleTimedOut && !options.signal?.aborted && stallRetries < MAX_STALL_RETRIES) {
           stallRetries++;
-          const zeroEvents = streamEventCount === 0;
-          // Force-compact on zero-event stalls to change the request payload.
-          // Only attempt once (first zero-event stall) to avoid thrashing.
-          if (zeroEvents && stallRetries <= 2 && options.transformContext) {
-            diag("stall_compact", { attempt: stallRetries, events: streamEventCount });
-            yield {
-              type: "retry" as const,
-              reason: "stream_stall" as const,
-              attempt: stallRetries,
-              maxAttempts: MAX_STALL_RETRIES,
-              delayMs: 0,
-            };
-            const transformed = await options.transformContext(messages, { force: true });
-            if (transformed !== messages) {
-              diag("stall_compact_done", {
-                before: messages.length,
-                after: transformed.length,
-              });
-              messages.length = 0;
-              messages.push(...transformed);
-            }
-          } else {
-            const delayMs = Math.min(STALL_DELAY_MS * 2 ** (stallRetries - 1), 8_000);
-            diag("retry", {
-              reason: "stream_stall",
-              attempt: stallRetries,
-              maxAttempts: MAX_STALL_RETRIES,
-              delayMs,
-              events: streamEventCount,
-            });
-            yield {
-              type: "retry" as const,
-              reason: "stream_stall" as const,
-              attempt: stallRetries,
-              maxAttempts: MAX_STALL_RETRIES,
-              delayMs,
-            };
-            await new Promise((r) => setTimeout(r, delayMs));
-          }
+          const delayMs = Math.min(STALL_DELAY_MS * 2 ** (stallRetries - 1), 8_000);
+          diag("retry", {
+            reason: "stream_stall",
+            attempt: stallRetries,
+            maxAttempts: MAX_STALL_RETRIES,
+            delayMs,
+            events: streamEventCount,
+          });
+          yield {
+            type: "retry" as const,
+            reason: "stream_stall" as const,
+            attempt: stallRetries,
+            maxAttempts: MAX_STALL_RETRIES,
+            delayMs,
+            silent: stallRetries <= 2,
+          };
+          await new Promise((r) => setTimeout(r, delayMs));
           turn--; // Don't count the failed turn
           continue;
         }

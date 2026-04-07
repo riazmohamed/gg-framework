@@ -27,7 +27,12 @@ export {
 export { discoverSkills, parseSkillFile, formatSkillsForPrompt, type Skill } from "./skills.js";
 export { ExtensionLoader } from "./extensions/loader.js";
 export type { Extension, ExtensionContext, ExtensionFactory } from "./extensions/types.js";
-export { shouldCompact, compact, type CompactionResult } from "./compaction/compactor.js";
+export {
+  shouldCompact,
+  compact,
+  COMPACTION_RESERVE_TOKENS,
+  type CompactionResult,
+} from "./compaction/compactor.js";
 export { initLogger, log, attachToEventBus, closeLogger } from "./logger.js";
 export {
   estimateTokens,

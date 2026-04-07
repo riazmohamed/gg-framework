@@ -50,8 +50,8 @@ export function createWriteTool(
         }
       }
       await ops.writeFile(resolved, content);
-      const bytes = Buffer.byteLength(content, "utf-8");
-      return `Wrote ${bytes} bytes to ${resolved}`;
+      const lines = content.split("\n").length;
+      return `Wrote ${lines} lines to ${resolved}`;
     },
   };
 }

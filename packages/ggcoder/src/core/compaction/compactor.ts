@@ -52,7 +52,19 @@ export interface CompactionResult {
 }
 
 /**
+ * Default token reserve for compaction.
+ * Leaves headroom for the model's next response + system overhead.
+ * Matches the widely-used Pi / Grok-CLI default of 16 384 tokens.
+ */
+export const COMPACTION_RESERVE_TOKENS = 16_384;
+
+/**
  * Check if compaction should be triggered.
+ *
+ * Uses the reserve-based approach (contextWindow − reserveTokens) used by
+ * Pi, Grok-CLI, OpenClaw, BrowserOS, and most real-world agent frameworks.
+ * A percentage-based threshold is still supported: when both are supplied the
+ * more conservative (lower) limit wins.
  */
 export function shouldCompact(
   messages: Message[],
@@ -60,9 +72,17 @@ export function shouldCompact(
   threshold = 0.8,
   /** Actual API-reported token count — preferred over char-based estimate when available. */
   actualTokens?: number,
+  /** Fixed token reserve subtracted from contextWindow. Defaults to 16 384. */
+  reserveTokens = COMPACTION_RESERVE_TOKENS,
 ): boolean {
   const estimated = actualTokens ?? estimateConversationTokens(messages);
-  const limit = contextWindow * threshold;
+  const percentageLimit = contextWindow * threshold;
+  // Only apply the fixed reserve when the context window is large enough
+  // that the reserve is meaningful (< 50% of the window).
+  const limit =
+    reserveTokens > 0 && reserveTokens < contextWindow * 0.5
+      ? Math.min(percentageLimit, contextWindow - reserveTokens)
+      : percentageLimit;
   const source = actualTokens != null ? "actual" : "estimated";
   log("INFO", "compaction", `Context check: ${estimated} ${source} tokens, threshold ${limit}`);
   return estimated > limit;

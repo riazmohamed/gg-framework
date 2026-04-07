@@ -131,6 +131,7 @@ interface AssistantItem {
   text: string;
   thinking?: string;
   thinkingMs?: number;
+  planMode?: boolean;
   id: string;
 }
 
@@ -506,6 +507,8 @@ export function App(props: AppProps) {
   // Hoisted before terminal title hook so it can reference them
   const [lastUserMessage, setLastUserMessage] = useState("");
   const [planMode, setPlanMode] = useState(false);
+  const planModeLocalRef = useRef(false);
+  planModeLocalRef.current = planMode;
 
   // Terminal title — updated later after agentLoop is created
   // (hoisted here so the hook is always called in the same order)
@@ -888,21 +891,24 @@ export function App(props: AppProps) {
 
   // Resolve fresh OAuth credentials before each agent loop run.
   // Falls back to the static props when authStorage is not available.
-  const resolveCredentials = useCallback(async () => {
-    // Ollama runs locally — no credentials needed
-    if (currentProvider === "ollama") {
-      return { apiKey: "", accountId: undefined };
-    }
-    if (props.authStorage) {
-      try {
-        const creds = await props.authStorage.resolveCredentials(currentProvider);
-        return { apiKey: creds.accessToken, accountId: creds.accountId };
-      } catch {
-        // Provider not authenticated — use static props as fallback
+  const resolveCredentials = useCallback(
+    async (opts?: { forceRefresh?: boolean }) => {
+      // Ollama runs locally — no credentials needed
+      if (currentProvider === "ollama") {
+        return { apiKey: "", accountId: undefined };
       }
-    }
-    return { apiKey: activeApiKey!, accountId: activeAccountId };
-  }, [props.authStorage, currentProvider, activeApiKey, activeAccountId]);
+      if (props.authStorage) {
+        try {
+          const creds = await props.authStorage.resolveCredentials(currentProvider, opts);
+          return { apiKey: creds.accessToken, accountId: creds.accountId };
+        } catch {
+          // Provider not authenticated — use static props as fallback
+        }
+      }
+      return { apiKey: activeApiKey!, accountId: activeAccountId };
+    },
+    [props.authStorage, currentProvider, activeApiKey, activeAccountId],
+  );
 
   // Build model router for auto-switching (e.g. vision model on image input).
   // Pass the logged-in providers and their credentials so the router can fall
@@ -1053,7 +1059,16 @@ export function App(props: AppProps) {
             queueFlush(flushed);
           }
           const displayText = planStepsRef.current.length > 0 ? stripDoneMarkers(text) : text;
-          return [{ kind: "assistant", text: displayText, thinking, thinkingMs, id: getId() }];
+          return [
+            {
+              kind: "assistant",
+              text: displayText,
+              thinking,
+              thinkingMs,
+              planMode: planModeLocalRef.current,
+              id: getId(),
+            },
+          ];
         });
       }, []),
       onToolStart: useCallback(
@@ -1357,9 +1372,12 @@ export function App(props: AppProps) {
             ...(usage.cacheRead != null && { cacheRead: String(usage.cacheRead) }),
             ...(usage.cacheWrite != null && { cacheWrite: String(usage.cacheWrite) }),
           });
-          // Track actual token count for compaction decisions
+          // Track actual token count for compaction decisions.
+          // Anthropic has separate input/output limits — only count input.
+          // All other providers share the context window — count both.
+          const inputContext = usage.inputTokens + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
           lastActualTokensRef.current =
-            usage.inputTokens + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+            currentProvider === "anthropic" ? inputContext : inputContext + usage.outputTokens;
           // For tool-only turns (no text), flush completed items to Static so
           // liveItems doesn't grow unbounded across consecutive tool-only turns.
           setLiveItems((prev) => {
@@ -2010,6 +2028,7 @@ export function App(props: AppProps) {
             thinking={item.thinking}
             thinkingMs={item.thinkingMs}
             showThinking={props.showThinking}
+            planMode={item.planMode}
           />
         );
       case "tool_start":
@@ -2273,36 +2292,42 @@ export function App(props: AppProps) {
 
             // Rebuild system prompt with the approved plan, then reset the session
             void (async () => {
-              const newPrompt = await buildSystemPrompt(
-                props.cwd,
-                props.skills,
-                false,
-                planPath,
-                props.provider,
-              );
-              messagesRef.current = [{ role: "system" as const, content: newPrompt }];
-              agentLoop.reset();
-              persistedIndexRef.current = messagesRef.current.length;
+              try {
+                const newPrompt = await buildSystemPrompt(
+                  props.cwd,
+                  props.skills,
+                  false,
+                  planPath,
+                  props.provider,
+                );
+                messagesRef.current = [{ role: "system" as const, content: newPrompt }];
+                agentLoop.reset();
+                persistedIndexRef.current = messagesRef.current.length;
 
-              // Create a new session file
-              const sm = sessionManagerRef.current;
-              if (sm) {
-                const s = await sm.create(props.cwd, currentProvider, currentModel);
-                sessionPathRef.current = s.path;
+                // Create a new session file
+                const sm = sessionManagerRef.current;
+                if (sm) {
+                  const s = await sm.create(props.cwd, currentProvider, currentModel);
+                  sessionPathRef.current = s.path;
+                }
+
+                // Start implementation with a clean context
+                setLiveItems([
+                  {
+                    kind: "info",
+                    text: "Plan approved — starting fresh session for implementation",
+                    id: getId(),
+                  },
+                ]);
+                setDoneStatus(null);
+                await agentLoop.run(
+                  "The plan has been approved. Implement it now, following each step in order.",
+                );
+              } catch (err) {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                log("ERROR", "error", errMsg);
+                setLiveItems((prev) => [...prev, { kind: "error", message: errMsg, id: getId() }]);
               }
-
-              // Start implementation with a clean context
-              setLiveItems([
-                {
-                  kind: "info",
-                  text: "Plan approved — starting fresh session for implementation",
-                  id: getId(),
-                },
-              ]);
-              setDoneStatus(null);
-              await agentLoop.run(
-                "The plan has been approved. Implement it now, following each step in order.",
-              );
             })();
           }}
           onReject={(planPath, feedback) => {
@@ -2320,7 +2345,11 @@ export function App(props: AppProps) {
               ...prev,
               { kind: "info", text: `Plan rejected — "${feedback}"`, id: getId() },
             ]);
-            void agentLoop.run(msg);
+            void agentLoop.run(msg).catch((err: unknown) => {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              log("ERROR", "error", errMsg);
+              setLiveItems((prev) => [...prev, { kind: "error", message: errMsg, id: getId() }]);
+            });
           }}
         />
       ) : (

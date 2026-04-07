@@ -5,6 +5,7 @@ import {
   type AgentTool,
   type ModelRouterResult,
 } from "@abukhaled/gg-agent";
+import { ProviderError } from "@abukhaled/gg-ai";
 import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from "@abukhaled/gg-ai";
 
 /** Rough token estimate from message content (~4 chars per token). */
@@ -69,8 +70,11 @@ export interface AgentLoopOptions {
   apiKey?: string;
   baseUrl?: string;
   accountId?: string;
-  /** Resolve fresh credentials before each run (e.g. OAuth token refresh). */
-  resolveCredentials?: () => Promise<{ apiKey: string; accountId?: string }>;
+  /** Resolve fresh credentials before each run (e.g. OAuth token refresh).
+   *  When `forceRefresh` is true, bypass cache and fetch a new token (used on 401 retry). */
+  resolveCredentials?: (opts?: {
+    forceRefresh?: boolean;
+  }) => Promise<{ apiKey: string; accountId?: string }>;
   transformContext?: (
     messages: Message[],
     options?: { force?: boolean },
@@ -241,7 +245,10 @@ export function useAgentLoop(
   const run = useCallback(
     async (userContent: UserContent) => {
       /** Run a single user message through the agent loop. Returns true if aborted. */
-      const runSingle = async (content: UserContent): Promise<boolean> => {
+      const runSingle = async (
+        content: UserContent,
+        credentialOpts?: { forceRefresh?: boolean },
+      ): Promise<boolean> => {
         const ac = new AbortController();
         abortRef.current = ac;
         let wasAborted = false;
@@ -342,7 +349,7 @@ export function useAgentLoop(
           let apiKey = options.apiKey;
           let accountId = options.accountId;
           if (options.resolveCredentials) {
-            const creds = await options.resolveCredentials();
+            const creds = await options.resolveCredentials(credentialOpts);
             apiKey = creds.apiKey;
             accountId = creds.accountId;
           }
@@ -413,6 +420,20 @@ export function useAgentLoop(
                   if (phaseRef.current === "retrying") setRetryInfo(null);
                   phaseRef.current = "thinking";
                   setActivityPhase("thinking");
+                }
+                break;
+
+              case "toolcall_delta":
+                // Tool call args being streamed — tick the char counter so the
+                // token estimate updates, and switch to "generating" phase so the
+                // user sees progress instead of a frozen "waiting" spinner.
+                charCountRef.current += event.chars;
+                streamTextDirty = true;
+                scheduleStreamFlush();
+                if (phaseRef.current === "waiting" || phaseRef.current === "thinking") {
+                  if (phaseRef.current === "thinking") freezeThinking();
+                  phaseRef.current = "generating";
+                  setActivityPhase("generating");
                 }
                 break;
 
@@ -525,15 +546,19 @@ export function useAgentLoop(
                 break;
 
               case "retry":
-                phaseRef.current = "retrying";
-                setActivityPhase("retrying");
-                setStallError(null); // clear any previous error on retry
-                setRetryInfo({
-                  reason: event.reason,
-                  attempt: event.attempt,
-                  maxAttempts: event.maxAttempts,
-                  delayMs: event.delayMs,
-                });
+                // Hidden retries (silent) don't update the UI — the user
+                // only sees retry indicators after silent attempts are exhausted.
+                if (!event.silent) {
+                  phaseRef.current = "retrying";
+                  setActivityPhase("retrying");
+                  setStallError(null); // clear any previous error on retry
+                  setRetryInfo({
+                    reason: event.reason,
+                    attempt: event.attempt,
+                    maxAttempts: event.maxAttempts,
+                    delayMs: event.delayMs,
+                  });
+                }
                 break;
 
               case "turn_end": {
@@ -651,8 +676,21 @@ export function useAgentLoop(
         return wasAborted;
       }; // end runSingle
 
-      // Run the initial message
-      const aborted = await runSingle(userContent);
+      // Run the initial message.
+      // On 401, force-refresh the OAuth token and retry once — the provider may
+      // have revoked the token server-side before the stored expiry.
+      let aborted: boolean;
+      try {
+        aborted = await runSingle(userContent);
+      } catch (err) {
+        if (err instanceof ProviderError && err.statusCode === 401 && options.resolveCredentials) {
+          // Pop the user message we pushed — runSingle will re-push it
+          messages.current.pop();
+          aborted = await runSingle(userContent, { forceRefresh: true });
+        } else {
+          throw err;
+        }
+      }
 
       // Drain the queue: process follow-up messages that arrived after agent_done.
       // Most queued messages are consumed mid-run via getSteeringMessages, but

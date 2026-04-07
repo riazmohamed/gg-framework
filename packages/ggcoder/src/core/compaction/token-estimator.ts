@@ -18,6 +18,10 @@ const MODEL_FAMILY_RATIOS: Record<string, number> = {
   // Moonshot/Kimi: ~2.8 chars/token (multilingual tokenizer)
   kimi: 2.8,
   moonshot: 2.8,
+  // MiniMax: ~3.2 chars/token (Anthropic-compatible tokenizer)
+  minimax: 3.2,
+  // Xiaomi MiMo: ~3.7 chars/token (OpenAI-compatible tokenizer)
+  mimo: 3.7,
 };
 
 /** Default ratio when model family is unknown */

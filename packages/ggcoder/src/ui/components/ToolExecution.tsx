@@ -42,11 +42,45 @@ type ToolExecutionProps = ToolRunningProps | ToolDoneProps;
 /** Tools that use compact one-line summaries instead of showing output. */
 const COMPACT_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
+/** Tools rendered with the server-tool style (spinner + summary, no output). */
+const SERVER_STYLE_TOOLS = new Set(["web_search"]);
+
 export function ToolExecution(props: ToolExecutionProps) {
   const theme = useTheme();
   const { columns } = useTerminalSize();
 
   if (props.status === "running") {
+    // Server-style tools (web_search) — blinking dot + spinner "Searching..."
+    if (SERVER_STYLE_TOOLS.has(props.name)) {
+      const { label, detail } = getToolHeaderParts(props.name, props.args);
+      const headerContentWidth = Math.max(10, columns - HEADER_PREFIX);
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Box flexDirection="row">
+            <ToolUseLoader status="running" />
+            <Box flexGrow={1} width={headerContentWidth}>
+              <Text wrap="wrap">
+                <Text bold color={theme.toolName}>
+                  {label}
+                </Text>
+                {detail && (
+                  <Text color={theme.text}>
+                    {"("}
+                    <Text color={theme.textDim}>{'"'}</Text>
+                    {detail}
+                    <Text color={theme.textDim}>{'"'}</Text>
+                    {")"}
+                  </Text>
+                )}
+              </Text>
+            </Box>
+          </Box>
+          <MessageResponse>
+            <Spinner label="Searching..." />
+          </MessageResponse>
+        </Box>
+      );
+    }
     // Compact tools get a blinking dot + summary label
     if (COMPACT_TOOLS.has(props.name)) {
       const summary = getCompactRunningLabel(props.name, props.args);
@@ -73,6 +107,43 @@ export function ToolExecution(props: ToolExecutionProps) {
   const { name, args, result, isError, details } = props;
   const headerContentWidth = Math.max(10, columns - HEADER_PREFIX);
   const bodyContentWidth = Math.max(10, columns - BODY_PREFIX);
+
+  // Server-style tools (web_search) — match ServerToolExecution done display
+  if (SERVER_STYLE_TOOLS.has(name)) {
+    const { label, detail } = getToolHeaderParts(name, args);
+    const searchCount = (result.match(/^\d+\./gm) ?? []).length;
+    const summaryText = isError
+      ? result.split("\n")[0]
+      : `${searchCount} result${searchCount !== 1 ? "s" : ""}`;
+    return (
+      <Box flexDirection="column" marginTop={1}>
+        <Box flexDirection="row">
+          <ToolUseLoader status={isError ? "error" : "done"} />
+          <Box flexGrow={1} width={headerContentWidth}>
+            <Text wrap="wrap">
+              <Text bold color={isError ? theme.toolError : theme.toolName}>
+                {label}
+              </Text>
+              {detail && (
+                <Text color={theme.text}>
+                  {"("}
+                  <Text color={theme.textDim}>{'"'}</Text>
+                  {detail}
+                  <Text color={theme.textDim}>{'"'}</Text>
+                  {")"}
+                </Text>
+              )}
+            </Text>
+          </Box>
+        </Box>
+        <MessageResponse>
+          <Text color={theme.textDim} wrap="wrap">
+            {summaryText}
+          </Text>
+        </MessageResponse>
+      </Box>
+    );
+  }
 
   // Compact tools — one-line summary, no output content
   if (COMPACT_TOOLS.has(name) && !isError) {
@@ -259,6 +330,11 @@ function getToolHeaderParts(
     case "skill": {
       const skillName = String(args.skill ?? "");
       return { label: displayName, detail: skillName };
+    }
+    case "web_search": {
+      const query = String(args.query ?? "");
+      const trunc = query.length > 60 ? query.slice(0, 57) + "…" : query;
+      return { label: "Web Search", detail: trunc };
     }
     case "web_fetch": {
       const url = String(args.url ?? "");

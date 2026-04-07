@@ -19,7 +19,7 @@ describe("createWriteTool", () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("writes file and returns byte count with absolute path", async () => {
+  it("writes file and returns line count with absolute path", async () => {
     const tool = createWriteTool(tmpDir);
     const content = "line1\nline2\nline3\n";
     const raw = await tool.execute(
@@ -28,15 +28,14 @@ describe("createWriteTool", () => {
     );
 
     const result = resultToString(raw);
-    const bytes = Buffer.byteLength(content, "utf-8");
-    expect(result).toBe(`Wrote ${bytes} bytes to ${path.join(tmpDir, "test.txt")}`);
+    expect(result).toBe(`Wrote 4 lines to ${path.join(tmpDir, "test.txt")}`);
 
     // Verify file was actually written
     const written = await fs.readFile(path.join(tmpDir, "test.txt"), "utf-8");
     expect(written).toBe(content);
   });
 
-  it("reports correct byte count for unicode content", async () => {
+  it("reports correct line count for unicode content", async () => {
     const tool = createWriteTool(tmpDir);
     const content = "héllo wörld 🚀\n";
     const raw = await tool.execute(
@@ -45,8 +44,7 @@ describe("createWriteTool", () => {
     );
 
     const result = resultToString(raw);
-    const bytes = Buffer.byteLength(content, "utf-8");
-    expect(result).toBe(`Wrote ${bytes} bytes to ${path.join(tmpDir, "unicode.txt")}`);
+    expect(result).toBe(`Wrote 2 lines to ${path.join(tmpDir, "unicode.txt")}`);
   });
 
   it("creates parent directories if needed", async () => {
@@ -58,7 +56,7 @@ describe("createWriteTool", () => {
 
     const resolved = path.join(tmpDir, "sub/dir/file.txt");
     const result = resultToString(raw);
-    expect(result).toBe(`Wrote 5 bytes to ${resolved}`);
+    expect(result).toBe(`Wrote 2 lines to ${resolved}`);
 
     // Verify file was actually created in the nested directory
     const written = await fs.readFile(resolved, "utf-8");
@@ -111,7 +109,7 @@ describe("createWriteTool", () => {
     );
 
     const result = resultToString(raw);
-    expect(result).toContain("Wrote 5 bytes");
+    expect(result).toContain("Wrote 1 lines");
   });
 
   it("restricts writes to .gg/plans/ in plan mode", async () => {
@@ -151,6 +149,6 @@ describe("createWriteTool", () => {
     );
 
     const result = resultToString(raw);
-    expect(result).toBe(`Wrote 0 bytes to ${path.join(tmpDir, "empty.txt")}`);
+    expect(result).toBe(`Wrote 1 lines to ${path.join(tmpDir, "empty.txt")}`);
   });
 });

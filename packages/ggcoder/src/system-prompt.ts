@@ -131,6 +131,7 @@ export async function buildSystemPrompt(
       `- **bash**: Run commands (tests, builds, git, installs). The shell already runs in the project working directory — don't \`cd\` into it redundantly. Check exit code and output for errors. Use non-interactive flags where needed (e.g. \`--yes\`, \`-y\`) to avoid blocking prompts. Set \`run_in_background=true\` for long-running processes (dev servers, watchers) — returns a process ID immediately.\n` +
       `- **find** / **ls**: Discover project structure and orient in unfamiliar directories.\n` +
       `- **grep**: Find usages, definitions, and imports across the codebase. Use to understand how code connects.\n` +
+      `- **web_search**: Search the web for current information, recent events, documentation, or facts. Returns a list of results with titles, URLs, and snippets. Use this before web_fetch when you need to find relevant pages.\n` +
       `- **web_fetch**: Read documentation, check live endpoints, fetch external resources.\n` +
       `- **task_output**: Read output from a background process by ID. Returns new output since last read (incremental). Use \`from_start=true\` to read from the beginning.\n` +
       `- **task_stop**: Stop a background process by ID. Sends SIGTERM, then SIGKILL after 5 seconds.\n` +
