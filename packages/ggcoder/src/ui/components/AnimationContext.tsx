@@ -75,12 +75,18 @@ export function useAnimationTick(): number {
  * Register this component as needing animation ticks.
  * The global timer only runs while at least one component is registered.
  * Call this in any component that uses animation frames (spinners, shimmer, etc).
+ *
+ * On Windows (reduced motion), the timer is not started — the elapsed-time
+ * counter still updates via its own 1s interval, but the 100ms animation
+ * tick that causes scroll-jumping is suppressed.
  */
 export function useAnimationActive(): void {
   const { register } = useContext(AnimationControlContext);
+  const skip = useReducedMotion();
   useEffect(() => {
+    if (skip) return;
     return register();
-  }, [register]);
+  }, [register, skip]);
 }
 
 /** Derive a frame index from the global tick for a given interval and frame count. */
@@ -91,9 +97,16 @@ export function deriveFrame(tick: number, intervalMs: number, frameCount: number
 /**
  * Check if reduced-motion is requested.
  * Respects NO_MOTION and REDUCE_MOTION env vars.
+ *
+ * On Windows, reduced motion is enabled by default because Ink's live-area
+ * re-renders (driven by the 100ms animation tick) cause Windows Terminal to
+ * force-scroll the viewport to the cursor — making it impossible to scroll
+ * up while the agent is running. Users can override with REDUCE_MOTION=0.
  */
 export function useReducedMotion(): boolean {
-  return !!(process.env.NO_MOTION || process.env.REDUCE_MOTION);
+  if (process.env.NO_MOTION || process.env.REDUCE_MOTION === "1") return true;
+  if (process.env.REDUCE_MOTION === "0") return false;
+  return process.platform === "win32";
 }
 
 export { TICK_INTERVAL };
