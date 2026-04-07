@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import sharp from "sharp";
@@ -57,7 +58,7 @@ function resolvePath(filePath: string, cwd: string): string {
   resolved = resolved.replace(/\\(.)/g, "$1");
   // Resolve home dir
   if (resolved.startsWith("~/")) {
-    resolved = path.join(process.env.HOME ?? "/", resolved.slice(2));
+    resolved = path.join(process.env.HOME ?? os.homedir(), resolved.slice(2));
   } else if (!path.isAbsolute(resolved)) {
     resolved = path.join(cwd, resolved);
   }
@@ -238,7 +239,7 @@ export function getClipboardImage(): Promise<ImageAttachment | null> {
       const mediaType = isPng ? "image/png" : "image/tiff";
 
       // Write clipboard image to temp file, then read as base64
-      const tmpPath = `/tmp/ogcoder-clipboard-${Date.now()}.${ext}`;
+      const tmpPath = path.join(os.tmpdir(), `ogcoder-clipboard-${Date.now()}.${ext}`);
       const writeScript = [
         `set imgData to the clipboard as «class ${clipClass}»`,
         `set filePath to POSIX file "${tmpPath}"`,

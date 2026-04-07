@@ -4,7 +4,8 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { killProcessTree } from "../utils/process.js";
+import { killProcessTree, terminateProcessTree } from "../utils/process.js";
+import { resolveShell } from "../utils/shell.js";
 
 export interface BackgroundProcess {
   id: string;
@@ -42,7 +43,8 @@ export class ProcessManager {
     const logFile = path.join(BG_DIR, `${id}.log`);
     const fd = fs.openSync(logFile, "w");
 
-    const child = spawn("bash", ["-c", command], {
+    const shell = resolveShell();
+    const child = spawn(shell, ["-c", command], {
       cwd,
       detached: true,
       stdio: ["ignore", fd, fd],
@@ -116,15 +118,9 @@ export class ProcessManager {
       return `Process ${id} already exited (code ${proc.exitCode})`;
     }
 
-    // SIGTERM first
-    try {
-      process.kill(-proc.pid, "SIGTERM");
-    } catch {
-      try {
-        process.kill(proc.pid, "SIGTERM");
-      } catch {
-        return `Process ${id} already exited`;
-      }
+    // Graceful termination first
+    if (!terminateProcessTree(proc.pid)) {
+      return `Process ${id} already exited`;
     }
 
     // Wait up to 5s, then SIGKILL

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
 import { killProcessTree } from "../utils/process.js";
+import { resolveShell } from "../utils/shell.js";
 import { truncateTail } from "./truncate.js";
 import { writeOverflow } from "./overflow.js";
 import { localOperations, type ToolOperations } from "./operations.js";
@@ -31,6 +32,18 @@ const ENV_ALLOWLIST = new Set([
   "CLICOLOR_FORCE",
   "NO_COLOR",
   "FORCE_COLOR",
+  // Windows equivalents
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "COMSPEC",
+  "SystemRoot",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "ProgramFiles",
+  "ProgramFiles(x86)",
+  "ProgramData",
+  "GG_GIT_BASH_PATH",
   // Development toolchains
   "NODE_PATH",
   "NVM_DIR",
@@ -112,7 +125,8 @@ export function createBashTool(
       const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT;
 
       return new Promise<string>((resolve) => {
-        const child = ops.spawn("bash", ["-c", command], {
+        const shell = resolveShell();
+        const child = ops.spawn(shell, ["-c", command], {
           cwd,
           detached: true,
           stdio: ["ignore", "pipe", "pipe"],
