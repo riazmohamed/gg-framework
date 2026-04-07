@@ -5,7 +5,7 @@ import { StreamingMarkdown } from "./Markdown.js";
 import { ThinkingBlock } from "./ThinkingBlock.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { stripDoneMarkers } from "../../utils/plan-steps.js";
-import { BLACK_CIRCLE, PLAN_SYMBOL } from "../constants/figures.js";
+import { BLACK_CIRCLE } from "../constants/figures.js";
 
 // BLACK_CIRCLE + " " = 2 chars
 const PREFIX_WIDTH = 2;
@@ -52,9 +52,7 @@ export const StreamingArea = memo(function StreamingArea({
       {displayText && (
         <Box flexDirection="row">
           <Box width={PREFIX_WIDTH} flexShrink={0}>
-            <Text color={planMode ? theme.planPrimary : theme.primary}>
-              {planMode ? PLAN_SYMBOL + " " : BLACK_CIRCLE + " "}
-            </Text>
+            <Text color={planMode ? theme.planPrimary : theme.primary}>{BLACK_CIRCLE + " "}</Text>
           </Box>
           <Box flexDirection="column" flexGrow={1} width={contentWidth}>
             {/* Stable/unstable split: only re-parses the tail block. */}

@@ -130,6 +130,7 @@ interface AssistantItem {
   text: string;
   thinking?: string;
   thinkingMs?: number;
+  planMode?: boolean;
   id: string;
 }
 
@@ -505,6 +506,8 @@ export function App(props: AppProps) {
   // Hoisted before terminal title hook so it can reference them
   const [lastUserMessage, setLastUserMessage] = useState("");
   const [planMode, setPlanMode] = useState(false);
+  const planModeLocalRef = useRef(false);
+  planModeLocalRef.current = planMode;
 
   // Terminal title — updated later after agentLoop is created
   // (hoisted here so the hook is always called in the same order)
@@ -1014,7 +1017,16 @@ export function App(props: AppProps) {
             queueFlush(flushed);
           }
           const displayText = planStepsRef.current.length > 0 ? stripDoneMarkers(text) : text;
-          return [{ kind: "assistant", text: displayText, thinking, thinkingMs, id: getId() }];
+          return [
+            {
+              kind: "assistant",
+              text: displayText,
+              thinking,
+              thinkingMs,
+              planMode: planModeLocalRef.current,
+              id: getId(),
+            },
+          ];
         });
       }, []),
       onToolStart: useCallback(
@@ -1939,6 +1951,7 @@ export function App(props: AppProps) {
             thinking={item.thinking}
             thinkingMs={item.thinkingMs}
             showThinking={props.showThinking}
+            planMode={item.planMode}
           />
         );
       case "tool_start":
