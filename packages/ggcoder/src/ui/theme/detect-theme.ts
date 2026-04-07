@@ -33,8 +33,13 @@ export async function detectTheme(): Promise<"dark" | "light"> {
   }
 
   // 3. OSC 11 — query actual terminal background color
-  const osc = await queryOSC11();
-  if (osc !== null) return osc;
+  //    Skip on WSL — the Windows terminal layer never responds, so we'd
+  //    always waste 200ms waiting for the timeout.
+  const isWSL = process.env["WSL_DISTRO_NAME"] || process.env["WSLENV"];
+  if (!isWSL) {
+    const osc = await queryOSC11();
+    if (osc !== null) return osc;
+  }
 
   // 4. COLORFGBG — "fg;bg" ANSI color indices
   const colorfgbg = process.env["COLORFGBG"];

@@ -45,6 +45,8 @@ export interface RenderAppConfig {
   onEnterPlanRef?: { current: (reason?: string) => void };
   onExitPlanRef?: { current: (planPath: string) => Promise<string> };
   skills?: Skill[];
+  /** Deferred MCP tools — resolved after UI renders to avoid blocking startup. */
+  pendingMCPTools?: Promise<AgentTool[]>;
 }
 
 export async function renderApp(config: RenderAppConfig): Promise<void> {
@@ -94,6 +96,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             onEnterPlanRef: config.onEnterPlanRef,
             onExitPlanRef: config.onExitPlanRef,
             skills: config.skills,
+            pendingMCPTools: config.pendingMCPTools,
           }),
         ),
       ),

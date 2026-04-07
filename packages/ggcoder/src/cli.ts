@@ -43,7 +43,7 @@ import { AuthStorage } from "./core/auth-storage.js";
 import { SessionManager } from "./core/session-manager.js";
 import { ensureAppDirs, getAppPaths, loadSavedSettings } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
-import { setStreamDiagnostic } from "@abukhaled/gg-agent";
+import { setStreamDiagnostic, type AgentTool } from "@abukhaled/gg-agent";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createTools } from "./tools/index.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
@@ -436,24 +436,44 @@ async function runInkTUI(opts: {
     { accessToken: string; accountId?: string; baseUrl?: string }
   > = {};
 
+  // Detect which providers have stored credentials (cheap local check).
+  // Only resolve (potentially refreshing tokens over the network) for the
+  // selected provider — the rest are resolved lazily on first use.
   await Promise.all(
     allProviders.map(async (p) => {
       const stored = await authStorage.getCredentials(p);
       if (stored) {
         loggedInProviders.push(p);
-        try {
-          const resolved = await authStorage.resolveCredentials(p);
+        // Eagerly populate static API-key providers (no network call)
+        if (
+          p === "glm" ||
+          p === "moonshot" ||
+          p === "xiaomi" ||
+          p === "minimax"
+        ) {
           credentialsByProvider[p] = {
-            accessToken: resolved.accessToken,
-            accountId: resolved.accountId,
-            baseUrl: resolved.baseUrl,
+            accessToken: stored.accessToken,
+            accountId: stored.accountId,
+            baseUrl: stored.baseUrl,
           };
-        } catch {
-          // Token refresh failed — still mark as logged in
         }
       }
     }),
   );
+
+  // Resolve the selected provider's credentials (may refresh OAuth token)
+  if (provider !== "ollama" && loggedInProviders.includes(provider)) {
+    try {
+      const resolved = await authStorage.resolveCredentials(provider);
+      credentialsByProvider[provider] = {
+        accessToken: resolved.accessToken,
+        accountId: resolved.accountId,
+        baseUrl: resolved.baseUrl,
+      };
+    } catch {
+      // Token refresh failed — fallback logic below will handle it
+    }
+  }
 
   // Ollama runs locally — always available, no auth needed
   loggedInProviders.push("ollama");
@@ -512,14 +532,24 @@ async function runInkTUI(opts: {
     setEstimatorModel(effectiveModel);
   }
 
-  // Ensure project-local .gg directories exist and discover agents/skills — all in parallel
+  // Ensure project-local .gg directories exist, discover agents/skills, and
+  // start session loading — all in parallel to minimize startup latency.
   const localGGDir = path.join(cwd, ".gg");
-  const [, , , agents, skills] = await Promise.all([
+  const sessionManager = new SessionManager(paths.sessionsDir);
+  const resumePathPromise =
+    opts.resumeSessionPath
+      ? Promise.resolve(opts.resumeSessionPath)
+      : opts.continueRecent
+        ? sessionManager.getMostRecent(cwd)
+        : Promise.resolve(null);
+
+  const [, , , agents, skills, resumePath] = await Promise.all([
     fs.promises.mkdir(path.join(localGGDir, "skills"), { recursive: true }),
     fs.promises.mkdir(path.join(localGGDir, "commands"), { recursive: true }),
     fs.promises.mkdir(path.join(localGGDir, "agents"), { recursive: true }),
     discoverAgents({ globalAgentsDir: paths.agentsDir, projectDir: cwd }),
     discoverSkills({ globalSkillsDir: paths.skillsDir, projectDir: cwd }),
+    resumePathPromise,
   ]);
 
   // Build system prompt & tools (with sub-agent support)
@@ -544,20 +574,21 @@ async function runInkTUI(opts: {
     onExitPlan: (planPath) => onExitPlanRef.current(planPath),
   });
 
-  // Connect MCP servers
+  // Start MCP server connections in the background — don't block startup.
+  // The promise is passed to the App which merges tools once they resolve.
   const mcpManager = new MCPClientManager();
-  try {
-    const providerApiKey =
-      effectiveProvider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
-    const mcpTools = await mcpManager.connectAll(getMCPServers(effectiveProvider, providerApiKey));
-    tools.push(...mcpTools);
-  } catch (err) {
-    log(
-      "WARN",
-      "mcp",
-      `MCP initialization failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+  const providerApiKey =
+    effectiveProvider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
+  const pendingMCPTools = mcpManager
+    .connectAll(getMCPServers(effectiveProvider, providerApiKey))
+    .catch((err) => {
+      log(
+        "WARN",
+        "mcp",
+        `MCP initialization failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [] as AgentTool[];
+    });
 
   // Kill all background processes on exit (synchronous — catches all exit paths)
   process.on("exit", () => {
@@ -568,15 +599,9 @@ async function runInkTUI(opts: {
   // Seed messages with system prompt
   const messages: Message[] = [{ role: "system" as const, content: systemPrompt }];
 
-  // Session management — create or reuse session file
-  const sessionManager = new SessionManager(paths.sessionsDir);
+  // Session management — resume or create session file
   let sessionPath: string | undefined;
   let initialHistory: CompletedItem[] | undefined;
-
-  // Determine which session to resume (explicit path or most recent)
-  const resumePath =
-    opts.resumeSessionPath ??
-    (opts.continueRecent ? await sessionManager.getMostRecent(cwd) : null);
 
   if (resumePath) {
     try {
@@ -656,6 +681,7 @@ async function runInkTUI(opts: {
     onEnterPlanRef,
     onExitPlanRef,
     skills,
+    pendingMCPTools,
   });
 
   closeLogger();

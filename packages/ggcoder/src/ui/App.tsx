@@ -495,6 +495,8 @@ export interface AppProps {
   onEnterPlanRef?: { current: (reason?: string) => void };
   onExitPlanRef?: { current: (planPath: string) => Promise<string> };
   skills?: Skill[];
+  /** Deferred MCP tools — resolved after UI renders to avoid blocking startup. */
+  pendingMCPTools?: Promise<AgentTool[]>;
 }
 
 // ── App Component ──────────────────────────────────────────
@@ -535,6 +537,20 @@ export function App(props: AppProps) {
       setHistory((prev) => compactHistory([...prev, ...trimFlushedItems(props.initialHistory!)]));
     }
   }, [isRestoredSession, props.initialHistory]);
+  // Deferred MCP tools — connect in the background so it doesn't block startup
+  useEffect(() => {
+    if (!props.pendingMCPTools) return;
+    let cancelled = false;
+    props.pendingMCPTools.then((mcpTools) => {
+      if (!cancelled && mcpTools.length > 0) {
+        setCurrentTools((prev) => [...prev, ...mcpTools]);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.pendingMCPTools]);
+
   // Items from the current/last turn — rendered in the live area so they stay visible
   const [liveItems, setLiveItems] = useState<CompletedItem[]>([]);
   const [overlay, setOverlay] = useState<"model" | "tasks" | "skills" | "plan" | null>(null);

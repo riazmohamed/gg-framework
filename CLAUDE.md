@@ -73,6 +73,12 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 - **Compaction** (`core/compaction/compactor.ts`): Triggers at 80% context usage. Keeps system message + recent ~20K tokens intact. Middle section summarized via LLM (tool calls → text, thinking stripped, results truncated). Falls back to extractive summary on failure.
 - **Sessions** (`core/session-manager.ts`): Append-only JSONL with DAG structure (leafId for branching). Streams line-by-line for large files. `repairToolPairs()` fixes interrupted sessions on restore.
 - **Auth**: OAuth PKCE for Anthropic and OpenAI; static API keys for GLM, Moonshot, Xiaomi, MiniMax, and Ollama. All credentials stored in `~/.gg/auth.json`.
+- **Startup** (`cli.ts`): Optimized for fast time-to-interactive. Key patterns:
+  - Auto-update check is fire-and-forget (never blocks)
+  - OSC 11 theme detection is skipped on WSL (always times out)
+  - Only the active provider's credentials are resolved at startup; other providers are checked locally without network calls
+  - MCP server connections are deferred — started in background, tools merged into UI via `pendingMCPTools` promise + `useEffect`
+  - Session resume path, agent/skill discovery, and directory creation all run in parallel
 - **UI**: Ink 6 + React 19. Slash commands split between UI-handled (`App.tsx`: `/model`, `/compact`, `/quit`, `/clear`) and registry (`core/slash-commands.ts`: `/help`, `/settings`, `/session`, `/new`, `/router`).
 
 ## Organization Rules
