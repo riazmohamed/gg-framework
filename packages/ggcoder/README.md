@@ -21,6 +21,8 @@ The CLI that sits on top of the [GG Framework](../../README.md). Built on [`@abu
 npm i -g @abukhaled/ogcoder
 ```
 
+**Windows users:** OG Coder runs inside WSL. See the [WSL installation guide](../../docs/INSTALL-WSL.md) for step-by-step setup.
+
 ---
 
 ## Getting started

@@ -43,6 +43,8 @@ npm i @abukhaled/gg-agent       # Streaming + agent loop
 npm i -g @abukhaled/ogcoder     # The full CLI
 ```
 
+**Windows users:** OG Coder runs inside WSL. See the [WSL installation guide](docs/INSTALL-WSL.md) for step-by-step setup.
+
 ---
 
 ## For developers
