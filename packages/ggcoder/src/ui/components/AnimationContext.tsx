@@ -94,19 +94,39 @@ export function deriveFrame(tick: number, intervalMs: number, frameCount: number
   return Math.floor((tick * TICK_INTERVAL) / intervalMs) % frameCount;
 }
 
+/** Detect WSL by checking for "microsoft" or "WSL" in the kernel release string. */
+let _isWSL: boolean | undefined;
+function isWSL(): boolean {
+  if (_isWSL !== undefined) return _isWSL;
+  if (process.platform === "win32") {
+    _isWSL = true;
+    return true;
+  }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const os = require("node:os");
+    const release: string = os.release();
+    _isWSL = /microsoft|WSL/i.test(release);
+  } catch {
+    _isWSL = false;
+  }
+  return _isWSL;
+}
+
 /**
  * Check if reduced-motion is requested.
  * Respects NO_MOTION and REDUCE_MOTION env vars.
  *
- * On Windows, reduced motion is enabled by default because Ink's live-area
- * re-renders (driven by the 100ms animation tick) cause Windows Terminal to
- * force-scroll the viewport to the cursor — making it impossible to scroll
- * up while the agent is running. Users can override with REDUCE_MOTION=0.
+ * On Windows and WSL, reduced motion is enabled by default because Ink's
+ * live-area re-renders (driven by the 100ms animation tick) cause the
+ * terminal viewport to force-scroll to the cursor — making it impossible
+ * to scroll up while the agent is running. Users can override with
+ * REDUCE_MOTION=0.
  */
 export function useReducedMotion(): boolean {
   if (process.env.NO_MOTION || process.env.REDUCE_MOTION === "1") return true;
   if (process.env.REDUCE_MOTION === "0") return false;
-  return process.platform === "win32";
+  return isWSL();
 }
 
 export { TICK_INTERVAL };

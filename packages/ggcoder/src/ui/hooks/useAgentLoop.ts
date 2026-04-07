@@ -259,10 +259,12 @@ export function useAgentLoop(
         let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
         let streamTextDirty = false;
         let streamThinkingDirty = false;
-        // On Windows, Ink's live-area redraws cause the terminal viewport to
-        // snap back to the bottom. Throttle to 200ms to reduce scroll-jumping
+        // On Windows/WSL, Ink's live-area redraws cause the terminal viewport
+        // to snap back to the bottom. Throttle to 200ms to reduce scroll-jumping
         // while still providing responsive streaming output.
-        const STREAM_FLUSH_MS = process.platform === "win32" ? 200 : 16;
+        const isWinOrWSL =
+          process.platform === "win32" || /microsoft|WSL/i.test(require("node:os").release());
+        const STREAM_FLUSH_MS = isWinOrWSL ? 200 : 16;
 
         const flushStreamState = () => {
           streamFlushTimer = null;
