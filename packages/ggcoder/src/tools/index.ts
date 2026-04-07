@@ -9,6 +9,7 @@ import { createGrepTool } from "./grep.js";
 import { createLsTool } from "./ls.js";
 import { createSubAgentTool } from "./subagent.js";
 import { createWebFetchTool } from "./web-fetch.js";
+import { createWebSearchTool } from "./web-search.js";
 import { createTaskOutputTool } from "./task-output.js";
 import { createTaskStopTool } from "./task-stop.js";
 import { createTasksTool } from "./tasks.js";
@@ -59,6 +60,11 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
     createTasksTool(cwd),
   ];
 
+  // Add web search tool for providers without reliable native web search
+  if (opts?.provider && opts.provider !== "anthropic") {
+    tools.push(createWebSearchTool());
+  }
+
   if (opts?.agents && opts.agents.length > 0 && opts.provider && opts.model) {
     tools.push(createSubAgentTool(cwd, opts.agents, opts.provider, opts.model, planModeRef));
   }
@@ -86,6 +92,7 @@ export { createFindTool } from "./find.js";
 export { createGrepTool } from "./grep.js";
 export { createLsTool } from "./ls.js";
 export { createWebFetchTool } from "./web-fetch.js";
+export { createWebSearchTool } from "./web-search.js";
 export { createTaskOutputTool } from "./task-output.js";
 export { createTaskStopTool } from "./task-stop.js";
 export { createTasksTool } from "./tasks.js";
