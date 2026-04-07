@@ -1,3 +1,4 @@
+import os from "node:os";
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
 
 /**
@@ -103,10 +104,7 @@ function isWSL(): boolean {
     return true;
   }
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const os = require("node:os");
-    const release: string = os.release();
-    _isWSL = /microsoft|WSL/i.test(release);
+    _isWSL = /microsoft|WSL/i.test(os.release());
   } catch {
     _isWSL = false;
   }

@@ -1,3 +1,4 @@
+import os from "node:os";
 import { useState, useRef, useCallback, useEffect } from "react";
 import {
   agentLoop,
@@ -262,8 +263,7 @@ export function useAgentLoop(
         // On Windows/WSL, Ink's live-area redraws cause the terminal viewport
         // to snap back to the bottom. Throttle to 200ms to reduce scroll-jumping
         // while still providing responsive streaming output.
-        const isWinOrWSL =
-          process.platform === "win32" || /microsoft|WSL/i.test(require("node:os").release());
+        const isWinOrWSL = process.platform === "win32" || /microsoft|WSL/i.test(os.release());
         const STREAM_FLUSH_MS = isWinOrWSL ? 200 : 16;
 
         const flushStreamState = () => {
