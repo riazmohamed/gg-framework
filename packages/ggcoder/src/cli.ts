@@ -39,6 +39,7 @@ import { renderSessionSelector } from "./ui/sessions.js";
 import type { CompletedItem } from "./ui/App.js";
 import { formatUserError } from "./utils/error-handler.js";
 import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { ThemeName } from "./ui/theme/theme.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import { SessionManager } from "./core/session-manager.js";
 import { ensureAppDirs, getAppPaths, loadSavedSettings } from "./config.js";
@@ -395,7 +396,7 @@ async function runInkTUI(opts: {
   thinkingLevel?: ThinkingLevel;
   continueRecent?: boolean;
   resumeSessionPath?: string;
-  theme?: "auto" | "dark" | "light";
+  theme?: "auto" | ThemeName;
 }): Promise<void> {
   const { provider, model, cwd } = opts;
 

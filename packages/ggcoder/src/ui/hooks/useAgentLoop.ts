@@ -117,6 +117,8 @@ export interface UseAgentLoopReturn {
   charCountRef: React.RefObject<number>;
   /** Accumulated real tokens from completed turns */
   realTokensAccumRef: React.RefObject<number>;
+  /** Run start timestamp ref — for smooth elapsed time computation */
+  runStartRef: React.RefObject<number>;
   linesChanged: { added: number; removed: number };
 }
 
@@ -722,6 +724,7 @@ export function useAgentLoop(
     retryInfo,
     stallError,
     elapsedMs,
+    runStartRef,
     thinkingMs,
     isThinking,
     streamedTokenEstimate,

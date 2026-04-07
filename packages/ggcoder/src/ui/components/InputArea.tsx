@@ -80,6 +80,47 @@ function getSelectionRange(anchor: number | null, cur: number): [number, number]
   return [Math.min(anchor, cur), Math.max(anchor, cur)];
 }
 
+// ── Kill Ring (module-level, persists across renders) ─────
+const KILL_RING_MAX = 10;
+const killRing: string[] = [];
+let killRingIndex = 0;
+let lastActionWasKill = false;
+let lastActionWasYank = false;
+let lastYankStart = 0;
+let lastYankLength = 0;
+
+function pushKill(text: string, direction: "append" | "prepend"): void {
+  if (!text) return;
+  if (lastActionWasKill && killRing.length > 0) {
+    killRing[0] = direction === "append" ? killRing[0] + text : text + killRing[0];
+  } else {
+    killRing.unshift(text);
+    if (killRing.length > KILL_RING_MAX) killRing.pop();
+  }
+  lastActionWasKill = true;
+  lastActionWasYank = false;
+}
+
+function yankText(): string {
+  return killRing[0] ?? "";
+}
+
+function recordYank(start: number, length: number): void {
+  lastYankStart = start;
+  lastYankLength = length;
+  lastActionWasYank = true;
+  killRingIndex = 0;
+}
+
+function yankPop(): { text: string; start: number; length: number } | null {
+  if (!lastActionWasYank || killRing.length <= 1) return null;
+  killRingIndex = (killRingIndex + 1) % killRing.length;
+  const text = killRing[killRingIndex];
+  const result = { text, start: lastYankStart, length: lastYankLength };
+  lastYankLength = text.length;
+  return result;
+}
+
 export interface PasteInfo {
   offset: number; // char index where paste starts in value
   length: number; // char length of pasted content
@@ -170,6 +211,29 @@ export function InputArea({
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const historyRef = useRef<string[]>([]);
   const historyIndexRef = useRef(-1);
+
+  // ── Ctrl+R history search state ──────────────────────────
+  const [searchMode, setSearchMode] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchFailed, setSearchFailed] = useState(false);
+  const searchIndexRef = useRef(0);
+  const savedInputRef = useRef("");
+  const savedCursorRef = useRef(0);
+
+  const findNextMatch = (query: string, startFrom: number) => {
+    if (!query) return;
+    for (let i = startFrom; i >= 0; i--) {
+      if (historyRef.current[i]?.toLowerCase().includes(query.toLowerCase())) {
+        searchIndexRef.current = i;
+        setValue(historyRef.current[i]);
+        const matchPos = historyRef.current[i].toLowerCase().lastIndexOf(query.toLowerCase());
+        setCursor(matchPos + query.length);
+        setSearchFailed(false);
+        return;
+      }
+    }
+    setSearchFailed(true);
+  };
   const lastEscRef = useRef(0);
   const { columns } = useTerminalSize();
   const [menuIndex, setMenuIndex] = useState(0);
@@ -524,6 +588,76 @@ export function InputArea({
       // Filter out stray mouse escape sequences so they don't get inserted as text
       if (isMouseEscapeSequence(input)) return;
 
+      // Reset kill ring accumulation for non-kill keys
+      const isKillKey = key.ctrl && (input === "k" || input === "u" || input === "w");
+      if (!isKillKey) lastActionWasKill = false;
+      const isYankKey = (key.ctrl && input === "y") || (key.meta && input === "y");
+      if (!isYankKey) lastActionWasYank = false;
+
+      // ── Ctrl+R history search mode ───────────────────────
+      if (key.ctrl && input === "r" && !disabled) {
+        if (!searchMode) {
+          savedInputRef.current = value;
+          savedCursorRef.current = cursor;
+          setSearchMode(true);
+          setSearchQuery("");
+          setSearchFailed(false);
+          searchIndexRef.current = historyRef.current.length;
+        } else {
+          // Already searching — find next match
+          findNextMatch(searchQuery, searchIndexRef.current - 1);
+        }
+        return;
+      }
+
+      // When search mode is active, intercept all keystrokes
+      if (searchMode) {
+        if (key.escape || (key.ctrl && input === "g")) {
+          // Cancel — restore original
+          setSearchMode(false);
+          setValue(savedInputRef.current);
+          setCursor(savedCursorRef.current);
+          return;
+        }
+        if (key.return) {
+          // Accept match and submit
+          setSearchMode(false);
+          return; // fall through to normal submit handling
+        }
+        if (key.backspace || key.delete) {
+          const newQuery = searchQuery.slice(0, -1);
+          setSearchQuery(newQuery);
+          if (!newQuery) {
+            setSearchMode(false);
+            setValue(savedInputRef.current);
+            setCursor(savedCursorRef.current);
+          } else {
+            searchIndexRef.current = historyRef.current.length;
+            findNextMatch(newQuery, searchIndexRef.current - 1);
+          }
+          return;
+        }
+        if (
+          key.rightArrow ||
+          (key.ctrl && input === "f") ||
+          (key.ctrl && input === "a") ||
+          (key.ctrl && input === "e")
+        ) {
+          // Accept match, exit search, keep value
+          setSearchMode(false);
+          return;
+        }
+        // Regular character — append to search query
+        if (input.length === 1 && !key.ctrl && !key.meta) {
+          const newQuery = searchQuery + input;
+          setSearchQuery(newQuery);
+          searchIndexRef.current = historyRef.current.length;
+          findNextMatch(newQuery, searchIndexRef.current - 1);
+          return;
+        }
+        return; // absorb all other keys during search
+      }
+
       // Ctrl+T toggles task overlay — works even while agent is running
       if (key.ctrl && input === "t") {
         onToggleTasks?.();
@@ -619,7 +753,7 @@ export function InputArea({
         process.exit(0);
       }
 
-      // Ctrl+W — delete previous word (or selection)
+      // Ctrl+W — kill previous word → push to kill ring
       if (key.ctrl && input === "w") {
         const sel = deleteSelection();
         if (sel) {
@@ -627,10 +761,57 @@ export function InputArea({
           setCursor(sel.newCursor);
         } else if (cursor > 0) {
           const boundary = prevWordBoundary(value, cursor);
+          const killed = value.slice(boundary, cursor);
+          pushKill(killed, "prepend");
           setValue((v) => v.slice(0, boundary) + v.slice(cursor));
           setCursor(boundary);
         }
         setSelectionAnchor(null);
+        return;
+      }
+
+      // Ctrl+K — kill from cursor to end of line → push to kill ring
+      if (key.ctrl && input === "k") {
+        const killed = value.slice(cursor);
+        if (killed) {
+          pushKill(killed, "append");
+          setValue(value.slice(0, cursor));
+        }
+        return;
+      }
+
+      // Ctrl+U — kill from cursor to start of line → push to kill ring
+      if (key.ctrl && input === "u") {
+        const killed = value.slice(0, cursor);
+        if (killed) {
+          pushKill(killed, "prepend");
+          setValue(value.slice(cursor));
+          setCursor(0);
+        }
+        return;
+      }
+
+      // Ctrl+Y — yank from kill ring
+      if (key.ctrl && input === "y") {
+        const text = yankText();
+        if (text) {
+          const start = cursor;
+          setValue(value.slice(0, cursor) + text + value.slice(cursor));
+          setCursor(cursor + text.length);
+          recordYank(start, text.length);
+        }
+        return;
+      }
+
+      // Alt+Y — yank-pop: cycle through kill ring after a yank
+      if (key.meta && input === "y") {
+        const pop = yankPop();
+        if (pop) {
+          const before = value.slice(0, pop.start);
+          const after = value.slice(pop.start + pop.length);
+          setValue(before + pop.text + after);
+          setCursor(pop.start + pop.text.length);
+        }
         return;
       }
 
@@ -967,9 +1148,16 @@ export function InputArea({
 
             return (
               <Box>
-                <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
-                  {PROMPT}
-                </Text>
+                {searchMode ? (
+                  <Text color={searchFailed ? theme.error : theme.inputPrompt} bold>
+                    {searchFailed ? "(fail)" : "(i-search)"}
+                    {`'${searchQuery}': `}
+                  </Text>
+                ) : (
+                  <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
+                    {PROMPT}
+                  </Text>
+                )}
                 <Text color={theme.text}>{displayStr.slice(0, cursorInDisplay)}</Text>
                 <Text color={theme.text} inverse={cursorVisible}>
                   {cursorInDisplay < displayStr.length ? displayStr[cursorInDisplay] : " "}

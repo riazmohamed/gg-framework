@@ -1,6 +1,17 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { Box, Text, Static, useStdout } from "ink";
 import { useTerminalSize } from "./hooks/useTerminalSize.js";
+import { useDoublePress } from "./hooks/useDoublePress.js";
+import {
+  useTaskBarStore,
+  useTaskBarPolling,
+  focusTaskBar,
+  exitTaskBar,
+  expandTaskBar,
+  collapseTaskBar,
+  navigateTaskBar,
+  killTask,
+} from "./stores/taskbar-store.js";
 import crypto, { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -28,10 +39,11 @@ import { PlanOverlay } from "./components/PlanOverlay.js";
 import { ModelSelector } from "./components/ModelSelector.js";
 import { TaskOverlay } from "./components/TaskOverlay.js";
 import { SkillsOverlay } from "./components/SkillsOverlay.js";
+import { ThemeSelector } from "./components/ThemeSelector.js";
 import { BackgroundTasksBar } from "./components/BackgroundTasksBar.js";
 import type { SlashCommandInfo } from "./components/SlashCommandMenu.js";
-import type { ProcessManager, BackgroundProcess } from "../core/process-manager.js";
-import { useTheme } from "./theme/theme.js";
+import type { ProcessManager } from "../core/process-manager.js";
+import { useTheme, useSetTheme, type ThemeName } from "./theme/theme.js";
 import {
   useAnimationTick,
   useAnimationActive,
@@ -44,7 +56,7 @@ import { getModel, getContextWindow } from "../core/model-registry.js";
 import { SessionManager, type MessageEntry } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
 import { generateSessionTitle } from "../utils/session-title.js";
-import { SettingsManager } from "../core/settings-manager.js";
+import { SettingsManager, type Settings } from "../core/settings-manager.js";
 import { shouldCompact, compact } from "../core/compaction/compactor.js";
 import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
 import { PROMPT_COMMANDS, getPromptCommand } from "../core/prompt-commands.js";
@@ -61,7 +73,12 @@ import {
 import type { MCPClientManager } from "../core/mcp/index.js";
 import { getMCPServers } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
-import { trimFlushedItems, flushOnTurnText, flushOnTurnEnd } from "./live-item-flush.js";
+import {
+  trimFlushedItems,
+  flushOnTurnText,
+  flushOnTurnEnd,
+  flushOverflow,
+} from "./live-item-flush.js";
 import { Buddy } from "./buddy/Buddy.js";
 
 // ── Provider Error Hints ──────────────────────────────────
@@ -140,6 +157,8 @@ interface ToolStartItem {
   name: string;
   args: Record<string, unknown>;
   id: string;
+  /** Live progress output (e.g., bash streaming stdout). */
+  progressOutput?: string;
 }
 
 interface ToolDoneItem {
@@ -500,11 +519,13 @@ export interface AppProps {
 
 export function App(props: AppProps) {
   const theme = useTheme();
+  const switchTheme = useSetTheme();
   const { stdout } = useStdout();
   const { columns, resizeKey } = useTerminalSize();
 
   // Hoisted before terminal title hook so it can reference them
   const [lastUserMessage, setLastUserMessage] = useState("");
+  const [exitPending, setExitPending] = useState(false);
   const [planMode, setPlanMode] = useState(false);
   const planModeLocalRef = useRef(false);
   planModeLocalRef.current = planMode;
@@ -536,7 +557,9 @@ export function App(props: AppProps) {
   }, [isRestoredSession, props.initialHistory]);
   // Items from the current/last turn — rendered in the live area so they stay visible
   const [liveItems, setLiveItems] = useState<CompletedItem[]>([]);
-  const [overlay, setOverlay] = useState<"model" | "tasks" | "skills" | "plan" | null>(null);
+  const [overlay, setOverlay] = useState<"model" | "tasks" | "skills" | "plan" | "theme" | null>(
+    null,
+  );
   const [taskCount, setTaskCount] = useState(() => getTaskCount(props.cwd));
   const [runAllTasks, setRunAllTasks] = useState(false);
   const runAllTasksRef = useRef(false);
@@ -824,68 +847,26 @@ export function App(props: AppProps) {
     [currentModel, compactConversation],
   );
 
-  // ── Background task bar state ───────────────────────────
-  const [bgTasks, setBgTasks] = useState<BackgroundProcess[]>([]);
-  const [taskBarFocused, setTaskBarFocused] = useState(false);
-  const [taskBarExpanded, setTaskBarExpanded] = useState(false);
-  const [selectedTaskIndex, setSelectedTaskIndex] = useState(0);
+  // ── Background task bar state (external store) ──────────
+  const {
+    bgTasks,
+    focused: taskBarFocused,
+    expanded: taskBarExpanded,
+    selectedIndex: selectedTaskIndex,
+  } = useTaskBarStore();
+  useTaskBarPolling(props.processManager);
 
-  // Poll ProcessManager every 2s for running tasks
-  useEffect(() => {
-    if (!props.processManager) return;
-    const pm = props.processManager;
-    const poll = () => {
-      const running = pm.list().filter((p) => p.exitCode === null);
-      setBgTasks(running);
-    };
-    poll();
-    const interval = setInterval(poll, 2000);
-    return () => clearInterval(interval);
-  }, [props.processManager]);
-
-  // Auto-exit task panel when all tasks gone
-  useEffect(() => {
-    if (bgTasks.length === 0) {
-      setTaskBarFocused(false);
-      setTaskBarExpanded(false);
-    }
-    // Clamp selected index
-    const maxIdx = Math.min(bgTasks.length, 5) - 1;
-    if (selectedTaskIndex > maxIdx && maxIdx >= 0) {
-      setSelectedTaskIndex(maxIdx);
-    }
-  }, [bgTasks.length, selectedTaskIndex]);
-
-  const handleFocusTaskBar = useCallback(() => {
-    if (bgTasks.length > 0) {
-      setTaskBarFocused(true);
-    }
-  }, [bgTasks.length]);
-
-  const handleTaskBarExit = useCallback(() => {
-    setTaskBarFocused(false);
-    setTaskBarExpanded(false);
-  }, []);
-
-  const handleTaskBarExpand = useCallback(() => {
-    setTaskBarExpanded(true);
-    setSelectedTaskIndex(0);
-  }, []);
-
-  const handleTaskBarCollapse = useCallback(() => {
-    setTaskBarExpanded(false);
-  }, []);
-
+  const handleFocusTaskBar = useCallback(() => focusTaskBar(), []);
+  const handleTaskBarExit = useCallback(() => exitTaskBar(), []);
+  const handleTaskBarExpand = useCallback(() => expandTaskBar(), []);
+  const handleTaskBarCollapse = useCallback(() => collapseTaskBar(), []);
   const handleTaskKill = useCallback(
     (id: string) => {
-      props.processManager?.stop(id);
+      if (props.processManager) killTask(props.processManager, id);
     },
     [props.processManager],
   );
-
-  const handleTaskNavigate = useCallback((index: number) => {
-    setSelectedTaskIndex(index);
-  }, []);
+  const handleTaskNavigate = useCallback((index: number) => navigateTaskBar(index), []);
 
   // Resolve fresh OAuth credentials before each agent loop run.
   // Falls back to the static props when authStorage is not available.
@@ -1104,6 +1085,27 @@ export function App(props: AppProps) {
         [],
       ),
       onToolUpdate: useCallback((toolCallId: string, update: unknown) => {
+        const u = update as Record<string, unknown>;
+
+        // Bash progress streaming — append output to tool_start item
+        if (u.type === "bash_progress") {
+          setLiveItems((prev) => {
+            const idx = prev.findIndex(
+              (item) => item.kind === "tool_start" && item.toolCallId === toolCallId,
+            );
+            if (idx === -1) return prev;
+            const item = prev[idx] as ToolStartItem;
+            const next = [...prev];
+            next[idx] = {
+              ...item,
+              progressOutput: (item.progressOutput ?? "") + String(u.output ?? ""),
+            };
+            return next;
+          });
+          return;
+        }
+
+        // Subagent updates
         setLiveItems((prev) => {
           const groupIdx = prev.findIndex((item) => item.kind === "subagent_group");
           if (groupIdx === -1) return prev;
@@ -1230,6 +1232,13 @@ export function App(props: AppProps) {
               const { flushed, remaining } = partitionCompleted(updated);
               if (flushed.length > 0) {
                 queueFlush(flushed);
+                return remaining;
+              }
+              // Overflow flush: if live area is still large, flush aggressively
+              const overflow = flushOverflow(updated);
+              if (overflow.flushed.length > 0) {
+                queueFlush(overflow.flushed);
+                return overflow.remaining;
               }
               return remaining;
             });
@@ -1542,6 +1551,12 @@ export function App(props: AppProps) {
         return;
       }
 
+      // Handle /theme — open theme selector overlay
+      if (trimmed === "/theme" || trimmed === "/t") {
+        setOverlay("theme");
+        return;
+      }
+
       // Handle /plan — toggle plan mode
       if (trimmed === "/plan" || trimmed === "/plan on") {
         setPlanMode(true);
@@ -1785,14 +1800,16 @@ export function App(props: AppProps) {
     [agentLoop, props.onSlashCommand, compactConversation],
   );
 
+  const handleDoubleExit = useDoublePress(setExitPending, () => process.exit(0));
+
   const handleAbort = useCallback(() => {
     if (agentLoop.isRunning) {
       agentLoop.clearQueue();
       agentLoop.abort();
     } else {
-      process.exit(0);
+      handleDoubleExit();
     }
-  }, [agentLoop]);
+  }, [agentLoop, handleDoubleExit]);
 
   const handleToggleThinking = useCallback(() => {
     setThinkingEnabled((prev) => {
@@ -1884,6 +1901,25 @@ export function App(props: AppProps) {
     [props.settingsFile, props.mcpManager, props.credentialsByProvider, props.authStorage],
   );
 
+  const handleThemeSelect = useCallback(
+    (name: ThemeName) => {
+      setOverlay(null);
+      if (switchTheme) {
+        switchTheme(name);
+      }
+      // Persist to settings
+      if (props.settingsFile) {
+        const sm = new SettingsManager(props.settingsFile);
+        sm.load().then(() => sm.set("theme", name as Settings["theme"]));
+      }
+      setLiveItems((prev) => [
+        ...prev,
+        { kind: "info", text: `Theme switched to: ${name}`, id: getId() },
+      ]);
+    },
+    [switchTheme, props.settingsFile],
+  );
+
   // All available slash commands for the command palette
   const allCommands = useMemo<SlashCommandInfo[]>(
     () => [
@@ -1891,6 +1927,7 @@ export function App(props: AppProps) {
       { name: "compact", aliases: ["c"], description: "Compact conversation" },
       { name: "clear", aliases: [], description: "Clear session and terminal" },
       { name: "quit", aliases: ["q", "exit"], description: "Exit the agent" },
+      { name: "theme", aliases: ["t"], description: "Switch theme" },
       { name: "plan", aliases: [], description: "Toggle plan mode (on/off)" },
       { name: "plans", aliases: [], description: "Open plans pane" },
       ...PROMPT_COMMANDS.map((cmd) => ({
@@ -1955,7 +1992,15 @@ export function App(props: AppProps) {
           />
         );
       case "tool_start":
-        return <ToolExecution key={item.id} status="running" name={item.name} args={item.args} />;
+        return (
+          <ToolExecution
+            key={item.id}
+            status="running"
+            name={item.name}
+            args={item.args}
+            progressOutput={(item as ToolStartItem).progressOutput}
+          />
+        );
       case "tool_done":
         return (
           <ToolExecution
@@ -2020,7 +2065,7 @@ export function App(props: AppProps) {
         return (
           <Box key={item.id} marginTop={1} flexShrink={1}>
             <Text color={theme.planPrimary} bold wrap="wrap">
-              {item.active ? "⊞ " : "⊟ "}
+              {item.active ? "● " : "● "}
               {item.text}
             </Text>
           </Box>
@@ -2303,6 +2348,7 @@ export function App(props: AppProps) {
               <ActivityIndicator
                 phase={agentLoop.activityPhase}
                 elapsedMs={agentLoop.elapsedMs}
+                runStartRef={agentLoop.runStartRef}
                 thinkingMs={agentLoop.thinkingMs}
                 isThinking={agentLoop.isThinking}
                 tokenEstimate={agentLoop.streamedTokenEstimate}
@@ -2388,6 +2434,12 @@ export function App(props: AppProps) {
               currentModel={currentModel}
               currentProvider={currentProvider}
             />
+          ) : overlay === "theme" ? (
+            <ThemeSelector
+              onSelect={handleThemeSelect}
+              onCancel={() => setOverlay(null)}
+              currentTheme={theme.name}
+            />
           ) : (
             <Footer
               model={currentModel}
@@ -2396,6 +2448,7 @@ export function App(props: AppProps) {
               gitBranch={gitBranch}
               thinkingEnabled={thinkingEnabled}
               planMode={planMode}
+              exitPending={exitPending}
             />
           )}
           {/* Buddy companion */}

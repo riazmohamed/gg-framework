@@ -128,6 +128,55 @@ export function flushOnTurnText<T extends FlushableItem>(liveItems: T[]): T[] {
 }
 
 /**
+ * Aggressive overflow flush: when live items exceed a threshold, flush all
+ * completed items except the last few to keep the live area bounded.
+ * This enables terminal scrollback access during long multi-tool runs.
+ *
+ * Returns { flushed, remaining }. Call this on every tool_start/tool_end
+ * when liveItems.length > threshold.
+ */
+const OVERFLOW_THRESHOLD = 8;
+const KEEP_RECENT = 3;
+
+export function flushOverflow<T extends FlushableItem>(
+  liveItems: T[],
+): { flushed: T[]; remaining: T[] } {
+  if (liveItems.length <= OVERFLOW_THRESHOLD) {
+    return { flushed: [], remaining: liveItems };
+  }
+
+  // Find the last active item (tool_start, running tool_group, server_tool_start)
+  let lastActiveIdx = -1;
+  for (let i = liveItems.length - 1; i >= 0; i--) {
+    const item = liveItems[i];
+    if (
+      item.kind === "tool_start" ||
+      item.kind === "server_tool_start" ||
+      (item.kind === "tool_group" &&
+        ((item as unknown as { tools: { status: string }[] }).tools ?? []).some(
+          (t) => t.status === "running",
+        ))
+    ) {
+      lastActiveIdx = i;
+      break;
+    }
+  }
+
+  // Keep at least KEEP_RECENT items + everything from the last active item onward
+  const keepFrom =
+    lastActiveIdx >= 0
+      ? Math.min(lastActiveIdx, liveItems.length - KEEP_RECENT)
+      : liveItems.length - KEEP_RECENT;
+  const splitAt = Math.max(0, keepFrom);
+
+  if (splitAt === 0) {
+    return { flushed: [], remaining: liveItems };
+  }
+
+  return { flushed: liveItems.slice(0, splitAt), remaining: liveItems.slice(splitAt) };
+}
+
+/**
  * Called when `onTurnEnd` fires with a tool_use stop reason (LLM responded
  * with only tool calls, no text). Flushes all items IF none are still pending
  * (no `tool_start` without a corresponding `tool_done`).

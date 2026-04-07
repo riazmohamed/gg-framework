@@ -12,101 +12,123 @@ interface SummarySegment {
   color?: string;
 }
 
+const BLUE = "#60a5fa";
+
+// ── Per-tool group renderers (registry pattern) ──────────
+
+type GroupRenderer = (tools: ToolGroupTool[], allDone: boolean) => SummarySegment[][];
+
+function renderGrepGroup(tools: ToolGroupTool[], allDone: boolean): SummarySegment[][] {
+  const n = tools.length;
+  return [
+    allDone
+      ? [
+          { text: "Searched", bold: true, color: BLUE },
+          { text: " for ", bold: false },
+          { text: String(n), bold: true },
+          { text: ` pattern${n !== 1 ? "s" : ""}`, bold: false },
+        ]
+      : [
+          { text: "Searching", bold: true, color: BLUE },
+          { text: " for ", bold: false },
+          { text: String(n), bold: true },
+          { text: ` pattern${n !== 1 ? "s" : ""}`, bold: false },
+        ],
+  ];
+}
+
+function renderReadGroup(tools: ToolGroupTool[], allDone: boolean): SummarySegment[][] {
+  const paths = tools
+    .map((t) => {
+      const fp = String(t.args?.file_path ?? "");
+      const segs = fp.split("/");
+      return segs.length <= 2 ? fp : "\u2026/" + segs.slice(-2).join("/");
+    })
+    .filter(Boolean);
+  const maxPaths = 3;
+  const shown = paths.slice(0, maxPaths);
+  const extra = paths.length - maxPaths;
+
+  return [
+    allDone
+      ? [
+          { text: "Read ", bold: true, color: BLUE },
+          { text: shown.join(", "), bold: false },
+          ...(extra > 0 ? [{ text: ` +${extra} more`, bold: false }] : []),
+        ]
+      : [
+          { text: "Reading ", bold: true, color: BLUE },
+          { text: shown.join(", "), bold: false },
+          ...(extra > 0 ? [{ text: ` +${extra} more`, bold: false }] : []),
+        ],
+  ];
+}
+
+function renderFindGroup(tools: ToolGroupTool[], allDone: boolean): SummarySegment[][] {
+  const n = tools.length;
+  return [
+    allDone
+      ? [
+          { text: "Found", bold: true, color: BLUE },
+          { text: " files for ", bold: false },
+          { text: String(n), bold: true },
+          { text: ` pattern${n !== 1 ? "s" : ""}`, bold: false },
+        ]
+      : [
+          { text: "Finding", bold: true, color: BLUE },
+          { text: " files for ", bold: false },
+          { text: String(n), bold: true },
+          { text: ` pattern${n !== 1 ? "s" : ""}`, bold: false },
+        ],
+  ];
+}
+
+function renderLsGroup(tools: ToolGroupTool[], allDone: boolean): SummarySegment[][] {
+  const n = tools.length;
+  return [
+    allDone
+      ? [
+          { text: "Listed", bold: true, color: BLUE },
+          { text: " ", bold: false },
+          { text: String(n), bold: true },
+          { text: ` director${n !== 1 ? "ies" : "y"}`, bold: false },
+        ]
+      : [
+          { text: "Listing", bold: true, color: BLUE },
+          { text: " ", bold: false },
+          { text: String(n), bold: true },
+          { text: ` director${n !== 1 ? "ies" : "y"}`, bold: false },
+        ],
+  ];
+}
+
+/** Registry of group renderers by tool name. Add new entries to support grouping for additional tools. */
+const GROUP_RENDERERS: Record<string, GroupRenderer> = {
+  grep: renderGrepGroup,
+  read: renderReadGroup,
+  find: renderFindGroup,
+  ls: renderLsGroup,
+};
+
+// ── Summary builder ──────────────────────────────────────
+
 function buildGroupSummary(tools: ToolGroupTool[], allDone: boolean): SummarySegment[] {
-  const counts: Record<string, number> = {};
+  // Group tools by name
+  const byName: Record<string, ToolGroupTool[]> = {};
   for (const t of tools) {
-    counts[t.name] = (counts[t.name] ?? 0) + 1;
+    (byName[t.name] ??= []).push(t);
   }
 
   const parts: SummarySegment[][] = [];
-
-  const BLUE = "#60a5fa";
-
-  if (counts.grep) {
-    const n = counts.grep;
-    parts.push(
-      allDone
-        ? [
-            { text: "Searched", bold: true, color: BLUE },
-            { text: " for ", bold: false },
-            { text: String(n), bold: true },
-            { text: ` pattern${n !== 1 ? "s" : ""}`, bold: false },
-          ]
-        : [
-            { text: "Searching", bold: true, color: BLUE },
-            { text: " for ", bold: false },
-            { text: String(n), bold: true },
-            { text: ` pattern${n !== 1 ? "s" : ""}`, bold: false },
-          ],
-    );
-  }
-  if (counts.read) {
-    // Show abbreviated file paths instead of just counts
-    const readTools = tools.filter((t) => t.name === "read");
-    const paths = readTools
-      .map((t) => {
-        const fp = String(t.args?.file_path ?? "");
-        const segs = fp.split("/");
-        return segs.length <= 2 ? fp : "…/" + segs.slice(-2).join("/");
-      })
-      .filter(Boolean);
-    const maxPaths = 3;
-    const shown = paths.slice(0, maxPaths);
-    const extra = paths.length - maxPaths;
-
-    parts.push(
-      allDone
-        ? [
-            { text: "Read ", bold: true, color: BLUE },
-            { text: shown.join(", "), bold: false },
-            ...(extra > 0 ? [{ text: ` +${extra} more`, bold: false }] : []),
-          ]
-        : [
-            { text: "Reading ", bold: true, color: BLUE },
-            { text: shown.join(", "), bold: false },
-            ...(extra > 0 ? [{ text: ` +${extra} more`, bold: false }] : []),
-          ],
-    );
-  }
-  if (counts.find) {
-    const n = counts.find;
-    parts.push(
-      allDone
-        ? [
-            { text: "found", bold: true, color: BLUE },
-            { text: " files for ", bold: false },
-            { text: String(n), bold: true },
-            { text: ` pattern${n !== 1 ? "s" : ""}`, bold: false },
-          ]
-        : [
-            { text: "finding", bold: true, color: BLUE },
-            { text: " files for ", bold: false },
-            { text: String(n), bold: true },
-            { text: ` pattern${n !== 1 ? "s" : ""}`, bold: false },
-          ],
-    );
-  }
-  if (counts.ls) {
-    const n = counts.ls;
-    parts.push(
-      allDone
-        ? [
-            { text: "listed", bold: true, color: BLUE },
-            { text: " ", bold: false },
-            { text: String(n), bold: true },
-            { text: ` director${n !== 1 ? "ies" : "y"}`, bold: false },
-          ]
-        : [
-            { text: "listing", bold: true, color: BLUE },
-            { text: " ", bold: false },
-            { text: String(n), bold: true },
-            { text: ` director${n !== 1 ? "ies" : "y"}`, bold: false },
-          ],
-    );
+  for (const [name, toolsOfType] of Object.entries(byName)) {
+    const renderer = GROUP_RENDERERS[name];
+    if (renderer) {
+      parts.push(...renderer(toolsOfType, allDone));
+    }
   }
 
   if (parts.length === 0) {
-    return [{ text: allDone ? "Done" : "Working…", bold: false }];
+    return [{ text: allDone ? "Done" : "Working\u2026", bold: false }];
   }
 
   // Capitalize first segment
@@ -127,6 +149,8 @@ function buildGroupSummary(tools: ToolGroupTool[], allDone: boolean): SummarySeg
   return segments;
 }
 
+// ── Components ───────────────────────────────────────────
+
 function SummaryText({ segments }: { segments: SummarySegment[] }) {
   return (
     <>
@@ -139,30 +163,20 @@ function SummaryText({ segments }: { segments: SummarySegment[] }) {
   );
 }
 
-export function ToolGroupExecution({ tools }: { tools: ToolGroupTool[] }) {
-  const allDone = tools.every((t) => t.status === "done");
-  const doneCount = tools.filter((t) => t.status === "done").length;
-  const toolNames = tools.map((t) => t.name).join(",");
-  const segments = useMemo(
-    () => buildGroupSummary(tools, allDone),
-    // Re-compute when tool composition or completion status changes
-    [toolNames, doneCount, allDone],
-  );
+interface ToolGroupExecutionProps {
+  tools: ToolGroupTool[];
+}
 
-  if (!allDone) {
-    return (
-      <Box marginTop={1} flexDirection="row">
-        <ToolUseLoader status="running" />
-        <Text wrap="wrap">
-          <SummaryText segments={segments} />
-        </Text>
-      </Box>
-    );
-  }
+export function ToolGroupExecution({ tools }: ToolGroupExecutionProps) {
+  const allDone = tools.every((t) => t.status === "done");
+  const hasError = tools.some((t) => t.isError);
+  const status = allDone ? (hasError ? "error" : "done") : "running";
+
+  const segments = useMemo(() => buildGroupSummary(tools, allDone), [tools, allDone]);
 
   return (
-    <Box marginTop={1} flexDirection="row" flexShrink={1}>
-      <ToolUseLoader status="done" />
+    <Box marginTop={1} flexDirection="row">
+      <ToolUseLoader status={status} />
       <Text wrap="wrap">
         <SummaryText segments={segments} />
       </Text>

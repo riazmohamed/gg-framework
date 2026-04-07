@@ -12,6 +12,7 @@ interface FooterProps {
   gitBranch?: string | null;
   thinkingEnabled?: boolean;
   planMode?: boolean;
+  exitPending?: boolean;
 }
 
 // Model ID → short display name
@@ -50,6 +51,7 @@ export function Footer({
   gitBranch,
   thinkingEnabled,
   planMode,
+  exitPending,
 }: FooterProps) {
   const theme = useTheme();
   const { columns } = useTerminalSize();
@@ -133,6 +135,14 @@ export function Footer({
       <Text color={thinkingEnabled ? theme.accent : theme.textDim}>{thinkingText}</Text>
     </>
   );
+
+  if (exitPending) {
+    return (
+      <Box paddingLeft={1} paddingRight={1} width={columns}>
+        <Text color={theme.warning}>Press Ctrl+C again to exit</Text>
+      </Box>
+    );
+  }
 
   if (fitsOnOneLine) {
     return (

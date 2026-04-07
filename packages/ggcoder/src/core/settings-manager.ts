@@ -12,7 +12,17 @@ const SettingsSchema = z.object({
   maxTokens: z.number().int().min(256).default(16384),
   thinkingEnabled: z.boolean().default(false),
   thinkingLevel: z.enum(["low", "medium", "high", "max"]).optional(),
-  theme: z.enum(["auto", "dark", "light"]).default("auto"),
+  theme: z
+    .enum([
+      "auto",
+      "dark",
+      "light",
+      "dark-ansi",
+      "light-ansi",
+      "dark-daltonized",
+      "light-daltonized",
+    ])
+    .default("auto"),
   showTokenUsage: z.boolean().default(true),
   showThinking: z.boolean().default(true),
   enabledTools: z.array(z.string()).optional(),
