@@ -676,22 +676,11 @@ async function runLogin(): Promise<void> {
         console.log(chalk.hex("#ef4444")("No API key provided. Login cancelled."));
         return;
       }
-      let baseUrl: string | undefined;
-      if (provider === "xiaomi") {
-        const urlInput = await rl.question(
-          chalk.hex("#60a5fa")(
-            `Base URL ${chalk.hex("#6b7280")("(Enter for default, or paste token plan URL)")}: `,
-          ),
-        );
-        if (urlInput.trim()) {
-          baseUrl = urlInput.trim();
-        }
-      }
       creds = {
         accessToken: apiKey.trim(),
         refreshToken: "",
         expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000 * 100, // ~100 years
-        ...(baseUrl ? { baseUrl } : {}),
+        ...(provider === "xiaomi" ? { baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1" } : {}),
       } satisfies OAuthCredentials;
     } else {
       creds =
