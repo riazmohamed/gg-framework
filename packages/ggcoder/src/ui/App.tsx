@@ -591,7 +591,9 @@ export function App(props: AppProps) {
   const persistedIndexRef = useRef(messagesRef.current.length);
   /** Last actual API-reported input token count (from turn_end). */
   const lastActualTokensRef = useRef(0);
-  /** Timestamp of last compaction — used for time-based cooldown. */
+  /** Timestamp (ms) when lastActualTokensRef was last updated by turn_end. */
+  const lastActualTokensTimestampRef = useRef(0);
+  /** Timestamp of last compaction — used for time-based cooldown and staleness detection. */
   const lastCompactionTimeRef = useRef(0);
 
   const getId = () => String(nextIdRef.current++);
@@ -766,21 +768,27 @@ export function App(props: AppProps) {
           approvedPlanPath: approvedPlanPathRef.current,
         });
 
-        // Replace spinner with completed notice
-        setLiveItems((prev) =>
-          prev.map((item) =>
-            item.id === spinId
-              ? ({
-                  kind: "compacted",
-                  originalCount: result.result.originalCount,
-                  newCount: result.result.newCount,
-                  tokensBefore: result.result.tokensBeforeEstimate,
-                  tokensAfter: result.result.tokensAfterEstimate,
-                  id: spinId,
-                } as CompactedItem)
-              : item,
-          ),
-        );
+        if (result.result.compacted) {
+          // Replace spinner with completed notice
+          setLiveItems((prev) =>
+            prev.map((item) =>
+              item.id === spinId
+                ? ({
+                    kind: "compacted",
+                    originalCount: result.result.originalCount,
+                    newCount: result.result.newCount,
+                    tokensBefore: result.result.tokensBeforeEstimate,
+                    tokensAfter: result.result.tokensAfterEstimate,
+                    id: spinId,
+                  } as CompactedItem)
+                : item,
+            ),
+          );
+        } else {
+          // Nothing was actually compacted — remove spinner silently
+          log("INFO", "compaction", `Compaction skipped: ${result.result.reason ?? "unknown"}`);
+          setLiveItems((prev) => prev.filter((item) => item.id !== spinId));
+        }
 
         return result.messages;
       } catch (err) {
@@ -820,7 +828,6 @@ export function App(props: AppProps) {
       if (options?.force) {
         const result = await compactConversation(messages);
         lastCompactionTimeRef.current = Date.now();
-        lastActualTokensRef.current = 0; // Reset stale pre-compaction count
         return result;
       }
 
@@ -833,13 +840,20 @@ export function App(props: AppProps) {
       }
 
       const contextWindow = getContextWindow(currentModel);
-      // Prefer actual API-reported tokens over char-based estimate
+      // Prefer actual API-reported tokens over char-based estimate, but only
+      // when the token count was recorded AFTER the most recent compaction.
+      // A count from before compaction is stale — it reflects the old context
+      // size and would trigger compaction again immediately for no reason.
+      const tokensFresh = lastActualTokensTimestampRef.current > lastCompactionTimeRef.current;
       const actualTokens =
-        lastActualTokensRef.current > 0 ? lastActualTokensRef.current : undefined;
+        lastActualTokensRef.current > 0 && tokensFresh ? lastActualTokensRef.current : undefined;
       if (shouldCompact(messages, contextWindow, threshold, actualTokens)) {
+        const before = messages.length;
         const result = await compactConversation(messages);
         lastCompactionTimeRef.current = Date.now();
-        lastActualTokensRef.current = 0; // Reset stale pre-compaction count
+        // If compaction was a no-op (e.g. too few middle messages to summarize),
+        // return the original reference so the agent loop doesn't replace messages.
+        if (result.length === before) return messages;
         return result;
       }
       return messages;
@@ -1334,6 +1348,7 @@ export function App(props: AppProps) {
           const inputContext = usage.inputTokens + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
           lastActualTokensRef.current =
             currentProvider === "anthropic" ? inputContext : inputContext + usage.outputTokens;
+          lastActualTokensTimestampRef.current = Date.now();
           // For tool-only turns (no text), flush completed items to Static so
           // liveItems doesn't grow unbounded across consecutive tool-only turns.
           setLiveItems((prev) => {
@@ -1533,6 +1548,9 @@ export function App(props: AppProps) {
         // Clear terminal screen + scrollback — needed because Ink's <Static>
         // writes directly to stdout and can't be removed by clearing React state
         stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+        // Discard any items queued for two-phase flush so they don't leak
+        // into the new session after the Static remount.
+        pendingFlushRef.current = [];
         setHistory([{ kind: "banner", id: "banner" }]);
         setLiveItems([]);
         setDoneStatus(null);
@@ -1543,10 +1561,14 @@ export function App(props: AppProps) {
         void (async () => {
           const newPrompt = await buildSystemPrompt(props.cwd, props.skills, planMode, undefined);
           messagesRef.current = [{ role: "system" as const, content: newPrompt }];
+          persistedIndexRef.current = messagesRef.current.length;
         })();
         agentLoop.reset();
         setSessionTitle(undefined);
         sessionTitleGeneratedRef.current = false;
+        // Bump staticKey to force Ink's <Static> to remount, discarding its
+        // internal record of previously rendered items so they don't reappear.
+        setStaticKey((k) => k + 1);
         setLiveItems([{ kind: "info", text: "Session cleared.", id: getId() }]);
         return;
       }
