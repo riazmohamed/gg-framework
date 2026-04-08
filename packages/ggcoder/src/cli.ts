@@ -15,14 +15,30 @@ process.on("unhandledRejection", (reason) => {
   throw reason;
 });
 
-// Drain performance entries to prevent buffer overflow warning from dependencies
+// Drain ALL performance entries to prevent unbounded memory growth.
+// Node emits entries for marks, measures, resource timing (HTTP), DNS, net, etc.
+// Without clearing, these accumulate across every LLM call and tool execution.
 import { PerformanceObserver, performance } from "node:perf_hooks";
-new PerformanceObserver((list) => {
-  for (const entry of list.getEntries()) {
-    if (entry.entryType === "measure") performance.clearMeasures(entry.name);
-    else if (entry.entryType === "mark") performance.clearMarks(entry.name);
-  }
-}).observe({ entryTypes: ["measure", "mark"] });
+{
+  const allTypes = PerformanceObserver.supportedEntryTypes.filter(
+    (t) => t !== "gc" && t !== "function",
+  );
+  new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      switch (entry.entryType) {
+        case "measure":
+          performance.clearMeasures(entry.name);
+          break;
+        case "mark":
+          performance.clearMarks(entry.name);
+          break;
+        case "resource":
+          performance.clearResourceTimings();
+          break;
+      }
+    }
+  }).observe({ entryTypes: allTypes });
+}
 
 import { parseArgs } from "node:util";
 import fs from "node:fs";
