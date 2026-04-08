@@ -258,7 +258,7 @@ function remapToolCallId(id: string, idMap: Map<string, string>): string {
 
 export function toOpenAIMessages(
   messages: Message[],
-  options?: { provider?: string },
+  options?: { provider?: string; thinking?: boolean },
 ): OpenAI.ChatCompletionMessageParam[] {
   const out: OpenAI.ChatCompletionMessageParam[] = [];
   const idMap = new Map<string, string>();
@@ -355,10 +355,14 @@ export function toOpenAIMessages(
         ...(hasToolCalls ? { tool_calls: toolCalls } : {}),
       };
       // Attach reasoning_content for multi-turn thinking coherence (non-standard field).
-      // Only send when the model actually returned thinking content — never fabricate
-      // empty/space values, as GLM silently hangs and other providers may reject them.
+      // When thinking content exists, always include it for round-tripping.
+      // When thinking is enabled but no content exists (e.g. after compaction),
+      // Moonshot/Kimi requires reasoning_content on assistant tool_call messages —
+      // default to empty string.  GLM silently hangs on empty values, so skip it there.
       if (thinkingParts) {
         (assistantMsg as unknown as Record<string, unknown>).reasoning_content = thinkingParts;
+      } else if (options?.thinking && hasToolCalls && options.provider !== "glm") {
+        (assistantMsg as unknown as Record<string, unknown>).reasoning_content = "";
       }
       out.push(assistantMsg);
       continue;

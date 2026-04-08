@@ -37,7 +37,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const usesThinkingParam =
     options.provider === "glm" || options.provider === "moonshot" || options.provider === "xiaomi";
 
-  const messages = toOpenAIMessages(options.messages, { provider: options.provider });
+  const messages = toOpenAIMessages(options.messages, {
+    provider: options.provider,
+    thinking: !!options.thinking,
+  });
 
   // GLM models default to 0.6 temperature when not in thinking mode
   const defaultTemp = options.provider === "glm" ? 0.6 : undefined;
