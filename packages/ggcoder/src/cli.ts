@@ -387,6 +387,7 @@ function main(): void {
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.5";
     if (p === "minimax") return "MiniMax-M2.7";
+    if (p === "openrouter") return "qwen/qwen3.6-plus";
     return "claude-opus-4-6";
   }
 
@@ -447,7 +448,15 @@ async function runInkTUI(opts: {
   const creds = await authStorage.resolveCredentials(provider);
 
   // Detect all logged-in providers and preload their credentials
-  const allProviders: Provider[] = ["anthropic", "xiaomi", "openai", "glm", "moonshot", "minimax"];
+  const allProviders: Provider[] = [
+    "anthropic",
+    "xiaomi",
+    "openai",
+    "glm",
+    "moonshot",
+    "minimax",
+    "openrouter",
+  ];
   const loggedInProviders: Provider[] = [];
   const credentialsByProvider: Record<
     string,
@@ -677,7 +686,8 @@ async function runLogin(): Promise<void> {
       provider === "glm" ||
       provider === "moonshot" ||
       provider === "xiaomi" ||
-      provider === "minimax"
+      provider === "minimax" ||
+      provider === "openrouter"
     ) {
       const keyLabel =
         provider === "glm"
@@ -686,7 +696,9 @@ async function runLogin(): Promise<void> {
             ? "Xiaomi MiMo"
             : provider === "minimax"
               ? "MiniMax"
-              : "Moonshot";
+              : provider === "openrouter"
+                ? "OpenRouter"
+                : "Moonshot";
       const apiKey = await rl.question(chalk.hex("#60a5fa")(`Paste your ${keyLabel} API key: `));
       if (!apiKey.trim()) {
         console.log(chalk.hex("#ef4444")("No API key provided. Login cancelled."));
@@ -1465,6 +1477,7 @@ function displayName(provider: Provider): string {
   if (provider === "glm") return "Z.AI (GLM)";
   if (provider === "moonshot") return "Moonshot";
   if (provider === "minimax") return "MiniMax";
+  if (provider === "openrouter") return "OpenRouter";
   return "OpenAI";
 }
 

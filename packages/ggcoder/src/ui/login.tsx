@@ -35,6 +35,7 @@ const PROVIDERS: { label: string; value: Provider; description: string }[] = [
   { label: "Z.AI (GLM)", value: "glm", description: "GLM-5, GLM-4.7" },
   { label: "Moonshot", value: "moonshot", description: "Kimi K2.5" },
   { label: "MiniMax", value: "minimax", description: "MiniMax M2.7, M2.7 Highspeed" },
+  { label: "OpenRouter", value: "openrouter", description: "Qwen3.6-Plus, multi-provider gateway" },
 ];
 
 function gradientLine(text: string): string {

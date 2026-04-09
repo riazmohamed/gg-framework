@@ -2,7 +2,15 @@ import type { z } from "zod";
 
 // ── Providers ──────────────────────────────────────────────
 
-export type Provider = "anthropic" | "xiaomi" | "openai" | "glm" | "moonshot" | "minimax" | "palsu";
+export type Provider =
+  | "anthropic"
+  | "xiaomi"
+  | "openai"
+  | "glm"
+  | "moonshot"
+  | "minimax"
+  | "openrouter"
+  | "palsu";
 
 // ── Thinking ───────────────────────────────────────────────
 

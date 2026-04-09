@@ -331,7 +331,11 @@ export class AgentSession {
         // API-key providers (GLM, Moonshot) have no refresh mechanism — retrying
         // with the same key is pointless. Clear the credential and let the error
         // surface so the user knows to re-login with a valid key.
-        if (this.provider === "glm" || this.provider === "moonshot") {
+        if (
+          this.provider === "glm" ||
+          this.provider === "moonshot" ||
+          this.provider === "openrouter"
+        ) {
           log("WARN", "auth", `Got 401 for ${this.provider} — API key is invalid or revoked`);
           await this.authStorage.clearCredentials(this.provider);
           throw err;
