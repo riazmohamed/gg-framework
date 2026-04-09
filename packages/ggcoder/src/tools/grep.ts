@@ -21,6 +21,8 @@ const GrepParams = z.object({
 
 const DEFAULT_MAX_RESULTS = 50;
 const MAX_LINE_LENGTH = 500;
+/** Skip files larger than 10 MB — single-line files (minified JS, data blobs) can OOM readline */
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 export function createGrepTool(
   cwd: string,
@@ -93,6 +95,15 @@ async function searchFile(
 ): Promise<string[]> {
   const results: string[] = [];
   const relPath = path.relative(cwd, filePath);
+
+  // Skip oversized files — readline buffers entire lines in memory, so a single-line
+  // file (minified JS, data blobs) can exceed V8's max string length and crash.
+  try {
+    const fileStat = await ops.stat(filePath);
+    if (fileStat.size > MAX_FILE_SIZE) return results;
+  } catch {
+    return results;
+  }
 
   const stream = ops.createReadStream(filePath, "utf-8");
   try {
