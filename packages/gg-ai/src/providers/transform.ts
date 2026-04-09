@@ -242,16 +242,16 @@ export function toAnthropicThinking(
 // ── OpenAI Transforms ──────────────────────────────────────
 
 /**
- * Remap tool call IDs that don't match OpenAI's expected prefix.
- * Anthropic uses `toolu_*` IDs which OpenAI rejects — we need `call_*` prefixed IDs.
- * The mapping is consistent within a single conversion so assistant tool_call IDs
- * match their corresponding tool result references.
+ * Remap Anthropic `toolu_*` tool call IDs to `call_*` so OpenAI accepts them.
+ * Only Anthropic IDs need remapping — IDs from OpenAI-compatible providers
+ * (Moonshot, GLM, Xiaomi, MiniMax) are passed through unchanged to avoid
+ * breaking the provider's own ID validation.
  */
 function remapToolCallId(id: string, idMap: Map<string, string>): string {
-  if (id.startsWith("call_")) return id;
+  if (!id.startsWith("toolu_")) return id;
   const existing = idMap.get(id);
   if (existing) return existing;
-  const mapped = `call_${id.replace(/^toolu_/, "")}`;
+  const mapped = `call_${id.slice(5)}`;
   idMap.set(id, mapped);
   return mapped;
 }

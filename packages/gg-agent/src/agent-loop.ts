@@ -104,7 +104,9 @@ export function isToolPairingError(err: unknown): boolean {
   return (
     (msg.includes("tool_use") && msg.includes("tool_result")) ||
     msg.includes("unexpected `tool_use_id`") ||
-    msg.includes("tool_use ids found without")
+    msg.includes("tool_use ids found without") ||
+    // Moonshot/OpenAI-compatible: "tool call id <id> is not found"
+    (msg.includes("tool call id") && msg.includes("is not found"))
   );
 }
 
