@@ -22,7 +22,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsup",
     "check": "tsc --noEmit",
     "test": "vitest run"
   },
