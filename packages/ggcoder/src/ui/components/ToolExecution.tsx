@@ -7,7 +7,8 @@ import { MessageResponse } from "./MessageResponse.js";
 import { highlightCode, langFromPath } from "../utils/highlight.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { computeWordDiff, type WordSegment } from "../utils/word-diff.js";
-import { DASHED_H } from "../constants/figures.js";
+import { DiffFrame } from "./DiffFrame.js";
+import { NoSelect } from "./NoSelect.js";
 
 const MAX_OUTPUT_LINES = 4; // max lines shown per tool result
 
@@ -26,6 +27,8 @@ interface ToolRunningProps {
   status: "running";
   name: string;
   args: Record<string, unknown>;
+  /** Live progress output (e.g., bash streaming stdout). */
+  progressOutput?: string;
 }
 
 interface ToolDoneProps {
@@ -96,6 +99,30 @@ export function ToolExecution(props: ToolExecutionProps) {
     }
     // Non-compact tools keep the sparkle spinner with a blinking dot prefix
     const { label, detail } = getToolHeaderParts(props.name, props.args);
+
+    // Bash progress streaming — show last 3 lines of live output
+    if (props.name === "bash" && props.progressOutput) {
+      const progLines = props.progressOutput.split("\n").filter(Boolean);
+      const tail = progLines.slice(-3);
+      return (
+        <Box marginTop={1} flexDirection="column">
+          <Box flexDirection="row">
+            <ToolUseLoader status="running" />
+            <Spinner label={detail ? `${label}(${detail})` : label} />
+          </Box>
+          <MessageResponse>
+            <Box flexDirection="column">
+              {tail.map((line, i) => (
+                <Text key={i} color={theme.textDim} wrap="truncate">
+                  {truncateLine(line, columns - 8)}
+                </Text>
+              ))}
+            </Box>
+          </MessageResponse>
+        </Box>
+      );
+    }
+
     return (
       <Box marginTop={1} flexDirection="row">
         <ToolUseLoader status="running" />
@@ -539,10 +566,17 @@ function buildDiffBody(
   const endIdx = Math.min(numbered.length, lastChangeIdx + 3);
   const focused = numbered.slice(startIdx, endIdx);
 
-  // Compute word-level diffs for adjacent remove/add pairs
+  // Compute word-level diffs for adjacent remove/add pairs.
+  // Skip word-level diff when >40% of characters changed (becomes noise).
+  const CHANGE_THRESHOLD = 0.4;
   for (let i = 0; i < focused.length - 1; i++) {
     if (focused[i].type === "remove" && focused[i + 1].type === "add") {
       const segments = computeWordDiff(focused[i].content, focused[i + 1].content);
+      const totalLen = segments.reduce((sum, s) => sum + s.text.length, 0);
+      const changedLen = segments
+        .filter((s) => s.type !== "unchanged")
+        .reduce((sum, s) => sum + s.text.length, 0);
+      if (totalLen > 0 && changedLen / totalLen > CHANGE_THRESHOLD) continue;
       focused[i] = { ...focused[i], wordSegments: segments.filter((s) => s.type !== "added") };
       focused[i + 1] = {
         ...focused[i + 1],
@@ -551,12 +585,14 @@ function buildDiffBody(
     }
   }
 
-  // Highlight context lines using file extension
+  // Syntax-highlight ALL diff lines (not just context) — added/removed lines
+  // get language-aware coloring overlaid with the diff background colors.
   const filePath = String(args?.file_path ?? "");
   const lang = langFromPath(filePath);
-  const highlighted = focused.map((line) =>
-    line.type === "context" ? { ...line, content: highlightCode(line.content, lang) } : line,
-  );
+  const highlighted = focused.map((line) => ({
+    ...line,
+    content: highlightCode(line.content, lang),
+  }));
 
   const maxLineNo = highlighted.reduce((m, l) => Math.max(m, l.lineNo), 0);
   const padWidth = String(maxLineNo).length;
@@ -566,14 +602,7 @@ function buildDiffBody(
     <DiffLine key={i} line={line} padWidth={padWidth} />
   ));
 
-  // Wrap diff lines in a dashed border frame (top/bottom only)
-  const diffFrame = (
-    <Box key="diff-frame" flexDirection="column">
-      <Text color="#4b5563">{DASHED_H.repeat(40)}</Text>
-      {rendered}
-      <Text color="#4b5563">{DASHED_H.repeat(40)}</Text>
-    </Box>
-  );
+  const diffFrame = <DiffFrame key="diff-frame">{rendered}</DiffFrame>;
 
   return {
     lines: [
@@ -719,57 +748,69 @@ const DiffLine = memo(function DiffLine({
   padWidth: number;
 }) {
   const lineNo = String(line.lineNo).padStart(padWidth, " ");
+  const marker = line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
 
   if (line.type === "add") {
     const bgColor = "#16a34a";
-    const wordHighlight = "#bbf7d0"; // brighter green for changed words
+    const wordHighlight = "#bbf7d0";
     return (
-      <Text backgroundColor={bgColor} color="#ffffff">
-        {lineNo}
-        {"  "}
-        {line.wordSegments
-          ? line.wordSegments.map((seg, i) =>
-              seg.type === "added" ? (
-                <Text key={i} color={wordHighlight} bold>
-                  {seg.text}
-                </Text>
-              ) : (
-                <Text key={i}>{seg.text}</Text>
-              ),
-            )
-          : line.content}
-      </Text>
+      <Box flexDirection="row">
+        <NoSelect fromLeftEdge>
+          <Text backgroundColor={bgColor} color="#ffffff" dimColor>
+            {lineNo} {marker}{" "}
+          </Text>
+        </NoSelect>
+        <Text backgroundColor={bgColor} color="#ffffff">
+          {line.wordSegments
+            ? line.wordSegments.map((seg, i) =>
+                seg.type === "added" ? (
+                  <Text key={i} color={wordHighlight} bold>
+                    {seg.text}
+                  </Text>
+                ) : (
+                  <Text key={i}>{seg.text}</Text>
+                ),
+              )
+            : line.content}
+        </Text>
+      </Box>
     );
   }
   if (line.type === "remove") {
     const bgColor = "#dc2626";
-    const wordHighlight = "#fecaca"; // brighter red for changed words
+    const wordHighlight = "#fecaca";
     return (
-      <Text backgroundColor={bgColor} color="#ffffff">
-        {lineNo}
-        {"  "}
-        {line.wordSegments
-          ? line.wordSegments.map((seg, i) =>
-              seg.type === "removed" ? (
-                <Text key={i} color={wordHighlight} bold>
-                  {seg.text}
-                </Text>
-              ) : (
-                <Text key={i}>{seg.text}</Text>
-              ),
-            )
-          : line.content}
-      </Text>
+      <Box flexDirection="row">
+        <NoSelect fromLeftEdge>
+          <Text backgroundColor={bgColor} color="#ffffff" dimColor>
+            {lineNo} {marker}{" "}
+          </Text>
+        </NoSelect>
+        <Text backgroundColor={bgColor} color="#ffffff">
+          {line.wordSegments
+            ? line.wordSegments.map((seg, i) =>
+                seg.type === "removed" ? (
+                  <Text key={i} color={wordHighlight} bold>
+                    {seg.text}
+                  </Text>
+                ) : (
+                  <Text key={i}>{seg.text}</Text>
+                ),
+              )
+            : line.content}
+        </Text>
+      </Box>
     );
   }
   return (
-    <Text>
-      <Text color="#6b7280">
-        {lineNo}
-        {"  "}
-      </Text>
-      {line.content}
-    </Text>
+    <Box flexDirection="row">
+      <NoSelect fromLeftEdge>
+        <Text color="#6b7280">
+          {lineNo} {marker}{" "}
+        </Text>
+      </NoSelect>
+      <Text>{line.content}</Text>
+    </Box>
   );
 });
 

@@ -37,7 +37,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const usesThinkingParam =
     options.provider === "glm" || options.provider === "moonshot" || options.provider === "xiaomi";
 
-  const messages = toOpenAIMessages(options.messages, { provider: options.provider });
+  const messages = toOpenAIMessages(options.messages, {
+    provider: options.provider,
+    thinking: !!options.thinking,
+  });
 
   // GLM models default to 0.6 temperature when not in thinking mode
   const defaultTemp = options.provider === "glm" ? 0.6 : undefined;
@@ -61,17 +64,24 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     stream_options: { include_usage: true },
   };
 
-  // Inject provider-native web search tools (non-standard, bypass SDK types)
-  if (options.webSearch) {
-    if (options.provider === "moonshot") {
-      const raw = params as unknown as Record<string, unknown>;
-      const tools = ((raw.tools as unknown[]) ?? []).slice();
-      tools.push({ type: "builtin_function", function: { name: "$web_search" } });
-      raw.tools = tools;
+  // Native web search is disabled for OpenAI-compatible providers — ggcoder
+  // provides its own web_search/web_fetch tools which handle results properly.
+  // Moonshot's $web_search was previously injected here but it returns opaque
+  // results and triggers reasoning_content validation errors with thinking mode.
+
+  // prompt_cache_key helps bucket similar requests for better cache hit rates.
+  // Only send to providers known to support it (OpenAI, Moonshot/Kimi) — unknown
+  // params may cause errors on other OpenAI-compatible providers like GLM or Xiaomi.
+  if (options.provider === "openai" || options.provider === "moonshot") {
+    const paramsAny = params as unknown as Record<string, unknown>;
+    paramsAny.prompt_cache_key = "ggcoder";
+
+    // Map cacheRetention to OpenAI's prompt_cache_retention param.
+    // "long" → "24h" keeps cached prefixes active up to 24 hours (OpenAI feature).
+    const retention = options.cacheRetention ?? "short";
+    if (retention === "long") {
+      paramsAny.prompt_cache_retention = "24h";
     }
-    // Xiaomi: web search requires account-level webSearchEnabled flag
-    // GLM (Z.AI): web search is provided via MCP servers, not inline tools
-    // OpenAI: Chat Completions API does not support web search
   }
 
   // Inject custom thinking param for GLM/Moonshot/Xiaomi (not part of OpenAI spec)
@@ -129,6 +139,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       const details = chunk.usage.prompt_tokens_details;
       if (details?.cached_tokens) {
         cacheRead = details.cached_tokens;
+      }
+      // Kimi K2/K2.5 reports cached_tokens at the top level of usage
+      // rather than nested under prompt_tokens_details.
+      const usageAny = chunk.usage as unknown as Record<string, unknown>;
+      if (!cacheRead && typeof usageAny.cached_tokens === "number" && usageAny.cached_tokens > 0) {
+        cacheRead = usageAny.cached_tokens as number;
       }
       // OpenAI's prompt_tokens includes cached tokens; subtract to match
       // Anthropic's convention where inputTokens excludes cache hits.

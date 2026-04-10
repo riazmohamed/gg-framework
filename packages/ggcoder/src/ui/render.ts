@@ -7,10 +7,12 @@ import type { MCPClientManager } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
 import type { Skill } from "../core/skills.js";
 import { App, type CompletedItem } from "./App.js";
-import { ThemeContext, loadTheme } from "./theme/theme.js";
+import { ThemeContext, SetThemeContext, loadTheme, type ThemeName } from "./theme/theme.js";
 import { detectTheme } from "./theme/detect-theme.js";
 import { AnimationProvider } from "./components/AnimationContext.js";
 import { TerminalSizeProvider } from "./hooks/useTerminalSize.js";
+// Note: DEC 2026 synchronized output (BSU/ESU) is handled natively by Ink 6.8+
+// via its built-in write-synchronized.ts module — no manual wrapping needed.
 
 export interface RenderAppConfig {
   provider: Provider;
@@ -25,7 +27,7 @@ export interface RenderAppConfig {
   accountId?: string;
   cwd: string;
   version: string;
-  theme?: "auto" | "dark" | "light";
+  theme?: "auto" | ThemeName;
   showThinking?: boolean;
   showTokenUsage?: boolean;
   onSlashCommand?: (input: string) => Promise<string | null>;
@@ -49,18 +51,35 @@ export interface RenderAppConfig {
   pendingMCPTools?: Promise<AgentTool[]>;
 }
 
+/** Stateful theme provider — enables runtime theme switching via useSetTheme(). */
+function ThemeProvider({
+  initial,
+  children,
+}: React.PropsWithChildren<{
+  initial: ThemeName;
+}>) {
+  const [themeName, setThemeName] = React.useState(initial);
+  const theme = React.useMemo(() => loadTheme(themeName), [themeName]);
+  const setTheme = React.useCallback((name: ThemeName) => setThemeName(name), []);
+
+  return React.createElement(
+    SetThemeContext.Provider,
+    { value: setTheme },
+    React.createElement(ThemeContext.Provider, { value: theme }, children),
+  );
+}
+
 export async function renderApp(config: RenderAppConfig): Promise<void> {
   const themeSetting = config.theme ?? "auto";
   const resolvedTheme = themeSetting === "auto" ? await detectTheme() : themeSetting;
-  const theme = loadTheme(resolvedTheme);
 
   // Clear screen + scrollback so old commands don't appear above the TUI
   process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
 
   const { waitUntilExit, clear } = render(
     React.createElement(
-      ThemeContext.Provider,
-      { value: theme },
+      ThemeProvider,
+      { initial: resolvedTheme },
       React.createElement(
         TerminalSizeProvider,
         null,

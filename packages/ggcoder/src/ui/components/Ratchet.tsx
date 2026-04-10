@@ -31,8 +31,14 @@ export function Ratchet({ children, lock: _lock = "always" }: Props): React.Reac
     if (!innerRef.current) return;
     const { height } = measureElement(innerRef.current);
     const termRows = process.stdout.rows ?? 24;
-    if (height > maxHeight.current) {
-      maxHeight.current = Math.min(height, termRows);
+    // Cap live area to 80% of terminal to preserve scrollback access
+    const maxAllowed = Math.floor(termRows * 0.8);
+    if (height === 0) {
+      // Reset when live area is empty (between turns)
+      maxHeight.current = 0;
+      setMinHeight(0);
+    } else if (height > maxHeight.current) {
+      maxHeight.current = Math.min(height, maxAllowed);
       setMinHeight(maxHeight.current);
     }
   }, [children]);

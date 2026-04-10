@@ -5,12 +5,15 @@ import os from "node:os";
 
 const PACKAGE_NAME = "@abukhaled/ogcoder";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
-const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
-const FETCH_TIMEOUT_MS = 3000;
+const CHECK_INTERVAL_MS = 1 * 60 * 60 * 1000; // 1 hour
+const FETCH_TIMEOUT_MS = 10_000; // 10s — npm can be slow
 
 interface UpdateState {
   lastCheckedAt: number;
-  lastSeenVersion?: string;
+  latestVersion?: string;
+  updatePending?: boolean;
+  lastUpdateAttempt?: number;
+  updateFailed?: boolean;
 }
 
 enum PackageManager {
@@ -46,12 +49,6 @@ function writeState(state: UpdateState): void {
   } catch {
     // Non-fatal
   }
-}
-
-function shouldCheck(): boolean {
-  const state = readState();
-  if (!state) return true;
-  return Date.now() - state.lastCheckedAt > CHECK_INTERVAL_MS;
 }
 
 function compareVersions(a: string, b: string): number {
@@ -95,13 +92,16 @@ function detectInstallInfo(): InstallInfo {
   };
 }
 
+/**
+ * Fetch latest version from npm registry asynchronously.
+ */
 async function fetchLatestVersion(): Promise<string | null> {
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-    const res = await fetch(REGISTRY_URL, { signal: controller.signal });
-    clearTimeout(timer);
-    const data = (await res.json()) as { version?: string };
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    const response = await fetch(REGISTRY_URL, { signal: controller.signal });
+    clearTimeout(timeout);
+    const data = (await response.json()) as { version?: string };
     const version = data.version?.trim();
     return version && /^\d+\.\d+\.\d+/.test(version) ? version : null;
   } catch {
@@ -109,62 +109,150 @@ async function fetchLatestVersion(): Promise<string | null> {
   }
 }
 
-function performUpdate(command: string): Promise<boolean> {
-  const [cmd, ...args] = command.split(" ");
-  return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
-      stdio: "pipe",
+/**
+ * Perform the update in a detached background process so it doesn't block
+ * or interfere with the current CLI session. The update takes effect on
+ * the next launch.
+ */
+function performUpdateInBackground(command: string): void {
+  try {
+    const parts = command.split(" ");
+    const child = spawn(parts[0]!, parts.slice(1), {
+      detached: true,
+      stdio: "ignore",
       env: { ...process.env, npm_config_loglevel: "silent" },
     });
-    const timeout = setTimeout(() => {
-      child.kill();
-      resolve(false);
-    }, 60_000);
-    child.on("close", (code) => {
-      clearTimeout(timeout);
-      resolve(code === 0);
-    });
-    child.on("error", () => {
-      clearTimeout(timeout);
-      resolve(false);
-    });
-  });
+    child.unref();
+  } catch {
+    // Non-fatal — will retry next startup
+  }
 }
 
 /**
- * Check for updates and silently auto-update if a newer version is available.
- * Fully async so it never blocks CLI startup.
+ * Check for updates at CLI startup. Two-phase approach:
  *
- * Returns a message to display if an update happened, or null.
+ * Phase 1 (instant): If a previous background check found a newer version,
+ *   kick off a background update now. Non-blocking.
+ *
+ * Phase 2 (async): Fire off a background version check for the *next* startup.
+ *
+ * Returns a message to display, or null.
  */
 export async function checkAndAutoUpdate(currentVersion: string): Promise<string | null> {
   try {
-    if (!shouldCheck()) return null;
+    const state = readState();
+    let message: string | null = null;
 
-    const latestVersion = await fetchLatestVersion();
+    // Phase 1: Apply pending update from previous check
+    if (state?.updatePending && state.latestVersion) {
+      if (compareVersions(state.latestVersion, currentVersion) > 0) {
+        const info = detectInstallInfo();
+        if (info.updateCommand) {
+          // Run update in background — takes effect next launch
+          performUpdateInBackground(info.updateCommand);
+          message = `Updating ${PACKAGE_NAME} ${currentVersion} → ${state.latestVersion} (takes effect next launch)`;
 
-    // Always record that we checked
-    writeState({
-      lastCheckedAt: Date.now(),
-      lastSeenVersion: latestVersion ?? undefined,
-    });
-
-    if (!latestVersion) return null;
-    if (compareVersions(latestVersion, currentVersion) <= 0) return null;
-
-    const info = detectInstallInfo();
-    if (!info.updateCommand) return null;
-
-    const success = await performUpdate(info.updateCommand);
-
-    if (success) {
-      return `Updated ${PACKAGE_NAME} ${currentVersion} \u2192 ${latestVersion}`;
+          writeState({
+            ...state,
+            lastCheckedAt: Date.now(),
+            updatePending: false,
+            lastUpdateAttempt: Date.now(),
+          });
+        }
+      } else {
+        // Already on latest (user may have updated manually)
+        writeState({ ...state, updatePending: false });
+      }
     }
 
-    // Update failed — show manual instructions
-    return `Update available: ${currentVersion} \u2192 ${latestVersion}\nRun: ${info.updateCommand}`;
+    // Phase 2: Schedule background check for next startup
+    const shouldCheck = !state || Date.now() - state.lastCheckedAt > CHECK_INTERVAL_MS;
+    if (shouldCheck) {
+      scheduleBackgroundCheck(currentVersion);
+    }
+
+    return message;
   } catch {
-    // Never block CLI startup
     return null;
+  }
+}
+
+/**
+ * Fire-and-forget async version check. Updates the state file so the
+ * next startup knows whether an update is available.
+ */
+function scheduleBackgroundCheck(currentVersion: string): void {
+  fetchLatestVersion()
+    .then((latestVersion) => {
+      const newState: UpdateState = {
+        lastCheckedAt: Date.now(),
+        latestVersion: latestVersion ?? undefined,
+        updatePending: false,
+      };
+
+      if (latestVersion && compareVersions(latestVersion, currentVersion) > 0) {
+        newState.updatePending = true;
+      }
+
+      writeState(newState);
+    })
+    .catch(() => {
+      // Non-fatal — will retry next time
+    });
+}
+
+// ── In-session periodic check ──────────────────────────────────────────
+
+let periodicTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Start periodic update checks during a long-running session.
+ * Checks every hour. If an update is found, calls `onUpdate` with a message.
+ */
+export function startPeriodicUpdateCheck(
+  currentVersion: string,
+  onUpdate: (message: string) => void,
+): void {
+  if (periodicTimer) return; // Already running
+
+  periodicTimer = setInterval(() => {
+    fetchLatestVersion()
+      .then((latestVersion) => {
+        if (!latestVersion) return;
+        if (compareVersions(latestVersion, currentVersion) <= 0) return;
+
+        const info = detectInstallInfo();
+        if (!info.updateCommand) return;
+
+        // Mark pending for next startup
+        writeState({
+          lastCheckedAt: Date.now(),
+          latestVersion,
+          updatePending: true,
+        });
+
+        onUpdate(
+          `Update available: ${currentVersion} → ${latestVersion} (will update on next launch, or run: ${info.updateCommand})`,
+        );
+
+        // Stop checking once we've notified
+        stopPeriodicUpdateCheck();
+      })
+      .catch(() => {
+        // Non-fatal
+      });
+  }, CHECK_INTERVAL_MS);
+
+  // Don't keep the process alive just for update checks
+  periodicTimer.unref();
+}
+
+/**
+ * Stop periodic update checks.
+ */
+export function stopPeriodicUpdateCheck(): void {
+  if (periodicTimer) {
+    clearInterval(periodicTimer);
+    periodicTimer = null;
   }
 }

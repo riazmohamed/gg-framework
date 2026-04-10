@@ -64,6 +64,14 @@ providerRegistry.register("ollama", {
     }),
 });
 
+providerRegistry.register("openrouter", {
+  stream: (options) =>
+    streamOpenAI({
+      ...options,
+      baseUrl: options.baseUrl ?? "https://openrouter.ai/api/v1",
+    }),
+});
+
 providerRegistry.register("minimax", {
   stream: (options) =>
     streamAnthropic({

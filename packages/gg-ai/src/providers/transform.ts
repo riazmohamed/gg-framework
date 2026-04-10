@@ -260,23 +260,23 @@ export function toAnthropicThinking(
 // ── OpenAI Transforms ──────────────────────────────────────
 
 /**
- * Remap tool call IDs that don't match OpenAI's expected prefix.
- * Anthropic uses `toolu_*` IDs which OpenAI rejects — we need `call_*` prefixed IDs.
- * The mapping is consistent within a single conversion so assistant tool_call IDs
- * match their corresponding tool result references.
+ * Remap Anthropic `toolu_*` tool call IDs to `call_*` so OpenAI accepts them.
+ * Only Anthropic IDs need remapping — IDs from OpenAI-compatible providers
+ * (Moonshot, GLM, Xiaomi, MiniMax) are passed through unchanged to avoid
+ * breaking the provider's own ID validation.
  */
 function remapToolCallId(id: string, idMap: Map<string, string>): string {
-  if (id.startsWith("call_")) return id;
+  if (!id.startsWith("toolu_")) return id;
   const existing = idMap.get(id);
   if (existing) return existing;
-  const mapped = `call_${id.replace(/^toolu_/, "")}`;
+  const mapped = `call_${id.slice(5)}`;
   idMap.set(id, mapped);
   return mapped;
 }
 
 export function toOpenAIMessages(
   messages: Message[],
-  options?: { provider?: string },
+  options?: { provider?: string; thinking?: boolean },
 ): OpenAI.ChatCompletionMessageParam[] {
   const out: OpenAI.ChatCompletionMessageParam[] = [];
   const idMap = new Map<string, string>();
@@ -444,10 +444,14 @@ export function toOpenAIMessages(
         ...(hasToolCalls ? { tool_calls: toolCalls } : {}),
       };
       // Attach reasoning_content for multi-turn thinking coherence (non-standard field).
-      // Only send when the model actually returned thinking content — never fabricate
-      // empty/space values, as GLM silently hangs and other providers may reject them.
+      // When thinking content exists, always include it for round-tripping.
+      // When thinking is enabled but no content exists (e.g. after compaction),
+      // Moonshot/Kimi requires reasoning_content on assistant tool_call messages —
+      // default to empty string.  GLM silently hangs on empty values, so skip it there.
       if (thinkingParts) {
         (assistantMsg as unknown as Record<string, unknown>).reasoning_content = thinkingParts;
+      } else if (options?.thinking && hasToolCalls && options.provider !== "glm") {
+        (assistantMsg as unknown as Record<string, unknown>).reasoning_content = " ";
       }
       out.push(assistantMsg);
       continue;

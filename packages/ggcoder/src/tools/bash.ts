@@ -142,10 +142,18 @@ export function createBashTool(
           totalBytes += data.length;
           if (totalBytes > MAX_OUTPUT_BYTES) {
             outputCapped = true;
-            // Keep what we have — it'll be truncated by truncateTail anyway
             return;
           }
           chunks.push(data);
+
+          // Stream progress to UI for live output display
+          if (context.onUpdate) {
+            context.onUpdate({
+              type: "bash_progress",
+              output: data.toString("utf-8"),
+              totalBytes,
+            });
+          }
         };
         child.stdout?.on("data", onData);
         child.stderr?.on("data", onData);

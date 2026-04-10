@@ -187,6 +187,17 @@ export const MODELS: ModelInfo[] = [
     supportsImages: false,
     costTier: "medium",
   },
+  // ── OpenRouter ────────────────────────────────────────────
+  {
+    id: "qwen/qwen3.6-plus",
+    name: "Qwen3.6-Plus",
+    provider: "openrouter",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: false,
+    costTier: "medium",
+  },
   // ── Moonshot (Kimi) ──────────────────────────────────────
   {
     id: "kimi-k2.5",
@@ -255,6 +266,7 @@ export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.1")!;
   if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k2.5")!;
   if (provider === "minimax") return MODELS.find((m) => m.id === "MiniMax-M2.7")!;
+  if (provider === "openrouter") return MODELS.find((m) => m.id === "qwen/qwen3.6-plus")!;
   return MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
 }
 

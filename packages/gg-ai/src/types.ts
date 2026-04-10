@@ -10,6 +10,7 @@ export type Provider =
   | "ollama"
   | "xiaomi"
   | "minimax"
+  | "openrouter"
   | "palsu";
 
 // ── Thinking ───────────────────────────────────────────────

@@ -3,6 +3,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import type { Provider } from "@abukhaled/gg-ai";
+import type { ThemeName } from "./ui/theme/theme.js";
 
 export const APP_NAME = "ogcoder";
 export const VERSION = "0.0.1";
@@ -51,7 +52,7 @@ export interface SavedSettings {
   provider?: Provider;
   model?: string;
   thinkingEnabled: boolean;
-  theme: "auto" | "dark" | "light";
+  theme: "auto" | ThemeName;
 }
 
 /** Load saved settings from the settings file. Returns defaults on missing/invalid file. */
@@ -63,12 +64,25 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
     if (raw.defaultProvider) result.provider = raw.defaultProvider;
     if (raw.defaultModel) result.model = raw.defaultModel;
     if (raw.thinkingEnabled === true) result.thinkingEnabled = true;
-    if (raw.theme === "dark" || raw.theme === "light" || raw.theme === "auto")
-      result.theme = raw.theme;
+    if (typeof raw.theme === "string" && isValidThemeSetting(raw.theme)) result.theme = raw.theme;
   } catch {
     // No settings file or invalid JSON — use defaults
   }
   return result;
+}
+
+const VALID_THEME_SETTINGS = new Set<string>([
+  "auto",
+  "dark",
+  "light",
+  "dark-ansi",
+  "light-ansi",
+  "dark-daltonized",
+  "light-daltonized",
+]);
+
+function isValidThemeSetting(value: string): value is "auto" | ThemeName {
+  return VALID_THEME_SETTINGS.has(value);
 }
 
 /** Seed built-in agent definitions on first run (won't overwrite user edits). */

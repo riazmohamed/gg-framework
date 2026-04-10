@@ -28,6 +28,7 @@ export function ModelSelector({
     glm: "Z.AI",
     moonshot: "Moonshot",
     xiaomi: "Xiaomi",
+    openrouter: "OpenRouter",
   };
 
   const items = filtered.map((m) => {
