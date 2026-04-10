@@ -112,6 +112,8 @@ const ShimmerText: React.FC<{ text: string; color: string; shimmerPos: number }>
 interface ActivityIndicatorProps {
   phase: ActivityPhase;
   elapsedMs: number;
+  /** Run start time ref — for smooth elapsed time on each animation tick. */
+  runStartRef?: React.RefObject<number>;
   thinkingMs: number;
   isThinking: boolean;
   tokenEstimate: number;
@@ -131,13 +133,13 @@ const RETRY_REASON_LABELS: Record<RetryInfo["reason"], string> = {
   overloaded: "Provider overloaded",
   rate_limit: "Rate limited",
   empty_response: "Empty response",
-  context_overflow: "Context overflow, compacting",
   stream_stall: "Provider stream stalled",
 };
 
 export function ActivityIndicator({
   phase,
-  elapsedMs,
+  elapsedMs: elapsedMsProp,
+  runStartRef,
   thinkingMs,
   isThinking,
   tokenEstimate,
@@ -152,6 +154,11 @@ export function ActivityIndicator({
 }: ActivityIndicatorProps) {
   const theme = useTheme();
   const reducedMotion = useReducedMotion();
+
+  // Smooth elapsed time: compute from runStartRef on each animation tick
+  // instead of using the 1000ms state update (which looks jerky).
+  const elapsedMs =
+    runStartRef?.current && phase !== "idle" ? Date.now() - runStartRef.current : elapsedMsProp;
 
   // Use the global animation tick instead of a local timer.
   // This eliminates a duplicate 100ms setInterval that was causing

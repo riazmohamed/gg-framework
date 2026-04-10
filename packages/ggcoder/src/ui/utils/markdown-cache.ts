@@ -1,13 +1,12 @@
 import { createHash } from "node:crypto";
-import type { Token } from "marked";
 
 const MAX_SIZE = 500;
 
-/** Simple LRU cache for parsed markdown tokens. */
-class MarkdownLRUCache {
-  private cache = new Map<string, Token[]>();
+/** Simple LRU cache for rendered markdown ANSI strings. */
+class MarkdownAnsiCache {
+  private cache = new Map<string, string>();
 
-  get(body: string): Token[] | undefined {
+  get(body: string): string | undefined {
     const key = this.hash(body);
     const entry = this.cache.get(key);
     if (!entry) return undefined;
@@ -17,11 +16,11 @@ class MarkdownLRUCache {
     return entry;
   }
 
-  set(body: string, tokens: Token[]): void {
+  set(body: string, ansi: string): void {
     const key = this.hash(body);
     // Delete first to reset insertion order
     this.cache.delete(key);
-    this.cache.set(key, tokens);
+    this.cache.set(key, ansi);
     // Evict oldest if over capacity
     if (this.cache.size > MAX_SIZE) {
       const oldest = this.cache.keys().next().value!;
@@ -34,7 +33,7 @@ class MarkdownLRUCache {
   }
 }
 
-export const markdownTokenCache = new MarkdownLRUCache();
+export const markdownAnsiCache = new MarkdownAnsiCache();
 
 /**
  * Check whether text contains markdown syntax worth parsing.

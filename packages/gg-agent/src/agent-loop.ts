@@ -59,6 +59,7 @@ export function isAbortError(err: unknown): boolean {
  */
 export function isContextOverflow(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
+  if (isBillingError(err)) return false;
   const msg = err.message.toLowerCase();
   return (
     msg.includes("prompt is too long") ||
@@ -82,7 +83,10 @@ export function isBillingError(err: unknown): boolean {
     msg.includes("billing") ||
     msg.includes("recharge") ||
     msg.includes("subscription plan") ||
-    msg.includes("does not yet include access")
+    msg.includes("does not yet include access") ||
+    msg.includes("token quota") ||
+    msg.includes("exceeded_current_quota_error") ||
+    msg.includes("check your account balance")
   );
 }
 
@@ -101,7 +105,9 @@ export function isToolPairingError(err: unknown): boolean {
   return (
     (msg.includes("tool_use") && msg.includes("tool_result")) ||
     msg.includes("unexpected `tool_use_id`") ||
-    msg.includes("tool_use ids found without")
+    msg.includes("tool_use ids found without") ||
+    // Moonshot/OpenAI-compatible: "tool call id <id> is not found"
+    (msg.includes("tool call id") && msg.includes("is not found"))
   );
 }
 
@@ -132,11 +138,9 @@ export async function* agentLoop(
   let lastRouterModel: string | undefined;
   let consecutivePauses = 0;
   let toolPairingRepaired = false;
-  let overflowRetries = 0;
   let overloadRetries = 0;
   let emptyResponseRetries = 0;
   let stallRetries = 0;
-  const MAX_OVERFLOW_RETRIES = 3;
   const MAX_OVERLOAD_RETRIES = 10;
   const MAX_EMPTY_RESPONSE_RETRIES = 2;
   const MAX_STALL_RETRIES = 5;
@@ -466,32 +470,13 @@ export async function* agentLoop(
           provider: options.provider,
           model: options.model,
         });
-        // Context overflow: force-compact via transformContext and retry (up to 3 times)
-        if (
-          overflowRetries < MAX_OVERFLOW_RETRIES &&
-          isContextOverflow(err) &&
-          options.transformContext
-        ) {
-          overflowRetries++;
-          diag("retry", {
-            reason: "context_overflow",
-            attempt: overflowRetries,
-            maxAttempts: MAX_OVERFLOW_RETRIES,
-          });
-          yield {
-            type: "retry" as const,
-            reason: "context_overflow" as const,
-            attempt: overflowRetries,
-            maxAttempts: MAX_OVERFLOW_RETRIES,
-            delayMs: 0,
-          };
-          const transformed = await options.transformContext(messages, { force: true });
-          if (transformed !== messages) {
-            messages.length = 0;
-            messages.push(...transformed);
-          }
-          turn--; // Don't count the failed turn
-          continue;
+        // Context overflow: surface immediately as an error.
+        // The pre-turn transformContext check should prevent overflow proactively.
+        // Compacting mid-retry is unreliable (calls the same provider, may not
+        // reduce enough) and was removed along with stall-compaction.
+        if (isContextOverflow(err)) {
+          yield { type: "error" as const, error: err instanceof Error ? err : new Error(errMsg) };
+          throw err;
         }
         // Overloaded / rate-limited: exponential backoff, retry up to 10 times
         if (overloadRetries < MAX_OVERLOAD_RETRIES && isOverloaded(err)) {
@@ -589,7 +574,6 @@ export async function* agentLoop(
       }
 
       // Reset retry counters after successful call
-      overflowRetries = 0;
       overloadRetries = 0;
       stallRetries = 0;
 

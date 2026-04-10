@@ -1,16 +1,26 @@
 import { execFileSync } from "node:child_process";
+import chalk from "chalk";
+import type { ThemeName } from "./theme.js";
 
 /**
- * Detect whether the terminal uses a dark or light background.
+ * Detect the best theme for the current terminal.
  *
- * Detection chain (first match wins):
- * 1. VSCODE_THEME_KIND env var (VS Code integrated terminal)
- * 2. macOS system dark mode (defaults read -g AppleInterfaceStyle)
- * 3. OSC 11 escape sequence query (most modern terminals)
- * 4. COLORFGBG env var (rxvt, some other terminals)
- * 5. Default to "dark"
+ * Detection chain for base theme (first match wins):
+ * 1. FORCE_THEME env var (explicit override with any ThemeName)
+ * 2. VSCODE_THEME_KIND env var (VS Code integrated terminal)
+ * 3. macOS system dark mode (defaults read -g AppleInterfaceStyle)
+ * 4. OSC 11 escape sequence query (most modern terminals)
+ * 5. COLORFGBG env var (rxvt, some other terminals)
+ * 6. Default to "dark"
+ *
+ * Auto-selects ANSI fallback variant when truecolor is not supported.
  */
-export async function detectTheme(): Promise<"dark" | "light"> {
+export async function detectTheme(): Promise<ThemeName> {
+  // 0. Explicit override
+  const forceTheme = process.env["FORCE_THEME"];
+  if (forceTheme && isValidThemeName(forceTheme)) {
+    return forceTheme;
+  }
   // 1. VS Code sets this reliably
   const vscodeTheme = process.env["VSCODE_THEME_KIND"];
   if (vscodeTheme) {
@@ -33,22 +43,42 @@ export async function detectTheme(): Promise<"dark" | "light"> {
   }
 
   // 3. OSC 11 — query actual terminal background color
-  const osc = await queryOSC11();
-  if (osc !== null) return osc;
+  let base: "dark" | "light" | null = await queryOSC11();
 
   // 4. COLORFGBG — "fg;bg" ANSI color indices
-  const colorfgbg = process.env["COLORFGBG"];
-  if (colorfgbg) {
-    const parts = colorfgbg.split(";");
-    const bg = parseInt(parts[parts.length - 1]!, 10);
-    if (!isNaN(bg)) {
-      // ANSI colors: 0-6 and 8 are dark, 7 and 9-15 are light
-      return bg === 7 || (bg >= 9 && bg <= 15) ? "light" : "dark";
+  if (base === null) {
+    const colorfgbg = process.env["COLORFGBG"];
+    if (colorfgbg) {
+      const parts = colorfgbg.split(";");
+      const bg = parseInt(parts[parts.length - 1]!, 10);
+      if (!isNaN(bg)) {
+        base = bg === 7 || (bg >= 9 && bg <= 15) ? "light" : "dark";
+      }
     }
   }
 
   // 5. Default
-  return "dark";
+  if (base === null) base = "dark";
+
+  // Auto-select ANSI variant for terminals without truecolor support
+  if (chalk.level < 3) {
+    return `${base}-ansi` as ThemeName;
+  }
+
+  return base;
+}
+
+const VALID_THEMES = new Set<string>([
+  "dark",
+  "light",
+  "dark-ansi",
+  "light-ansi",
+  "dark-daltonized",
+  "light-daltonized",
+]);
+
+function isValidThemeName(name: string): name is ThemeName {
+  return VALID_THEMES.has(name);
 }
 
 /**

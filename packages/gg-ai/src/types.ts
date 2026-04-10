@@ -4,12 +4,13 @@ import type { z } from "zod";
 
 export type Provider =
   | "anthropic"
+  | "xiaomi"
   | "openai"
   | "glm"
   | "moonshot"
   | "ollama"
-  | "xiaomi"
   | "minimax"
+  | "openrouter"
   | "palsu";
 
 // ── Thinking ───────────────────────────────────────────────

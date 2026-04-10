@@ -1,6 +1,17 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { Box, Text, Static, useStdout } from "ink";
 import { useTerminalSize } from "./hooks/useTerminalSize.js";
+import { useDoublePress } from "./hooks/useDoublePress.js";
+import {
+  useTaskBarStore,
+  useTaskBarPolling,
+  focusTaskBar,
+  exitTaskBar,
+  expandTaskBar,
+  collapseTaskBar,
+  navigateTaskBar,
+  killTask,
+} from "./stores/taskbar-store.js";
 import crypto, { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -19,6 +30,7 @@ import { ServerToolExecution } from "./components/ServerToolExecution.js";
 import { SubAgentPanel, type SubAgentInfo } from "./components/SubAgentPanel.js";
 import { CompactionSpinner, CompactionDone } from "./components/CompactionNotice.js";
 import type { SubAgentUpdate, SubAgentDetails } from "../tools/subagent.js";
+import { createWebSearchTool } from "../tools/web-search.js";
 import { StreamingArea } from "./components/StreamingArea.js";
 import { ActivityIndicator } from "./components/ActivityIndicator.js";
 import { InputArea } from "./components/InputArea.js";
@@ -28,10 +40,11 @@ import { PlanOverlay } from "./components/PlanOverlay.js";
 import { ModelSelector } from "./components/ModelSelector.js";
 import { TaskOverlay } from "./components/TaskOverlay.js";
 import { SkillsOverlay } from "./components/SkillsOverlay.js";
+import { ThemeSelector } from "./components/ThemeSelector.js";
 import { BackgroundTasksBar } from "./components/BackgroundTasksBar.js";
 import type { SlashCommandInfo } from "./components/SlashCommandMenu.js";
-import type { ProcessManager, BackgroundProcess } from "../core/process-manager.js";
-import { useTheme } from "./theme/theme.js";
+import type { ProcessManager } from "../core/process-manager.js";
+import { useTheme, useSetTheme, type ThemeName } from "./theme/theme.js";
 import {
   useAnimationTick,
   useAnimationActive,
@@ -44,8 +57,9 @@ import { getModel, getContextWindow } from "../core/model-registry.js";
 import { createModelRouter } from "../core/model-router.js";
 import { SessionManager, type MessageEntry } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
+import { startPeriodicUpdateCheck, stopPeriodicUpdateCheck } from "../core/auto-update.js";
 import { generateSessionTitle } from "../utils/session-title.js";
-import { SettingsManager } from "../core/settings-manager.js";
+import { SettingsManager, type Settings } from "../core/settings-manager.js";
 import { shouldCompact, compact } from "../core/compaction/compactor.js";
 import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
 import { PROMPT_COMMANDS, getPromptCommand } from "../core/prompt-commands.js";
@@ -62,7 +76,12 @@ import {
 import type { MCPClientManager } from "../core/mcp/index.js";
 import { getMCPServers } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
-import { trimFlushedItems, flushOnTurnText, flushOnTurnEnd } from "./live-item-flush.js";
+import {
+  trimFlushedItems,
+  flushOnTurnText,
+  flushOnTurnEnd,
+  flushOverflow,
+} from "./live-item-flush.js";
 import { Buddy } from "./buddy/Buddy.js";
 
 // ── Provider Error Hints ──────────────────────────────────
@@ -141,6 +160,8 @@ interface ToolStartItem {
   name: string;
   args: Record<string, unknown>;
   id: string;
+  /** Live progress output (e.g., bash streaming stdout). */
+  progressOutput?: string;
 }
 
 interface ToolDoneItem {
@@ -501,11 +522,13 @@ export interface AppProps {
 
 export function App(props: AppProps) {
   const theme = useTheme();
+  const switchTheme = useSetTheme();
   const { stdout } = useStdout();
   const { columns, resizeKey } = useTerminalSize();
 
   // Hoisted before terminal title hook so it can reference them
   const [lastUserMessage, setLastUserMessage] = useState("");
+  const [exitPending, setExitPending] = useState(false);
   const [planMode, setPlanMode] = useState(false);
   const planModeLocalRef = useRef(false);
   planModeLocalRef.current = planMode;
@@ -537,7 +560,9 @@ export function App(props: AppProps) {
   }, [isRestoredSession, props.initialHistory]);
   // Items from the current/last turn — rendered in the live area so they stay visible
   const [liveItems, setLiveItems] = useState<CompletedItem[]>([]);
-  const [overlay, setOverlay] = useState<"model" | "tasks" | "skills" | "plan" | null>(null);
+  const [overlay, setOverlay] = useState<"model" | "tasks" | "skills" | "plan" | "theme" | null>(
+    null,
+  );
   const [taskCount, setTaskCount] = useState(() => getTaskCount(props.cwd));
   const [runAllTasks, setRunAllTasks] = useState(false);
   const runAllTasksRef = useRef(false);
@@ -569,7 +594,9 @@ export function App(props: AppProps) {
   const persistedIndexRef = useRef(messagesRef.current.length);
   /** Last actual API-reported input token count (from turn_end). */
   const lastActualTokensRef = useRef(0);
-  /** Timestamp of last compaction — used for time-based cooldown. */
+  /** Timestamp (ms) when lastActualTokensRef was last updated by turn_end. */
+  const lastActualTokensTimestampRef = useRef(0);
+  /** Timestamp of last compaction — used for time-based cooldown and staleness detection. */
   const lastCompactionTimeRef = useRef(0);
 
   const getId = () => String(nextIdRef.current++);
@@ -596,6 +623,14 @@ export function App(props: AppProps) {
   useEffect(() => {
     getGitBranch(props.cwd).then(setGitBranch);
   }, [props.cwd]);
+
+  // Periodic update check during long sessions
+  useEffect(() => {
+    startPeriodicUpdateCheck(props.version, (msg) => {
+      setLiveItems((prev) => [...prev, { kind: "info", text: msg, id: getId() }]);
+    });
+    return () => stopPeriodicUpdateCheck();
+  }, [props.version]);
 
   // Load custom commands from .gg/commands/
   const [customCommands, setCustomCommands] = useState<CustomCommand[]>([]);
@@ -745,21 +780,27 @@ export function App(props: AppProps) {
           approvedPlanPath: approvedPlanPathRef.current,
         });
 
-        // Replace spinner with completed notice
-        setLiveItems((prev) =>
-          prev.map((item) =>
-            item.id === spinId
-              ? ({
-                  kind: "compacted",
-                  originalCount: result.result.originalCount,
-                  newCount: result.result.newCount,
-                  tokensBefore: result.result.tokensBeforeEstimate,
-                  tokensAfter: result.result.tokensAfterEstimate,
-                  id: spinId,
-                } as CompactedItem)
-              : item,
-          ),
-        );
+        if (result.result.compacted) {
+          // Replace spinner with completed notice
+          setLiveItems((prev) =>
+            prev.map((item) =>
+              item.id === spinId
+                ? ({
+                    kind: "compacted",
+                    originalCount: result.result.originalCount,
+                    newCount: result.result.newCount,
+                    tokensBefore: result.result.tokensBeforeEstimate,
+                    tokensAfter: result.result.tokensAfterEstimate,
+                    id: spinId,
+                  } as CompactedItem)
+                : item,
+            ),
+          );
+        } else {
+          // Nothing was actually compacted — remove spinner silently
+          log("INFO", "compaction", `Compaction skipped: ${result.result.reason ?? "unknown"}`);
+          setLiveItems((prev) => prev.filter((item) => item.id !== spinId));
+        }
 
         return result.messages;
       } catch (err) {
@@ -799,7 +840,6 @@ export function App(props: AppProps) {
       if (options?.force) {
         const result = await compactConversation(messages);
         lastCompactionTimeRef.current = Date.now();
-        lastActualTokensRef.current = 0; // Reset stale pre-compaction count
         return result;
       }
 
@@ -812,13 +852,20 @@ export function App(props: AppProps) {
       }
 
       const contextWindow = getContextWindow(currentModel);
-      // Prefer actual API-reported tokens over char-based estimate
+      // Prefer actual API-reported tokens over char-based estimate, but only
+      // when the token count was recorded AFTER the most recent compaction.
+      // A count from before compaction is stale — it reflects the old context
+      // size and would trigger compaction again immediately for no reason.
+      const tokensFresh = lastActualTokensTimestampRef.current > lastCompactionTimeRef.current;
       const actualTokens =
-        lastActualTokensRef.current > 0 ? lastActualTokensRef.current : undefined;
+        lastActualTokensRef.current > 0 && tokensFresh ? lastActualTokensRef.current : undefined;
       if (shouldCompact(messages, contextWindow, threshold, actualTokens)) {
+        const before = messages.length;
         const result = await compactConversation(messages);
         lastCompactionTimeRef.current = Date.now();
-        lastActualTokensRef.current = 0; // Reset stale pre-compaction count
+        // If compaction was a no-op (e.g. too few middle messages to summarize),
+        // return the original reference so the agent loop doesn't replace messages.
+        if (result.length === before) return messages;
         return result;
       }
       return messages;
@@ -826,68 +873,26 @@ export function App(props: AppProps) {
     [currentModel, compactConversation],
   );
 
-  // ── Background task bar state ───────────────────────────
-  const [bgTasks, setBgTasks] = useState<BackgroundProcess[]>([]);
-  const [taskBarFocused, setTaskBarFocused] = useState(false);
-  const [taskBarExpanded, setTaskBarExpanded] = useState(false);
-  const [selectedTaskIndex, setSelectedTaskIndex] = useState(0);
+  // ── Background task bar state (external store) ──────────
+  const {
+    bgTasks,
+    focused: taskBarFocused,
+    expanded: taskBarExpanded,
+    selectedIndex: selectedTaskIndex,
+  } = useTaskBarStore();
+  useTaskBarPolling(props.processManager);
 
-  // Poll ProcessManager every 2s for running tasks
-  useEffect(() => {
-    if (!props.processManager) return;
-    const pm = props.processManager;
-    const poll = () => {
-      const running = pm.list().filter((p) => p.exitCode === null);
-      setBgTasks(running);
-    };
-    poll();
-    const interval = setInterval(poll, 2000);
-    return () => clearInterval(interval);
-  }, [props.processManager]);
-
-  // Auto-exit task panel when all tasks gone
-  useEffect(() => {
-    if (bgTasks.length === 0) {
-      setTaskBarFocused(false);
-      setTaskBarExpanded(false);
-    }
-    // Clamp selected index
-    const maxIdx = Math.min(bgTasks.length, 5) - 1;
-    if (selectedTaskIndex > maxIdx && maxIdx >= 0) {
-      setSelectedTaskIndex(maxIdx);
-    }
-  }, [bgTasks.length, selectedTaskIndex]);
-
-  const handleFocusTaskBar = useCallback(() => {
-    if (bgTasks.length > 0) {
-      setTaskBarFocused(true);
-    }
-  }, [bgTasks.length]);
-
-  const handleTaskBarExit = useCallback(() => {
-    setTaskBarFocused(false);
-    setTaskBarExpanded(false);
-  }, []);
-
-  const handleTaskBarExpand = useCallback(() => {
-    setTaskBarExpanded(true);
-    setSelectedTaskIndex(0);
-  }, []);
-
-  const handleTaskBarCollapse = useCallback(() => {
-    setTaskBarExpanded(false);
-  }, []);
-
+  const handleFocusTaskBar = useCallback(() => focusTaskBar(), []);
+  const handleTaskBarExit = useCallback(() => exitTaskBar(), []);
+  const handleTaskBarExpand = useCallback(() => expandTaskBar(), []);
+  const handleTaskBarCollapse = useCallback(() => collapseTaskBar(), []);
   const handleTaskKill = useCallback(
     (id: string) => {
-      props.processManager?.stop(id);
+      if (props.processManager) killTask(props.processManager, id);
     },
     [props.processManager],
   );
-
-  const handleTaskNavigate = useCallback((index: number) => {
-    setSelectedTaskIndex(index);
-  }, []);
+  const handleTaskNavigate = useCallback((index: number) => navigateTaskBar(index), []);
 
   // Resolve fresh OAuth credentials before each agent loop run.
   // Falls back to the static props when authStorage is not available.
@@ -1146,6 +1151,27 @@ export function App(props: AppProps) {
         [],
       ),
       onToolUpdate: useCallback((toolCallId: string, update: unknown) => {
+        const u = update as Record<string, unknown>;
+
+        // Bash progress streaming — append output to tool_start item
+        if (u.type === "bash_progress") {
+          setLiveItems((prev) => {
+            const idx = prev.findIndex(
+              (item) => item.kind === "tool_start" && item.toolCallId === toolCallId,
+            );
+            if (idx === -1) return prev;
+            const item = prev[idx] as ToolStartItem;
+            const next = [...prev];
+            next[idx] = {
+              ...item,
+              progressOutput: (item.progressOutput ?? "") + String(u.output ?? ""),
+            };
+            return next;
+          });
+          return;
+        }
+
+        // Subagent updates
         setLiveItems((prev) => {
           const groupIdx = prev.findIndex((item) => item.kind === "subagent_group");
           if (groupIdx === -1) return prev;
@@ -1272,6 +1298,13 @@ export function App(props: AppProps) {
               const { flushed, remaining } = partitionCompleted(updated);
               if (flushed.length > 0) {
                 queueFlush(flushed);
+                return remaining;
+              }
+              // Overflow flush: if live area is still large, flush aggressively
+              const overflow = flushOverflow(updated);
+              if (overflow.flushed.length > 0) {
+                queueFlush(overflow.flushed);
+                return overflow.remaining;
               }
               return remaining;
             });
@@ -1378,6 +1411,7 @@ export function App(props: AppProps) {
           const inputContext = usage.inputTokens + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
           lastActualTokensRef.current =
             currentProvider === "anthropic" ? inputContext : inputContext + usage.outputTokens;
+          lastActualTokensTimestampRef.current = Date.now();
           // For tool-only turns (no text), flush completed items to Static so
           // liveItems doesn't grow unbounded across consecutive tool-only turns.
           setLiveItems((prev) => {
@@ -1587,6 +1621,9 @@ export function App(props: AppProps) {
         // Clear terminal screen + scrollback — needed because Ink's <Static>
         // writes directly to stdout and can't be removed by clearing React state
         stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+        // Discard any items queued for two-phase flush so they don't leak
+        // into the new session after the Static remount.
+        pendingFlushRef.current = [];
         setHistory([{ kind: "banner", id: "banner" }]);
         setDoneStatus(null);
         approvedPlanPathRef.current = undefined;
@@ -1602,11 +1639,21 @@ export function App(props: AppProps) {
             props.provider,
           );
           messagesRef.current = [{ role: "system" as const, content: newPrompt }];
+          persistedIndexRef.current = messagesRef.current.length;
         })();
         agentLoop.reset();
         setSessionTitle(undefined);
         sessionTitleGeneratedRef.current = false;
+        // Bump staticKey to force Ink's <Static> to remount, discarding its
+        // internal record of previously rendered items so they don't reappear.
+        setStaticKey((k) => k + 1);
         setLiveItems([{ kind: "info", text: "Session cleared.", id: getId() }]);
+        return;
+      }
+
+      // Handle /theme — open theme selector overlay
+      if (trimmed === "/theme" || trimmed === "/t") {
+        setOverlay("theme");
         return;
       }
 
@@ -1854,14 +1901,16 @@ export function App(props: AppProps) {
     [agentLoop, props.onSlashCommand, compactConversation],
   );
 
+  const handleDoubleExit = useDoublePress(setExitPending, () => process.exit(0));
+
   const handleAbort = useCallback(() => {
     if (agentLoop.isRunning) {
       agentLoop.clearQueue();
       agentLoop.abort();
     } else {
-      process.exit(0);
+      handleDoubleExit();
     }
-  }, [agentLoop]);
+  }, [agentLoop, handleDoubleExit]);
 
   const handleToggleThinking = useCallback(() => {
     setThinkingEnabled((prev) => {
@@ -1888,44 +1937,61 @@ export function App(props: AppProps) {
       const newModelId = value.slice(colonIdx + 1);
       log("INFO", "model", `Model changed`, { provider: newProvider, model: newModelId });
 
-      // Reconnect MCP servers when provider changes
+      // Handle provider-specific tool changes when provider changes
       setCurrentProvider((prevProvider) => {
-        if (newProvider !== prevProvider && props.mcpManager) {
-          void (async () => {
-            // Disconnect old MCP servers
-            await props.mcpManager!.dispose();
+        if (newProvider !== prevProvider) {
+          // Add/remove client-side web_search tool based on provider.
+          // Anthropic has native server-side web search; all other providers need the client tool.
+          setCurrentTools((prev) => {
+            const hasWebSearch = prev.some((t) => t.name === "web_search");
+            if (newProvider === "anthropic" && hasWebSearch) {
+              // Switching TO anthropic — remove client-side web_search (server-side handles it)
+              return prev.filter((t) => t.name !== "web_search");
+            } else if (newProvider !== "anthropic" && !hasWebSearch) {
+              // Switching FROM anthropic — add client-side web_search
+              return [...prev, createWebSearchTool()];
+            }
+            return prev;
+          });
 
-            // Remove old MCP tools, connect new ones
-            let apiKey: string | undefined;
-            if (newProvider === "glm" && props.authStorage) {
-              try {
-                const glmCreds = await props.authStorage.resolveCredentials("glm");
-                apiKey = glmCreds.accessToken;
-              } catch {
-                // GLM not configured — skip Z.AI MCP servers
+          // Reconnect MCP servers
+          if (props.mcpManager) {
+            void (async () => {
+              // Disconnect old MCP servers
+              await props.mcpManager!.dispose();
+
+              // Remove old MCP tools, connect new ones
+              let apiKey: string | undefined;
+              if (newProvider === "glm" && props.authStorage) {
+                try {
+                  const glmCreds = await props.authStorage.resolveCredentials("glm");
+                  apiKey = glmCreds.accessToken;
+                } catch {
+                  // GLM not configured — skip Z.AI MCP servers
+                }
+              } else if (newProvider === "glm") {
+                apiKey = props.credentialsByProvider?.["glm"]?.accessToken;
               }
-            } else if (newProvider === "glm") {
-              apiKey = props.credentialsByProvider?.["glm"]?.accessToken;
-            }
-            try {
-              const mcpTools = await props.mcpManager!.connectAll(
-                getMCPServers(newProvider, apiKey),
-              );
-              setCurrentTools((prev) => [
-                ...prev.filter((t) => !t.name.startsWith("mcp__")),
-                ...mcpTools,
-              ]);
-              log("INFO", "mcp", `MCP servers reconnected for provider ${newProvider}`);
-            } catch (err) {
-              log(
-                "WARN",
-                "mcp",
-                `MCP reconnection failed: ${err instanceof Error ? err.message : String(err)}`,
-              );
-              // Still remove old MCP tools even if reconnection fails
-              setCurrentTools((prev) => prev.filter((t) => !t.name.startsWith("mcp__")));
-            }
-          })();
+              try {
+                const mcpTools = await props.mcpManager!.connectAll(
+                  getMCPServers(newProvider, apiKey),
+                );
+                setCurrentTools((prev) => [
+                  ...prev.filter((t) => !t.name.startsWith("mcp__")),
+                  ...mcpTools,
+                ]);
+                log("INFO", "mcp", `MCP servers reconnected for provider ${newProvider}`);
+              } catch (err) {
+                log(
+                  "WARN",
+                  "mcp",
+                  `MCP reconnection failed: ${err instanceof Error ? err.message : String(err)}`,
+                );
+                // Still remove old MCP tools even if reconnection fails
+                setCurrentTools((prev) => prev.filter((t) => !t.name.startsWith("mcp__")));
+              }
+            })();
+          }
         }
         return newProvider;
       });
@@ -1956,6 +2022,25 @@ export function App(props: AppProps) {
     [props.settingsFile, props.mcpManager, props.credentialsByProvider, props.authStorage, stdout],
   );
 
+  const handleThemeSelect = useCallback(
+    (name: ThemeName) => {
+      setOverlay(null);
+      if (switchTheme) {
+        switchTheme(name);
+      }
+      // Persist to settings
+      if (props.settingsFile) {
+        const sm = new SettingsManager(props.settingsFile);
+        sm.load().then(() => sm.set("theme", name as Settings["theme"]));
+      }
+      setLiveItems((prev) => [
+        ...prev,
+        { kind: "info", text: `Theme switched to: ${name}`, id: getId() },
+      ]);
+    },
+    [switchTheme, props.settingsFile],
+  );
+
   // All available slash commands for the command palette
   const allCommands = useMemo<SlashCommandInfo[]>(
     () => [
@@ -1968,6 +2053,7 @@ export function App(props: AppProps) {
         aliases: ["teach"],
         description: "Open the comprehensive guide on building this LLM agent framework",
       },
+      { name: "theme", aliases: ["t"], description: "Switch theme" },
       { name: "plan", aliases: [], description: "Toggle plan mode (on/off)" },
       { name: "plans", aliases: [], description: "Open plans pane" },
       ...PROMPT_COMMANDS.map((cmd) => ({
@@ -2032,7 +2118,15 @@ export function App(props: AppProps) {
           />
         );
       case "tool_start":
-        return <ToolExecution key={item.id} status="running" name={item.name} args={item.args} />;
+        return (
+          <ToolExecution
+            key={item.id}
+            status="running"
+            name={item.name}
+            args={item.args}
+            progressOutput={(item as ToolStartItem).progressOutput}
+          />
+        );
       case "tool_done":
         return (
           <ToolExecution
@@ -2097,7 +2191,7 @@ export function App(props: AppProps) {
         return (
           <Box key={item.id} marginTop={1} flexShrink={1}>
             <Text color={theme.planPrimary} bold wrap="wrap">
-              {item.active ? "⊞ " : "⊟ "}
+              {item.active ? "● " : "● "}
               {item.text}
             </Text>
           </Box>
@@ -2386,6 +2480,7 @@ export function App(props: AppProps) {
               <ActivityIndicator
                 phase={agentLoop.activityPhase}
                 elapsedMs={agentLoop.elapsedMs}
+                runStartRef={agentLoop.runStartRef}
                 thinkingMs={agentLoop.thinkingMs}
                 isThinking={agentLoop.isThinking}
                 tokenEstimate={agentLoop.streamedTokenEstimate}
@@ -2471,6 +2566,12 @@ export function App(props: AppProps) {
               currentModel={currentModel}
               currentProvider={currentProvider}
             />
+          ) : overlay === "theme" ? (
+            <ThemeSelector
+              onSelect={handleThemeSelect}
+              onCancel={() => setOverlay(null)}
+              currentTheme={theme.name}
+            />
           ) : (
             <Footer
               model={currentModel}
@@ -2479,6 +2580,7 @@ export function App(props: AppProps) {
               gitBranch={gitBranch}
               thinkingEnabled={thinkingEnabled}
               planMode={planMode}
+              exitPending={exitPending}
             />
           )}
           {/* Buddy companion */}
