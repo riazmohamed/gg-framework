@@ -32,7 +32,7 @@ importers:
 
   packages/gg-agent:
     dependencies:
-      '@kenkaiiii/gg-ai':
+      '@abukhaled/gg-ai':
         specifier: workspace:*
         version: link:../gg-ai
       zod:
@@ -67,15 +67,15 @@ importers:
 
   packages/ggcoder:
     dependencies:
+      '@abukhaled/gg-agent':
+        specifier: workspace:*
+        version: link:../gg-agent
+      '@abukhaled/gg-ai':
+        specifier: workspace:*
+        version: link:../gg-ai
       '@kenkaiiii/agent-home-sdk':
         specifier: ^0.3.8
         version: 0.3.8
-      '@kenkaiiii/gg-agent':
-        specifier: workspace:*
-        version: link:../gg-agent
-      '@kenkaiiii/gg-ai':
-        specifier: workspace:*
-        version: link:../gg-ai
       '@modelcontextprotocol/sdk':
         specifier: ^1.27.1
         version: 1.27.1(zod@4.3.6)
