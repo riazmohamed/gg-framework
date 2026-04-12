@@ -476,6 +476,142 @@ Replace all placeholders with the actual commands for the detected project type 
 Report that /update is now available with dependency updates, security audits, and deprecation fixes.`,
   },
   {
+    name: "simplify",
+    aliases: [],
+    description:
+      "Review changed code for reuse, quality, and efficiency, then fix any issues found",
+    prompt: `# Simplify: Code Review and Cleanup
+
+Review all changed files for reuse, quality, and efficiency. Fix any issues found.
+
+## Phase 1: Identify Changes
+
+Run \`git diff\` (or \`git diff HEAD\` if there are staged changes) to see what changed. If there are no git changes, review the most recently modified files that the user mentioned or that you edited earlier in this conversation.
+
+## Phase 2: Launch Three Review Agents in Parallel
+
+Use the subagent tool to launch all three agents concurrently in a single response (call the subagent tool 3 times in one message). Pass each agent the full diff so it has the complete context.
+
+### Agent 1: Code Reuse Review
+
+For each change:
+
+1. **Search for existing utilities and helpers** that could replace newly written code. Look for similar patterns elsewhere in the codebase — common locations are utility directories, shared modules, and files adjacent to the changed ones.
+2. **Flag any new function that duplicates existing functionality.** Suggest the existing function to use instead.
+3. **Flag any inline logic that could use an existing utility** — hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
+
+### Agent 2: Code Quality Review
+
+Review the same changes for hacky patterns:
+
+1. **Redundant state**: state that duplicates existing state, cached values that could be derived, observers/effects that could be direct calls
+2. **Parameter sprawl**: adding new parameters to a function instead of generalizing or restructuring existing ones
+3. **Copy-paste with slight variation**: near-duplicate code blocks that should be unified with a shared abstraction
+4. **Leaky abstractions**: exposing internal details that should be encapsulated, or breaking existing abstraction boundaries
+5. **Stringly-typed code**: using raw strings where constants, enums (string unions), or branded types already exist in the codebase
+6. **Unnecessary JSX nesting**: wrapper Boxes/elements that add no layout value — check if inner component props (flexShrink, alignItems, etc.) already provide the needed behavior
+7. **Unnecessary comments**: comments explaining WHAT the code does (well-named identifiers already do that), narrating the change, or referencing the task/caller — delete; keep only non-obvious WHY (hidden constraints, subtle invariants, workarounds)
+
+### Agent 3: Efficiency Review
+
+Review the same changes for efficiency:
+
+1. **Unnecessary work**: redundant computations, repeated file reads, duplicate network/API calls, N+1 patterns
+2. **Missed concurrency**: independent operations run sequentially when they could run in parallel
+3. **Hot-path bloat**: new blocking work added to startup or per-request/per-render hot paths
+4. **Recurring no-op updates**: state/store updates inside polling loops, intervals, or event handlers that fire unconditionally — add a change-detection guard so downstream consumers aren't notified when nothing changed. Also: if a wrapper function takes an updater/reducer callback, verify it honors same-reference returns (or whatever the "no change" signal is) — otherwise callers' early-return no-ops are silently defeated
+5. **Unnecessary existence checks**: pre-checking file/resource existence before operating (TOCTOU anti-pattern) — operate directly and handle the error
+6. **Memory**: unbounded data structures, missing cleanup, event listener leaks
+7. **Overly broad operations**: reading entire files when only a portion is needed, loading all items when filtering for one
+
+## Phase 3: Fix Issues
+
+Wait for all three agents to complete. Aggregate their findings and fix each issue directly. If a finding is a false positive or not worth addressing, note it and move on — do not argue with the finding, just skip it.
+
+When done, briefly summarize what was fixed (or confirm the code was already clean).`,
+  },
+  {
+    name: "batch",
+    aliases: [],
+    description:
+      "Research and plan a large-scale change, then execute it in parallel across branch-isolated workers that each open a PR",
+    prompt: `# Batch: Parallel Work Orchestration
+
+You are orchestrating a large, parallelizable change across this codebase.
+
+## Phase 1: Research
+
+Launch one or more subagents using the subagent tool with \`agent: "researcher"\` to deeply research what this instruction touches. You need their results before proceeding, so wait for them to complete. Have them:
+
+- Find ALL files, patterns, and call sites that need to change
+- Understand existing conventions so the migration is consistent
+- Quantify the surface area (how many files, how many call sites)
+- Note any risks or complications
+
+## Phase 2: Plan
+
+After research completes, call the enter_plan tool to enter plan mode. Using the research findings:
+
+1. **Decompose into independent units.** Break the work into 5–30 self-contained units. Each unit must:
+   - Be independently implementable on its own git branch (no shared state with sibling units)
+   - Be mergeable on its own without depending on another unit's PR landing first
+   - Be roughly uniform in size (split large units, merge trivial ones)
+
+   Scale the count to the actual work: few files → closer to 5; hundreds of files → closer to 30. Prefer per-directory or per-module slicing over arbitrary file lists.
+
+2. **Determine the test recipe.** Figure out how a worker can verify its change actually works — not just that unit tests pass. Look for:
+   - An existing e2e/integration test suite the worker can run
+   - A dev-server + curl pattern (for API changes)
+   - A CLI verification pattern (for CLI changes)
+
+   If you cannot find a concrete verification path, ask the user how to verify. Offer 2–3 specific options based on what the researcher found. Do not skip this — the workers cannot ask the user themselves.
+
+3. **Write the plan** to \`.gg/plans/batch.md\` with:
+   - Summary of research findings
+   - Numbered list of work units — each with: title, file list, one-line description
+   - The test recipe (or "skip e2e because …")
+   - Note that each worker will use the \`worker\` agent (branch-isolated)
+
+4. Call exit_plan to present the plan for approval.
+
+## Phase 3: Spawn Workers (After Plan Approval)
+
+Record the current branch name first: \`git branch --show-current\`.
+
+Spawn one subagent per work unit using the subagent tool with \`agent: "worker"\`. **Launch them all in a single message block so they run in parallel.**
+
+For each worker, the task must be fully self-contained. Include:
+- The overall goal (the user's instruction)
+- The starting branch to branch from (the branch name you recorded above)
+- This unit's specific task (title, file list, change description — copied verbatim from your plan)
+- Any codebase conventions discovered during research
+- The test recipe from your plan (or "skip e2e because …")
+- These additional instructions, copied verbatim:
+
+\`\`\`
+After you finish implementing the change:
+1. Self-review your diff for code reuse, quality, and efficiency. Search the codebase for existing utilities that could replace new code. Fix any issues found.
+2. Run the project's test suite (check for package.json scripts, Makefile targets, or common commands like npm test, pnpm test, pytest, go test). If tests fail, fix them.
+3. Follow the e2e test recipe above. If it says to skip e2e, skip it.
+4. Commit all changes with a clear message, push the branch, and create a PR with gh pr create. Use a descriptive title.
+5. Switch back to the original branch with git checkout -.
+6. End with exactly: PR: <url> or PR: none — <reason>
+\`\`\`
+
+## Phase 4: Track Results
+
+After launching all workers, render an initial status table:
+
+| # | Unit | Status | PR |
+|---|------|--------|----|
+| 1 | <title> | running | — |
+| 2 | <title> | running | — |
+
+As workers complete, parse the \`PR: <url>\` line from each result and re-render the table with updated status (\`done\` / \`failed\`) and PR links. Keep a brief failure note for any worker that did not produce a PR.
+
+When all workers have reported, render the final table and a one-line summary (e.g., "22/24 units landed as PRs").`,
+  },
+  {
     name: "compare",
     aliases: [],
     description: "Compare code against real-world implementations via Grep MCP",
