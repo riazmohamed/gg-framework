@@ -1783,10 +1783,14 @@ export function App(props: AppProps) {
         return;
       }
 
-      // Move any remaining live items into history (Static) before starting new turn
+      // Move any remaining live items into history (Static) before starting a
+      // new turn. Must go through queueFlush so flushGeneration bumps and the
+      // drain effect actually runs — mutating pendingFlushRef directly here
+      // stashed items that nothing was signalled to pick up, so they sat in
+      // limbo until some unrelated later code path happened to call queueFlush.
       setLiveItems((prev) => {
         if (prev.length > 0) {
-          pendingFlushRef.current = [...pendingFlushRef.current, ...prev];
+          queueFlush(prev);
         }
         return [];
       });
