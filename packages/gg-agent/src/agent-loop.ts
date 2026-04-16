@@ -570,13 +570,8 @@ export async function* agentLoop(
         options.signal?.removeEventListener("abort", forwardAbort);
       }
 
-      // Reset retry counters after successful call. The non-streaming flag
-      // is *also* reset -- a successful non-streaming round-trip means the
-      // upstream problem has resolved, so the next turn should try streaming
-      // again (cheaper and provides live output).
       overloadRetries = 0;
       stallRetries = 0;
-      useNonStreamingFallback = false;
 
       // Detect empty/degenerate responses — the API occasionally returns 0 tokens
       // with no content, or "thinks" without producing actionable output.
@@ -607,12 +602,19 @@ export async function* agentLoop(
             maxAttempts: MAX_EMPTY_RESPONSE_RETRIES,
             delayMs: 0,
           };
-          turn--; // Don't count the failed turn
+          turn--; // Don't count the failed turn — keep useNonStreamingFallback set
+          // so the retry doesn't bounce back into a streaming connection that
+          // will stall again with the same upstream problem.
           continue;
         }
         // Exhausted retries — fall through and let the agent finish
       }
       emptyResponseRetries = 0;
+
+      // Only clear the non-streaming fallback after an actionable response —
+      // an empty non-streaming reply means the upstream issue hasn't resolved,
+      // so staying in non-streaming mode avoids retrying into another stall.
+      useNonStreamingFallback = false;
 
       // Accumulate usage
       totalUsage.inputTokens += response.usage.inputTokens;
