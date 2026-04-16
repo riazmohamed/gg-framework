@@ -72,7 +72,7 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 
 | Provider | Models | Auth |
 |---|---|---|
-| **Anthropic** | Claude Opus 4.6, Sonnet 4.6, Haiku 4.5 | OAuth |
+| **Anthropic** | Claude Opus 4.7, Sonnet 4.6, Haiku 4.5 | OAuth |
 | **OpenAI** | GPT-4.1, o3, o4-mini | OAuth |
 | **Z.AI (GLM)** | GLM-5.1, GLM-4.7 | API key |
 | **Moonshot** | Kimi K2.5 | API key |
@@ -84,7 +84,7 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 Everything runs through slash commands inside the session. Not CLI flags.
 
 ```bash
-/model claude-opus-4-6       # Switch models on the fly
+/model claude-opus-4-7       # Switch models on the fly
 /model kimi-k2.5
 /compact                      # Compress context when it gets long
 

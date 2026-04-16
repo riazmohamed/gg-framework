@@ -14,8 +14,8 @@ export interface ModelInfo {
 export const MODELS: ModelInfo[] = [
   // ── Anthropic ──────────────────────────────────────────
   {
-    id: "claude-opus-4-6",
-    name: "Claude Opus 4.6",
+    id: "claude-opus-4-7",
+    name: "Claude Opus 4.7",
     provider: "anthropic",
     contextWindow: 1_000_000,
     maxOutputTokens: 128_000,

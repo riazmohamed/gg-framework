@@ -198,7 +198,7 @@ export function toAnthropicToolChoice(choice: ToolChoice): Anthropic.ToolChoice 
 }
 
 function supportsAdaptiveThinking(model: string): boolean {
-  return /opus-4-6|sonnet-4-6/.test(model);
+  return /opus-4-7|opus-4-6|sonnet-4-6/.test(model);
 }
 
 export function toAnthropicThinking(
@@ -212,7 +212,7 @@ export function toAnthropicThinking(
 } {
   if (supportsAdaptiveThinking(model)) {
     // Adaptive thinking — model decides when/how much to think.
-    // budget_tokens is deprecated on Opus 4.6 / Sonnet 4.6.
+    // budget_tokens is deprecated on Opus 4.7 / Opus 4.6 / Sonnet 4.6.
     // "max" effort is Opus-only; downgrade to "high" for Sonnet
     let effort: string = level;
     if (level === "max" && !model.includes("opus")) {
