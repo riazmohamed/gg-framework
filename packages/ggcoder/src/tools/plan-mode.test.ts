@@ -161,7 +161,10 @@ describe("plan mode tool restrictions", () => {
       const tool = createEditTool(tmpDir, readFiles, undefined, planModeRef);
 
       const result = resultToString(
-        await tool.execute({ file_path: "test.ts", old_text: "foo", new_text: "bar" }, mockContext),
+        await tool.execute(
+          { file_path: "test.ts", edits: [{ old_text: "foo", new_text: "bar" }] },
+          mockContext,
+        ),
       );
 
       expect(result).toContain("Error");
@@ -195,7 +198,7 @@ describe("plan mode tool restrictions", () => {
       );
 
       expect(result).toContain("Wrote");
-      expect(result).toContain("bytes");
+      expect(result).toContain("lines");
 
       // Verify file was actually created
       const written = await fs.readFile(path.join(tmpDir, ".gg", "plans", "my-plan.md"), "utf-8");

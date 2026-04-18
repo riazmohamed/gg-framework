@@ -341,7 +341,7 @@ function main(): void {
   if (values.json) {
     const message = positionals[0] ?? "";
     const jsonProvider = (values.provider ?? "anthropic") as Provider;
-    const jsonModel = values.model ?? "claude-opus-4-6";
+    const jsonModel = values.model ?? "claude-opus-4-7";
     const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
     const systemPrompt = values["system-prompt"];
     const cwd = process.cwd();
@@ -362,7 +362,7 @@ function main(): void {
   // RPC mode — headless JSON-over-stdio for IDE integrations
   if (values.rpc) {
     const rpcProvider = (values.provider ?? "anthropic") as Provider;
-    const rpcModel = values.model ?? "claude-opus-4-6";
+    const rpcModel = values.model ?? "claude-opus-4-7";
     const systemPrompt = values["system-prompt"];
     const cwd = process.cwd();
     runRpcMode({
@@ -389,7 +389,7 @@ function main(): void {
     if (p === "moonshot") return "kimi-k2.5";
     if (p === "minimax") return "MiniMax-M2.7";
     if (p === "openrouter") return "qwen/qwen3.6-plus";
-    return "claude-opus-4-6";
+    return "claude-opus-4-7";
   }
 
   const model: string = saved.model ?? getHardcodedDefault(provider);
@@ -1097,7 +1097,7 @@ async function runSessions(): Promise<void> {
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.5";
     if (p === "minimax") return "MiniMax-M2.7";
-    return "claude-opus-4-6";
+    return "claude-opus-4-7";
   }
 
   const model = saved2.model ?? getDefault(provider);
@@ -1340,7 +1340,7 @@ async function runServe(): Promise<void> {
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.5";
     if (p === "minimax") return "MiniMax-M2.7";
-    return "claude-opus-4-6";
+    return "claude-opus-4-7";
   }
 
   const model = serveValues.model ?? saved3.model ?? getDefault(provider);
@@ -1518,7 +1518,7 @@ async function runAgentHome(): Promise<void> {
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.5";
     if (p === "minimax") return "MiniMax-M2.7";
-    return "claude-opus-4-6";
+    return "claude-opus-4-7";
   }
 
   const model = ahValues.model ?? saved4.model ?? getDefault(provider);

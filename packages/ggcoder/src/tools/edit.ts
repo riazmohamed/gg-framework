@@ -5,10 +5,20 @@ import { resolvePath, rejectSymlink } from "./path-utils.js";
 import { fuzzyFindText, countOccurrences, generateDiff } from "./edit-diff.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 
-const EditParams = z.object({
-  file_path: z.string().describe("The file path to edit"),
+const EditItem = z.object({
   old_text: z.string().describe("The exact text to find and replace"),
   new_text: z.string().describe("The replacement text"),
+});
+
+const EditParams = z.object({
+  file_path: z.string().describe("The file path to edit"),
+  edits: z
+    .array(EditItem)
+    .min(1)
+    .describe(
+      "One or more edits applied in order. Each edit operates on the result of the previous one. " +
+        "Every old_text must uniquely match exactly one location in the file at the time it is applied.",
+    ),
 });
 
 export function createEditTool(
@@ -20,10 +30,13 @@ export function createEditTool(
   return {
     name: "edit",
     description:
-      "Replace a specific text string in a file. The file must be read first before editing. " +
-      "The old_text must uniquely match exactly one location in the file. Returns a unified diff of the change.",
+      "Replace one or more text strings in a file. The file must be read first before editing. " +
+      "Pass `edits` as an array of { old_text, new_text } pairs; edits are applied sequentially " +
+      "so each subsequent match runs against the result of the prior edits. " +
+      "Every old_text must uniquely match exactly one location in the file when applied. " +
+      "Returns a unified diff of the combined change.",
     parameters: EditParams,
-    async execute({ file_path, old_text, new_text }) {
+    async execute({ file_path, edits }) {
       if (planModeRef?.current) {
         return "Error: edit is restricted in plan mode. Use read-only tools to explore the codebase, then write your plan to .gg/plans/.";
       }
@@ -34,51 +47,56 @@ export function createEditTool(
         throw new Error("File must be read first before editing. Use the read tool first.");
       }
 
-      const content = await ops.readFile(resolved);
+      const original = await ops.readFile(resolved);
+      const hasCRLF = original.includes("\r\n");
+      const originalNormalized = hasCRLF ? original.replace(/\r\n/g, "\n") : original;
 
-      // Detect line endings
-      const hasCRLF = content.includes("\r\n");
+      let working = originalNormalized;
+      const fileName = path.basename(resolved);
 
-      // Normalize for matching
-      const normalized = hasCRLF ? content.replace(/\r\n/g, "\n") : content;
-      const normalizedOld = hasCRLF ? old_text.replace(/\r\n/g, "\n") : old_text;
-      const normalizedNew = hasCRLF ? new_text.replace(/\r\n/g, "\n") : new_text;
+      for (let i = 0; i < edits.length; i++) {
+        const { old_text, new_text } = edits[i];
+        const normalizedOld = hasCRLF ? old_text.replace(/\r\n/g, "\n") : old_text;
+        const normalizedNew = hasCRLF ? new_text.replace(/\r\n/g, "\n") : new_text;
 
-      // Check uniqueness
-      const occurrences = countOccurrences(normalized, normalizedOld);
-      if (occurrences === 0) {
-        throw new Error(
-          `old_text not found in ${path.basename(resolved)}. ` +
-            "Make sure the text matches exactly, including whitespace and indentation.",
-        );
+        const label = edits.length > 1 ? ` (edit ${i + 1}/${edits.length})` : "";
+
+        const occurrences = countOccurrences(working, normalizedOld);
+        if (occurrences === 0) {
+          throw new Error(
+            `old_text not found in ${fileName}${label}. ` +
+              "Make sure the text matches exactly, including whitespace and indentation.",
+          );
+        }
+        if (occurrences > 1) {
+          throw new Error(
+            `old_text found ${occurrences} times in ${fileName}${label}. ` +
+              "Include more surrounding context to make the match unique.",
+          );
+        }
+
+        const match = fuzzyFindText(working, normalizedOld);
+        if (!match.found) {
+          throw new Error(`old_text not found in ${fileName}${label}.`);
+        }
+
+        working =
+          working.slice(0, match.index) +
+          normalizedNew +
+          working.slice(match.index + match.matchLength);
       }
-      if (occurrences > 1) {
-        throw new Error(
-          `old_text found ${occurrences} times in ${path.basename(resolved)}. ` +
-            "Include more surrounding context to make the match unique.",
-        );
-      }
 
-      // Find and replace
-      const match = fuzzyFindText(normalized, normalizedOld);
-      if (!match.found) {
-        throw new Error(`old_text not found in ${path.basename(resolved)}.`);
-      }
-
-      const newContent =
-        normalized.slice(0, match.index) +
-        normalizedNew +
-        normalized.slice(match.index + match.matchLength);
-
-      // Restore line endings if needed
-      const finalContent = hasCRLF ? newContent.replace(/\n/g, "\r\n") : newContent;
-
+      const finalContent = hasCRLF ? working.replace(/\n/g, "\r\n") : working;
       await ops.writeFile(resolved, finalContent);
 
       const relPath = path.relative(cwd, resolved);
-      const diff = generateDiff(normalized, newContent, relPath);
+      const diff = generateDiff(originalNormalized, working, relPath);
+      const summary =
+        edits.length > 1
+          ? `Successfully applied ${edits.length} edits to ${relPath}.`
+          : `Successfully replaced text in ${relPath}.`;
       return {
-        content: `Successfully replaced text in ${relPath}.`,
+        content: summary,
         details: { diff },
       };
     },
