@@ -550,6 +550,23 @@ export function useAgentLoop(
                 break;
 
               case "retry":
+                // The stream restarts from scratch on retry — the provider
+                // will re-emit text from the beginning. Without clearing
+                // the accumulated buffers, the retry's deltas append to the
+                // aborted attempt's partial text, producing a visible
+                // duplicate (e.g. "Now I'll work on this..Now I'll work on this..").
+                if (streamFlushTimer) {
+                  clearTimeout(streamFlushTimer);
+                  streamFlushTimer = null;
+                }
+                textVisibleRef.current = "";
+                thinkingBufferRef.current = "";
+                thinkingVisibleRef.current = "";
+                charCountRef.current = 0;
+                streamTextDirty = false;
+                streamThinkingDirty = false;
+                setStreamingText("");
+                setStreamingThinking("");
                 // Hidden retries (silent) don't update the UI — the user
                 // only sees retry indicators after silent attempts are exhausted.
                 if (!event.silent) {

@@ -136,7 +136,7 @@ export async function buildSystemPrompt(
   sections.push(
     `## Tools\n\n` +
       `- **read**: Read file contents. Use offset/limit for large files.\n` +
-      `- **edit**: Surgical changes to existing files. The old_text must uniquely match one location.\n` +
+      `- **edit**: Surgical changes to existing files. Pass \`edits\` as an array of { old_text, new_text } pairs; each old_text must uniquely match one location and edits apply in order.\n` +
       `- **write**: Create new files or complete rewrites. Prefer edit for small changes.\n` +
       `- **bash**: Run commands (tests, builds, git, installs). The shell already runs in the project working directory — don't \`cd\` into it redundantly. Check exit code and output for errors. Use non-interactive flags where needed (e.g. \`--yes\`, \`-y\`) to avoid blocking prompts. Set \`run_in_background=true\` for long-running processes (dev servers, watchers) — returns a process ID immediately.\n` +
       `- **find** / **ls**: Discover project structure and orient in unfamiliar directories.\n` +
