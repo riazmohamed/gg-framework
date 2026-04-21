@@ -11,6 +11,8 @@ export interface ModelInfo {
   costTier: "low" | "medium" | "high";
 }
 
+// Provider display order — mirrors `PROVIDERS` in ui/login.tsx so the
+// /model selector and login selector sort models identically.
 export const MODELS: ModelInfo[] = [
   // ── Anthropic ──────────────────────────────────────────
   {
@@ -42,17 +44,6 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     costTier: "low",
-  },
-  // ── Xiaomi (MiMo) ──────────────────────────────────────
-  {
-    id: "mimo-v2-pro",
-    name: "MiMo-V2-Pro",
-    provider: "xiaomi",
-    contextWindow: 1_000_000,
-    maxOutputTokens: 131_072,
-    supportsThinking: true,
-    supportsImages: false,
-    costTier: "medium",
   },
   // ── OpenAI (Codex) ─────────────────────────────────────
   {
@@ -95,7 +86,18 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     costTier: "low",
   },
-  // ── GLM (Z.AI) ───────────────────────────────────────────
+  // ── Moonshot (Kimi) ────────────────────────────────────
+  {
+    id: "kimi-k2.6",
+    name: "Kimi K2.6",
+    provider: "moonshot",
+    contextWindow: 262_144,
+    maxOutputTokens: 16_384,
+    supportsThinking: true,
+    supportsImages: true,
+    costTier: "medium",
+  },
+  // ── Z.AI (GLM) ─────────────────────────────────────────
   {
     id: "glm-5.1",
     name: "GLM-5.1",
@@ -126,7 +128,7 @@ export const MODELS: ModelInfo[] = [
     supportsImages: false,
     costTier: "low",
   },
-  // ── MiniMax ───────────────────────────────────────────────
+  // ── MiniMax ────────────────────────────────────────────
   {
     id: "MiniMax-M2.7",
     name: "MiniMax M2.7",
@@ -147,7 +149,18 @@ export const MODELS: ModelInfo[] = [
     supportsImages: false,
     costTier: "medium",
   },
-  // ── OpenRouter ────────────────────────────────────────────
+  // ── Xiaomi (MiMo) ──────────────────────────────────────
+  {
+    id: "mimo-v2-pro",
+    name: "MiMo-V2-Pro",
+    provider: "xiaomi",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 131_072,
+    supportsThinking: true,
+    supportsImages: false,
+    costTier: "medium",
+  },
+  // ── OpenRouter ─────────────────────────────────────────
   {
     id: "qwen/qwen3.6-plus",
     name: "Qwen3.6-Plus",
@@ -156,17 +169,6 @@ export const MODELS: ModelInfo[] = [
     maxOutputTokens: 65_536,
     supportsThinking: true,
     supportsImages: false,
-    costTier: "medium",
-  },
-  // ── Moonshot (Kimi) ──────────────────────────────────────
-  {
-    id: "kimi-k2.6",
-    name: "Kimi K2.6",
-    provider: "moonshot",
-    contextWindow: 262_144,
-    maxOutputTokens: 16_384,
-    supportsThinking: true,
-    supportsImages: true,
     costTier: "medium",
   },
 ];

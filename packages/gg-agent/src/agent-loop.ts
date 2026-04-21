@@ -140,6 +140,29 @@ export function isMalformedStream(err: unknown): boolean {
   return /\bin JSON at position \d+/i.test(msg);
 }
 
+/**
+ * Promise-returning sleep that rejects with AbortError if `signal` fires.
+ * Used by retry backoffs so ESC/Ctrl+C cancel immediately instead of having
+ * to wait out the full delay (up to 30s per overload retry × 10 retries).
+ */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException("Aborted", "AbortError"));
+  }
+  return new Promise<void>((resolve, reject) => {
+    let onAbort: (() => void) | null = null;
+    const timer = setTimeout(() => {
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export async function* agentLoop(
   messages: Message[],
   options: AgentOptions,
@@ -500,7 +523,7 @@ export async function* agentLoop(
             maxAttempts: MAX_OVERLOAD_RETRIES,
             delayMs,
           };
-          await new Promise((r) => setTimeout(r, delayMs));
+          await abortableSleep(delayMs, options.signal);
           turn--; // Don't count the failed turn
           continue;
         }
@@ -539,7 +562,7 @@ export async function* agentLoop(
             delayMs,
             silent: stallRetries <= 2,
           };
-          await new Promise((r) => setTimeout(r, delayMs));
+          await abortableSleep(delayMs, options.signal);
           turn--; // Don't count the failed turn
           continue;
         }
