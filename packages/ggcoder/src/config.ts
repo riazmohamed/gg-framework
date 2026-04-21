@@ -55,14 +55,35 @@ export interface SavedSettings {
   theme: "auto" | ThemeName;
 }
 
+const VALID_PROVIDERS = new Set<Provider>([
+  "anthropic",
+  "xiaomi",
+  "openai",
+  "glm",
+  "moonshot",
+  "minimax",
+  "openrouter",
+]);
+
+function isValidProvider(value: unknown): value is Provider {
+  return typeof value === "string" && VALID_PROVIDERS.has(value as Provider);
+}
+
 /** Load saved settings from the settings file. Returns defaults on missing/invalid file. */
 export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
   const filePath = settingsFilePath ?? getAppPaths().settingsFile;
   const result: SavedSettings = { thinkingEnabled: false, theme: "auto" };
   try {
     const raw = JSON.parse(fsSync.readFileSync(filePath, "utf-8"));
-    if (raw.defaultProvider) result.provider = raw.defaultProvider;
-    if (raw.defaultModel) result.model = raw.defaultModel;
+    // Only accept providers the current build actually supports. A stale
+    // provider name (e.g. a previously-supported provider that's since been
+    // removed) would otherwise poison startup with "Not logged in" errors.
+    if (isValidProvider(raw.defaultProvider)) {
+      result.provider = raw.defaultProvider;
+      // Only honor the saved model when the provider was also accepted —
+      // otherwise a model from the removed provider would leak through.
+      if (typeof raw.defaultModel === "string") result.model = raw.defaultModel;
+    }
     if (raw.thinkingEnabled === true) result.thinkingEnabled = true;
     if (typeof raw.theme === "string" && isValidThemeSetting(raw.theme)) result.theme = raw.theme;
   } catch {
