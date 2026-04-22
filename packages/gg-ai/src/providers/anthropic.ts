@@ -11,6 +11,7 @@ import type {
 import { ProviderError } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import {
+  downgradeUnsupportedImages,
   normalizeAnthropicStopReason,
   toAnthropicCacheControl,
   toAnthropicMessages,
@@ -52,7 +53,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const useStreaming = options.streaming !== false;
 
   const cacheControl = toAnthropicCacheControl(options.cacheRetention, options.baseUrl);
-  const { system: rawSystem, messages } = toAnthropicMessages(options.messages, cacheControl);
+  const downgradedMessages = downgradeUnsupportedImages(options.messages, options.supportsImages);
+  const { system: rawSystem, messages } = toAnthropicMessages(downgradedMessages, cacheControl);
 
   // OAuth tokens require Claude Code identity in the system prompt
   const system = isOAuth

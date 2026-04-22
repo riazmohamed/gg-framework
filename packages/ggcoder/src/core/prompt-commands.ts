@@ -222,7 +222,13 @@ Create a concise tree structure showing key directories and files with brief des
 
 Create CLAUDE.md with: project description, project structure tree, organization rules (one file per component, single responsibility), and zero-tolerance code quality checks with the exact commands for this project.
 
-Keep total file under 100 lines. If updating, preserve any custom sections the user added.`,
+Keep total file under 100 lines. If updating, preserve any custom sections the user added.
+
+## Step 6: Restart Notice
+
+End your reply with this exact notice so the user doesn't miss it:
+
+> ⚠️ CLAUDE.md was created/updated. ggcoder loads it at startup, so **exit and restart ggcoder** (\`/quit\` then run \`ggcoder\` again) before continuing. Without a restart, I won't see the new context.`,
   },
   {
     name: "setup-lint",
@@ -474,6 +480,322 @@ Replace all placeholders with the actual commands for the detected project type 
 ## Step 3: Confirm
 
 Report that /update is now available with dependency updates, security audits, and deprecation fixes.`,
+  },
+  {
+    name: "eyes",
+    aliases: [],
+    description:
+      "Build project-specific perception probes (screenshots, logs, APIs, etc.) and document them in CLAUDE.md",
+    prompt: `# Eyes: Give the Agent Project-Specific Perception
+
+Build the set of "eyes" this project needs — scripts the agent can run to observe UI, logs, APIs, processes, state, builds, etc. — then document them in CLAUDE.md so any future agent (even with no context) can use them. Re-run this command later to add missing eyes or update existing ones.
+
+## Execution Discipline (read before starting)
+
+This command is long because it has to cover any project type. To stay reliable, obey these rules:
+
+1. **Minimum viable set.** Build the SMALLEST useful subset of probes first — typically 3–8, never more than 10 in a single run. Mark the rest as \`deferred\` in the manifest. The user re-runs \`/eyes\` to expand coverage. Prefer 4 probes that all pass Phase 4 over 15 probes half-built.
+2. **Budget.** 3–8 probes per run is the target. If the mapper picks more, trim to the highest-value ones for THIS project and defer the rest. Capabilities marked "opt-in" (\`load\`, \`chaos\`, \`remote\`, \`apm\`) are deferred unless the user already configured them or explicitly asks.
+3. **Checkpoint after every phase.** At the end of each phase, write progress into \`.gg/eyes/manifest.json\` (add a \`phase_completed\` field: \`"research" | "design" | "build" | "verify" | "document"\`). On re-run, read this and resume from the next phase. Never redo completed phases unless the user passes \`refresh\` or the project materially changed.
+4. **Phase gates.** Do not start Phase N+1 until Phase N is complete AND its checkpoint is written. Do not announce completion until Phase 5 is written AND Phase 4 Pass B has succeeded.
+5. **Phase 4 Pass B is non-negotiable.** If probes build but the contextless-agent verification is skipped, the command has FAILED — regardless of how many probes work. Report failure and stop; do not paper over it.
+6. **Fail loud, recover small.** If a probe fails to build after one retry, mark it \`failed\` in the manifest with the error, continue with the rest, and report failures at the end. Do not silently drop probes. Do not let one failure abort the whole run.
+7. **Defer, don't fake.** If a capability requires scaffolding that's too invasive (e.g. adding a debug endpoint inside a game engine) and the user hasn't opted in, mark it deferred with a one-line note. Never stub a probe that doesn't actually work.
+
+## Hard Rules (Headless Contract)
+
+These are non-negotiable. The user must never see pop-ups, browser windows, or images opened on their screen. Everything happens in the background.
+
+- **Never** call \`open\`, \`xdg-open\`, \`start\`, \`code\`, Finder/Explorer reveals, or any command that launches a GUI window.
+- **Never** pass \`--headed\`, \`--no-headless\`, \`--gui\`, or equivalent flags. Browsers, emulators, simulators, and engine editors must run headless / in batch mode.
+- All artifacts (screenshots, recordings, DB dumps, log snapshots, HAR files, traces) go to \`.gg/eyes/out/\` which MUST be gitignored.
+- Every probe script must have a timeout and exit non-zero on failure with a clear stderr message.
+- Long-running processes (dev servers, tailers, capture sinks) are started in the background; their PIDs/ports go in \`.gg/eyes/state.json\`; they are stopped via \`.gg/eyes/down.sh\`.
+- Never prompt the user. If a dep is missing, install it silently. If the dev server isn't up, start it.
+- **Redaction**: before writing any artifact that may contain secrets (logs, HAR files, env dumps, screenshots of auth'd UIs), run it through a redaction pass (\`.gg/eyes/redact.sh\`) that strips JWTs, API keys, bearer tokens, and values of env vars matching \`*_KEY|*_SECRET|*_TOKEN|*_PASSWORD\`.
+- **Remote / production eyes**: OFF by default. Only enabled if the user explicitly opts in via \`.gg/eyes/remote.json\` (gitignored). Remote probes must be read-only and refuse to run destructive operations.
+
+## Capability Vocabulary
+
+Think in capabilities, not project types. Map the project to the subset it actually needs. Not every capability applies to every project — pick the relevant ones. Capabilities split into three tiers:
+
+### Core (observe)
+
+- \`visual\` — screenshot a UI (web page, mobile screen, desktop window, game frame)
+- \`runtime_logs\` — read recent stdout/stderr or log files from the running app
+- \`http\` — hit HTTP endpoints and read responses (REST, GraphQL, health checks)
+- \`state\` — inspect persistent state (DB rows, KV stores, files written by the app)
+- \`process\` — check what's running, on what port, PID, uptime
+- \`build\` — compile/typecheck and surface errors
+- \`test\` — run a single test or subset and read output
+- \`cli_io\` — invoke the CLI being built with args and capture stdout/stderr/exit
+- \`native_ui\` — capture mobile/desktop native windows (simulator screencap, window capture)
+- \`dom\` — DOM / accessibility tree snapshot of a headless browser page (often more useful than a screenshot for assertions)
+- \`browser_console\` — browser-side console logs and uncaught errors via CDP
+- \`network\` — network traffic (HAR export via CDP, or mitmproxy for non-browser traffic)
+- \`storage\` — cookies, localStorage, sessionStorage, IndexedDB dumps
+- \`sockets\` — open ports / listening sockets (\`lsof -i\`, \`ss\`)
+- \`fs_watch\` — filesystem changes during a probe run (fswatch / inotify)
+- \`env\` — env var diff, runtime versions, doctor report
+- \`perf\` — performance metrics (Lighthouse for web, xctrace / simpleperf for mobile, FPS / frame-time for games, process sampling for servers, bundle size for frontends)
+- \`metrics\` — scrape a metrics endpoint (Prometheus, /metrics)
+- \`trace\` — pull a distributed trace by ID (OTEL collector)
+- \`responsive\` — capture a viewport matrix (mobile / tablet / desktop) in one call
+- \`a11y\` — accessibility audit (axe-core on a page, or platform a11y tree)
+- \`headers\` — HTTP security-header audit (CSP, HSTS, X-Frame-Options, etc.)
+
+### Act (drive to a state)
+
+These convert the agent from a passive camera into an actor. Without them, ~60% of real debugging still needs the user.
+
+- \`act_web\` — drive a web UI: click, type, scroll, wait, nav. Playwright script accepts a sequence and returns post-state (screenshot + DOM).
+- \`act_mobile\` — drive a mobile app via Appium / XCUITest / UIAutomator: tap, swipe, input.
+- \`act_desktop\` — drive a desktop window via nut-js / AXUIElement / UIAutomation / AT-SPI.
+- \`act_cli\` — pty-based expect scripts for interactive CLIs (prompts, TUIs). Also captures ANSI frames so Ink/bubbletea/textual output can be snapshotted.
+- \`act_game\` — input simulation (keyboard / gamepad) into a running game, optionally recording + replaying deterministic seeds.
+- \`auth\` — establish and reuse a logged-in session (Playwright \`storageState.json\`, API token capture) so protected flows are reachable without re-logging in.
+- \`deeplink\` — jump directly to a screen by URL / URI scheme (mobile and web).
+
+### Capture (external side-effects)
+
+Local sinks that intercept what the app sends outward, so the agent can verify side-effects without real external services.
+
+- \`capture_email\` — local SMTP sink (Mailpit / MailHog) + \`.gg/eyes/mail.sh\` to list/read captured messages.
+- \`capture_webhook\` — local webhook receiver that logs incoming POSTs + a probe to list them.
+- \`capture_push\` — local push-notification sink (ntfy or APNS/FCM mock) + reader.
+- \`capture_sms\` — SMS mock / sink if the project sends SMS.
+- \`capture_stripe\` — \`stripe listen\` in the background capturing webhook events + reader.
+- \`capture_events\` — analytics / tracking event sink (intercepts calls to Segment, PostHog, GA, etc.).
+- \`capture_queue\` — peek messages in a queue without consuming (Kafka / Redis / RabbitMQ / SQS / BullMQ / Sidekiq / Celery).
+- \`capture_ws\` — open a WebSocket / SSE, record frames, send test messages.
+- \`capture_grpc\` — \`grpcurl\` with reflection, record responses.
+- \`capture_errors\` — local Sentry-compatible error sink.
+- \`capture_audio\` — record audio produced by the app via a virtual sink (ffmpeg + pulseaudio / BlackHole on macOS / WASAPI loopback on Windows). Saves \`.wav\` for playback-by-tooling or waveform inspection.
+- \`capture_video\` — record a window or headless-browser video stream via ffmpeg (\`x11grab\` / \`avfoundation\` / \`gdigrab\`) or Playwright's built-in video recording. Saves \`.mp4\`.
+
+### Diff & Time (compare, replay)
+
+- \`diff_visual\` — screenshot vs baseline under \`.gg/eyes/baselines/\` using pixelmatch / odiff; returns similarity score + diff PNG.
+- \`diff_api\` — API response vs recorded baseline (golden files).
+- \`diff_branch\` — visual diff between two git refs (checkout A, screenshot; checkout B, screenshot; diff). Use a git worktree so the working tree is undisturbed.
+- \`record\` — rolling background recorder: tails logs + periodic screenshots + network events to a ring buffer under \`.gg/eyes/recordings/\`. \`replay.sh <timestamp>\` scrubs back.
+- \`introspect\` — language-runtime / engine hooks: Node inspector, Python REPL eval, Jupyter \`nbconvert --execute\`, DataFrame head/describe, matplotlib intercept, game-engine RCON-style debug endpoint for entity/state queries.
+- \`remote\` — opt-in prod/staging read-only eyes (k8s / fly / vercel / cloudflare / railway log + exec). Must refuse destructive ops. Gated behind \`.gg/eyes/remote.json\`.
+- \`security\` — runtime secret-leak scan of artifacts, dependency audit, HTTP header audit.
+- \`container\` — \`docker ps\` / \`docker logs\` / \`docker exec\` / \`compose\` wrappers for dockerized stacks.
+- \`concurrency\` — multi-session harness: parallel isolated contexts (Playwright contexts, multiple CLI processes) with an action coordinator, for "user A acts, user B observes" tests.
+
+### Stress & Environment
+
+- \`load\` — load / stress testing via k6 / vegeta / wrk / hey. Produces latency percentiles + throughput report. Opt-in (destructive against the target) — off unless the project has a clear perf target or the user enables it.
+- \`chaos\` — failure injection: Toxiproxy for network fault (latency, drops, bandwidth), chaos-mesh for k8s, process kill / pause helpers for local procs. Opt-in and scoped (never touches remote unless remote profile explicitly allows).
+- \`browser_matrix\` — extension of \`visual\` / \`act_web\`: run the same script across Chromium + Firefox + WebKit and return per-browser results. Use Playwright's multi-browser support; enable only if cross-browser matters for this project.
+- \`devices\` — auto-detect physically connected real devices (\`adb devices\`, \`xcrun devicectl list devices\`, \`ideviceinfo\`, USB-serial via \`system_profiler\` / \`lsusb\`). Wires \`native_ui\` / \`act_mobile\` / \`runtime_logs\` to target the physical device when present, falls back to simulator otherwise.
+- \`apm\` — read-only pulls from APM providers (Datadog, New Relic, Honeycomb, Grafana Cloud, Sentry) when creds are configured in \`.gg/eyes/remote.json\`. Only under \`remote\`.
+
+## Project-Type Recipes (reference, not exhaustive)
+
+Use this as a starting point in the Capability Mapper. Add or drop based on what the project actually has.
+
+- **Web app (Next.js / Vite / SvelteKit / Remix / Astro)**: visual, dom, browser_console, network, storage, auth, responsive, a11y, http, runtime_logs, build, test, act_web, diff_visual, capture_email, capture_webhook, perf (Lighthouse). Add \`browser_matrix\` if cross-browser matters; add \`capture_video\` for flow recordings.
+- **Backend service / API**: http, runtime_logs, state (DB), process, sockets, build, test, metrics, trace, capture_ws, capture_grpc, capture_queue, capture_email, capture_webhook, capture_stripe, container. Add \`load\` if there's a perf target; \`chaos\` for resilience work.
+- **CLI tool**: cli_io, act_cli (pty + ANSI snapshot), runtime_logs, build, test, fs_watch, env.
+- **Mobile app (iOS)**: native_ui (\`xcrun simctl io booted screenshot\`), runtime_logs (\`xcrun simctl spawn booted log stream\`), act_mobile (XCUITest / Appium), build (xcodebuild), test, deeplink, perf (xctrace), devices (auto-target physical iPhone if connected).
+- **Mobile app (Android)**: native_ui (\`adb shell screencap\`), runtime_logs (\`adb logcat\`), act_mobile (UIAutomator / Appium), build (gradle), test, deeplink, perf (simpleperf), devices.
+- **Media app (audio / video / streaming)**: capture_audio, capture_video, perf, runtime_logs — plus whatever platform recipe applies (web / mobile / desktop).
+- **Desktop app (Electron / Tauri)**: visual (headless window capture or WebDriver), runtime_logs, build, test, act_desktop, introspect (devtools / Tauri IPC), fs_watch.
+- **Game (Unity / Unreal / Godot / custom engine)**: visual (engine batch-mode screenshot or off-screen render), runtime_logs, build (batch-mode build), introspect (REQUIRES a small in-engine debug endpoint the agent can query for entity state — scaffold it if missing), act_game (input injection + deterministic seeding + input recording/replay), perf (FPS / frame-time).
+- **Browser extension**: visual + dom + browser_console via Playwright persistent context with \`--load-extension\`; act_web to drive target sites; introspect for background/service-worker state.
+- **Python / data / ML**: introspect (nb-run, df-head, plot-capture intercepting \`plt.show\`), http (if FastAPI / Flask), state, build (typecheck via mypy), test, env (gpu status, python/cuda versions), perf.
+- **Chrome/Firefox extension**: like web app + extension-specific loading.
+- **Library / SDK**: build, test, cli_io (if it has a CLI demo), introspect (REPL eval).
+
+Also consider adding across ANY project type when warranted: \`load\` (if perf-critical), \`chaos\` (if resilience-critical), \`capture_audio\` / \`capture_video\` (if the app produces media), \`devices\` (if real hardware matters), \`apm\` (if prod observability is configured).
+
+## Probe Naming Convention
+
+Probe IDs use \`<verb>\` or \`<verb>-<object>\` lowercase-kebab: \`screenshot\`, \`logs\`, \`api\`, \`dom\`, \`act-web\`, \`diff-visual\`, \`capture-email\`, \`record\`. Scripts are \`.gg/eyes/<id>.sh\`. Self-tests are \`.gg/eyes/<id>.test.sh\`.
+
+## Phase 1: Research (Parallel Sub-Agents)
+
+Use the subagent tool to spawn these agents IN PARALLEL (multiple calls in a single response). Each must return structured findings.
+
+**Agent 1 — Project Classifier**: Read manifests (package.json, Cargo.toml, go.mod, pyproject.toml, Podfile, Info.plist, tauri.conf.json, docker-compose.yml, Makefile, etc.). Return: project kind(s) (web app / CLI / mobile / desktop / backend service / library / game / extension), languages, frameworks, runtimes.
+
+**Agent 2 — Runtime Surveyor**: Find existing dev scripts, ports, log paths, DB locations, test runners, build outputs, env files. Report exact commands already defined.
+
+**Agent 3 — Existing-Eyes Auditor**: Read current \`.gg/eyes/\` (if any), \`.gg/eyes/manifest.json\`, existing \`CLAUDE.md\`, and \`.gitignore\`. Report what's already installed so this run is a diff, not a rewrite. Never overwrite user-modified probe scripts without good reason.
+
+**Agent 4 — Capability Mapper**: Given the above, pick the 3–8 HIGHEST-VALUE probes to build NOW, and list everything else as deferred. The minimum viable set should unlock the most common perception tasks for this project type (for a web app that's usually \`visual\` + \`dom\` + \`runtime_logs\` + \`http\` + \`act_web\`; for a backend: \`http\` + \`runtime_logs\` + \`state\` + \`capture_email\` or \`capture_webhook\`; for a CLI: \`cli_io\` + \`act_cli\` + \`runtime_logs\`). Opt-in capabilities (\`load\`, \`chaos\`, \`remote\`, \`apm\`) are ALWAYS deferred unless explicitly requested. For each chosen capability, pick the best concrete implementation for this stack (e.g. \`visual\` web → Playwright headless; \`visual\` Tauri → WebDriver or tauri-driver; \`visual\` iOS → \`xcrun simctl io booted screenshot\`; \`native_ui\` Android → \`adb shell screencap\`; \`capture_email\` → Mailpit on a free port; \`act_web\` → Playwright with reusable \`storageState.json\`; \`introspect\` game → defer unless the engine already exposes a debug endpoint).
+
+Wait for all agents. Synthesize into a single plan listing \`build_now\` (3–8 probes) and \`deferred\` (everything else with a one-line reason).
+
+**Checkpoint: write \`phase_completed: "research"\` to \`.gg/eyes/manifest.json\` before proceeding.**
+
+## Phase 2: Design
+
+Write \`.gg/eyes/manifest.json\` with the probe list. Schema:
+
+\`\`\`json
+{
+  "version": 1,
+  "phase_completed": "design",
+  "project": { "kind": "...", "stack": "..." },
+  "probes": [
+    {
+      "id": "screenshot",
+      "capability": "visual",
+      "status": "pending",
+      "script": ".gg/eyes/screenshot.sh",
+      "impl": "playwright-headless",
+      "deps": ["playwright"],
+      "timeout_ms": 15000,
+      "usage": "<url-or-path> [viewport]",
+      "output": ".gg/eyes/out/screenshot-<timestamp>.png"
+    }
+  ],
+  "deferred": [
+    { "capability": "load", "reason": "opt-in; no perf target set" },
+    { "capability": "capture_audio", "reason": "project does not produce audio" }
+  ],
+  "lifecycle": { "up": ".gg/eyes/up.sh", "down": ".gg/eyes/down.sh" }
+}
+\`\`\`
+
+Probe \`status\` transitions: \`pending\` → \`built\` (after Phase 3) → \`verified\` (after Phase 4 Pass A) → \`failed\` with an \`error\` field if anything goes wrong at any point. Update the manifest after each probe changes state.
+
+If a manifest already exists, diff against it: keep \`verified\` probes as-is, rebuild \`failed\` ones, add missing ones, remove probes whose capability no longer applies (but never delete a user-edited script without asking). If \`phase_completed\` already indicates a later phase, resume from the next phase rather than restarting.
+
+Also ensure \`.gitignore\` contains: \`.gg/eyes/out/\`, \`.gg/eyes/state.json\`, \`.gg/eyes/recordings/\`, \`.gg/eyes/remote.json\`, \`.gg/eyes/auth/\`.
+
+**Checkpoint: manifest is now written with \`phase_completed: "design"\`. Proceed to Phase 3.**
+
+## Phase 3: Build (Parallel Sub-Agents)
+
+For each probe that is new or changed, spawn a sub-agent via the subagent tool. Launch them IN PARALLEL (all in one response). Each sub-agent's task:
+
+1. Create \`.gg/eyes/<id>.sh\` (or \`.mjs\`/\`.py\` only if shell is unreasonable). Make it executable. It must:
+   - Be fully headless (re-read the Hard Rules above)
+   - Have a timeout
+   - Exit non-zero with a clear stderr message on failure
+   - Write artifacts only under \`.gg/eyes/out/\`
+   - Print the artifact path (or result) to stdout so the agent can consume it
+   - Self-recover where possible (start dev server if down, install missing dep, pick a free port)
+2. Install any required dependencies silently (locally to the project where possible; \`npx --yes\`, \`pnpm add -D --silent\`, \`pip install --quiet --user\`, etc.). For Playwright: also run the headless browser install (\`npx --yes playwright install chromium\`).
+3. Write \`.gg/eyes/<id>.test.sh\` — a self-test that proves the probe works end-to-end headlessly. It must produce a real artifact or real output, not a mock.
+4. Append a short usage block to \`.gg/eyes/README.md\`.
+5. Report success or failure back. On success, main agent updates that probe's \`status\` to \`built\`. On failure, main agent retries ONCE; if it still fails, sets \`status: "failed"\` with a one-line \`error\` and moves on — does NOT abort the whole run.
+
+Also create (once, shared):
+- \`.gg/eyes/up.sh\` — start the dev stack + any required capture sinks (Mailpit, webhook receiver, stripe listen) in the background, record PIDs/ports to \`.gg/eyes/state.json\`, idempotent.
+- \`.gg/eyes/down.sh\` — stop everything started by \`up.sh\`.
+- \`.gg/eyes/redact.sh\` — stdin-in / stdout-out redactor that strips tokens, API keys, bearer headers, and values of \`*_KEY|*_SECRET|*_TOKEN|*_PASSWORD\` env vars. All probes that produce text artifacts pipe through this before writing.
+- \`.gg/eyes/doctor.sh\` — prints OS/arch, runtime versions, installed probe deps, port availability, sink status. One blob for troubleshooting.
+- \`.gg/eyes/out/\`, \`.gg/eyes/baselines/\`, \`.gg/eyes/recordings/\`, \`.gg/eyes/auth/\` directories (create as needed).
+
+**Checkpoint: after all parallel sub-agents report, update \`phase_completed: "build"\` in the manifest with each probe's final status. Proceed to Phase 4.**
+
+## Phase 4: Verify
+
+Two verification passes. Both must pass before Phase 5.
+
+**Pass A — Self-tests**: Run every \`.gg/eyes/<id>.test.sh\` for probes with \`status: "built"\`. On pass, set \`status: "verified"\`. On failure, retry ONCE; if it still fails, set \`status: "failed"\` with the error, and continue with remaining probes. It is fine to finish Phase 4 with some probes failed — they are recorded and the user can re-run \`/eyes\` to retry them. It is NOT fine to skip Pass B.
+
+**Pass B — Contextless agent test**: Spawn ONE sub-agent via the subagent tool whose entire context is the updated CLAUDE.md \`## Eyes\` section only (paste it into the task). Give it a concrete task that exercises at least one *act* or *capture* probe if those were built, not just pure observation. Examples:
+- web app: "Log in as the test user, navigate to Settings, capture the page, and report the value in the Email field."
+- backend: "Trigger the password-reset endpoint for test@example.com, then read the captured email and report the reset link."
+- CLI (interactive): "Run the init command, answer the prompts with defaults, and report the final confirmation line."
+- mobile: "Deep-link to the profile screen and report the displayed username."
+- game: "Spawn the player at (0,0), step forward three frames, and report the player's position."
+- library / pure observation: fall back to a simple probe ("capture the home page and report the primary heading").
+
+If the sub-agent can complete the task without asking clarifying questions, the docs work. If it gets stuck or guesses, fix the \`## Eyes\` section in CLAUDE.md and retry (up to 2 retries). This is the real test — not "does the script run" but "can a contextless agent use it from the docs alone."
+
+**Pass B is MANDATORY.** If you skip it, this command has failed. Do not claim completion without it. If Pass B cannot be run (e.g. no verified probes at all), report that the command failed and stop.
+
+**Pass C — Autonomy test (MANDATORY when triggers were written)**: Spawn a second contextless sub-agent with only the \`## Eyes\` section. Give it a task that IMPLIES perception but does NOT demand it — a task that looks like normal coding work. Examples:
+- web app: "Add a disabled state to the login button when the form is invalid." (Should trigger the visual probe per the "after editing UI components" rule without being asked.)
+- backend: "Add a new field \`phone\` to the user registration endpoint." (Should trigger the http/api probe per the "after adding/modifying a route" rule.)
+- CLI: "Add a \`--verbose\` flag to the main command." (Should trigger the cli probe per the "after changing CLI args" rule.)
+- mobile: "Change the profile screen header color to blue." (Should trigger a screenshot per the UI-edit rule.)
+
+A pass means the sub-agent reached for the right probe on its own initiative, unprompted. A fail means it edited code and reported done without verifying, OR asked the user to verify. If Pass C fails, the "When to use" rules are too weak — rewrite them more actionably and retry (up to 2 retries). If the probe set is pure-observation (no UI/runtime changes apply) and no autonomy trigger makes sense, skip Pass C and note why.
+
+**Checkpoint: update \`phase_completed: "verify"\` with Pass A, Pass B, and Pass C results. Proceed to Phase 5.**
+
+## Phase 5: Document
+
+Insert or update a single \`## Eyes\` section in the project's CLAUDE.md (create CLAUDE.md if it doesn't exist, but do not clobber other sections). Keep it terse — the scripts are self-documenting; CLAUDE.md is the index.
+
+The section MUST include four subsections, in order: intro → probe table → **when to use automatically** → **when NOT to use** → lifecycle.
+
+Template:
+
+\`\`\`markdown
+## Eyes
+
+Perception probes live in \`.gg/eyes/\`. All headless. Artifacts go to \`.gg/eyes/out/\` (gitignored). Never open GUIs or prompt the user. Invoke probes yourself rather than asking the user — that's the whole point.
+
+### Available probes
+
+| Need | Run | Then |
+|---|---|---|
+| <one-line need> | \`.gg/eyes/<id>.sh <args>\` | <how to consume output> |
+| ... | ... | ... |
+
+### When to use these eyes (automatically, without being asked)
+
+Reach for probes ON YOUR OWN INITIATIVE when any of these apply — do not ask the user to verify something you can verify yourself:
+
+- <project-specific trigger 1: e.g. "After editing any file under \`src/ui/\` or \`src/components/\`, screenshot the affected page and visually verify the change landed.">
+- <trigger 2: e.g. "After adding or modifying an HTTP route, hit it with \`.gg/eyes/api.sh\` and confirm the response shape.">
+- <trigger 3: e.g. "After changing CLI argument parsing, run \`.gg/eyes/cli.sh --help\` and confirm the new flag appears.">
+- <trigger 4: e.g. "Before claiming a UI bug is fixed, screenshot the before/after and diff.">
+- <trigger 5: e.g. "After any change that touches email sending, trigger the flow and check \`.gg/eyes/mail.sh\` for the captured message.">
+- If a probe fails or returns unexpected results, investigate the artifact/output directly before assuming the probe itself is broken.
+
+### When NOT to use these eyes
+
+Do not run probes for:
+
+- Docs-only changes (README, markdown, comments).
+- Config-only changes that don't affect runtime behavior.
+- Refactors that preserve behavior and are already covered by tests.
+- Style/formatting-only changes.
+- When a probe was already run this turn on the same artifact — reuse the output, don't re-run.
+- When the dev server / simulator / sink isn't up AND the task doesn't require runtime verification — don't spin up infra just to be thorough.
+
+### Lifecycle
+
+Start/stop dev stack + capture sinks: \`.gg/eyes/up.sh\` / \`.gg/eyes/down.sh\` (idempotent, background).
+Refresh/expand this setup when the project changes: \`/eyes\`.
+\`\`\`
+
+For each probe: one row, one line need, exact invocation, one-line consumption hint (e.g. "read the printed PNG path", "parse JSON stdout", "grep stderr for ERROR"). Only include probes with \`status: "verified"\`. Do not document failed or deferred probes in the table — a short line below the lifecycle can list them if present ("Deferred: load, chaos. Failed: capture_audio (BlackHole not installed). Run \`/eyes\` again to retry.").
+
+**The "when to use" and "when NOT to use" triggers are project-specific and mandatory.** Generate them based on the actual project layout and probes built. Rules of thumb:
+- Tie triggers to file paths, file types, or task descriptions the future agent will recognize ("after editing \`src/routes/**\`…", "after modifying a \`.tsx\` component…", "before claiming an API change is done…").
+- Every verified probe should have at least one trigger that names it, OR be explicitly listed in "When NOT to use" if it's expensive/opt-in (e.g. \`load\`, \`diff_branch\`).
+- Match the trigger density to the project: a web app with many UI components warrants a strong visual trigger; a pure backend library does not.
+- Triggers should be ACTIONABLE ("screenshot the page") not VAGUE ("verify UI looks right").
+
+**Checkpoint: update \`phase_completed: "document"\`. Proceed to Phase 6.**
+
+## Phase 6: Report
+
+Summarize in the chat:
+- Project kind detected
+- Probes built and verified (list with ✓)
+- Probes failed (list with one-line error) — user can re-run \`/eyes\` to retry
+- Capabilities deferred (one-line reason each) — user can re-run \`/eyes\` to expand coverage
+- Contextless-agent verification result (Pass B) — explicitly state whether it passed
+- One-line example the user can try next (e.g. "Try: ask me to screenshot the home page.")
+
+**IMPORTANT — if CLAUDE.md was created or modified**, end the report with a clear notice:
+
+> ⚠️ CLAUDE.md was updated with the new \`## Eyes\` section. ggcoder loads CLAUDE.md at startup, so **exit and restart ggcoder** (\`/quit\` then run \`ggcoder\` again) before asking me to use these probes. Without a restart, I won't see the new instructions in my context.
+
+Make this notice the last thing in the report so the user doesn't miss it.`,
   },
   {
     name: "simplify",

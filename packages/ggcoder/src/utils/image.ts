@@ -3,15 +3,17 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import sharp from "sharp";
 
-/** Anthropic's 5 MB limit applies to the base64 string, not the decoded binary.
- *  Raw buffer limit = floor(5 MB × 3/4) so the base64 stays under 5 MB. */
-const MAX_IMAGE_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4);
+/** Anthropic's maximum image size in bytes (5 MB). */
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** Anthropic's hard per-dimension cap for many-image requests. Exceeding this
+ *  in either dimension causes a 400 even if the byte size is fine. */
+const MAX_IMAGE_DIMENSION = 2000;
 
-const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+export const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 const TEXT_EXTENSIONS = new Set([".md", ".txt"]);
 const ATTACHABLE_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, ...TEXT_EXTENSIONS]);
 
-const MEDIA_TYPES: Record<string, string> = {
+export const IMAGE_MEDIA_TYPES: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -19,6 +21,9 @@ const MEDIA_TYPES: Record<string, string> = {
   ".webp": "image/webp",
   ".bmp": "image/bmp",
 };
+
+// Backwards-compat alias for internal use below
+const MEDIA_TYPES = IMAGE_MEDIA_TYPES;
 
 export interface ImageAttachment {
   kind: "image" | "text";
@@ -128,20 +133,23 @@ async function fileExists(filePath: string): Promise<boolean> {
 }
 
 /**
- * Downscale an image buffer so it fits within MAX_IMAGE_BYTES.
+ * Downscale an image buffer so it fits within both MAX_IMAGE_DIMENSION per side
+ * (Anthropic's hard pixel cap for many-image requests) and MAX_IMAGE_BYTES.
  * Preserves format (PNG→PNG, JPEG→JPEG, etc.) and aspect ratio.
- * Progressively reduces dimensions by 25% until under the limit.
  */
-async function shrinkToFit(
+export async function shrinkToFit(
   buffer: Buffer,
   mediaType: string,
 ): Promise<{ buffer: Buffer; mediaType: string }> {
-  if (buffer.length <= MAX_IMAGE_BYTES) return { buffer, mediaType };
+  const meta = await sharp(buffer).metadata();
+  const origW = meta.width ?? 4096;
+  const origH = meta.height ?? 4096;
+  const exceedsDim = origW > MAX_IMAGE_DIMENSION || origH > MAX_IMAGE_DIMENSION;
 
-  let img = sharp(buffer);
-  const meta = await img.metadata();
-  let width = meta.width ?? 4096;
-  let height = meta.height ?? 4096;
+  // Short-circuit: within both limits — return as-is.
+  if (!exceedsDim && buffer.length <= MAX_IMAGE_BYTES) {
+    return { buffer, mediaType };
+  }
 
   // Determine output format from mediaType
   const formatMap: Record<string, keyof sharp.FormatEnum> = {
@@ -154,14 +162,35 @@ async function shrinkToFit(
   let outFormat = formatMap[mediaType] ?? "png";
   let outMediaType = mediaType === "image/bmp" ? "image/png" : mediaType;
 
-  // Try progressively smaller sizes (75% each step)
+  // Compute the initial target dimensions: fit within MAX_IMAGE_DIMENSION,
+  // preserving aspect ratio. Sharp's fit: "inside" does the same math but we
+  // want explicit width/height so we can shrink them further in the byte loop.
+  const scale = exceedsDim ? Math.min(MAX_IMAGE_DIMENSION / origW, MAX_IMAGE_DIMENSION / origH) : 1;
+  let width = Math.max(1, Math.round(origW * scale));
+  let height = Math.max(1, Math.round(origH * scale));
+
+  // Encode at the dimension-capped size first — often this is already under
+  // MAX_IMAGE_BYTES and we're done.
+  {
+    const first = await sharp(buffer)
+      .resize(width, height, { fit: "inside", withoutEnlargement: true })
+      .toFormat(outFormat)
+      .toBuffer();
+    if (first.length <= MAX_IMAGE_BYTES) {
+      return { buffer: first, mediaType: outMediaType };
+    }
+  }
+
+  // Still too large — progressively shrink by 25% per step.
   for (let attempt = 0; attempt < 10; attempt++) {
-    width = Math.round(width * 0.75);
-    height = Math.round(height * 0.75);
+    width = Math.max(1, Math.round(width * 0.75));
+    height = Math.max(1, Math.round(height * 0.75));
     if (width < 1 || height < 1) break;
 
-    img = sharp(buffer).resize(width, height, { fit: "inside", withoutEnlargement: true });
-    const result = await img.toFormat(outFormat).toBuffer();
+    const result = await sharp(buffer)
+      .resize(width, height, { fit: "inside", withoutEnlargement: true })
+      .toFormat(outFormat)
+      .toBuffer();
 
     if (result.length <= MAX_IMAGE_BYTES) {
       return { buffer: result, mediaType: outMediaType };

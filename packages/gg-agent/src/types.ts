@@ -5,6 +5,7 @@ import type {
   Message,
   ServerToolDefinition,
   StopReason,
+  ToolResultContent,
   Usage,
   StreamOptions,
 } from "@abukhaled/gg-ai";
@@ -12,7 +13,7 @@ import type {
 // ── Tool Results ────────────────────────────────────────────
 
 export interface StructuredToolResult {
-  content: string;
+  content: ToolResultContent;
   details?: unknown;
 }
 
@@ -180,6 +181,9 @@ export interface AgentOptions {
   signal?: AbortSignal;
   accountId?: string;
   cacheRetention?: StreamOptions["cacheRetention"];
+  /** Whether the target model supports image input. When false, image blocks
+   *  in messages/tool_results are downgraded to text placeholders. Default: true. */
+  supportsImages?: boolean;
   /** Enable provider-native web search. */
   webSearch?: boolean;
   /** Enable server-side compaction (Anthropic only, beta). */

@@ -68,7 +68,18 @@ export function estimateMessageTokens(message: Message): number {
         tokens += estimateTokens(JSON.stringify(tc.args));
       } else if ("type" in part && part.type === "tool_result") {
         const tr = part as unknown as ToolResult;
-        tokens += estimateTokens(tr.content);
+        if (typeof tr.content === "string") {
+          tokens += estimateTokens(tr.content);
+        } else {
+          for (const block of tr.content) {
+            if (block.type === "text") {
+              tokens += estimateTokens(block.text);
+            } else {
+              // Image: estimate ~1500 tokens per image (Anthropic rough mean)
+              tokens += 1500;
+            }
+          }
+        }
       }
     }
   }

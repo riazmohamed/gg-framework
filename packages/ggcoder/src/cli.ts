@@ -385,7 +385,7 @@ function main(): void {
   function getHardcodedDefault(p: string): string {
     if (p === "openai") return "gpt-5.4";
     if (p === "glm") return "glm-5.1";
-    if (p === "moonshot") return "kimi-k2.5";
+    if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
     if (p === "openrouter") return "qwen/qwen3.6-plus";
     return "claude-opus-4-7";
@@ -424,19 +424,12 @@ async function runInkTUI(opts: {
   resumeSessionPath?: string;
   theme?: "auto" | ThemeName;
 }): Promise<void> {
-  const { provider, model, cwd } = opts;
+  const { cwd } = opts;
 
-  // Set model for token estimation accuracy
-  setEstimatorModel(model);
-
-  // Resolve auth
+  // Resolve auth first so we can pick an active provider the user has
+  // actually logged in with — we must never default to a provider they
+  // haven't authenticated against.
   const paths = await ensureAppDirs();
-  initLogger(paths.logFile, {
-    version: CLI_VERSION,
-    provider,
-    model,
-    thinking: opts.thinkingLevel,
-  });
 
   // Wire stream stall diagnostics into the debug log
   setStreamDiagnostic((phase, data) => {
@@ -446,96 +439,41 @@ async function runInkTUI(opts: {
   const authStorage = new AuthStorage(paths.authFile);
   await authStorage.load();
 
-  // Detect all logged-in providers and preload their credentials
-  const allProviders: Provider[] = [
-    "anthropic",
-    "xiaomi",
-    "openai",
-    "glm",
-    "moonshot",
-    "ollama",
-    "minimax",
-    "openrouter",
-  ];
-  const loggedInProviders: Provider[] = [];
+  const { provider, model, loggedInProviders } = await resolveActiveProvider(
+    authStorage,
+    opts.provider,
+    opts.model,
+  );
+
+  // Preload every logged-in provider's credentials for the model switcher.
   const credentialsByProvider: Record<
     string,
     { accessToken: string; accountId?: string; baseUrl?: string }
   > = {};
-
-  for (const p of allProviders) {
-    const stored = await authStorage.getCredentials(p);
-    if (stored) {
-      loggedInProviders.push(p);
-      try {
-        const resolved = await authStorage.resolveCredentials(p);
-        credentialsByProvider[p] = {
-          accessToken: resolved.accessToken,
-          accountId: resolved.accountId,
-          baseUrl: resolved.baseUrl,
-        };
-      } catch {
-        // Token refresh failed — still mark as logged in
-      }
+  for (const p of loggedInProviders) {
+    try {
+      const resolved = await authStorage.resolveCredentials(p);
+      credentialsByProvider[p] = {
+        accessToken: resolved.accessToken,
+        accountId: resolved.accountId,
+        baseUrl: resolved.baseUrl,
+      };
+    } catch {
+      // Token refresh failed — still leave them in loggedInProviders
     }
   }
 
-  // Ollama runs locally — always available, no auth needed
-  loggedInProviders.push("ollama");
+  // Set model for token estimation accuracy (after provider is finalized)
+  setEstimatorModel(model);
 
-  // Resolve credentials for the selected provider.
-  // If the provider needs auth but isn't authenticated, fall back to another
-  // authenticated provider (or Ollama as a last resort) instead of crashing.
-  let creds: OAuthCredentials | undefined;
-  let effectiveProvider = provider;
-  let effectiveModel = model;
+  initLogger(paths.logFile, {
+    version: CLI_VERSION,
+    provider,
+    model,
+    thinking: opts.thinkingLevel,
+  });
 
-  if (provider === "ollama") {
-    // Ollama is local — no credentials needed
-  } else if (credentialsByProvider[provider]) {
-    creds = await authStorage.resolveCredentials(provider);
-  } else {
-    // Selected provider has no auth — fall back to the first authenticated provider
-    const fallbackProvider = loggedInProviders.find((p) => credentialsByProvider[p]);
-    if (fallbackProvider) {
-      effectiveProvider = fallbackProvider;
-      effectiveModel = getDefaultModel(fallbackProvider).id;
-      creds = await authStorage.resolveCredentials(fallbackProvider);
-      log(
-        "WARN",
-        "auth",
-        `Provider "${provider}" not authenticated, falling back to "${fallbackProvider}"`,
-      );
-      console.log(
-        chalk.hex("#f59e0b")(
-          `⚠ Not logged in to ${provider}. Falling back to ${fallbackProvider} (${effectiveModel}).`,
-        ),
-      );
-      console.log(
-        chalk.hex("#6b7280")(
-          `  Run "ogcoder login" to add more providers, or use /model to switch.\n`,
-        ),
-      );
-    } else {
-      // No authenticated provider at all — fall back to Ollama
-      effectiveProvider = "ollama";
-      effectiveModel = getDefaultModel("ollama").id;
-      log("WARN", "auth", "No authenticated providers found, falling back to Ollama");
-      console.log(
-        chalk.hex("#f59e0b")(
-          `⚠ No authenticated providers. Falling back to Ollama (${effectiveModel}).`,
-        ),
-      );
-      console.log(
-        chalk.hex("#6b7280")(`  Run "ogcoder login" to authenticate a cloud provider.\n`),
-      );
-    }
-  }
-
-  // Update token estimator if we fell back to a different model
-  if (effectiveModel !== model) {
-    setEstimatorModel(effectiveModel);
-  }
+  const creds = await authStorage.resolveCredentials(provider);
 
   // Ensure project-local .gg directories exist
   const localGGDir = path.join(cwd, ".gg");
@@ -554,7 +492,7 @@ async function runInkTUI(opts: {
   });
 
   // Build system prompt & tools (with sub-agent support)
-  const systemPrompt = await buildSystemPrompt(cwd, skills, false, undefined, effectiveProvider);
+  const systemPrompt = await buildSystemPrompt(cwd, skills, false, undefined, provider);
 
   // Plan mode refs — shared between tools and UI
   const planModeRef = { current: false };
@@ -568,8 +506,8 @@ async function runInkTUI(opts: {
   const { tools, processManager } = createTools(cwd, {
     agents,
     skills,
-    provider: effectiveProvider,
-    model: effectiveModel,
+    provider: provider,
+    model: model,
     planModeRef,
     onEnterPlan: (reason) => onEnterPlanRef.current(reason),
     onExitPlan: (planPath) => onExitPlanRef.current(planPath),
@@ -579,8 +517,8 @@ async function runInkTUI(opts: {
   const mcpManager = new MCPClientManager();
   try {
     const providerApiKey =
-      effectiveProvider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
-    const mcpTools = await mcpManager.connectAll(getMCPServers(effectiveProvider, providerApiKey));
+      provider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
+    const mcpTools = await mcpManager.connectAll(getMCPServers(provider, providerApiKey));
     tools.push(...mcpTools);
   } catch (err) {
     log(
@@ -624,12 +562,12 @@ async function runInkTUI(opts: {
 
         // Auto-compact on load if the restored session exceeds the context window.
         // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
-        const contextWindow = getContextWindow(effectiveModel);
+        const contextWindow = getContextWindow(model);
         if (shouldCompact(messages, contextWindow, 0.8)) {
           log("INFO", "session", `Restored session exceeds context — auto-compacting`);
           const compacted = await compact(messages, {
-            provider: effectiveProvider,
-            model: effectiveModel,
+            provider: provider,
+            model: model,
             apiKey: creds?.accessToken ?? "",
             contextWindow,
           });
@@ -656,14 +594,14 @@ async function runInkTUI(opts: {
 
   // Create a new session file if we didn't reuse one
   if (!sessionPath) {
-    const session = await sessionManager.create(cwd, effectiveProvider, effectiveModel);
+    const session = await sessionManager.create(cwd, provider, model);
     sessionPath = session.path;
     log("INFO", "session", `New session created`, { path: sessionPath });
   }
 
   await renderApp({
-    provider: effectiveProvider,
-    model: effectiveModel,
+    provider: provider,
+    model: model,
     tools,
     webSearch: true,
     messages,
@@ -1078,7 +1016,7 @@ async function runSessions(): Promise<void> {
   function getDefault(p: string): string {
     if (p === "openai") return "gpt-5.4";
     if (p === "glm") return "glm-5.1";
-    if (p === "moonshot") return "kimi-k2.5";
+    if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
     return "claude-opus-4-7";
   }
@@ -1314,22 +1252,20 @@ async function runServe(): Promise<void> {
   }
 
   const saved3 = loadSavedSettings();
-
-  const provider: Provider =
-    (serveValues.provider as Provider | undefined) ?? saved3.provider ?? "anthropic";
-
-  function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.4";
-    if (p === "glm") return "glm-5.1";
-    if (p === "moonshot") return "kimi-k2.5";
-    if (p === "minimax") return "MiniMax-M2.7";
-    return "claude-opus-4-7";
-  }
-
-  const model = serveValues.model ?? saved3.model ?? getDefault(provider);
   const thinkingLevel: ThinkingLevel | undefined = saved3.thinkingEnabled ? "medium" : undefined;
 
   const paths = await ensureAppDirs();
+  const authStorage = new AuthStorage(paths.authFile);
+  await authStorage.load();
+
+  const preferredProvider: Provider =
+    (serveValues.provider as Provider | undefined) ?? saved3.provider ?? "anthropic";
+  const { provider, model } = await resolveActiveProvider(
+    authStorage,
+    preferredProvider,
+    serveValues.model ?? saved3.model,
+  );
+
   initLogger(paths.logFile, {
     version: CLI_VERSION,
     provider,
@@ -1492,22 +1428,20 @@ async function runAgentHome(): Promise<void> {
   }
 
   const saved4 = loadSavedSettings();
-
-  const provider: Provider =
-    (ahValues.provider as Provider | undefined) ?? saved4.provider ?? "anthropic";
-
-  function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.4";
-    if (p === "glm") return "glm-5.1";
-    if (p === "moonshot") return "kimi-k2.5";
-    if (p === "minimax") return "MiniMax-M2.7";
-    return "claude-opus-4-7";
-  }
-
-  const model = ahValues.model ?? saved4.model ?? getDefault(provider);
   const thinkingLevel: ThinkingLevel | undefined = saved4.thinkingEnabled ? "medium" : undefined;
 
   const paths = await ensureAppDirs();
+  const authStorage = new AuthStorage(paths.authFile);
+  await authStorage.load();
+
+  const preferredProvider: Provider =
+    (ahValues.provider as Provider | undefined) ?? saved4.provider ?? "anthropic";
+  const { provider, model } = await resolveActiveProvider(
+    authStorage,
+    preferredProvider,
+    ahValues.model ?? saved4.model,
+  );
+
   initLogger(paths.logFile, {
     version: CLI_VERSION,
     provider,
@@ -1527,6 +1461,52 @@ async function runAgentHome(): Promise<void> {
 }
 
 // ── Helpers ────────────────────────────────────────────────
+
+/**
+ * Pick the provider/model to start with. If the preferred provider isn't
+ * one the user is logged into, fall back to the first provider they ARE
+ * logged into (in `allProviders` order). Throws if nothing is logged in.
+ *
+ * This prevents the CLI from crashing with "Not logged in" on startup just
+ * because settings.json remembers a provider the user later logged out of.
+ */
+async function resolveActiveProvider(
+  authStorage: AuthStorage,
+  preferred: Provider,
+  savedModel: string | undefined,
+): Promise<{ provider: Provider; model: string; loggedInProviders: Provider[] }> {
+  const allProviders: Provider[] = [
+    "anthropic",
+    "xiaomi",
+    "openai",
+    "glm",
+    "moonshot",
+    "minimax",
+    "openrouter",
+  ];
+  const loggedInProviders: Provider[] = [];
+  for (const p of allProviders) {
+    if (await authStorage.getCredentials(p)) loggedInProviders.push(p);
+  }
+
+  if (loggedInProviders.length === 0) {
+    throw new Error('Not logged in to any provider. Run "ggcoder login" to authenticate.');
+  }
+
+  if (loggedInProviders.includes(preferred)) {
+    return {
+      provider: preferred,
+      model: savedModel ?? getDefaultModel(preferred).id,
+      loggedInProviders,
+    };
+  }
+
+  // Preferred provider isn't authenticated — fall back to the first one
+  // that is, and use that provider's default model (the saved model
+  // belonged to a provider the user can no longer reach).
+  const provider = loggedInProviders[0]!;
+  return { provider, model: getDefaultModel(provider).id, loggedInProviders };
+}
 
 function displayName(provider: Provider): string {
   if (provider === "anthropic") return "Anthropic";
@@ -1556,8 +1536,14 @@ function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
   for (const msg of msgs) {
     if (msg.role === "tool") {
       for (const tr of msg.content) {
+        const text =
+          typeof tr.content === "string"
+            ? tr.content
+            : tr.content
+                .map((b) => (b.type === "text" ? b.text : `[image ${b.mediaType}]`))
+                .join("\n");
         toolResults.set(tr.toolCallId, {
-          content: tr.content,
+          content: text,
           isError: tr.isError ?? false,
         });
       }

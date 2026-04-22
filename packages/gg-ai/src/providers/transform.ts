@@ -3,6 +3,7 @@ import type OpenAI from "openai";
 import type {
   CacheRetention,
   ContentPart,
+  ImageContent,
   Message,
   StopReason,
   TextContent,
@@ -10,8 +11,76 @@ import type {
   ThinkingLevel,
   Tool,
   ToolChoice,
+  ToolResultContent,
 } from "../types.js";
 import { zodToJsonSchema } from "../utils/zod-to-json-schema.js";
+
+// ── Shared helpers ─────────────────────────────────────────
+
+const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
+const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
+
+/** Replace image/video/document blocks with a text placeholder (deduping consecutive placeholders). */
+function stripImages(content: ContentPart[], placeholder: string): TextContent[] {
+  const out: TextContent[] = [];
+  let lastWasPlaceholder = false;
+  for (const block of content) {
+    if (block.type !== "text") {
+      if (!lastWasPlaceholder) out.push({ type: "text", text: placeholder });
+      lastWasPlaceholder = true;
+      continue;
+    }
+    out.push(block);
+    lastWasPlaceholder = block.text === placeholder;
+  }
+  return out;
+}
+
+/**
+ * Pre-transform pass: when the target model doesn't support images, replace
+ * image blocks in user messages and tool_result messages with a text placeholder.
+ * Called before provider-specific transforms.
+ */
+export function downgradeUnsupportedImages(
+  messages: Message[],
+  supportsImages: boolean | undefined,
+): Message[] {
+  if (supportsImages !== false) return messages;
+  return messages.map((msg) => {
+    if (msg.role === "user" && Array.isArray(msg.content)) {
+      return { ...msg, content: stripImages(msg.content, NON_VISION_USER_IMAGE_PLACEHOLDER) };
+    }
+    if (msg.role === "tool") {
+      return {
+        ...msg,
+        content: msg.content.map((tr) =>
+          Array.isArray(tr.content)
+            ? {
+                ...tr,
+                content: stripImages(tr.content, NON_VISION_TOOL_IMAGE_PLACEHOLDER),
+              }
+            : tr,
+        ),
+      };
+    }
+    return msg;
+  });
+}
+
+/** Extract concatenated text from tool_result content (array or string). */
+function toolResultText(content: ToolResultContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((b): b is TextContent => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+}
+
+/** Extract image blocks from tool_result content. Returns empty array for string content. */
+function toolResultImages(content: ToolResultContent): ImageContent[] {
+  if (typeof content === "string") return [];
+  return content.filter((b): b is ImageContent => b.type === "image");
+}
 
 // ── Anthropic Transforms ───────────────────────────────────
 
@@ -24,6 +93,36 @@ export function toAnthropicCacheControl(
   const ttl =
     resolved === "long" && (!baseUrl || baseUrl.includes("api.anthropic.com")) ? "1h" : undefined;
   return { type: "ephemeral", ...(ttl && { ttl }) } as { type: "ephemeral"; ttl?: "1h" };
+}
+
+type AnthropicImageSource = {
+  type: "base64";
+  media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+  data: string;
+};
+
+/**
+ * Convert tool_result content to Anthropic's wire format. Strings pass through;
+ * arrays are mapped to Anthropic's (text | image) block format, which
+ * tool_result.content accepts natively.
+ */
+function toAnthropicToolResultContent(
+  content: ToolResultContent,
+):
+  | string
+  | Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }> {
+  if (typeof content === "string") return content;
+  return content.map((block) => {
+    if (block.type === "text") return { type: "text" as const, text: block.text };
+    return {
+      type: "image" as const,
+      source: {
+        type: "base64" as const,
+        media_type: block.mediaType as AnthropicImageSource["media_type"],
+        data: block.data,
+      },
+    };
+  });
 }
 
 export function toAnthropicMessages(
@@ -137,7 +236,7 @@ export function toAnthropicMessages(
         content: msg.content.map((result) => ({
           type: "tool_result" as const,
           tool_use_id: result.toolCallId,
-          content: result.content,
+          content: toAnthropicToolResultContent(result.content),
           is_error: result.isError,
         })),
       });
@@ -276,7 +375,7 @@ function remapToolCallId(id: string, idMap: Map<string, string>): string {
 
 export function toOpenAIMessages(
   messages: Message[],
-  options?: { provider?: string; thinking?: boolean },
+  options?: { provider?: string; thinking?: boolean; supportsImages?: boolean },
 ): OpenAI.ChatCompletionMessageParam[] {
   const out: OpenAI.ChatCompletionMessageParam[] = [];
   const idMap = new Map<string, string>();
@@ -457,11 +556,32 @@ export function toOpenAIMessages(
       continue;
     }
     if (msg.role === "tool") {
+      // OpenAI's `tool` role only accepts text. Emit the tool message with the
+      // text content, then (if any tool results carried images and the model
+      // supports vision) a follow-up `user` message carrying image_url blocks.
+      const imageBlocks: OpenAI.ChatCompletionContentPartImage[] = [];
       for (const result of msg.content) {
+        const text = toolResultText(result.content);
+        const images = toolResultImages(result.content);
+        const hasText = text.length > 0;
         out.push({
           role: "tool",
           tool_call_id: remapToolCallId(result.toolCallId, idMap),
-          content: result.content,
+          content: hasText ? text : "(see attached image)",
+        });
+        if (images.length > 0 && options?.supportsImages !== false) {
+          for (const img of images) {
+            imageBlocks.push({
+              type: "image_url",
+              image_url: { url: `data:${img.mediaType};base64,${img.data}` },
+            });
+          }
+        }
+      }
+      if (imageBlocks.length > 0) {
+        out.push({
+          role: "user",
+          content: [{ type: "text", text: "Attached image(s) from tool result:" }, ...imageBlocks],
         });
       }
     }

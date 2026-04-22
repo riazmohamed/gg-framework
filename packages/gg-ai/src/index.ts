@@ -17,6 +17,7 @@ export type {
   DocumentContent,
   ToolCall,
   ToolResult,
+  ToolResultContent,
   ServerToolCall,
   ServerToolResult,
   ServerToolDefinition,

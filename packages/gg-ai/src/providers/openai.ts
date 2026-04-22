@@ -9,6 +9,7 @@ import type {
 import { ProviderError } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import {
+  downgradeUnsupportedImages,
   normalizeOpenAIStopReason,
   toOpenAIMessages,
   toOpenAIReasoningEffort,
@@ -38,9 +39,11 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const usesThinkingParam =
     options.provider === "glm" || options.provider === "moonshot" || options.provider === "xiaomi";
 
-  const messages = toOpenAIMessages(options.messages, {
+  const downgradedMessages = downgradeUnsupportedImages(options.messages, options.supportsImages);
+  const messages = toOpenAIMessages(downgradedMessages, {
     provider: options.provider,
     thinking: !!options.thinking,
+    supportsImages: options.supportsImages,
   });
 
   // GLM models default to 0.6 temperature when not in thinking mode
