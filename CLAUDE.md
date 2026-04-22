@@ -6,13 +6,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **gg-framework** — Modular TypeScript monorepo for building LLM-powered apps, from raw streaming to a full CLI coding agent.
 
-| Package          | npm                    | Description                                   |
-| ---------------- | ---------------------- | --------------------------------------------- |
-| `packages/gg-ai` | `@abukhaled/gg-ai`    | Unified LLM streaming API (Anthropic, OpenAI) |
-| `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution              |
-| `packages/ggcoder` | `@abukhaled/ogcoder`  | CLI coding agent (`ogcoder` binary)          |
+| Package | npm | Description |
+|---|---|---|
+| `packages/gg-ai` | `@abukhaled/gg-ai` | Unified LLM streaming API (Anthropic, OpenAI) |
+| `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution |
+| `packages/ggcoder` | `@abukhaled/ogcoder` | CLI coding agent (`ogcoder` binary) |
+
+**Install**: `npm i -g @abukhaled/ogcoder`
 
 **Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder`
+
+## Project Structure
+
+```
+packages/
+  ├── gg-ai/                 # @abukhaled/gg-ai — Unified LLM streaming API
+  │   └── src/
+  │       ├── types.ts       # Core types (StreamOptions, ContentBlock, events)
+  │       ├── errors.ts      # GGAIError, ProviderError
+  │       ├── stream.ts      # Main stream() dispatch function
+  │       ├── providers/     # Anthropic, OpenAI streaming implementations
+  │       └── utils/         # EventStream, Zod-to-JSON-Schema
+  │
+  ├── gg-agent/              # @abukhaled/gg-agent — Agent loop with tool execution
+  │   └── src/
+  │       ├── types.ts       # AgentTool, AgentEvent, AgentOptions
+  │       ├── agent.ts       # Agent class + AgentStream
+  │       └── agent-loop.ts  # Pure async generator loop
+  │
+  └── ggcoder/               # @abukhaled/ogcoder — CLI (ogcoder)
+      └── src/
+          ├── cli.ts         # CLI entry point
+          ├── config.ts      # Configuration constants
+          ├── core/          # Auth, OAuth, settings, sessions, extensions
+          │   ├── oauth/     # PKCE OAuth flows (anthropic, openai)
+          │   ├── compaction/ # Context compaction & token estimation
+          │   ├── mcp/       # Model Context Protocol client
+          │   └── extensions/ # Extension system
+          ├── tools/         # Agentic tools (bash, read, write, edit, grep, find, ls, web-fetch, subagent)
+          ├── ui/            # Ink/React terminal UI components & hooks
+          │   ├── components/ # UI components (one per file)
+          │   ├── hooks/     # useAgentLoop, useSessionManager, useSlashCommands, etc.
+          │   └── theme/     # dark.json, light.json, etc.
+          ├── modes/         # Execution modes (interactive, print, json, serve, agent-home)
+          └── utils/         # Error handling, git, shell, formatting, image
+```
 
 ## Commands
 
@@ -75,9 +113,10 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 - **Model router** (`core/model-router.ts`): Per-turn model switching. Modes: `vision` (auto-switch on images/video/docs), `plan-execute` (heavy planner + light executor), `hybrid` (vision priority, then plan-execute). Vision fallback chain: GLM-4.6V → MiMo Omni → Moonshot → OpenAI (Claude excluded for cost).
 - **Compaction** (`core/compaction/compactor.ts`): Triggers at 80% context or `contextWindow - 16384` tokens (whichever is lower). Keeps system message + recent ~20K tokens intact. Middle section summarized via LLM. Falls back to extractive summary on failure.
 - **Sessions** (`core/session-manager.ts`): Append-only JSONL with DAG structure (leafId for branching). Streams line-by-line for large files. `repairToolPairs()` fixes interrupted sessions on restore.
-- **Auth** (`core/auth-storage.ts`, `core/oauth/`): OAuth PKCE for Anthropic and OpenAI (with token refresh + 401 retry); static API keys for GLM, Moonshot, Xiaomi, MiniMax, Ollama, and OpenRouter. All credentials stored in `~/.gg/auth.json`. Ollama needs no credentials.
+- **Auth** (`core/auth-storage.ts`, `core/oauth/`): OAuth PKCE for Anthropic and OpenAI (with token refresh + 401 retry); static API keys for GLM, Moonshot, Xiaomi, MiniMax, and OpenRouter. Ollama runs locally — no credentials needed. All credentials stored in `~/.gg/auth.json`. Provider selection at startup uses `resolveActiveProvider()` in `cli.ts` — falls back to the first authenticated provider if the saved one isn't logged in.
 - **Themes** (`ui/theme/`): Six themes — `dark`, `light`, `dark-ansi`, `light-ansi`, `dark-daltonized`, `light-daltonized` — plus `auto` (detects from terminal). ANSI variants use 16-color palette for limited terminals; daltonized variants are color-blind friendly. `loadTheme(name)` in `theme.ts` returns the JSON config; `ThemeContext` + `useTheme()` for read, `SetThemeContext` + `useSetTheme()` for runtime switching.
 - **UI**: Ink 6 + React 19. `useAgentLoop` hook drives the agent and surfaces events to React state. Throttled streaming flush at ~16ms intervals to avoid saturating renders. Markdown rendering uses `utils/token-to-ansi.ts` (custom tokenizer → ANSI) instead of marked-terminal for theme-aware output. Terminal hyperlinks via `utils/hyperlink.ts` (gated by `supports-hyperlinks.ts`). Cross-component state (taskbar, etc.) lives in `ui/stores/` using a tiny `create-store` pattern.
+- **Debug logging**: `~/.gg/debug.log` — timestamped log of startup, auth, tool calls, turn completions, errors. Truncated on each CLI restart. Singleton logger in `src/core/logger.ts`.
 
 ### Slash Commands
 
@@ -88,6 +127,14 @@ Two kinds — UI-handled take precedence over registry:
 
 To add a UI command: add a condition in `handleSubmit` before the registry check.
 To add a registry command: add an entry in `createBuiltinCommands()` array. If it needs new capabilities, extend `SlashCommandContext` and wire it in `AgentSession.createSlashCommandContext()`.
+
+## Key Patterns
+
+- **StreamResult/AgentStream**: dual-nature objects — async iterable (`for await`) + thenable (`await`)
+- **EventStream**: push-based async iterable in `@abukhaled/gg-ai/utils/event-stream.ts`
+- **agentLoop**: pure async generator — call LLM, yield deltas, execute tools, loop on tool_use
+- **resolveActiveProvider**: `cli.ts` helper that picks the logged-in provider at startup with fallback
+- **Zod schemas**: tool parameters defined with Zod, converted to JSON Schema at provider boundary
 
 ## Organization Rules
 
@@ -108,3 +155,5 @@ pnpm --filter @abukhaled/gg-ai publish --no-git-checks
 pnpm --filter @abukhaled/gg-agent publish --no-git-checks
 pnpm --filter @abukhaled/ogcoder publish --no-git-checks
 ```
+
+All packages use `"publishConfig": { "access": "public" }` (required for scoped packages). Use `--no-git-checks` to skip git dirty/tag checks.
