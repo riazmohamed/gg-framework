@@ -4,6 +4,7 @@ import {
   type Message,
   type ToolCall,
   type ToolResult,
+  type ToolResultContent,
   type Usage,
   type ContentPart,
   type AssistantMessage,
@@ -122,6 +123,46 @@ export function isOverloaded(err: unknown): boolean {
     msg.includes("429") ||
     msg.includes("529")
   );
+}
+
+/**
+ * Detect malformed-stream errors — the SDK's SSE decoder threw a JSON parse
+ * error mid-stream, typically because a chunk was truncated or corrupted by
+ * an intermediary (CDN, proxy).  Same class of transport failure as a stall:
+ * replaying the request — and ideally flipping to non-streaming — recovers.
+ */
+export function isMalformedStream(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === "SyntaxError") return true;
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause instanceof Error && cause.name === "SyntaxError") return true;
+  const msg = err.message;
+  // V8 JSON.parse error messages: "Expected ... in JSON at position N"
+  // and "Unexpected token ... in JSON at position N"
+  return /\bin JSON at position \d+/i.test(msg);
+}
+
+/**
+ * Promise-returning sleep that rejects with AbortError if `signal` fires.
+ * Used by retry backoffs so ESC/Ctrl+C cancel immediately instead of having
+ * to wait out the full delay (up to 30s per overload retry × 10 retries).
+ */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException("Aborted", "AbortError"));
+  }
+  return new Promise<void>((resolve, reject) => {
+    let onAbort: (() => void) | null = null;
+    const timer = setTimeout(() => {
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export async function* agentLoop(
@@ -368,6 +409,7 @@ export async function* agentLoop(
           signal: streamController.signal,
           accountId: options.accountId,
           cacheRetention: options.cacheRetention,
+          supportsImages: options.supportsImages,
           compaction: options.compaction,
           clearToolUses: options.clearToolUses,
           // Flip to non-streaming fallback after repeated stream stalls.
@@ -524,17 +566,18 @@ export async function* agentLoop(
             maxAttempts: MAX_OVERLOAD_RETRIES,
             delayMs,
           };
-          await new Promise((r) => setTimeout(r, delayMs));
+          await abortableSleep(delayMs, options.signal);
           turn--; // Don't count the failed turn
           continue;
         }
         // Stream stall: the API connection hung without closing.
-        // Retry with exponential backoff -- most stalls are transient server-side
-        // issues, not payload-dependent. First 2 retries are silent (hidden retries).
-        // After STALL_RETRIES_BEFORE_NON_STREAMING consecutive streaming stalls,
-        // flip to non-streaming mode for subsequent retries -- broken SSE
-        // connections often recover when replayed as a plain HTTP response.
-        if (idleTimedOut && !options.signal?.aborted && stallRetries < MAX_STALL_RETRIES) {
+        // Malformed stream: the SDK's SSE decoder hit truncated/corrupted JSON.
+        // Both are transport failures — retry with exponential backoff and flip
+        // to non-streaming mode after STALL_RETRIES_BEFORE_NON_STREAMING attempts,
+        // since broken SSE often recovers when replayed as plain HTTP.
+        const malformed = isMalformedStream(err);
+        const transportFailure = (idleTimedOut || malformed) && !options.signal?.aborted;
+        if (transportFailure && stallRetries < MAX_STALL_RETRIES) {
           stallRetries++;
           if (!useNonStreamingFallback && stallRetries >= STALL_RETRIES_BEFORE_NON_STREAMING) {
             useNonStreamingFallback = true;
@@ -542,11 +585,12 @@ export async function* agentLoop(
               stallRetries,
               provider: options.provider,
               model: options.model,
+              cause: malformed ? "malformed_stream" : "stream_stall",
             });
           }
           const delayMs = Math.min(STALL_DELAY_MS * 2 ** (stallRetries - 1), 8_000);
           diag("retry", {
-            reason: "stream_stall",
+            reason: malformed ? "malformed_stream" : "stream_stall",
             attempt: stallRetries,
             maxAttempts: MAX_STALL_RETRIES,
             delayMs,
@@ -561,13 +605,13 @@ export async function* agentLoop(
             delayMs,
             silent: stallRetries <= 2,
           };
-          await new Promise((r) => setTimeout(r, delayMs));
+          await abortableSleep(delayMs, options.signal);
           turn--; // Don't count the failed turn
           continue;
         }
         // Stream stall retries exhausted — surface a clear error so the UI
         // can distinguish "gave up after stalls" from "completed normally".
-        if (idleTimedOut && !options.signal?.aborted) {
+        if (transportFailure) {
           diag("stall_exhausted", {
             stallRetries: MAX_STALL_RETRIES,
             provider: options.provider,
@@ -759,7 +803,7 @@ export async function* agentLoop(
           args: toolCall.args,
         });
 
-        let resultContent: string;
+        let resultContent: ToolResultContent;
         let details: unknown;
         let isError = false;
 
@@ -796,7 +840,7 @@ export async function* agentLoop(
         eventStream.push({
           type: "tool_call_end" as const,
           toolCallId: toolCall.id,
-          result: resultContent,
+          result: toolResultPreview(resultContent),
           details,
           isError,
           durationMs,
@@ -875,7 +919,9 @@ export async function* agentLoop(
           const HARD_MAX = 400_000; // absolute ceiling regardless of context window
           const max = Math.min(options.maxToolResultChars, HARD_MAX);
           for (const tr of toolResults) {
-            if (tr.content.length > max) {
+            // Only truncate string content — array content (text+image blocks)
+            // is already size-bounded by the image resizer.
+            if (typeof tr.content === "string" && tr.content.length > max) {
               // Keep 70% head + 30% tail to preserve errors/diagnostics at the end
               const headChars = Math.floor(max * 0.7);
               const tailChars = max - headChars;
@@ -939,6 +985,15 @@ export async function* agentLoop(
 
 function normalizeToolResult(raw: ToolExecuteResult): StructuredToolResult {
   return typeof raw === "string" ? { content: raw } : raw;
+}
+
+/** Flatten tool result content to a plain-text preview for the tool_call_end event.
+ *  Image blocks become a "[image]" placeholder so the UI has something to render. */
+function toolResultPreview(content: ToolResultContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((block) => (block.type === "text" ? block.text : `[image ${block.mediaType}]`))
+    .join("\n");
 }
 
 function extractToolCalls(content: string | ContentPart[]): ToolCall[] {

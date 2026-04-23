@@ -1,16 +1,20 @@
 import os from "node:os";
 import type {
   ContentPart,
+  ImageContent,
   Message,
   StreamEvent,
   StreamOptions,
   StreamResponse,
+  TextContent,
   Tool,
   ToolCall,
+  ToolResultContent,
 } from "../types.js";
 import { ProviderError } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import { zodToJsonSchema } from "../utils/zod-to-json-schema.js";
+import { downgradeUnsupportedImages } from "./transform.js";
 
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
 
@@ -22,7 +26,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const baseUrl = (options.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, "");
   const url = `${baseUrl}/codex/responses`;
 
-  const { system, input } = toCodexInput(options.messages);
+  const downgraded = downgradeUnsupportedImages(options.messages, options.supportsImages);
+  const { system, input } = toCodexInput(downgraded, { supportsImages: options.supportsImages });
 
   const body: Record<string, unknown> = {
     model: options.model,
@@ -304,7 +309,18 @@ function remapCodexId(id: string, idMap: Map<string, string>): string {
   return mapped;
 }
 
-function toCodexInput(messages: Message[]): { system: string | undefined; input: unknown[] } {
+function codexToolResultText(content: ToolResultContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((b): b is TextContent => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+}
+
+function toCodexInput(
+  messages: Message[],
+  options?: { supportsImages?: boolean },
+): { system: string | undefined; input: unknown[] } {
   let system: string | undefined;
   const input: unknown[] = [];
   const idMap = new Map<string, string>();
@@ -368,14 +384,35 @@ function toCodexInput(messages: Message[]): { system: string | undefined; input:
     }
 
     if (msg.role === "tool") {
+      const toolImages: ImageContent[] = [];
       for (const result of msg.content) {
         const [callId] = result.toolCallId.includes("|")
           ? result.toolCallId.split("|", 2)
           : [result.toolCallId];
+        const text = codexToolResultText(result.content);
         input.push({
           type: "function_call_output",
           call_id: remapCodexId(callId, idMap),
-          output: result.content,
+          output: text.length > 0 ? text : "(see attached image)",
+        });
+        if (options?.supportsImages !== false && Array.isArray(result.content)) {
+          for (const block of result.content) {
+            if (block.type === "image") toolImages.push(block);
+          }
+        }
+      }
+      if (toolImages.length > 0) {
+        input.push({
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "Attached image(s) from tool result:" },
+            ...toolImages.map((img) => ({
+              type: "input_image",
+              detail: "auto",
+              image_url: `data:${img.mediaType};base64,${img.data}`,
+            })),
+          ],
         });
       }
     }

@@ -40,7 +40,7 @@ export async function generateSessionTitle(opts: {
         : opts.provider === "glm"
           ? "glm-4.7-flash"
           : opts.provider === "moonshot"
-            ? "kimi-k2.5"
+            ? "kimi-k2.6"
             : "claude-haiku-4-5-20251001";
 
   const messages: Message[] = [

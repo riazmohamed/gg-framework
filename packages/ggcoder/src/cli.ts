@@ -386,7 +386,7 @@ function main(): void {
   function getHardcodedDefault(p: string): string {
     if (p === "openai") return "gpt-5.4";
     if (p === "glm") return "glm-5.1";
-    if (p === "moonshot") return "kimi-k2.5";
+    if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
     if (p === "openrouter") return "qwen/qwen3.6-plus";
     return "claude-opus-4-7";
@@ -1095,7 +1095,7 @@ async function runSessions(): Promise<void> {
   function getDefault(p: string): string {
     if (p === "openai") return "gpt-5.4";
     if (p === "glm") return "glm-5.1";
-    if (p === "moonshot") return "kimi-k2.5";
+    if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
     return "claude-opus-4-7";
   }
@@ -1331,22 +1331,20 @@ async function runServe(): Promise<void> {
   }
 
   const saved3 = loadSavedSettings();
-
-  const provider: Provider =
-    (serveValues.provider as Provider | undefined) ?? saved3.provider ?? "anthropic";
-
-  function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.4";
-    if (p === "glm") return "glm-5.1";
-    if (p === "moonshot") return "kimi-k2.5";
-    if (p === "minimax") return "MiniMax-M2.7";
-    return "claude-opus-4-7";
-  }
-
-  const model = serveValues.model ?? saved3.model ?? getDefault(provider);
   const thinkingLevel: ThinkingLevel | undefined = saved3.thinkingEnabled ? "medium" : undefined;
 
   const paths = await ensureAppDirs();
+  const authStorage = new AuthStorage(paths.authFile);
+  await authStorage.load();
+
+  const preferredProvider: Provider =
+    (serveValues.provider as Provider | undefined) ?? saved3.provider ?? "anthropic";
+  const { provider, model } = await resolveActiveProvider(
+    authStorage,
+    preferredProvider,
+    serveValues.model ?? saved3.model,
+  );
+
   initLogger(paths.logFile, {
     version: CLI_VERSION,
     provider,
@@ -1509,22 +1507,20 @@ async function runAgentHome(): Promise<void> {
   }
 
   const saved4 = loadSavedSettings();
-
-  const provider: Provider =
-    (ahValues.provider as Provider | undefined) ?? saved4.provider ?? "anthropic";
-
-  function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.4";
-    if (p === "glm") return "glm-5.1";
-    if (p === "moonshot") return "kimi-k2.5";
-    if (p === "minimax") return "MiniMax-M2.7";
-    return "claude-opus-4-7";
-  }
-
-  const model = ahValues.model ?? saved4.model ?? getDefault(provider);
   const thinkingLevel: ThinkingLevel | undefined = saved4.thinkingEnabled ? "medium" : undefined;
 
   const paths = await ensureAppDirs();
+  const authStorage = new AuthStorage(paths.authFile);
+  await authStorage.load();
+
+  const preferredProvider: Provider =
+    (ahValues.provider as Provider | undefined) ?? saved4.provider ?? "anthropic";
+  const { provider, model } = await resolveActiveProvider(
+    authStorage,
+    preferredProvider,
+    ahValues.model ?? saved4.model,
+  );
+
   initLogger(paths.logFile, {
     version: CLI_VERSION,
     provider,
@@ -1544,6 +1540,52 @@ async function runAgentHome(): Promise<void> {
 }
 
 // ── Helpers ────────────────────────────────────────────────
+
+/**
+ * Pick the provider/model to start with. If the preferred provider isn't
+ * one the user is logged into, fall back to the first provider they ARE
+ * logged into (in `allProviders` order). Throws if nothing is logged in.
+ *
+ * This prevents the CLI from crashing with "Not logged in" on startup just
+ * because settings.json remembers a provider the user later logged out of.
+ */
+async function resolveActiveProvider(
+  authStorage: AuthStorage,
+  preferred: Provider,
+  savedModel: string | undefined,
+): Promise<{ provider: Provider; model: string; loggedInProviders: Provider[] }> {
+  const allProviders: Provider[] = [
+    "anthropic",
+    "xiaomi",
+    "openai",
+    "glm",
+    "moonshot",
+    "minimax",
+    "openrouter",
+  ];
+  const loggedInProviders: Provider[] = [];
+  for (const p of allProviders) {
+    if (await authStorage.getCredentials(p)) loggedInProviders.push(p);
+  }
+
+  if (loggedInProviders.length === 0) {
+    throw new Error('Not logged in to any provider. Run "ggcoder login" to authenticate.');
+  }
+
+  if (loggedInProviders.includes(preferred)) {
+    return {
+      provider: preferred,
+      model: savedModel ?? getDefaultModel(preferred).id,
+      loggedInProviders,
+    };
+  }
+
+  // Preferred provider isn't authenticated — fall back to the first one
+  // that is, and use that provider's default model (the saved model
+  // belonged to a provider the user can no longer reach).
+  const provider = loggedInProviders[0]!;
+  return { provider, model: getDefaultModel(provider).id, loggedInProviders };
+}
 
 function displayName(provider: Provider): string {
   if (provider === "anthropic") return "Anthropic";
@@ -1573,8 +1615,14 @@ function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
   for (const msg of msgs) {
     if (msg.role === "tool") {
       for (const tr of msg.content) {
+        const text =
+          typeof tr.content === "string"
+            ? tr.content
+            : tr.content
+                .map((b) => (b.type === "text" ? b.text : `[image ${b.mediaType}]`))
+                .join("\n");
         toolResults.set(tr.toolCallId, {
-          content: tr.content,
+          content: text,
           isError: tr.isError ?? false,
         });
       }
