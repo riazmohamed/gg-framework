@@ -58,7 +58,11 @@ import { getGitBranch } from "../utils/git.js";
 import { getModel, getContextWindow } from "../core/model-registry.js";
 import { SessionManager, type MessageEntry } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
-import { startPeriodicUpdateCheck, stopPeriodicUpdateCheck } from "../core/auto-update.js";
+import {
+  getPendingUpdate,
+  startPeriodicUpdateCheck,
+  stopPeriodicUpdateCheck,
+} from "../core/auto-update.js";
 import { generateSessionTitle } from "../utils/session-title.js";
 import { SettingsManager, type Settings } from "../core/settings-manager.js";
 import { shouldCompact, compact } from "../core/compaction/compactor.js";
@@ -575,6 +579,9 @@ export function App(props: AppProps) {
   const [eyesCount, setEyesCount] = useState<number | undefined>(() =>
     isEyesActive(props.cwd) ? journalCount({ status: "open" }, props.cwd) : undefined,
   );
+  const [updatePending, setUpdatePending] = useState<boolean>(
+    () => getPendingUpdate(props.version) !== null,
+  );
   const [runAllTasks, setRunAllTasks] = useState(false);
   const runAllTasksRef = useRef(false);
   const startTaskRef = useRef<(title: string, prompt: string, taskId: string) => void>(() => {});
@@ -639,6 +646,7 @@ export function App(props: AppProps) {
   useEffect(() => {
     startPeriodicUpdateCheck(props.version, (msg) => {
       setLiveItems((prev) => [...prev, { kind: "update_notice", text: msg, id: getId() }]);
+      setUpdatePending(true);
     });
     return () => stopPeriodicUpdateCheck();
   }, [props.version]);
@@ -2609,10 +2617,13 @@ export function App(props: AppProps) {
           )}
           {/* Buddy companion */}
           {buddyEnabled && <Buddy phase={agentLoop.activityPhase} />}
-          {/* Status row — background tasks (if any) and eyes call-to-action
-              (if any) share a single line. Eyes renders alone when no bg tasks;
-              hidden entirely when both are empty. */}
-          {(bgTasks.length > 0 || (eyesCount !== undefined && eyesCount > 0)) && (
+          {/* Status row — background tasks, eyes call-to-action, and the
+              update-ready indicator all share a single line. Order is
+              intentional: active work (bg tasks) first, actionable signals
+              (eyes) next, ambient hint (update ready) last. */}
+          {(bgTasks.length > 0 ||
+            (eyesCount !== undefined && eyesCount > 0) ||
+            updatePending) && (
             <Box>
               {bgTasks.length > 0 && (
                 <BackgroundTasksBar
@@ -2631,6 +2642,18 @@ export function App(props: AppProps) {
                 <Box paddingLeft={bgTasks.length > 0 ? 2 : 1} paddingRight={1}>
                   <Text color={theme.accent} bold>
                     {`${eyesCount} eyes signal${eyesCount === 1 ? "" : "s"} · Run /eyes-improve to enhance GG Coder`}
+                  </Text>
+                </Box>
+              )}
+              {updatePending && (
+                <Box
+                  paddingLeft={
+                    bgTasks.length > 0 || (eyesCount !== undefined && eyesCount > 0) ? 2 : 1
+                  }
+                  paddingRight={1}
+                >
+                  <Text color={theme.success} bold>
+                    ✨ Update ready · restart to apply
                   </Text>
                 </Box>
               )}
