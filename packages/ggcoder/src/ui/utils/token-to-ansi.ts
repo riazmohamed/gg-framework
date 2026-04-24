@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import { marked, type Token, type Tokens } from "marked";
+import wrapAnsi from "wrap-ansi";
 import type { Theme } from "../theme/theme.js";
 import { highlightCode } from "./highlight.js";
 import { fitToWidth, centerToWidth, plainTextLength, wrapPlainTextLines } from "./table-text.js";
@@ -170,12 +171,19 @@ function tokenToAnsi(
 
     case "blockquote": {
       const bq = token as Tokens.Blockquote;
+      // Pre-wrap paragraph content to fit `columns - 2` (accounting for the
+      // "\u2502 " gutter). Without this, long one-line blockquotes (e.g. the
+      // restart notice emitted by /eyes) get truncated by Ink's Text wrap
+      // when nested ANSI codes confuse its width calculation.
+      const barWidth = 2;
+      const wrapWidth = Math.max(20, columns - barWidth);
       const inner = (bq.tokens ?? [])
         .map((t) => {
           if (t.type === "paragraph") {
-            return chalk.italic.hex(theme.textMuted)(
+            const para = chalk.italic.hex(theme.textMuted)(
               inlineToAnsi((t as Tokens.Paragraph).tokens ?? [], theme, theme.textMuted),
             );
+            return wrapAnsi(para, wrapWidth, { hard: true, wordWrap: true });
           }
           return tokenToAnsi(t, theme, depth, undefined, token, columns, false);
         })

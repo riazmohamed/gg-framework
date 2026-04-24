@@ -1,25 +1,62 @@
 import fs from "node:fs";
+import { randomBytes } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
 
 type LogLevel = "INFO" | "ERROR" | "WARN";
 
+// Cross-session log retention: the log is appended across ggcoder launches so
+// you can grep back through prior sessions. Rotated at MAX_BYTES to keep it
+// bounded; we keep one generation (debug.log.1) — that's enough to survive
+// one rotation's worth of scrollback while bounding disk usage.
+const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+
 let fd: number | null = null;
+let sessionId = "";
 let unsubscribers: (() => void)[] = [];
 
+function rotateIfNeeded(filePath: string): void {
+  try {
+    const st = fs.statSync(filePath);
+    if (st.size < MAX_BYTES) return;
+    const rotated = `${filePath}.1`;
+    // Replace prior rotation (fs.renameSync overwrites on POSIX; on Windows
+    // it fails if dest exists, so unlink first defensively).
+    try {
+      fs.unlinkSync(rotated);
+    } catch {
+      // No prior rotation
+    }
+    fs.renameSync(filePath, rotated);
+  } catch {
+    // Log file doesn't exist yet or stat failed — nothing to rotate
+  }
+}
+
 /**
- * Initialize the debug logger. Opens the log file with truncation ('w' mode)
- * and writes a startup header. No-op if already initialized.
+ * Initialize the debug logger. Opens the log file in append mode so the
+ * previous session's lines are preserved (rotated at MAX_BYTES). Generates a
+ * session ID tagged onto every log line so concurrent sessions or back-scroll
+ * across sessions can be filtered by `grep "sid=<id>"`. No-op if already
+ * initialized.
  */
 export function initLogger(
   filePath: string,
   meta?: { version?: string; provider?: string; model?: string; thinking?: string },
 ): void {
   if (fd !== null) return;
+  rotateIfNeeded(filePath);
   try {
-    fd = fs.openSync(filePath, "w");
+    fd = fs.openSync(filePath, "a");
   } catch {
     // Can't open log file — silently disable logging
     return;
+  }
+  sessionId = randomBytes(4).toString("hex");
+  // Visible separator between sessions when back-reading the log.
+  try {
+    fs.writeSync(fd, "\n");
+  } catch {
+    // Write failed — proceed without the separator
   }
   const parts = ["ogcoder"];
   if (meta?.version) parts[0] += ` v${meta.version}`;
@@ -27,7 +64,13 @@ export function initLogger(
   if (meta?.provider) parts.push(`provider=${meta.provider}`);
   if (meta?.model) parts.push(`model=${meta.model}`);
   if (meta?.thinking) parts.push(`thinking=${meta.thinking}`);
+  parts.push(`pid=${process.pid}`);
   log("INFO", "startup", parts.join(" "));
+}
+
+/** Session identifier included on every log line as `sid=<id>`. */
+export function getSessionId(): string {
+  return sessionId;
 }
 
 /**
@@ -41,7 +84,7 @@ export function log(
 ): void {
   if (fd === null) return;
   const ts = new Date().toISOString();
-  let line = `[${ts}] [${level}] [${category}] ${message}`;
+  let line = `[${ts}] [sid=${sessionId}] [${level}] [${category}] ${message}`;
   if (data) {
     const pairs = Object.entries(data)
       .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)

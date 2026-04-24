@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Provider } from "@abukhaled/gg-ai";
+import { isEyesActive, readJournal } from "@abukhaled/ggcoder-eyes";
 import { formatSkillsForPrompt, type Skill } from "./core/skills.js";
 import { TOOL_PROMPT_HINTS, DEFAULT_TOOL_NAMES } from "./tools/prompt-hints.js";
 
@@ -34,7 +35,7 @@ export async function buildSystemPrompt(
   // 2. How to Work (compressed)
   sections.push(
     `## How to Work\n\n` +
-      `- **Read before edit/write.** \`edit\` and \`write\` fail on any file not yet read this session.\n` +
+      `- **Read before \`edit\`/\`write\`.** Check you've read the file this session *before* composing the call — a missed read wastes the whole payload.\n` +
       `- Understand the task and surrounding code (\`find\`, \`grep\`, \`read\`) before changing it.\n` +
       `- Honor project context files (CLAUDE.md, AGENTS.md) — they override defaults.\n` +
       `- Follow existing conventions. Write code that fits in, not code that stands out.\n` +
@@ -164,6 +165,27 @@ export async function buildSystemPrompt(
 
     if (contextParts.length > 0) {
       sections.push(`## Project Context\n\n${contextParts.join("\n\n")}`);
+    }
+  }
+
+  // 7. Eyes — open improvement signals from past probe use (gated on .gg/eyes/manifest.json)
+  if (isEyesActive(cwd)) {
+    const open = readJournal({ status: "open", order: "desc", limit: 10 }, cwd);
+    if (open.length > 0) {
+      const lines = open.map((e) => {
+        const probeTag = e.probe ? ` [${e.probe}]` : "";
+        const date = e.ts.slice(0, 10);
+        return `- ${date} · *${e.kind}*${probeTag}: ${e.reason}`;
+      });
+      sections.push(
+        `## Eyes — Open Improvement Signals\n\n` +
+          `These are unresolved signals from past use of this project's perception probes ` +
+          `(\`.gg/eyes/\`). Consider whether any bear on the current work. If a missing or ` +
+          `inadequate capability would force you to **guess, skip verification, or hand-wave**, ` +
+          `surface the tradeoff in conversation rather than working around it silently — give the ` +
+          `user the choice to fix the probe first.\n\n` +
+          lines.join("\n"),
+      );
     }
   }
 

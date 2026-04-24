@@ -21,6 +21,7 @@ import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from
 import { extractImagePaths, type ImageAttachment } from "../utils/image.js";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { useAgentLoop, type UserContent } from "./hooks/useAgentLoop.js";
+import { isEyesActive, journalCount } from "@abukhaled/ggcoder-eyes";
 import { UserMessage } from "./components/UserMessage.js";
 import type { PasteInfo } from "./components/InputArea.js";
 import { AssistantMessage } from "./components/AssistantMessage.js";
@@ -40,6 +41,7 @@ import { PlanOverlay } from "./components/PlanOverlay.js";
 import { ModelSelector } from "./components/ModelSelector.js";
 import { TaskOverlay } from "./components/TaskOverlay.js";
 import { SkillsOverlay } from "./components/SkillsOverlay.js";
+import { EyesOverlay } from "./components/EyesOverlay.js";
 import { ThemeSelector } from "./components/ThemeSelector.js";
 import { BackgroundTasksBar } from "./components/BackgroundTasksBar.js";
 import type { SlashCommandInfo } from "./components/SlashCommandMenu.js";
@@ -57,7 +59,11 @@ import { getModel, getContextWindow } from "../core/model-registry.js";
 import { createModelRouter } from "../core/model-router.js";
 import { SessionManager, type MessageEntry } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
-import { startPeriodicUpdateCheck, stopPeriodicUpdateCheck } from "../core/auto-update.js";
+import {
+  getPendingUpdate,
+  startPeriodicUpdateCheck,
+  stopPeriodicUpdateCheck,
+} from "../core/auto-update.js";
 import { generateSessionTitle } from "../utils/session-title.js";
 import { SettingsManager, type Settings } from "../core/settings-manager.js";
 import { shouldCompact, compact } from "../core/compaction/compactor.js";
@@ -187,6 +193,12 @@ interface InfoItem {
   id: string;
 }
 
+interface UpdateNoticeItem {
+  kind: "update_notice";
+  text: string;
+  id: string;
+}
+
 interface QueuedItem {
   kind: "queued";
   text: string;
@@ -287,6 +299,7 @@ export type CompletedItem =
   | ServerToolDoneItem
   | ErrorItem
   | InfoItem
+  | UpdateNoticeItem
   | QueuedItem
   | CompactingItem
   | CompactedItem
@@ -560,10 +573,16 @@ export function App(props: AppProps) {
   }, [isRestoredSession, props.initialHistory]);
   // Items from the current/last turn — rendered in the live area so they stay visible
   const [liveItems, setLiveItems] = useState<CompletedItem[]>([]);
-  const [overlay, setOverlay] = useState<"model" | "tasks" | "skills" | "plan" | "theme" | null>(
-    null,
-  );
+  const [overlay, setOverlay] = useState<
+    "model" | "tasks" | "skills" | "plan" | "theme" | "eyes" | null
+  >(null);
   const [taskCount, setTaskCount] = useState(() => getTaskCount(props.cwd));
+  const [eyesCount, setEyesCount] = useState<number | undefined>(() =>
+    isEyesActive(props.cwd) ? journalCount({ status: "open" }, props.cwd) : undefined,
+  );
+  const [updatePending, setUpdatePending] = useState<boolean>(
+    () => getPendingUpdate(props.version) !== null,
+  );
   const [runAllTasks, setRunAllTasks] = useState(false);
   const runAllTasksRef = useRef(false);
   const startTaskRef = useRef<(title: string, prompt: string, taskId: string) => void>(() => {});
@@ -627,7 +646,8 @@ export function App(props: AppProps) {
   // Periodic update check during long sessions
   useEffect(() => {
     startPeriodicUpdateCheck(props.version, (msg) => {
-      setLiveItems((prev) => [...prev, { kind: "info", text: msg, id: getId() }]);
+      setLiveItems((prev) => [...prev, { kind: "update_notice", text: msg, id: getId() }]);
+      setUpdatePending(true);
     });
     return () => stopPeriodicUpdateCheck();
   }, [props.version]);
@@ -1559,6 +1579,17 @@ export function App(props: AppProps) {
     setTitleRunning(agentLoop.isRunning);
   }, [agentLoop.isRunning]);
 
+  // Refresh eyes badge count when the agent settles (end of a turn) — a turn
+  // may have logged new rough/wish/blocked signals. Also covers the case where
+  // /eyes was run for the first time (manifest now exists).
+  useEffect(() => {
+    if (!agentLoop.isRunning) {
+      setEyesCount(
+        isEyesActive(props.cwd) ? journalCount({ status: "open" }, props.cwd) : undefined,
+      );
+    }
+  }, [agentLoop.isRunning, props.cwd]);
+
   // Terminal progress bar (OSC 9;4) — pulsing bar in supported terminals
   useTerminalProgress(agentLoop.isRunning, agentLoop.activeToolCalls.length > 0);
 
@@ -1654,6 +1685,25 @@ export function App(props: AppProps) {
       // Handle /theme — open theme selector overlay
       if (trimmed === "/theme" || trimmed === "/t") {
         setOverlay("theme");
+        return;
+      }
+
+      // Open the Eyes pane — read-only review of installed probes + open signals.
+      // Gated by the ggcoder-eyes manifest: in projects without /eyes set up,
+      // there's nothing useful to show.
+      if (trimmed === "/eyes-view" || trimmed === "/ev") {
+        if (!isEyesActive(props.cwd)) {
+          setLiveItems((prev) => [
+            ...prev,
+            {
+              kind: "info",
+              text: "Eyes not set up in this project. Run /setup-eyes to get started.",
+              id: getId(),
+            },
+          ]);
+          return;
+        }
+        setOverlay("eyes");
         return;
       }
 
@@ -2045,34 +2095,62 @@ export function App(props: AppProps) {
     [switchTheme, props.settingsFile],
   );
 
-  // All available slash commands for the command palette
-  const allCommands = useMemo<SlashCommandInfo[]>(
-    () => [
+  // All available slash commands for the command palette — ordered by how
+  // commonly they're used and grouped by purpose; /quit stays dead last.
+  const allCommands = useMemo<SlashCommandInfo[]>(() => {
+    const promptByName = new Map(PROMPT_COMMANDS.map((c) => [c.name, c]));
+    const fromPrompt = (name: string): SlashCommandInfo | null => {
+      const c = promptByName.get(name);
+      return c ? { name: c.name, aliases: c.aliases, description: c.description } : null;
+    };
+    const promptOrder = [
+      // Project audits / one-shot analysis
+      "init",
+      "research",
+      "scan",
+      "verify",
+      "simplify",
+      "compare",
+      "batch",
+      // Setup / installers
+      "setup-lint",
+      "setup-tests",
+      "setup-commit",
+      "setup-update",
+      "setup-eyes",
+      "eyes-improve",
+      "setup-skills",
+    ];
+    const orderedPromptCommands = promptOrder
+      .map(fromPrompt)
+      .filter((c): c is SlashCommandInfo => c !== null);
+    const knownPromptNames = new Set(promptOrder);
+    const remainingPromptCommands = PROMPT_COMMANDS.filter(
+      (c) => !knownPromptNames.has(c.name),
+    ).map((c) => ({ name: c.name, aliases: c.aliases, description: c.description }));
+
+    return [
+      // Session actions (most frequent)
       { name: "model", aliases: ["m"], description: "Switch model" },
       { name: "compact", aliases: ["c"], description: "Compact conversation" },
       { name: "clear", aliases: [], description: "Clear session and terminal" },
-      { name: "quit", aliases: ["q", "exit"], description: "Exit the agent" },
       {
         name: "teach-me",
         aliases: ["teach"],
         description: "Open the comprehensive guide on building this LLM agent framework",
       },
       { name: "theme", aliases: ["t"], description: "Switch theme" },
-      { name: "plan", aliases: [], description: "Toggle plan mode (on/off)" },
       { name: "plans", aliases: [], description: "Open plans pane" },
-      ...PROMPT_COMMANDS.map((cmd) => ({
-        name: cmd.name,
-        aliases: cmd.aliases,
-        description: cmd.description,
-      })),
+      ...orderedPromptCommands,
+      ...remainingPromptCommands,
       ...customCommands.map((cmd) => ({
         name: cmd.name,
         aliases: [] as string[],
         description: cmd.description,
       })),
-    ],
-    [customCommands],
-  );
+      { name: "quit", aliases: ["q", "exit"], description: "Exit the agent" },
+    ];
+  }, [customCommands]);
 
   const renderItem = (item: CompletedItem) => {
     switch (item.kind) {
@@ -2191,6 +2269,22 @@ export function App(props: AppProps) {
             </Text>
           </Box>
         );
+      case "update_notice":
+        return (
+          <Box
+            key={item.id}
+            marginTop={1}
+            flexShrink={1}
+            borderStyle="round"
+            borderColor={theme.success}
+            paddingX={1}
+          >
+            <Text color={theme.success} bold wrap="wrap">
+              {"✨ "}
+              {item.text}
+            </Text>
+          </Box>
+        );
       case "plan_transition":
         return (
           <Box key={item.id} marginTop={1} flexShrink={1}>
@@ -2301,7 +2395,8 @@ export function App(props: AppProps) {
   const isTaskView = overlay === "tasks";
   const isSkillsView = overlay === "skills";
   const isPlanView = overlay === "plan";
-  const isOverlayView = isTaskView || isSkillsView || isPlanView;
+  const isEyesView = overlay === "eyes";
+  const isOverlayView = isTaskView || isSkillsView || isPlanView || isEyesView;
 
   return (
     <Box flexDirection="column" width={columns}>
@@ -2349,6 +2444,21 @@ export function App(props: AppProps) {
             stdout?.write("\x1b[2J\x1b[3J\x1b[H");
             setStaticKey((k) => k + 1);
             setOverlay(null);
+          }}
+        />
+      ) : isEyesView ? (
+        <EyesOverlay
+          cwd={props.cwd}
+          onClose={() => {
+            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+            setEyesCount(
+              isEyesActive(props.cwd) ? journalCount({ status: "open" }, props.cwd) : undefined,
+            );
+            setStaticKey((k) => k + 1);
+            setOverlay(null);
+          }}
+          onQueueMessage={(msg) => {
+            agentLoop.queueMessage(msg);
           }}
         />
       ) : isPlanView ? (
@@ -2561,6 +2671,7 @@ export function App(props: AppProps) {
             }}
             cwd={props.cwd}
             commands={allCommands}
+            eyesCount={eyesCount}
           />
           {overlay === "model" ? (
             <ModelSelector
@@ -2589,19 +2700,47 @@ export function App(props: AppProps) {
           )}
           {/* Buddy companion */}
           {buddyEnabled && <Buddy phase={agentLoop.activityPhase} />}
-          {/* Background tasks bar */}
-          {bgTasks.length > 0 && (
-            <BackgroundTasksBar
-              tasks={bgTasks}
-              focused={taskBarFocused}
-              expanded={taskBarExpanded}
-              selectedIndex={selectedTaskIndex}
-              onExpand={handleTaskBarExpand}
-              onCollapse={handleTaskBarCollapse}
-              onKill={handleTaskKill}
-              onExit={handleTaskBarExit}
-              onNavigate={handleTaskNavigate}
-            />
+          {/* Status row — background tasks, eyes call-to-action, and the
+              update-ready indicator all share a single line. Order is
+              intentional: active work (bg tasks) first, actionable signals
+              (eyes) next, ambient hint (update ready) last. */}
+          {(bgTasks.length > 0 ||
+            (eyesCount !== undefined && eyesCount > 0) ||
+            updatePending) && (
+            <Box>
+              {bgTasks.length > 0 && (
+                <BackgroundTasksBar
+                  tasks={bgTasks}
+                  focused={taskBarFocused}
+                  expanded={taskBarExpanded}
+                  selectedIndex={selectedTaskIndex}
+                  onExpand={handleTaskBarExpand}
+                  onCollapse={handleTaskBarCollapse}
+                  onKill={handleTaskKill}
+                  onExit={handleTaskBarExit}
+                  onNavigate={handleTaskNavigate}
+                />
+              )}
+              {eyesCount !== undefined && eyesCount > 0 && (
+                <Box paddingLeft={bgTasks.length > 0 ? 2 : 1} paddingRight={1}>
+                  <Text color={theme.accent} bold>
+                    {`${eyesCount} eyes signal${eyesCount === 1 ? "" : "s"} · Run /eyes-improve to enhance OG Coder`}
+                  </Text>
+                </Box>
+              )}
+              {updatePending && (
+                <Box
+                  paddingLeft={
+                    bgTasks.length > 0 || (eyesCount !== undefined && eyesCount > 0) ? 2 : 1
+                  }
+                  paddingRight={1}
+                >
+                  <Text color={theme.success} bold>
+                    ✨ Update ready · restart to apply
+                  </Text>
+                </Box>
+              )}
+            </Box>
           )}
         </>
       )}

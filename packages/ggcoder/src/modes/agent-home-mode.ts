@@ -96,8 +96,8 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
     relayUrl: AGENT_HOME_RELAY_URL,
     token: options.agentHome.token,
     agent: {
-      id: "ggcoder",
-      name: "GG Coder",
+      id: "ogcoder",
+      name: "OG Coder",
       description: `AI coding agent — ${options.model}`,
     },
   });
@@ -200,7 +200,7 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
     const modelInfo = MODELS.find((m) => m.id === currentModel);
 
     let text = "";
-    text += `**GG Coder**\n`;
+    text += `**OG Coder**\n`;
     text += `Project: **${path.basename(currentCwd)}** \u00b7 Model: **${modelInfo?.name ?? currentModel}**\n\n`;
 
     text += `**Commands**\n`;
@@ -506,7 +506,7 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
     const state = await getOrCreateSession(targetSessionId);
 
     if (state.isProcessing) {
-      stream.error("GG Coder is still processing a previous message. Please wait.");
+      stream.error("OG Coder is still processing a previous message. Please wait.");
       return;
     }
 
@@ -652,10 +652,10 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
     console.log();
     console.log(
       `  ${gradientText(LOGO[0]!)}${GAP}` +
-        chalk.hex("#60a5fa").bold("GG Coder") +
+        chalk.hex("#60a5fa").bold("OG Coder") +
         chalk.hex("#6b7280")(` v${options.version}`) +
         chalk.hex("#6b7280")(" \u00b7 By ") +
-        chalk.white.bold("Ken Kai"),
+        chalk.white.bold("Abu Khaled"),
     );
     console.log(`  ${gradientText(LOGO[1]!)}${GAP}` + chalk.hex("#a78bfa")(modelName));
     console.log(`  ${gradientText(LOGO[2]!)}${GAP}` + chalk.hex("#6b7280")(displayPath));
@@ -664,7 +664,7 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
       chalk.hex("#6b7280")("  Mode      ") +
         chalk.hex("#a78bfa")("Agent Home") +
         chalk.hex("#6b7280")("  \u00b7  Agent ") +
-        chalk.white("GG Coder"),
+        chalk.white("OG Coder"),
     );
     console.log();
     console.log(chalk.hex("#6b7280")("  Connecting to relay..."));

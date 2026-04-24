@@ -203,6 +203,9 @@ interface InputAreaProps {
   onTogglePlanMode?: () => void;
   cwd: string;
   commands?: SlashCommandInfo[];
+  /** Number of open eyes-journal signals. `undefined` when eyes is inactive in
+   * this project (hides the badge entirely). Zero hides it too. */
+  eyesCount?: number;
 }
 
 // Border (1 each side) + padding (1 each side) = 4 characters of overhead
@@ -265,8 +268,15 @@ export function InputArea({
   onTogglePlanMode,
   cwd,
   commands = [],
+  eyesCount,
 }: InputAreaProps) {
   const theme = useTheme();
+  const eyesBadge =
+    eyesCount && eyesCount > 0 ? (
+      <Text color={theme.accent} bold>
+        {`[eyes: ${eyesCount}↗] `}
+      </Text>
+    ) : null;
   const [value, setValue] = useState("");
   const [cursor, setCursor] = useState(0);
   const cursorRef = useRef(cursor);
@@ -1281,9 +1291,12 @@ export function InputArea({
                     {`'${searchQuery}': `}
                   </Text>
                 ) : (
-                  <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
-                    {PROMPT}
-                  </Text>
+                  <>
+                    {eyesBadge}
+                    <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
+                      {PROMPT}
+                    </Text>
+                  </>
                 )}
                 <Text color={theme.text}>{displayStr.slice(0, cursorInDisplay)}</Text>
                 <Text color={theme.text} inverse={cursorVisible}>
@@ -1516,6 +1529,7 @@ export function InputArea({
 
             return (
               <Box key={i}>
+                {i === 0 ? eyesBadge : null}
                 <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
                   {i === 0 ? PROMPT : "  "}
                 </Text>

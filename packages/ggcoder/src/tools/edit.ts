@@ -77,7 +77,7 @@ export function createEditTool(
         if (occurrences === 0) {
           throw new Error(
             `old_text not found in ${fileName}${label}. ` +
-              "Make sure the text matches exactly, including whitespace and indentation.",
+              "Text must match verbatim — do not paraphrase. Re-read the file if unsure.",
           );
         }
         if (occurrences > 1) {

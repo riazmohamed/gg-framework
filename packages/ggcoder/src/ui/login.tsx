@@ -30,7 +30,7 @@ let _version = "";
 
 const PROVIDERS: { label: string; value: Provider; description: string }[] = [
   { label: "Anthropic", value: "anthropic", description: "Claude Opus 4.7, Sonnet 4.6, Haiku 4.5" },
-  { label: "OpenAI", value: "openai", description: "GPT-5.4, GPT-5.3 Codex, Codex Mini" },
+  { label: "OpenAI", value: "openai", description: "GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex" },
   { label: "Moonshot", value: "moonshot", description: "Kimi K2.6" },
   { label: "Z.AI (GLM)", value: "glm", description: "GLM-5.1, GLM-4.7, GLM-4.7 Flash" },
   { label: "MiniMax", value: "minimax", description: "MiniMax M2.7, M2.7 Highspeed" },

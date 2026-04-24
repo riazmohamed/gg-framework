@@ -43,7 +43,7 @@ import { PerformanceObserver, performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
 import fs from "node:fs";
 import readline from "node:readline/promises";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { renderApp } from "./ui/render.js";
 import { runJsonMode } from "./modes/json-mode.js";
@@ -62,6 +62,7 @@ import { ensureAppDirs, getAppPaths, loadSavedSettings } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
 import { setStreamDiagnostic } from "@abukhaled/gg-agent";
 import { buildSystemPrompt } from "./system-prompt.js";
+import { isEyesActive, journalCount } from "@abukhaled/ggcoder-eyes";
 import { createTools } from "./tools/index.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import { setEstimatorModel } from "./core/compaction/token-estimator.js";
@@ -165,8 +166,8 @@ function printHelp(): void {
   const opts: [string, string][] = [
     ["-h, --help", "Show this help message"],
     ["-v, --version", "Show version number"],
-    ["--provider <name>", "AI provider (anthropic, openai, glm, moonshot, xiaomi, ollama)"],
-    ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-4.1)"],
+    ["--provider <name>", "AI provider (anthropic, xiaomi, openai, glm, moonshot)"],
+    ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-5.5)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Override the system prompt"],
     ["--json", "JSON output mode (for sub-agents)"],
@@ -212,7 +213,7 @@ function main(): void {
   // Silent auto-update check (throttled, non-blocking on failure)
   const updateMessage = checkAndAutoUpdate(CLI_VERSION);
   if (updateMessage) {
-    console.error(chalk.hex("#60a5fa")(updateMessage));
+    console.error(chalk.bold.hex("#4ade80")(`✨ ${updateMessage}`));
   }
 
   // Intercept --help / -h before anything else so it works with subcommands
@@ -224,6 +225,24 @@ function main(): void {
 
   // Handle subcommands before parseArgs
   const subcommand = process.argv[2];
+
+  // Passthrough to @abukhaled/ggcoder-eyes CLI. Agents call this from bash as
+  // `ogcoder eyes log rough "..."` etc. — `ogcoder` is guaranteed on PATH
+  // (user launched it), so this avoids depending on nested bin visibility in
+  // global npm/pnpm installs.
+  if (subcommand === "eyes") {
+    let cliPath: string;
+    try {
+      cliPath = _require.resolve("@abukhaled/ggcoder-eyes/cli");
+    } catch {
+      process.stderr.write("ggcoder-eyes package not installed\n");
+      process.exit(1);
+    }
+    const r = spawnSync(process.execPath, [cliPath, ...process.argv.slice(3)], {
+      stdio: "inherit",
+    });
+    process.exit(r.status ?? 0);
+  }
 
   if (subcommand === "login") {
     runLogin().catch((err) => {
@@ -383,7 +402,7 @@ function main(): void {
   const provider: Provider = saved.provider ?? "anthropic";
 
   function getHardcodedDefault(p: string): string {
-    if (p === "openai") return "gpt-5.4";
+    if (p === "openai") return "gpt-5.5";
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
@@ -599,6 +618,21 @@ async function runInkTUI(opts: {
     log("INFO", "session", `New session created`, { path: sessionPath });
   }
 
+  // Eyes startup banner — surface open journal signals from past sessions so the
+  // user isn't relying on reading agent prose to know improvements are pending.
+  if (isEyesActive(cwd)) {
+    const openCount = journalCount({ status: "open" }, cwd);
+    if (openCount > 0) {
+      const s = openCount === 1 ? "" : "s";
+      if (!initialHistory) initialHistory = [];
+      initialHistory.push({
+        kind: "info",
+        text: `👁  Eyes: ${openCount} open improvement signal${s} from recent sessions. Run /eyes-improve to triage.`,
+        id: "eyes-banner",
+      });
+    }
+  }
+
   await renderApp({
     provider: provider,
     model: model,
@@ -740,10 +774,10 @@ async function runDoctor(): Promise<void> {
   console.log();
   console.log(
     `  ${gradientLine(LOGO[0]!)}${GAP}` +
-      primary.bold("GG Coder") +
+      primary.bold("OG Coder") +
       dim(` v${CLI_VERSION}`) +
       dim(" · By ") +
-      chalk.white.bold("Ken Kai"),
+      chalk.white.bold("Abu Khaled"),
   );
   console.log(`  ${gradientLine(LOGO[1]!)}${GAP}` + accent("Doctor"));
   console.log(`  ${gradientLine(LOGO[2]!)}${GAP}` + dim("Diagnose & Fix"));
@@ -769,7 +803,7 @@ async function runDoctor(): Promise<void> {
   }
   if (myUid !== process.geteuid!()) {
     console.log(warn("    ⚠ uid ≠ euid — running with elevated privileges (sudo?)"));
-    console.log(dim("      Running ggcoder with sudo can cause ownership issues."));
+    console.log(dim("      Running ogcoder with sudo can cause ownership issues."));
     console.log(dim("      Use without sudo, or fix after: sudo chown -R $(whoami) ~/.gg"));
   }
   console.log();
@@ -883,7 +917,7 @@ async function runDoctor(): Promise<void> {
         await fsP.copyFile(authFile, path.join(ggDir, backupName));
         await fsP.writeFile(authFile, "{}", { encoding: "utf-8", mode: 0o600 });
         console.log(good(`    ✓ Corrupt file backed up as ${backupName}`));
-        console.log(dim('      Run "ggcoder login" to re-authenticate'));
+        console.log(dim('      Run "ogcoder login" to re-authenticate'));
         authData = {};
         fixed++;
       }
@@ -900,7 +934,7 @@ async function runDoctor(): Promise<void> {
     }
   } catch {
     console.log(dim(`    Path:  ${authFile}`));
-    console.log(warn('    Not found — run "ggcoder login" to authenticate'));
+    console.log(warn('    Not found — run "ogcoder login" to authenticate'));
   }
   console.log();
 
@@ -1014,7 +1048,7 @@ async function runSessions(): Promise<void> {
   const provider: Provider = saved2.provider ?? "anthropic";
 
   function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.4";
+    if (p === "openai") return "gpt-5.5";
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
@@ -1338,10 +1372,10 @@ async function runAgentHomeLogin(): Promise<void> {
   console.log();
   console.log(
     `  ${gradientTextLocal(LOGO[0]!)}${GAP}` +
-      chalk.hex("#60a5fa").bold("GG Coder") +
+      chalk.hex("#60a5fa").bold("OG Coder") +
       chalk.hex("#6b7280")(` v${CLI_VERSION}`) +
       chalk.hex("#6b7280")(" \u00b7 By ") +
-      chalk.white.bold("Ken Kai"),
+      chalk.white.bold("Abu Khaled"),
   );
   console.log(`  ${gradientTextLocal(LOGO[1]!)}${GAP}` + chalk.hex("#a78bfa")("Agent Home Setup"));
   console.log(
@@ -1391,7 +1425,7 @@ async function runAgentHomeLogin(): Promise<void> {
         chalk.hex("#4ade80")(`  \u2713 Config saved to ${paths.agentHomeFile}`) +
         "\n\n" +
         chalk.hex("#60a5fa")("  To start:\n") +
-        chalk.hex("#6b7280")("    cd your-project && ggcoder agent-home\n"),
+        chalk.hex("#6b7280")("    cd your-project && ogcoder agent-home\n"),
     );
   } finally {
     rl.close();
@@ -1419,10 +1453,10 @@ async function runAgentHome(): Promise<void> {
     console.error(
       chalk.hex("#ef4444")("Agent Home not configured.\n\n") +
         "Run " +
-        chalk.hex("#60a5fa").bold("ggcoder agent-home-login") +
+        chalk.hex("#60a5fa").bold("ogcoder agent-home-login") +
         " to set up your token.\n\n" +
         chalk.hex("#6b7280")("Or provide manually:\n") +
-        chalk.hex("#6b7280")("  ggcoder agent-home --token TOKEN"),
+        chalk.hex("#6b7280")("  ogcoder agent-home --token TOKEN"),
     );
     process.exit(1);
   }
@@ -1490,7 +1524,7 @@ async function resolveActiveProvider(
   }
 
   if (loggedInProviders.length === 0) {
-    throw new Error('Not logged in to any provider. Run "ggcoder login" to authenticate.');
+    throw new Error('Not logged in to any provider. Run "ogcoder login" to authenticate.');
   }
 
   if (loggedInProviders.includes(preferred)) {

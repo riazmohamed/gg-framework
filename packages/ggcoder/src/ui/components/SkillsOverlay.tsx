@@ -2,79 +2,8 @@ import React, { useState, useEffect } from "react";
 import { Box, Text, useInput } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
-import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { homedir } from "node:os";
-
-// ── Types ────────────────────────────────────────────────
-
-interface SkillEntry {
-  name: string;
-  description: string;
-  source: "project" | "global";
-  path: string;
-}
-
-// ── Skill loading ────────────────────────────────────────
-
-async function loadSkillEntries(cwd: string): Promise<SkillEntry[]> {
-  const entries: SkillEntry[] = [];
-
-  // Project skills: {cwd}/.gg/skills/*.md
-  await loadFromDir(join(cwd, ".gg", "skills"), "project", entries);
-
-  // Global skills: ~/.gg/skills/*.md
-  await loadFromDir(join(homedir(), ".gg", "skills"), "global", entries);
-
-  return entries;
-}
-
-async function loadFromDir(
-  dir: string,
-  source: "project" | "global",
-  out: SkillEntry[],
-): Promise<void> {
-  let files: string[];
-  try {
-    files = await readdir(dir);
-  } catch {
-    return;
-  }
-
-  for (const file of files) {
-    if (!file.endsWith(".md")) continue;
-    const filePath = join(dir, file);
-    try {
-      const raw = await readFile(filePath, "utf-8");
-      const { name, description } = parseFrontmatter(raw, file);
-      out.push({ name, description, source, path: filePath });
-    } catch {
-      // Skip unreadable files
-    }
-  }
-}
-
-function parseFrontmatter(raw: string, filename: string): { name: string; description: string } {
-  let name = filename.replace(/\.md$/, "");
-  let description = "";
-
-  if (raw.startsWith("---")) {
-    const endIndex = raw.indexOf("---", 3);
-    if (endIndex !== -1) {
-      const frontmatter = raw.slice(3, endIndex).trim();
-      for (const line of frontmatter.split("\n")) {
-        const colonIndex = line.indexOf(":");
-        if (colonIndex === -1) continue;
-        const key = line.slice(0, colonIndex).trim().toLowerCase();
-        const value = line.slice(colonIndex + 1).trim();
-        if (key === "name") name = value;
-        else if (key === "description") description = value;
-      }
-    }
-  }
-
-  return { name, description };
-}
+import { discoverSkills, type Skill } from "../../core/skills.js";
+import { getAppPaths } from "../../config.js";
 
 // ── Banner ───────────────────────────────────────────────
 
@@ -129,14 +58,15 @@ interface SkillsOverlayProps {
 export function SkillsOverlay({ cwd, onClose }: SkillsOverlayProps) {
   const theme = useTheme();
   const { columns } = useTerminalSize();
-  const [skills, setSkills] = useState<SkillEntry[]>([]);
+  const [skills, setSkills] = useState<Skill[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [expandedSkill, setExpandedSkill] = useState<string | null>(null);
 
-  // Load skills on mount
+  // Load skills on mount — delegate to the canonical loader so flat (.md)
+  // and directory-layout (<dir>/SKILL.md) skills both show up.
   useEffect(() => {
-    void loadSkillEntries(cwd).then((s) => {
+    void discoverSkills({ globalSkillsDir: getAppPaths().skillsDir, projectDir: cwd }).then((s) => {
       setSkills(s);
       setLoaded(true);
     });
@@ -267,7 +197,7 @@ export function SkillsOverlay({ cwd, onClose }: SkillsOverlayProps) {
         const isExpanded = expandedSkill === skill.name;
 
         return (
-          <Box key={skill.path} flexDirection="column">
+          <Box key={`${skill.source}:${skill.name}`} flexDirection="column">
             <Text color={selected ? theme.primary : theme.text} bold={selected}>
               {prefix}
               <Text color={selected ? theme.primary : "#e5e7eb"}>{skill.name}</Text>
