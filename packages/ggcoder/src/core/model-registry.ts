@@ -47,6 +47,26 @@ export const MODELS: ModelInfo[] = [
   },
   // ── OpenAI (Codex) ─────────────────────────────────────
   {
+    id: "gpt-5.5",
+    name: "GPT-5.5",
+    provider: "openai",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    supportsThinking: true,
+    supportsImages: true,
+    costTier: "high",
+  },
+  {
+    id: "gpt-5.5-pro",
+    name: "GPT-5.5 Pro",
+    provider: "openai",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    supportsThinking: true,
+    supportsImages: true,
+    costTier: "high",
+  },
+  {
     id: "gpt-5.4",
     name: "GPT-5.4",
     provider: "openai",
@@ -183,7 +203,7 @@ export function getModelsForProvider(provider: Provider): ModelInfo[] {
 
 export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "xiaomi") return MODELS.find((m) => m.id === "mimo-v2-pro")!;
-  if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.4")!;
+  if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.5")!;
   if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.1")!;
   if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k2.6")!;
   if (provider === "minimax") return MODELS.find((m) => m.id === "MiniMax-M2.7")!;

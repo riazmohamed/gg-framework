@@ -167,7 +167,7 @@ function printHelp(): void {
     ["-h, --help", "Show this help message"],
     ["-v, --version", "Show version number"],
     ["--provider <name>", "AI provider (anthropic, xiaomi, openai, glm, moonshot)"],
-    ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-4.1)"],
+    ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-5.5)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Override the system prompt"],
     ["--json", "JSON output mode (for sub-agents)"],
@@ -402,7 +402,7 @@ function main(): void {
   const provider: Provider = saved.provider ?? "anthropic";
 
   function getHardcodedDefault(p: string): string {
-    if (p === "openai") return "gpt-5.4";
+    if (p === "openai") return "gpt-5.5";
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
@@ -1048,7 +1048,7 @@ async function runSessions(): Promise<void> {
   const provider: Provider = saved2.provider ?? "anthropic";
 
   function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.4";
+    if (p === "openai") return "gpt-5.5";
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
