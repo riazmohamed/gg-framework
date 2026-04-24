@@ -1614,7 +1614,7 @@ export function App(props: AppProps) {
             ...prev,
             {
               kind: "info",
-              text: "Eyes not set up in this project. Run /eyes to get started.",
+              text: "Eyes not set up in this project. Run /setup-eyes to get started.",
               id: getId(),
             },
           ]);
@@ -2008,29 +2008,57 @@ export function App(props: AppProps) {
     [switchTheme, props.settingsFile],
   );
 
-  // All available slash commands for the command palette
-  const allCommands = useMemo<SlashCommandInfo[]>(
-    () => [
+  // All available slash commands for the command palette — ordered by how
+  // commonly they're used and grouped by purpose; /quit stays dead last.
+  const allCommands = useMemo<SlashCommandInfo[]>(() => {
+    const promptByName = new Map(PROMPT_COMMANDS.map((c) => [c.name, c]));
+    const fromPrompt = (name: string): SlashCommandInfo | null => {
+      const c = promptByName.get(name);
+      return c ? { name: c.name, aliases: c.aliases, description: c.description } : null;
+    };
+    const promptOrder = [
+      // Project audits / one-shot analysis
+      "init",
+      "research",
+      "scan",
+      "verify",
+      "simplify",
+      "compare",
+      "batch",
+      // Setup / installers
+      "setup-lint",
+      "setup-tests",
+      "setup-commit",
+      "setup-update",
+      "setup-eyes",
+      "eyes-improve",
+      "skills-audit",
+    ];
+    const orderedPromptCommands = promptOrder
+      .map(fromPrompt)
+      .filter((c): c is SlashCommandInfo => c !== null);
+    const knownPromptNames = new Set(promptOrder);
+    const remainingPromptCommands = PROMPT_COMMANDS.filter(
+      (c) => !knownPromptNames.has(c.name),
+    ).map((c) => ({ name: c.name, aliases: c.aliases, description: c.description }));
+
+    return [
+      // Session actions (most frequent)
       { name: "model", aliases: ["m"], description: "Switch model" },
       { name: "compact", aliases: ["c"], description: "Compact conversation" },
       { name: "clear", aliases: [], description: "Clear session and terminal" },
-      { name: "quit", aliases: ["q", "exit"], description: "Exit the agent" },
       { name: "theme", aliases: ["t"], description: "Switch theme" },
-      { name: "plan", aliases: [], description: "Toggle plan mode (on/off)" },
       { name: "plans", aliases: [], description: "Open plans pane" },
-      ...PROMPT_COMMANDS.map((cmd) => ({
-        name: cmd.name,
-        aliases: cmd.aliases,
-        description: cmd.description,
-      })),
+      ...orderedPromptCommands,
+      ...remainingPromptCommands,
       ...customCommands.map((cmd) => ({
         name: cmd.name,
         aliases: [] as string[],
         description: cmd.description,
       })),
-    ],
-    [customCommands],
-  );
+      { name: "quit", aliases: ["q", "exit"], description: "Exit the agent" },
+    ];
+  }, [customCommands]);
 
   const renderItem = (item: CompletedItem) => {
     switch (item.kind) {

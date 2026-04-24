@@ -482,7 +482,7 @@ Replace all placeholders with the actual commands for the detected project type 
 Report that /update is now available with dependency updates, security audits, and deprecation fixes.`,
   },
   {
-    name: "eyes",
+    name: "setup-eyes",
     aliases: [],
     description: "Set up project perception probes and document them",
     prompt: `# Eyes: Set Up or Expand Project Perception

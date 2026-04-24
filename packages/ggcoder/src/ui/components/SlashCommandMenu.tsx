@@ -51,8 +51,6 @@ export function SlashCommandMenu({ commands, filter, selectedIndex }: SlashComma
       {visible.map((cmd, i) => {
         const actualIndex = start + i;
         const isSelected = actualIndex === idx;
-        const aliasStr =
-          cmd.aliases.length > 0 ? ` (${cmd.aliases.map((a) => "/" + a).join(", ")})` : "";
         return (
           <Box key={cmd.name}>
             <Text color={isSelected ? theme.commandColor : theme.textDim}>
@@ -61,7 +59,6 @@ export function SlashCommandMenu({ commands, filter, selectedIndex }: SlashComma
             <Text color={isSelected ? theme.commandColor : theme.text} bold={isSelected}>
               /{cmd.name}
             </Text>
-            <Text color={theme.textDim}>{aliasStr}</Text>
             <Text color={theme.textDim}> — {cmd.description}</Text>
           </Box>
         );
