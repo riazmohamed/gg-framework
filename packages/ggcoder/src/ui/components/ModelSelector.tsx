@@ -47,6 +47,12 @@ export function ModelSelector({
   );
 
   return (
-    <SelectList items={items} onSelect={onSelect} onCancel={onCancel} initialIndex={initialIndex} />
+    <SelectList
+      items={items}
+      onSelect={onSelect}
+      onCancel={onCancel}
+      initialIndex={initialIndex}
+      windowSize={6}
+    />
   );
 }

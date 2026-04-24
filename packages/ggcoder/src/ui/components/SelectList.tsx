@@ -13,9 +13,17 @@ interface SelectListProps {
   onSelect: (value: string) => void;
   onCancel: () => void;
   initialIndex?: number;
+  /** If set, render at most this many items at once and scroll the window as the selection moves. */
+  windowSize?: number;
 }
 
-export function SelectList({ items, onSelect, onCancel, initialIndex = 0 }: SelectListProps) {
+export function SelectList({
+  items,
+  onSelect,
+  onCancel,
+  initialIndex = 0,
+  windowSize,
+}: SelectListProps) {
   const theme = useTheme();
   const [selectedIndex, setSelectedIndex] = useState(initialIndex);
   const [filter, setFilter] = useState("");
@@ -64,6 +72,17 @@ export function SelectList({ items, onSelect, onCancel, initialIndex = 0 }: Sele
     }
   });
 
+  const total = filtered.length;
+  const clampedIndex = Math.min(Math.max(selectedIndex, 0), Math.max(0, total - 1));
+  const useWindow = windowSize !== undefined && windowSize > 0 && total > windowSize;
+  const start = useWindow
+    ? Math.max(0, Math.min(clampedIndex - Math.floor(windowSize / 2), total - windowSize))
+    : 0;
+  const end = useWindow ? Math.min(start + windowSize, total) : total;
+  const visible = useWindow ? filtered.slice(start, end) : filtered;
+  const hasAbove = useWindow && start > 0;
+  const hasBelow = useWindow && end < total;
+
   return (
     <Box flexDirection="column">
       {filter && (
@@ -71,15 +90,20 @@ export function SelectList({ items, onSelect, onCancel, initialIndex = 0 }: Sele
           <Text color={theme.textDim}>Filter: {filter}</Text>
         </Box>
       )}
-      {filtered.map((item, index) => (
-        <Box key={item.value}>
-          <Text color={index === selectedIndex ? theme.primary : theme.text}>
-            {index === selectedIndex ? "❯ " : "  "}
-            {item.label}
-          </Text>
-          {item.description && <Text color={theme.textDim}> — {item.description}</Text>}
-        </Box>
-      ))}
+      {hasAbove && <Text color={theme.textDim}> ↑ {start} more</Text>}
+      {visible.map((item, i) => {
+        const index = useWindow ? start + i : i;
+        return (
+          <Box key={item.value}>
+            <Text color={index === clampedIndex ? theme.primary : theme.text}>
+              {index === clampedIndex ? "❯ " : "  "}
+              {item.label}
+            </Text>
+            {item.description && <Text color={theme.textDim}> — {item.description}</Text>}
+          </Box>
+        );
+      })}
+      {hasBelow && <Text color={theme.textDim}> ↓ {total - end} more</Text>}
       {filtered.length === 0 && <Text color={theme.textDim}>No matches</Text>}
       <Box marginTop={1}>
         <Text color={theme.textDim}>↑↓ navigate · Enter select · Esc cancel</Text>
