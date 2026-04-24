@@ -11,10 +11,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `packages/gg-ai` | `@abukhaled/gg-ai` | Unified LLM streaming API (Anthropic, OpenAI) |
 | `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution |
 | `packages/ggcoder` | `@abukhaled/ogcoder` | CLI coding agent (`ogcoder` binary) |
+| `packages/ggcoder-eyes` | `@abukhaled/ggcoder-eyes` | Project-agnostic perception probes — screenshots, logs, HTTP, capture sinks |
 
 **Install**: `npm i -g @abukhaled/ogcoder`
 
-**Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder`
+**Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`)
+
+**Last app-update sync**: 2026-04-24 — merged `main` (now at v4.3.54), pulled in `ggcoder-eyes` package (rebranded from `@kenkaiiii/`), `EyesOverlay` UI, eyes journal integration, `palsu` test provider, session-id tagged debug logs.
 
 ## Project Structure
 
@@ -34,22 +37,35 @@ packages/
   │       ├── agent.ts       # Agent class + AgentStream
   │       └── agent-loop.ts  # Pure async generator loop
   │
-  └── ggcoder/               # @abukhaled/ogcoder — CLI (ogcoder)
-      └── src/
-          ├── cli.ts         # CLI entry point
-          ├── config.ts      # Configuration constants
-          ├── core/          # Auth, OAuth, settings, sessions, extensions
-          │   ├── oauth/     # PKCE OAuth flows (anthropic, openai)
-          │   ├── compaction/ # Context compaction & token estimation
-          │   ├── mcp/       # Model Context Protocol client
-          │   └── extensions/ # Extension system
-          ├── tools/         # Agentic tools (bash, read, write, edit, grep, find, ls, web-fetch, subagent)
-          ├── ui/            # Ink/React terminal UI components & hooks
-          │   ├── components/ # UI components (one per file)
-          │   ├── hooks/     # useAgentLoop, useSessionManager, useSlashCommands, etc.
-          │   └── theme/     # dark.json, light.json, etc.
-          ├── modes/         # Execution modes (interactive, print, json, serve, agent-home)
-          └── utils/         # Error handling, git, shell, formatting, image
+  ├── ggcoder/               # @abukhaled/ogcoder — CLI (ogcoder)
+  │   └── src/
+  │       ├── cli.ts         # CLI entry point
+  │       ├── config.ts      # Configuration constants
+  │       ├── core/          # Auth, OAuth, settings, sessions, extensions
+  │       │   ├── oauth/     # PKCE OAuth flows (anthropic, openai)
+  │       │   ├── compaction/ # Context compaction & token estimation
+  │       │   ├── mcp/       # Model Context Protocol client
+  │       │   └── extensions/ # Extension system
+  │       ├── tools/         # Agentic tools (bash, read, write, edit, grep, find, ls, web-fetch, subagent)
+  │       ├── ui/            # Ink/React terminal UI components & hooks
+  │       │   ├── components/ # UI components (one per file, incl. EyesOverlay)
+  │       │   ├── hooks/     # useAgentLoop, useSessionManager, useSlashCommands, etc.
+  │       │   └── theme/     # dark.json, light.json, etc.
+  │       ├── modes/         # Execution modes (interactive, print, json, serve, agent-home, rpc)
+  │       └── utils/         # Error handling, git, shell, formatting, image
+  │
+  └── ggcoder-eyes/          # @abukhaled/ggcoder-eyes — Perception probes (eyes)
+      ├── src/
+      │   ├── cli.ts         # `ggcoder-eyes` binary (also reachable via `ogcoder eyes ...`)
+      │   ├── manifest.ts    # .gg/eyes/manifest.json reader
+      │   └── journal.ts     # .gg/eyes/journal.jsonl reader/writer
+      ├── shared/            # _lib.sh and _redact.sh — shared bash helpers
+      └── probes/            # Probe scripts: visual, runtime_logs, http, capture_email
+          └── <probe>/
+              ├── install.sh # Install/setup the probe
+              ├── detect.sh  # Detect availability
+              ├── test.sh    # Smoke test
+              └── impl/      # Per-platform impls (e.g. simctl, adb, playwright)
 ```
 
 ## Commands
@@ -95,6 +111,7 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
   - MiniMax: silently strips image/video/document content (unsupported)
 - **StreamResult**: dual-interface — async iterable (`for await`) AND thenable (`await` for final response)
 - **Zod → JSON Schema** (`utils/zod-to-json-schema.ts`): `z.toJSONSchema(schema)` with `$schema` key stripped. Bypassed when tool has `rawInputSchema` (MCP tools).
+- **Test provider**: `providers/palsu.ts` — deterministic mock provider used in tests; `providers/openai-codex.ts` is a legacy OpenAI Codex endpoint variant.
 
 ### gg-agent: Agent Loop
 
@@ -108,15 +125,54 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 
 ### ggcoder: CLI Application
 
-- **Tools** (`tools/`): Factory functions returning `AgentTool<ZodSchema>`. Each tool gets `ToolOperations` interface for I/O abstraction (local fs by default, injectable for remote).
+- **Tools** (`tools/`): Factory functions returning `AgentTool<ZodSchema>`. Each tool gets `ToolOperations` interface for I/O abstraction (local fs by default, injectable for remote). Core tools: `bash`, `read`, `write`, `edit`, `grep`, `find`, `ls`, `web-fetch`, `web-search`. Advanced tools: `subagent` (spawns child `ogcoder` process in json-mode, streams NDJSON back), `skill` (injects skill markdown into context), `tasks`/`task-output`/`task-stop` (background task management), `enter-plan`/`exit-plan` (plan mode gating).
 - **MCP** (`core/mcp/`): Servers configured with command (stdio) or url (HTTP/SSE with fallback). Tools wrapped as `AgentTool` with `mcp__${server}__${tool}` naming. Rate-limited (2s min gap).
 - **Model router** (`core/model-router.ts`): Per-turn model switching. Modes: `vision` (auto-switch on images/video/docs), `plan-execute` (heavy planner + light executor), `hybrid` (vision priority, then plan-execute). Vision fallback chain: GLM-4.6V → MiMo Omni → Moonshot → OpenAI (Claude excluded for cost).
 - **Compaction** (`core/compaction/compactor.ts`): Triggers at 80% context or `contextWindow - 16384` tokens (whichever is lower). Keeps system message + recent ~20K tokens intact. Middle section summarized via LLM. Falls back to extractive summary on failure.
 - **Sessions** (`core/session-manager.ts`): Append-only JSONL with DAG structure (leafId for branching). Streams line-by-line for large files. `repairToolPairs()` fixes interrupted sessions on restore.
-- **Auth** (`core/auth-storage.ts`, `core/oauth/`): OAuth PKCE for Anthropic and OpenAI (with token refresh + 401 retry); static API keys for GLM, Moonshot, Xiaomi, MiniMax, and OpenRouter. Ollama runs locally — no credentials needed. All credentials stored in `~/.gg/auth.json`. Provider selection at startup uses `resolveActiveProvider()` in `cli.ts` — falls back to the first authenticated provider if the saved one isn't logged in.
+- **Auth** (`core/auth-storage.ts`, `core/oauth/`): OAuth PKCE for Anthropic and OpenAI (with token refresh + 401 retry); static API keys for GLM, Moonshot, Xiaomi, MiniMax, and OpenRouter. All credentials stored in `~/.gg/auth.json`. Provider selection at startup uses `resolveActiveProvider()` in `cli.ts` — falls back to the first authenticated provider if the saved one isn't logged in.
 - **Themes** (`ui/theme/`): Six themes — `dark`, `light`, `dark-ansi`, `light-ansi`, `dark-daltonized`, `light-daltonized` — plus `auto` (detects from terminal). ANSI variants use 16-color palette for limited terminals; daltonized variants are color-blind friendly. `loadTheme(name)` in `theme.ts` returns the JSON config; `ThemeContext` + `useTheme()` for read, `SetThemeContext` + `useSetTheme()` for runtime switching.
 - **UI**: Ink 6 + React 19. `useAgentLoop` hook drives the agent and surfaces events to React state. Throttled streaming flush at ~16ms intervals to avoid saturating renders. Markdown rendering uses `utils/token-to-ansi.ts` (custom tokenizer → ANSI) instead of marked-terminal for theme-aware output. Terminal hyperlinks via `utils/hyperlink.ts` (gated by `supports-hyperlinks.ts`). Cross-component state (taskbar, etc.) lives in `ui/stores/` using a tiny `create-store` pattern.
 - **Debug logging**: `~/.gg/debug.log` — timestamped log of startup, auth, tool calls, turn completions, errors. Truncated on each CLI restart. Singleton logger in `src/core/logger.ts`.
+
+### Execution Modes
+
+All modes live in `ggcoder/src/modes/` and are dispatched from `cli.ts`:
+
+- **interactive** (default): Ink/React terminal UI, full session management.
+- **print**: Single-turn, streams output to stdout, no UI.
+- **json**: Non-interactive NDJSON mode — each agent event is a JSON line on stdout. Used internally by the `subagent` tool when spawning child processes.
+- **serve**: Telegram bot integration (`core/telegram.ts`). Maps chat IDs to project directories (`~/.gg/serve.json`). Voice messages transcribed locally via `core/voice-transcriber.ts` (Whisper-based, model downloaded on first use).
+- **agent-home**: Persistent background agent workspace (`~/.gg/agent-home.json`), used for long-running autonomous sessions.
+- **rpc**: JSON-RPC interface for programmatic control.
+
+### Plan Mode
+
+The plan mode system lets the agent propose a structured plan before executing. Tools: `enter-plan` (agent enters plan-drafting state, pauses execution) and `exit-plan` (submits the plan for user approval). UI components `PlanApproval`, `PlanBanner`, `PlanOverlay`, and `PlanProgress` render the approval flow. `/plan` and `/plans` slash commands are UI-handled (need `agentLoop.reset()` access).
+
+### Extensibility: Agents, Skills, Custom Commands
+
+All three systems discover markdown files with YAML frontmatter from two locations (merged, project-local wins on conflict):
+- **Global**: `~/.gg/{agents,skills}/`
+- **Project-local**: `{cwd}/.gg/{agents,skills}/`
+
+**Agents** (`core/agents.ts`): Frontmatter keys: `name`, `description`, `tools` (comma-separated). Body is the system prompt. Two built-in agents seeded on first run (won't overwrite edits):
+  - `owl` — read-only codebase explorer (tools: read, grep, find, ls, bash)
+  - `bee` — general task worker (tools: read, write, edit, bash, find, grep, ls)
+
+**Skills** (`core/skills.ts`): Frontmatter: `name`, `description`. Body is injected into context by the `skill` tool when the agent invokes it by name.
+
+**Custom Commands** (`core/custom-commands.ts`): User-defined slash commands loaded alongside built-ins. Frontmatter: `name`, `description`. Body defines behavior.
+
+### Eyes — Perception Probes (`ggcoder-eyes`)
+
+Project-agnostic probes that let the agent *see* what's happening in the running project (UI screenshots, runtime logs, HTTP responses, captured emails) and persist signals it would otherwise have to guess about.
+
+- **Activation gate**: `isEyesActive(cwd)` checks for `.gg/eyes/manifest.json`. The system prompt only injects the "Open Improvement Signals" section when active, so projects without eyes pay no prompt cost.
+- **CLI**: invoked from agents as `ogcoder eyes <subcommand>` (passes through to the `@abukhaled/ggcoder-eyes` CLI via `_require.resolve(...)/cli`). `ogcoder` is guaranteed on PATH for the agent's bash shell, which avoids nested-bin visibility issues in global pnpm/npm installs.
+- **Journal**: `readJournal({ status, order, limit }, cwd)` / `journalCount(...)` over `.gg/eyes/journal.jsonl`. Open entries surface in the startup banner ("👁 Eyes: N open improvement signals — run /eyes-improve to triage") and in the `EyesOverlay` UI component.
+- **Probes** (each is a self-contained shell module with `install.sh` / `detect.sh` / `test.sh` and platform impls under `impl/`): `visual` (simctl / adb / window / playwright / generic), `runtime_logs` (tail / docker / simctl / adb-logcat), `http` (curl), `capture_email` (mailpit). Add a probe by dropping a new directory under `packages/ggcoder-eyes/probes/`.
+- **Slash commands**: `/setup-eyes` (install probes for the current project) and `/eyes-improve` (triage open journal signals into actionable improvements). Both are loaded from `core/prompt-commands.ts`.
 
 ### Slash Commands
 
@@ -147,12 +203,13 @@ To add a registry command: add an entry in `createBuiltinCommands()` array. If i
 
 ## Publishing
 
-Publish in dependency order. All three packages must share the same version.
+Publish in dependency order. The three core packages (`gg-ai`, `gg-agent`, `ogcoder`) must share the same version. `ggcoder-eyes` versions independently.
 
 ```bash
 pnpm build
 pnpm --filter @abukhaled/gg-ai publish --no-git-checks
 pnpm --filter @abukhaled/gg-agent publish --no-git-checks
+pnpm --filter @abukhaled/ggcoder-eyes publish --no-git-checks
 pnpm --filter @abukhaled/ogcoder publish --no-git-checks
 ```
 

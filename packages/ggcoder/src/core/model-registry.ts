@@ -220,17 +220,6 @@ export const MODELS: ModelInfo[] = [
     supportsImages: false,
     costTier: "medium",
   },
-  // ── Xiaomi (MiMo) ──────────────────────────────────────
-  {
-    id: "mimo-v2-pro",
-    name: "MiMo-V2-Pro",
-    provider: "xiaomi",
-    contextWindow: 1_000_000,
-    maxOutputTokens: 131_072,
-    supportsThinking: true,
-    supportsImages: false,
-    costTier: "medium",
-  },
   // ── OpenRouter ─────────────────────────────────────────
   {
     id: "qwen/qwen3.6-plus",
