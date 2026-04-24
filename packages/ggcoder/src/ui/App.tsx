@@ -2032,7 +2032,7 @@ export function App(props: AppProps) {
       "setup-update",
       "setup-eyes",
       "eyes-improve",
-      "skills-audit",
+      "setup-skills",
     ];
     const orderedPromptCommands = promptOrder
       .map(fromPrompt)

@@ -753,7 +753,7 @@ Style preferences and subjective improvements are not valid findings. Only repor
 If the code aligns well with real-world patterns, say so. That's a good outcome.`,
   },
   {
-    name: "skills-audit",
+    name: "setup-skills",
     aliases: [],
     description: "Audit project, recommend skills ranked by impact",
     prompt: `# Skills Audit: Find useful skills for this project

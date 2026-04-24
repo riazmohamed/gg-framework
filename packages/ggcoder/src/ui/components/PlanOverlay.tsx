@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Box, Text, Static, useInput } from "ink";
+import { Box, Text, Static, useInput, useStdout } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { Markdown } from "./Markdown.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
@@ -155,6 +155,7 @@ export function PlanOverlay({
   onDeletePlan,
 }: PlanOverlayProps) {
   const theme = useTheme();
+  const { stdout } = useStdout();
 
   const { columns } = useTerminalSize();
   // Pre-compute the width available for Markdown — same as AssistantMessage.
@@ -224,10 +225,15 @@ export function PlanOverlay({
   }
 
   function collapsePlan() {
+    // The expanded view renders into <Static>, which flushes to terminal
+    // scrollback. Unmounting alone leaves that content above the list view;
+    // clear the terminal so the list redraws clean.
+    stdout?.write("\x1b[2J\x1b[3J\x1b[H");
     setExpandedPlan(null);
     setStaticItems([]);
     setRejectMode(false);
     setRejectFeedback("");
+    autoExpandedRef.current = true;
   }
 
   useInput((input, key) => {
