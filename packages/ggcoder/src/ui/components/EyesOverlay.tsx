@@ -10,7 +10,7 @@ import {
   updateEntry,
   type JournalEntry,
   type ProbeEntry,
-} from "@kenkaiiii/ggcoder-eyes";
+} from "@abukhaled/ggcoder-eyes";
 
 // ── Navigable row model ───────────────────────────────────
 // Flatten probes + signals into a single navigable list so arrow keys and
@@ -68,7 +68,7 @@ let cachedCliPath: string | null = null;
 function resolveCli(): string | null {
   if (cachedCliPath) return cachedCliPath;
   try {
-    cachedCliPath = requireFn.resolve("@kenkaiiii/ggcoder-eyes/cli");
+    cachedCliPath = requireFn.resolve("@abukhaled/ggcoder-eyes/cli");
     return cachedCliPath;
   } catch {
     return null;

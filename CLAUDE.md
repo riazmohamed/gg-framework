@@ -6,13 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **gg-framework** — Modular TypeScript monorepo for building LLM-powered apps, from raw streaming to a full CLI coding agent.
 
-| Package             | npm                   | Description                                   |
-| ------------------- | --------------------- | --------------------------------------------- |
-| `packages/gg-ai`    | `@abukhaled/gg-ai`    | Unified LLM streaming API (Anthropic, OpenAI) |
-| `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution                |
-| `packages/ggcoder`  | `@abukhaled/ogcoder`  | CLI coding agent (`ogcoder` binary)           |
+| Package                 | npm                       | Description                                                          |
+| ----------------------- | ------------------------- | -------------------------------------------------------------------- |
+| `packages/gg-ai`        | `@abukhaled/gg-ai`        | Unified LLM streaming API (Anthropic, OpenAI)                        |
+| `packages/gg-agent`     | `@abukhaled/gg-agent`     | Agent loop with tool execution                                       |
+| `packages/ggcoder`      | `@abukhaled/ogcoder`      | CLI coding agent (`ogcoder` binary)                                  |
+| `packages/ggcoder-eyes` | `@abukhaled/ggcoder-eyes` | Project-agnostic perception probes (screenshots, logs, HTTP capture) |
 
-**Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder`
+**Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (uses `ggcoder-eyes` for perception)
+
+Current published version: **4.3.56** (last app-update sync: 2026-04-25).
 
 ## Commands
 
@@ -55,7 +58,7 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 
 ### gg-ai: Provider-Agnostic Streaming
 
-- **Provider registry** (`provider-registry.ts` + `stream.ts`): Map-based dispatch. Built-in providers registered at module load: `anthropic` and `minimax` → `streamAnthropic()` (MiniMax uses an Anthropic-compatible endpoint); `openai`, `glm`, `moonshot`, `xiaomi`, `ollama`, `openrouter` → `streamOpenAI()` with provider-specific baseUrl/config. Extensions can register custom providers via `providerRegistry.register()`.
+- **Provider registry** (`provider-registry.ts` + `stream.ts`): Map-based dispatch. Built-in providers registered at module load: `anthropic` and `minimax` → `streamAnthropic()` (MiniMax uses an Anthropic-compatible endpoint); `openai`, `glm`, `moonshot`, `xiaomi`, `ollama`, `deepseek`, `openrouter` → `streamOpenAI()` with provider-specific baseUrl/config. Extensions can register custom providers via `providerRegistry.register()`.
 - **Fail-fast dispatch**: Provider handlers must throw `ProviderError` when required config is missing (e.g. region-scoped `baseUrl`) rather than silently defaulting. Silent fallbacks mask real failures — the canonical example is `xiaomi`, whose keys are region-scoped and which throws if `baseUrl` is not supplied.
 - **Message transform** (`providers/transform.ts`): Converts unified `Message[]` to provider format. Key quirks:
   - Anthropic: `toolu_*` IDs, `thinking` content blocks with signatures, tool results wrapped in user messages
@@ -79,7 +82,9 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 - **Model router** (`core/model-router.ts`): Per-turn model switching. Modes: `vision` (auto-switch on images/video/docs), `plan-execute` (heavy planner + light executor), `hybrid` (vision priority, then plan-execute).
 - **Compaction** (`core/compaction/compactor.ts`): Triggers at 80% context usage. Keeps system message + recent ~20K tokens intact. Middle section summarized via LLM (tool calls → text, thinking stripped, results truncated). Falls back to extractive summary on failure.
 - **Sessions** (`core/session-manager.ts`): Append-only JSONL with DAG structure (leafId for branching). Streams line-by-line for large files. `repairToolPairs()` fixes interrupted sessions on restore.
-- **Auth**: OAuth PKCE for Anthropic and OpenAI; static API keys for GLM, Moonshot, Xiaomi, MiniMax, Ollama, and OpenRouter. All credentials stored in `~/.gg/auth.json` (file mode `0o600`, written atomically with a file lock via `core/auth-storage.ts`). Xiaomi keys are **region-scoped** — the correct regional `baseUrl` must be captured at login via `core/xiaomi-regions.ts` (a key from `ams` returns 401 on `sgp`). The `runLogin()` flow in `cli.ts` runs a region selector before opening readline; raw-mode Ink-style selectors (see `ui/login.tsx`) cannot coexist with an active readline interface.
+- **Auth**: OAuth PKCE for Anthropic and OpenAI; static API keys for GLM, Moonshot, Xiaomi, MiniMax, Ollama, DeepSeek, and OpenRouter. All credentials stored in `~/.gg/auth.json` (file mode `0o600`, written atomically with a file lock via `core/auth-storage.ts`). Xiaomi keys are **region-scoped** — the correct regional `baseUrl` must be captured at login via `core/xiaomi-regions.ts` (a key from `ams` returns 401 on `sgp`). The `runLogin()` flow in `cli.ts` runs a region selector before opening readline; raw-mode Ink-style selectors (see `ui/login.tsx`) cannot coexist with an active readline interface.
+- **Models**: Defined in `core/model-registry.ts`. Vision-routing pairs: `mimo-v2-pro` (text) ↔ `mimo-v2-omni`/`mimo-v2-flash` (vision); GLM `glm-5.1`/`glm-4.7` (text) ↔ `glm-4.6v`/`glm-5v-turbo`/`glm-4.6v-flashx`/`glm-4.6v-flash` (vision). MiniMax M2.7 reports `supportsImages: false` because the Anthropic-compat endpoint silently drops multimodal blocks.
+- **Eyes (`packages/ggcoder-eyes`)**: Perception probes the agent invokes via the `ggcoder eyes ...` passthrough in `cli.ts`. Probes live in `probes/<name>/impl/*.sh`, with `detect.sh`, `install.sh`, and `test.sh` per probe. The agent reads `isEyesActive`/`journalCount`/`readJournal` from `@abukhaled/ggcoder-eyes`; `EyesOverlay.tsx` renders the live journal in the TUI.
 - **Startup** (`cli.ts`): Optimized for fast time-to-interactive. Key patterns:
   - Auto-update check is fire-and-forget (never blocks)
   - OSC 11 theme detection is skipped on WSL (always times out)
@@ -105,5 +110,10 @@ Publish in dependency order:
 pnpm build
 pnpm --filter @abukhaled/gg-ai publish --no-git-checks
 pnpm --filter @abukhaled/gg-agent publish --no-git-checks
+pnpm --filter @abukhaled/ggcoder-eyes publish --no-git-checks
 pnpm --filter @abukhaled/ogcoder publish --no-git-checks
 ```
+
+Global install for local testing: `cd packages/ggcoder && npm install -g .` (pnpm's
+global install fails without `PNPM_HOME`; the existing `ogcoder` symlink lives
+under the active nvm node version's `bin/`).
