@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | Package | npm | Description |
 |---|---|---|
-| `packages/gg-ai` | `@abukhaled/gg-ai` | Unified LLM streaming API (Anthropic, OpenAI) |
+| `packages/gg-ai` | `@abukhaled/gg-ai` | Unified LLM streaming API (Anthropic + OpenAI-compatible providers) |
 | `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution |
 | `packages/ggcoder` | `@abukhaled/ogcoder` | CLI coding agent (`ogcoder` binary) |
 | `packages/ggcoder-eyes` | `@abukhaled/ggcoder-eyes` | Project-agnostic perception probes — screenshots, logs, HTTP, capture sinks |
@@ -16,57 +16,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Install**: `npm i -g @abukhaled/ogcoder`
 
 **Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`)
-
-**Last app-update sync**: 2026-04-25 — merged `main` (now at v4.3.56), added DeepSeek V4 provider (`deepseek-v4-pro`, `deepseek-v4-flash`) alongside the existing Ollama provider; both share the static-API-key code paths.
-
-## Project Structure
-
-```
-packages/
-  ├── gg-ai/                 # @abukhaled/gg-ai — Unified LLM streaming API
-  │   └── src/
-  │       ├── types.ts       # Core types (StreamOptions, ContentBlock, events)
-  │       ├── errors.ts      # GGAIError, ProviderError
-  │       ├── stream.ts      # Main stream() dispatch function
-  │       ├── providers/     # Anthropic, OpenAI streaming implementations
-  │       └── utils/         # EventStream, Zod-to-JSON-Schema
-  │
-  ├── gg-agent/              # @abukhaled/gg-agent — Agent loop with tool execution
-  │   └── src/
-  │       ├── types.ts       # AgentTool, AgentEvent, AgentOptions
-  │       ├── agent.ts       # Agent class + AgentStream
-  │       └── agent-loop.ts  # Pure async generator loop
-  │
-  ├── ggcoder/               # @abukhaled/ogcoder — CLI (ogcoder)
-  │   └── src/
-  │       ├── cli.ts         # CLI entry point
-  │       ├── config.ts      # Configuration constants
-  │       ├── core/          # Auth, OAuth, settings, sessions, extensions
-  │       │   ├── oauth/     # PKCE OAuth flows (anthropic, openai)
-  │       │   ├── compaction/ # Context compaction & token estimation
-  │       │   ├── mcp/       # Model Context Protocol client
-  │       │   └── extensions/ # Extension system
-  │       ├── tools/         # Agentic tools (bash, read, write, edit, grep, find, ls, web-fetch, subagent)
-  │       ├── ui/            # Ink/React terminal UI components & hooks
-  │       │   ├── components/ # UI components (one per file, incl. EyesOverlay)
-  │       │   ├── hooks/     # useAgentLoop, useSessionManager, useSlashCommands, etc.
-  │       │   └── theme/     # dark.json, light.json, etc.
-  │       ├── modes/         # Execution modes (interactive, print, json, serve, agent-home, rpc)
-  │       └── utils/         # Error handling, git, shell, formatting, image
-  │
-  └── ggcoder-eyes/          # @abukhaled/ggcoder-eyes — Perception probes (eyes)
-      ├── src/
-      │   ├── cli.ts         # `ggcoder-eyes` binary (also reachable via `ogcoder eyes ...`)
-      │   ├── manifest.ts    # .gg/eyes/manifest.json reader
-      │   └── journal.ts     # .gg/eyes/journal.jsonl reader/writer
-      ├── shared/            # _lib.sh and _redact.sh — shared bash helpers
-      └── probes/            # Probe scripts: visual, runtime_logs, http, capture_email
-          └── <probe>/
-              ├── install.sh # Install/setup the probe
-              ├── detect.sh  # Detect availability
-              ├── test.sh    # Smoke test
-              └── impl/      # Per-platform impls (e.g. simctl, adb, playwright)
-```
 
 ## Commands
 
@@ -79,21 +28,14 @@ pnpm format                         # Prettier write
 pnpm format:check                   # Prettier check
 pnpm test                           # Vitest (all packages)
 
+# Always run after editing any file:
+pnpm check && pnpm lint && pnpm format:check
+
 # Single package
 pnpm --filter @abukhaled/gg-ai test          # Test one package
 pnpm --filter @abukhaled/ogcoder test -- src/tools/read.test.ts  # Single test file
 pnpm test -- -t "should read files"          # Test by name pattern
 ```
-
-## Code Quality — Zero Tolerance
-
-After editing ANY file, run:
-
-```bash
-pnpm check && pnpm lint && pnpm format:check
-```
-
-Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`.
 
 ## Architecture
 
@@ -178,8 +120,8 @@ Project-agnostic probes that let the agent *see* what's happening in the running
 
 Two kinds — UI-handled take precedence over registry:
 
-1. **UI-handled** (`App.tsx` `handleSubmit`): `/model`, `/compact`, `/quit`, `/clear`, `/theme`, `/teach-me`, `/plan`, `/plans` — these need direct React state access (overlays, token counters, `agentLoop.reset()`).
-2. **Registry** (`core/slash-commands.ts` `createBuiltinCommands()`): `/help`, `/settings`, `/session`, `/new`, `/router` — receive `SlashCommandContext` with methods like `switchModel()`, `compact()`, `newSession()`.
+1. **UI-handled** — see `handleSubmit` in `ggcoder/src/ui/App.tsx`. These short-circuit before the registry because they need direct React state access (overlays, token counters, `agentLoop.reset()`).
+2. **Registry** — see `createBuiltinCommands()` in `ggcoder/src/core/slash-commands.ts`. Receive a `SlashCommandContext` with methods like `switchModel()`, `compact()`, `newSession()`.
 
 To add a UI command: add a condition in `handleSubmit` before the registry check.
 To add a registry command: add an entry in `createBuiltinCommands()` array. If it needs new capabilities, extend `SlashCommandContext` and wire it in `AgentSession.createSlashCommandContext()`.
