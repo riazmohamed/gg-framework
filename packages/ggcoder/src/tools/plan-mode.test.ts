@@ -10,8 +10,20 @@ import { createBashTool } from "./bash.js";
 import { ProcessManager } from "../core/process-manager.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 
-function resultToString(result: string | { content: string }): string {
-  return typeof result === "string" ? result : result.content;
+function resultToString(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (result && typeof result === "object" && "content" in result) {
+    const c = (result as { content: unknown }).content;
+    if (typeof c === "string") return c;
+    if (Array.isArray(c)) {
+      return c
+        .map((b: { type: string; text?: string }) =>
+          b.type === "text" ? (b.text ?? "") : "[image]",
+        )
+        .join("\n");
+    }
+  }
+  return String(result);
 }
 
 const mockContext = {
@@ -161,7 +173,10 @@ describe("plan mode tool restrictions", () => {
       const tool = createEditTool(tmpDir, readFiles, undefined, planModeRef);
 
       const result = resultToString(
-        await tool.execute({ file_path: "test.ts", old_text: "foo", new_text: "bar" }, mockContext),
+        await tool.execute(
+          { file_path: "test.ts", edits: [{ old_text: "foo", new_text: "bar" }] },
+          mockContext,
+        ),
       );
 
       expect(result).toContain("Error");
@@ -195,7 +210,7 @@ describe("plan mode tool restrictions", () => {
       );
 
       expect(result).toContain("Wrote");
-      expect(result).toContain("bytes");
+      expect(result).toContain("lines");
 
       // Verify file was actually created
       const written = await fs.readFile(path.join(tmpDir, ".gg", "plans", "my-plan.md"), "utf-8");
@@ -248,7 +263,6 @@ describe("buildSystemPrompt with plan mode", () => {
     const prompt = await buildSystemPrompt(tmpDir, [], true);
 
     expect(prompt).toContain("Plan Mode (ACTIVE)");
-    expect(prompt).toContain("read-only");
     expect(prompt).toContain("exit_plan");
     expect(prompt).toContain(".gg/plans/");
   });
@@ -259,11 +273,18 @@ describe("buildSystemPrompt with plan mode", () => {
     expect(prompt).not.toContain("Plan Mode (ACTIVE)");
   });
 
-  it("includes enter_plan and exit_plan tool descriptions", async () => {
+  it("includes enter_plan (not exit_plan) when not in plan mode", async () => {
     const prompt = await buildSystemPrompt(tmpDir, [], false);
 
     expect(prompt).toContain("enter_plan");
+    expect(prompt).not.toContain("- **exit_plan**");
+  });
+
+  it("includes exit_plan (not enter_plan) when in plan mode", async () => {
+    const prompt = await buildSystemPrompt(tmpDir, [], true);
+
     expect(prompt).toContain("exit_plan");
+    expect(prompt).not.toContain("- **enter_plan**");
   });
 
   it("includes approved plan when approvedPlanPath is set", async () => {
@@ -278,7 +299,7 @@ describe("buildSystemPrompt with plan mode", () => {
     expect(prompt).toContain("approved.md");
     expect(prompt).toContain("# My Plan");
     expect(prompt).toContain("Do this");
-    expect(prompt).toContain("Follow the plan");
+    expect(prompt).toContain("Follow step order");
   });
 
   it("does not include approved plan section when no path is set", async () => {

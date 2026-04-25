@@ -34,26 +34,40 @@ export async function discoverSkills(options: {
 async function loadSkillsFromDir(dir: string, source: string): Promise<Skill[]> {
   const skills: Skill[] = [];
 
-  let files: string[];
+  let dirents;
   try {
-    files = await fs.readdir(dir);
+    dirents = await fs.readdir(dir, { withFileTypes: true });
   } catch {
     return skills;
   }
 
-  for (const file of files) {
-    if (!file.endsWith(".md")) continue;
-    const filePath = path.join(dir, file);
+  for (const entry of dirents) {
+    const entryPath = path.join(dir, entry.name);
 
-    try {
-      const content = await fs.readFile(filePath, "utf-8");
-      const skill = parseSkillFile(content, source);
-      if (!skill.name) {
-        skill.name = path.basename(file, ".md");
+    // Flat layout: ~/.gg/skills/foo.md
+    if (entry.isFile() && entry.name.endsWith(".md")) {
+      try {
+        const content = await fs.readFile(entryPath, "utf-8");
+        const skill = parseSkillFile(content, source);
+        if (!skill.name) skill.name = path.basename(entry.name, ".md");
+        skills.push(skill);
+      } catch {
+        // Skip unreadable files
       }
-      skills.push(skill);
-    } catch {
-      // Skip unreadable files
+      continue;
+    }
+
+    // Directory layout (skills.sh ecosystem): ~/.gg/skills/foo/SKILL.md
+    if (entry.isDirectory()) {
+      const skillFile = path.join(entryPath, "SKILL.md");
+      try {
+        const content = await fs.readFile(skillFile, "utf-8");
+        const skill = parseSkillFile(content, source);
+        if (!skill.name) skill.name = entry.name;
+        skills.push(skill);
+      } catch {
+        // No SKILL.md — skip
+      }
     }
   }
 

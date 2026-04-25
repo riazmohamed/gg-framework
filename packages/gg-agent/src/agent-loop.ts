@@ -4,6 +4,7 @@ import {
   type Message,
   type ToolCall,
   type ToolResult,
+  type ToolResultContent,
   type Usage,
   type ContentPart,
   type AssistantMessage,
@@ -124,6 +125,46 @@ export function isOverloaded(err: unknown): boolean {
   );
 }
 
+/**
+ * Detect malformed-stream errors — the SDK's SSE decoder threw a JSON parse
+ * error mid-stream, typically because a chunk was truncated or corrupted by
+ * an intermediary (CDN, proxy).  Same class of transport failure as a stall:
+ * replaying the request — and ideally flipping to non-streaming — recovers.
+ */
+export function isMalformedStream(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === "SyntaxError") return true;
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause instanceof Error && cause.name === "SyntaxError") return true;
+  const msg = err.message;
+  // V8 JSON.parse error messages: "Expected ... in JSON at position N"
+  // and "Unexpected token ... in JSON at position N"
+  return /\bin JSON at position \d+/i.test(msg);
+}
+
+/**
+ * Promise-returning sleep that rejects with AbortError if `signal` fires.
+ * Used by retry backoffs so ESC/Ctrl+C cancel immediately instead of having
+ * to wait out the full delay (up to 30s per overload retry × 10 retries).
+ */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException("Aborted", "AbortError"));
+  }
+  return new Promise<void>((resolve, reject) => {
+    let onAbort: (() => void) | null = null;
+    const timer = setTimeout(() => {
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export async function* agentLoop(
   messages: Message[],
   options: AgentOptions,
@@ -141,10 +182,18 @@ export async function* agentLoop(
   let overloadRetries = 0;
   let emptyResponseRetries = 0;
   let stallRetries = 0;
+  // Non-streaming fallback mode. After repeated stream stalls, flip to a
+  // plain non-streaming request/response -- often survives broken SSE
+  // connections (transient CDN / proxy issues) that streaming retries cannot.
+  let useNonStreamingFallback = false;
   const MAX_OVERLOAD_RETRIES = 10;
   const MAX_EMPTY_RESPONSE_RETRIES = 2;
   const MAX_STALL_RETRIES = 5;
-  const STALL_DELAY_MS = 1_000; // Brief pause before retry — just enough to avoid tight loops
+  // After this many streaming stalls in a row, switch to non-streaming mode
+  // for the remaining stall retries. Keeps the first two retries fast (the
+  // cheap "transient glitch" case) before paying for a full response round-trip.
+  const STALL_RETRIES_BEFORE_NON_STREAMING = 2;
+  const STALL_DELAY_MS = 1_000; // Brief pause before retry -- just enough to avoid tight loops
   const OVERLOAD_BASE_DELAY_MS = 2_000;
   const OVERLOAD_MAX_DELAY_MS = 30_000;
   const STREAM_FIRST_EVENT_TIMEOUT_MS = 45_000; // 45s to get first event (Opus thinks long)
@@ -154,13 +203,19 @@ export async function* agentLoop(
   // and caused false "stream stalled" errors, especially in plan mode.
   const STREAM_HARD_TIMEOUT_MS = 90_000; // 90s absolute cap before output starts
   // Once output events (text_delta) are actively streaming, extend the hard
-  // timeout — long responses (plan mode, detailed explanations) can legitimately
+  // timeout -- long responses (plan mode, detailed explanations) can legitimately
   // take 2-3+ minutes while events flow continuously.
   const STREAM_OUTPUT_HARD_TIMEOUT_MS = 300_000; // 5min hard cap once output is flowing
   // Reasoning models (MiMo) can pause 3-5 minutes between thinking and output
   // generation.  Once we've seen thinking events, extend timeouts significantly.
   const STREAM_THINKING_IDLE_TIMEOUT_MS = 300_000; // 5min idle after thinking
   const STREAM_THINKING_HARD_TIMEOUT_MS = 600_000; // 10min hard cap with thinking
+  // Non-streaming mode has no per-event idle -- the entire response arrives in
+  // one HTTP round-trip. Use a single generous hard cap instead. This matches
+  // Claude Code's v2.1.110/111 behaviour: cap non-streaming retries so API
+  // unreachability doesn't cause multi-minute hangs, but not so aggressively
+  // that slow-but-healthy backends get killed.
+  const NON_STREAMING_HARD_TIMEOUT_MS = 300_000; // 5min for full non-streaming response
 
   try {
     while (turn < maxTurns) {
@@ -281,15 +336,20 @@ export async function* agentLoop(
       options.signal?.addEventListener("abort", forwardAbort, { once: true });
 
       // Three-phase idle timeout:
-      //  - Before first event: STREAM_FIRST_EVENT_TIMEOUT_MS (45s) — Opus can
+      //  - Before first event: STREAM_FIRST_EVENT_TIMEOUT_MS (45s) -- Opus can
       //    take 30s+ to start on large contexts, that's not a stall.
       //  - After output event (text_delta, server_toolcall): STREAM_IDLE_TIMEOUT_MS
-      //    (10s) — once output is streaming, 10s of silence is dead. Retry fast.
-      //  - After thinking events only: STREAM_THINKING_IDLE_TIMEOUT_MS (5min) —
+      //    (10s) -- once output is streaming, 10s of silence is dead. Retry fast.
+      //  - After thinking events only: STREAM_THINKING_IDLE_TIMEOUT_MS (5min) --
       //    reasoning models (MiMo) can pause minutes between thinking and output.
+      //
+      // In non-streaming fallback mode the entire response arrives in a single
+      // HTTP round-trip, so the idle timer is disabled -- only the hard timeout
+      // applies. Synthesized events all arrive at once when the response returns.
       let hasReceivedEvent = false;
       let hasReceivedThinking = false;
       const resetIdleTimer = () => {
+        if (useNonStreamingFallback) return; // no inter-event idle in non-streaming mode
         if (idleTimer) clearTimeout(idleTimer);
         const timeoutMs = hasReceivedEvent
           ? STREAM_IDLE_TIMEOUT_MS
@@ -317,17 +377,22 @@ export async function* agentLoop(
       // Hard timeout: absolute cap per LLM call. Safety net for streams that
       // keep sending sparse events (e.g. keep-alive pings) but never complete.
       // Extended dynamically when thinking events arrive (see thinking_delta handler).
-      let hardTimeoutMs = STREAM_HARD_TIMEOUT_MS;
+      // Non-streaming fallback uses a single larger cap since there's no stream
+      // to observe -- just wait for the full response up to the cap.
+      let hardTimeoutMs = useNonStreamingFallback
+        ? NON_STREAMING_HARD_TIMEOUT_MS
+        : STREAM_HARD_TIMEOUT_MS;
       hardTimer = setTimeout(() => {
         diag("hard_timeout_fired", {
           events: typeof streamEventCount !== "undefined" ? streamEventCount : 0,
+          nonStreaming: useNonStreamingFallback,
         });
         idleTimedOut = true;
         streamController.abort();
       }, hardTimeoutMs);
 
       try {
-        diag("stream_call");
+        diag("stream_call", { nonStreaming: useNonStreamingFallback });
         streamCallStart = Date.now();
         const result = stream({
           provider: turnProvider,
@@ -344,8 +409,11 @@ export async function* agentLoop(
           signal: streamController.signal,
           accountId: options.accountId,
           cacheRetention: options.cacheRetention,
+          supportsImages: options.supportsImages,
           compaction: options.compaction,
           clearToolUses: options.clearToolUses,
+          // Flip to non-streaming fallback after repeated stream stalls.
+          ...(useNonStreamingFallback ? { streaming: false } : {}),
         });
         diag("stream_created", { setupMs: Date.now() - streamCallStart });
 
@@ -498,22 +566,36 @@ export async function* agentLoop(
             maxAttempts: MAX_OVERLOAD_RETRIES,
             delayMs,
           };
-          await new Promise((r) => setTimeout(r, delayMs));
+          await abortableSleep(delayMs, options.signal);
           turn--; // Don't count the failed turn
           continue;
         }
         // Stream stall: the API connection hung without closing.
-        // Retry with exponential backoff — most stalls are transient server-side
-        // issues, not payload-dependent. First 2 retries are silent (hidden retries).
-        if (idleTimedOut && !options.signal?.aborted && stallRetries < MAX_STALL_RETRIES) {
+        // Malformed stream: the SDK's SSE decoder hit truncated/corrupted JSON.
+        // Both are transport failures — retry with exponential backoff and flip
+        // to non-streaming mode after STALL_RETRIES_BEFORE_NON_STREAMING attempts,
+        // since broken SSE often recovers when replayed as plain HTTP.
+        const malformed = isMalformedStream(err);
+        const transportFailure = (idleTimedOut || malformed) && !options.signal?.aborted;
+        if (transportFailure && stallRetries < MAX_STALL_RETRIES) {
           stallRetries++;
+          if (!useNonStreamingFallback && stallRetries >= STALL_RETRIES_BEFORE_NON_STREAMING) {
+            useNonStreamingFallback = true;
+            diag("non_streaming_fallback_enabled", {
+              stallRetries,
+              provider: options.provider,
+              model: options.model,
+              cause: malformed ? "malformed_stream" : "stream_stall",
+            });
+          }
           const delayMs = Math.min(STALL_DELAY_MS * 2 ** (stallRetries - 1), 8_000);
           diag("retry", {
-            reason: "stream_stall",
+            reason: malformed ? "malformed_stream" : "stream_stall",
             attempt: stallRetries,
             maxAttempts: MAX_STALL_RETRIES,
             delayMs,
             events: streamEventCount,
+            nonStreaming: useNonStreamingFallback,
           });
           yield {
             type: "retry" as const,
@@ -523,13 +605,13 @@ export async function* agentLoop(
             delayMs,
             silent: stallRetries <= 2,
           };
-          await new Promise((r) => setTimeout(r, delayMs));
+          await abortableSleep(delayMs, options.signal);
           turn--; // Don't count the failed turn
           continue;
         }
         // Stream stall retries exhausted — surface a clear error so the UI
         // can distinguish "gave up after stalls" from "completed normally".
-        if (idleTimedOut && !options.signal?.aborted) {
+        if (transportFailure) {
           diag("stall_exhausted", {
             stallRetries: MAX_STALL_RETRIES,
             provider: options.provider,
@@ -573,7 +655,6 @@ export async function* agentLoop(
         options.signal?.removeEventListener("abort", forwardAbort);
       }
 
-      // Reset retry counters after successful call
       overloadRetries = 0;
       stallRetries = 0;
 
@@ -606,12 +687,19 @@ export async function* agentLoop(
             maxAttempts: MAX_EMPTY_RESPONSE_RETRIES,
             delayMs: 0,
           };
-          turn--; // Don't count the failed turn
+          turn--; // Don't count the failed turn — keep useNonStreamingFallback set
+          // so the retry doesn't bounce back into a streaming connection that
+          // will stall again with the same upstream problem.
           continue;
         }
         // Exhausted retries — fall through and let the agent finish
       }
       emptyResponseRetries = 0;
+
+      // Only clear the non-streaming fallback after an actionable response —
+      // an empty non-streaming reply means the upstream issue hasn't resolved,
+      // so staying in non-streaming mode avoids retrying into another stall.
+      useNonStreamingFallback = false;
 
       // Accumulate usage
       totalUsage.inputTokens += response.usage.inputTokens;
@@ -715,7 +803,7 @@ export async function* agentLoop(
           args: toolCall.args,
         });
 
-        let resultContent: string;
+        let resultContent: ToolResultContent;
         let details: unknown;
         let isError = false;
 
@@ -752,7 +840,7 @@ export async function* agentLoop(
         eventStream.push({
           type: "tool_call_end" as const,
           toolCallId: toolCall.id,
-          result: resultContent,
+          result: toolResultPreview(resultContent),
           details,
           isError,
           durationMs,
@@ -831,7 +919,9 @@ export async function* agentLoop(
           const HARD_MAX = 400_000; // absolute ceiling regardless of context window
           const max = Math.min(options.maxToolResultChars, HARD_MAX);
           for (const tr of toolResults) {
-            if (tr.content.length > max) {
+            // Only truncate string content — array content (text+image blocks)
+            // is already size-bounded by the image resizer.
+            if (typeof tr.content === "string" && tr.content.length > max) {
               // Keep 70% head + 30% tail to preserve errors/diagnostics at the end
               const headChars = Math.floor(max * 0.7);
               const tailChars = max - headChars;
@@ -895,6 +985,15 @@ export async function* agentLoop(
 
 function normalizeToolResult(raw: ToolExecuteResult): StructuredToolResult {
   return typeof raw === "string" ? { content: raw } : raw;
+}
+
+/** Flatten tool result content to a plain-text preview for the tool_call_end event.
+ *  Image blocks become a "[image]" placeholder so the UI has something to render. */
+function toolResultPreview(content: ToolResultContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((block) => (block.type === "text" ? block.text : `[image ${block.mediaType}]`))
+    .join("\n");
 }
 
 function extractToolCalls(content: string | ContentPart[]): ToolCall[] {

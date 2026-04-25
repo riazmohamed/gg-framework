@@ -74,6 +74,14 @@ providerRegistry.register("ollama", {
     }),
 });
 
+providerRegistry.register("deepseek", {
+  stream: (options) =>
+    streamOpenAI({
+      ...options,
+      baseUrl: options.baseUrl ?? "https://api.deepseek.com/v1",
+    }),
+});
+
 providerRegistry.register("openrouter", {
   stream: (options) =>
     streamOpenAI({

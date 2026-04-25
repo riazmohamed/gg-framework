@@ -150,7 +150,7 @@ export async function checkAndAutoUpdate(currentVersion: string): Promise<string
         if (info.updateCommand) {
           // Run update in background — takes effect next launch
           performUpdateInBackground(info.updateCommand);
-          message = `Updating ${PACKAGE_NAME} ${currentVersion} → ${state.latestVersion} (takes effect next launch)`;
+          message = `Ken just shipped ${state.latestVersion}! Installing in the background — takes effect next launch.`;
 
           writeState({
             ...state,
@@ -172,6 +172,22 @@ export async function checkAndAutoUpdate(currentVersion: string): Promise<string
     }
 
     return message;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the current state file and report whether a newer version has been
+ * downloaded / is pending install. Used by the TUI to show a persistent
+ * "update ready" indicator in the status row.
+ */
+export function getPendingUpdate(currentVersion: string): { latestVersion: string } | null {
+  try {
+    const state = readState();
+    if (!state?.latestVersion) return null;
+    if (compareVersions(state.latestVersion, currentVersion) <= 0) return null;
+    return { latestVersion: state.latestVersion };
   } catch {
     return null;
   }
@@ -232,7 +248,7 @@ export function startPeriodicUpdateCheck(
         });
 
         onUpdate(
-          `Update available: ${currentVersion} → ${latestVersion} (will update on next launch, or run: ${info.updateCommand})`,
+          `Ken just pushed a fresh update — ${currentVersion} → ${latestVersion}! I'll grab it on next launch (or run ${info.updateCommand} if you can't wait).`,
         );
 
         // Stop checking once we've notified

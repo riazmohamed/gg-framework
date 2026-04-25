@@ -17,15 +17,16 @@ interface FooterProps {
 
 // Model ID → short display name
 const MODEL_SHORT_NAMES: Record<string, string> = {
-  "claude-opus-4-6": "Opus",
+  "claude-opus-4-7": "Opus",
   "claude-sonnet-4-6": "Sonnet",
   "claude-haiku-4-5": "Haiku",
   "claude-haiku-4-5-20251001": "Haiku",
-  "gpt-4.1": "GPT-4.1",
-  "gpt-4.1-mini": "GPT-4.1 Mini",
-  "gpt-4.1-nano": "GPT-4.1 Nano",
-  o3: "o3",
-  "o4-mini": "o4-mini",
+  "gpt-5.5": "GPT-5.5",
+  "gpt-5.5-pro": "GPT-5.5 Pro",
+  "gpt-5.4": "GPT-5.4",
+  "gpt-5.4-mini": "GPT-5.4 Mini",
+  "gpt-5.3-codex": "GPT-5.3 Codex",
+  "codex-mini-latest": "Codex Mini",
 };
 
 function getShortModelName(model: string): string {

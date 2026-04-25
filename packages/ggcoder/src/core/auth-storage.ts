@@ -95,6 +95,7 @@ export class AuthStorage {
       provider === "xiaomi" ||
       provider === "minimax" ||
       provider === "ollama" ||
+      provider === "deepseek" ||
       provider === "openrouter"
     ) {
       return creds;

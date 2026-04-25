@@ -222,7 +222,13 @@ Create a concise tree structure showing key directories and files with brief des
 
 Create CLAUDE.md with: project description, project structure tree, organization rules (one file per component, single responsibility), and zero-tolerance code quality checks with the exact commands for this project.
 
-Keep total file under 100 lines. If updating, preserve any custom sections the user added.`,
+Keep total file under 100 lines. If updating, preserve any custom sections the user added.
+
+## Step 6: Restart Notice
+
+End your reply with this exact notice so the user doesn't miss it:
+
+> ⚠️ CLAUDE.md was created/updated. ggcoder loads it at startup, so **exit and restart ggcoder** (\`/quit\` then run \`ggcoder\` again) before continuing. Without a restart, I won't see the new context.`,
   },
   {
     name: "setup-lint",
@@ -476,6 +482,256 @@ Replace all placeholders with the actual commands for the detected project type 
 Report that /update is now available with dependency updates, security audits, and deprecation fixes.`,
   },
   {
+    name: "setup-eyes",
+    aliases: [],
+    description: "Set up project perception probes and document them",
+    prompt: `# Eyes: Set Up or Expand Project Perception
+
+Build the perception probes this project needs and document them in CLAUDE.md so any future agent can use them. The \`ggcoder eyes\` CLI does the mechanical work (detect, install, verify); your job is **judgment** (which capabilities matter for THIS project) and **prose** (the project-specific triggers in CLAUDE.md). Re-run this command anytime to add or fix probes.
+
+## Steps
+
+1. \`ggcoder eyes list\` — see what's already installed/verified. **Resume**, don't restart. Skip verified probes; re-run failed ones.
+2. \`ggcoder eyes detect\` — emits JSON of \`{capability: {candidates, primary}}\` for this project.
+3. **Pick 3–8 capabilities to install this run.** Heuristics:
+   - Universal: \`http\` for any API/backend, \`runtime_logs\` for anything with a server.
+   - UI: \`visual\` — for multi-stack projects (e.g. React Native), install all primary candidates with distinct names: \`install visual --impl playwright --as visual-web\`, \`install visual --impl adb --as visual-android\`, \`install visual --impl simctl --as visual-ios\`.
+   - Backend with email/webhooks: \`capture_email\`, \`capture_webhook\`.
+   - **Always defer** opt-ins: \`load\`, \`chaos\`, \`remote\`, \`apm\` — unless the user explicitly asked.
+4. For each pick: \`ggcoder eyes install <cap> [--impl <name>] [--as <name>]\`. On failure: retry once, then mark and continue — don't abort the whole run.
+5. \`ggcoder eyes verify\` — runs every installed probe's self-test. Some failures (\`adb\` no device, \`simctl\` no booted simulator) are expected; they get recorded.
+6. **Write/update the \`## Eyes\` section in CLAUDE.md** (create CLAUDE.md if missing; do NOT clobber other sections). Use the template below. The triggers are the load-bearing piece — make them project-specific and actionable.
+7. **Report**: list verified ✓ / failed ✗ / deferred. End with the restart notice.
+
+## CLAUDE.md \`## Eyes\` template
+
+\`\`\`markdown
+## Eyes
+
+Perception probes live in \`.gg/eyes/\`. All headless. Artifacts → \`.gg/eyes/out/\` (gitignored). Invoke probes yourself; don't ask the user to verify what you can verify.
+
+### Available probes
+
+| Need | Run | Then |
+|---|---|---|
+| <one-line need> | \`.gg/eyes/<id>.sh <args>\` | <how to consume the output> |
+| ... | ... | ... |
+
+### When to use these eyes (automatically, without being asked)
+
+Reach for probes ON YOUR OWN INITIATIVE when any of these apply:
+
+- <project-specific trigger 1, e.g. "After editing any \`.tsx\` file under \`src/components/\`, screenshot the affected page with \`.gg/eyes/visual.sh http://localhost:3000/<path>\`.">
+- <trigger 2, e.g. "After adding/modifying a route under \`src/routes/\`, hit it with \`.gg/eyes/http.sh\` and confirm the response shape.">
+- <trigger 3>
+
+If a probe fails or returns unexpected results, investigate the artifact directly before assuming the probe itself is broken.
+
+### When NOT to use
+
+- Docs-only changes, comments, formatting.
+- Refactors covered by tests.
+- Dev server / simulator / sink isn't up AND the task doesn't require runtime verification.
+- Same probe already ran this turn on the same artifact — reuse the output.
+
+### When to escalate a capability gap (the self-improvement loop)
+
+If you're about to **guess**, **skip verification**, or **hand-wave** about something a better probe would show you — STOP and surface the tradeoff inline. Phrasing like:
+
+> "I tried screenshotting but the failure is a JS error I can only see in the browser console — and there's no \`browser_console\` probe. Two paths: (a) ~3 min to add it, then I can diagnose properly. (b) Workaround: I'd guess from the DOM state. Your call?"
+
+Wait for the user's choice. **Don't escalate more than once per request** — if the user picked the workaround, don't re-ask in the same turn.
+
+For minor friction (worked around it but wished it were better), don't interrupt — log it for later review:
+- \`ggcoder eyes log rough "<reason>" [--probe <name>]\` — minor friction, you handled it
+- \`ggcoder eyes log wish "<gap>"\` — capability you wished existed
+- \`ggcoder eyes log blocked "<reason>"\` — call this AFTER the user approves an inline-escalation fix, for the audit trail
+
+These accumulate quietly. The user reviews them periodically. Open signals will appear in your context on future turns until they're acked.
+\`\`\`
+
+## Trigger writing rules
+
+The "When to use" triggers are project-specific and the load-bearing piece — without them the agent has probes but no instinct to use them. Rules:
+- For each verified probe, write at least one trigger that names a real **file pattern** or **task type** the agent will recognize ("after editing \`*.tsx\` under \`src/ui/\`", not "after UI changes").
+- Be **actionable** ("screenshot the page", "hit the endpoint") not **vague** ("verify it works").
+- Match density to the project: a UI-heavy app warrants strong visual triggers; a pure backend library does not.
+
+## Restart notice
+
+End your report with:
+
+> ⚠ CLAUDE.md was updated. ggcoder loads CLAUDE.md at startup, so **exit and restart ggcoder** (\`/quit\` then \`ggcoder\` again) before asking me to use these probes. Without a restart, I won't see the new instructions in my context.`,
+  },
+  {
+    name: "eyes-improve",
+    aliases: [],
+    description: "Triage eyes signals and apply approved probe fixes",
+    prompt: `# Eyes Improve: Triage Accumulated Signals
+
+Read the open signals in \`.gg/eyes/journal.jsonl\`, group related ones, propose concrete fixes, and apply what the user approves. This isn't unbounded refactoring — it's incremental probe improvement driven by real use.
+
+## Steps
+
+1. \`ggcoder eyes log list --status open\` — if zero entries, say "nothing to triage" and stop.
+2. **Group** signals by likely fix:
+   - Multiple \`rough\` entries naming the same probe / same frustration → one patch to that probe.
+   - \`wish\` entries naming a capability not installed → one \`ggcoder eyes install <cap>\` proposal.
+   - \`blocked\` entries are historical (user already resolved inline) → ack them, no new work.
+3. **Cap at 5 proposals this run.** If more would apply, mention them and stop — they'll resurface next run.
+4. For each group, propose ONE concrete change:
+   - **Probe tweak**: read \`.gg/eyes/<name>.sh\`, show a diff, explain what it fixes.
+   - **New probe**: \`ggcoder eyes install <cap>\` with a one-line justification.
+   - **New/updated trigger**: bullet added under \`## Eyes → When to use\` in CLAUDE.md.
+5. Present all proposals as a numbered list with diffs inline. Ask: **"Accept which? Reply with numbers (e.g. '1, 3') or 'none'."**
+6. On user reply:
+   - For accepted: apply the change. Then \`ggcoder eyes log ack <id>\` for every journal entry the proposal covers.
+   - For unmentioned / rejected: \`ggcoder eyes log defer <id>\` so they stop appearing in context every turn. The user can resurrect deferred entries later.
+7. **Report**: applied changes (one line each), entries acked, entries deferred.
+
+## Rules
+
+- **No fishing.** Only act on entries already in the journal. Don't scan the repo for hypothetical gaps.
+- **No scope creep.** "Add a \`--wait-for-selector\` flag to the visual probe" is in scope. "Rewrite the probe in TypeScript" is not.
+- **Preserve user edits.** If \`.gg/eyes/<name>.sh\` has diverged from the shipped impl (user hand-edited), point this out and ask before overwriting.
+- **Be honest about tradeoffs.** If a proposed fix might break existing invocations, say so in the proposal.
+- **Decline when appropriate.** If open signals are all vague or low-value, say so and defer them — don't manufacture fixes.`,
+  },
+  {
+    name: "simplify",
+    aliases: [],
+    description: "Review changed code and fix issues found",
+    prompt: `# Simplify: Code Review and Cleanup
+
+Review all changed files for reuse, quality, and efficiency. Fix any issues found.
+
+## Phase 1: Identify Changes
+
+Run \`git diff\` (or \`git diff HEAD\` if there are staged changes) to see what changed. If there are no git changes, review the most recently modified files that the user mentioned or that you edited earlier in this conversation.
+
+## Phase 2: Launch Three Review Agents in Parallel
+
+Use the subagent tool to launch all three agents concurrently in a single response (call the subagent tool 3 times in one message). Pass each agent the full diff so it has the complete context.
+
+### Agent 1: Code Reuse Review
+
+For each change:
+
+1. **Search for existing utilities and helpers** that could replace newly written code. Look for similar patterns elsewhere in the codebase — common locations are utility directories, shared modules, and files adjacent to the changed ones.
+2. **Flag any new function that duplicates existing functionality.** Suggest the existing function to use instead.
+3. **Flag any inline logic that could use an existing utility** — hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
+
+### Agent 2: Code Quality Review
+
+Review the same changes for hacky patterns:
+
+1. **Redundant state**: state that duplicates existing state, cached values that could be derived, observers/effects that could be direct calls
+2. **Parameter sprawl**: adding new parameters to a function instead of generalizing or restructuring existing ones
+3. **Copy-paste with slight variation**: near-duplicate code blocks that should be unified with a shared abstraction
+4. **Leaky abstractions**: exposing internal details that should be encapsulated, or breaking existing abstraction boundaries
+5. **Stringly-typed code**: using raw strings where constants, enums (string unions), or branded types already exist in the codebase
+6. **Unnecessary JSX nesting**: wrapper Boxes/elements that add no layout value — check if inner component props (flexShrink, alignItems, etc.) already provide the needed behavior
+7. **Unnecessary comments**: comments explaining WHAT the code does (well-named identifiers already do that), narrating the change, or referencing the task/caller — delete; keep only non-obvious WHY (hidden constraints, subtle invariants, workarounds)
+
+### Agent 3: Efficiency Review
+
+Review the same changes for efficiency:
+
+1. **Unnecessary work**: redundant computations, repeated file reads, duplicate network/API calls, N+1 patterns
+2. **Missed concurrency**: independent operations run sequentially when they could run in parallel
+3. **Hot-path bloat**: new blocking work added to startup or per-request/per-render hot paths
+4. **Recurring no-op updates**: state/store updates inside polling loops, intervals, or event handlers that fire unconditionally — add a change-detection guard so downstream consumers aren't notified when nothing changed. Also: if a wrapper function takes an updater/reducer callback, verify it honors same-reference returns (or whatever the "no change" signal is) — otherwise callers' early-return no-ops are silently defeated
+5. **Unnecessary existence checks**: pre-checking file/resource existence before operating (TOCTOU anti-pattern) — operate directly and handle the error
+6. **Memory**: unbounded data structures, missing cleanup, event listener leaks
+7. **Overly broad operations**: reading entire files when only a portion is needed, loading all items when filtering for one
+
+## Phase 3: Fix Issues
+
+Wait for all three agents to complete. Aggregate their findings and fix each issue directly. If a finding is a false positive or not worth addressing, note it and move on — do not argue with the finding, just skip it.
+
+When done, briefly summarize what was fixed (or confirm the code was already clean).`,
+  },
+  {
+    name: "batch",
+    aliases: [],
+    description: "Plan a large change, execute in parallel PRs",
+    prompt: `# Batch: Parallel Work Orchestration
+
+You are orchestrating a large, parallelizable change across this codebase.
+
+## Phase 1: Research
+
+Launch one or more subagents using the subagent tool with \`agent: "researcher"\` to deeply research what this instruction touches. You need their results before proceeding, so wait for them to complete. Have them:
+
+- Find ALL files, patterns, and call sites that need to change
+- Understand existing conventions so the migration is consistent
+- Quantify the surface area (how many files, how many call sites)
+- Note any risks or complications
+
+## Phase 2: Plan
+
+After research completes, call the enter_plan tool to enter plan mode. Using the research findings:
+
+1. **Decompose into independent units.** Break the work into 5–30 self-contained units. Each unit must:
+   - Be independently implementable on its own git branch (no shared state with sibling units)
+   - Be mergeable on its own without depending on another unit's PR landing first
+   - Be roughly uniform in size (split large units, merge trivial ones)
+
+   Scale the count to the actual work: few files → closer to 5; hundreds of files → closer to 30. Prefer per-directory or per-module slicing over arbitrary file lists.
+
+2. **Determine the test recipe.** Figure out how a worker can verify its change actually works — not just that unit tests pass. Look for:
+   - An existing e2e/integration test suite the worker can run
+   - A dev-server + curl pattern (for API changes)
+   - A CLI verification pattern (for CLI changes)
+
+   If you cannot find a concrete verification path, ask the user how to verify. Offer 2–3 specific options based on what the researcher found. Do not skip this — the workers cannot ask the user themselves.
+
+3. **Write the plan** to \`.gg/plans/batch.md\` with:
+   - Summary of research findings
+   - Numbered list of work units — each with: title, file list, one-line description
+   - The test recipe (or "skip e2e because …")
+   - Note that each worker will use the \`worker\` agent (branch-isolated)
+
+4. Call exit_plan to present the plan for approval.
+
+## Phase 3: Spawn Workers (After Plan Approval)
+
+Record the current branch name first: \`git branch --show-current\`.
+
+Spawn one subagent per work unit using the subagent tool with \`agent: "worker"\`. **Launch them all in a single message block so they run in parallel.**
+
+For each worker, the task must be fully self-contained. Include:
+- The overall goal (the user's instruction)
+- The starting branch to branch from (the branch name you recorded above)
+- This unit's specific task (title, file list, change description — copied verbatim from your plan)
+- Any codebase conventions discovered during research
+- The test recipe from your plan (or "skip e2e because …")
+- These additional instructions, copied verbatim:
+
+\`\`\`
+After you finish implementing the change:
+1. Self-review your diff for code reuse, quality, and efficiency. Search the codebase for existing utilities that could replace new code. Fix any issues found.
+2. Run the project's test suite (check for package.json scripts, Makefile targets, or common commands like npm test, pnpm test, pytest, go test). If tests fail, fix them.
+3. Follow the e2e test recipe above. If it says to skip e2e, skip it.
+4. Commit all changes with a clear message, push the branch, and create a PR with gh pr create. Use a descriptive title.
+5. Switch back to the original branch with git checkout -.
+6. End with exactly: PR: <url> or PR: none — <reason>
+\`\`\`
+
+## Phase 4: Track Results
+
+After launching all workers, render an initial status table:
+
+| # | Unit | Status | PR |
+|---|------|--------|----|
+| 1 | <title> | running | — |
+| 2 | <title> | running | — |
+
+As workers complete, parse the \`PR: <url>\` line from each result and re-render the table with updated status (\`done\` / \`failed\`) and PR links. Keep a brief failure note for any worker that did not produce a PR.
+
+When all workers have reported, render the final table and a one-line summary (e.g., "22/24 units landed as PRs").`,
+  },
+  {
     name: "compare",
     aliases: [],
     description: "Compare code against real-world implementations via Grep MCP",
@@ -495,6 +751,105 @@ Evidence: Grep MCP - pattern seen in X out of Y repos searched
 Style preferences and subjective improvements are not valid findings. Only report things backed by clear Grep MCP evidence across multiple repos.
 
 If the code aligns well with real-world patterns, say so. That's a good outcome.`,
+  },
+  {
+    name: "setup-skills",
+    aliases: [],
+    description: "Audit project, recommend skills ranked by impact",
+    prompt: `# Skills Audit: Find useful skills for this project
+
+Analyze this project and recommend skills from the open ecosystem that would make **working on this project more efficient, easier, and safer**. That is the goal, full stop. Every recommendation must pass the test: does this skill save real time, lower real cognitive load, or prevent real mistakes for someone working on THIS project, repeatedly?
+
+Ranked by real impact, not volume.
+
+This project could be anything — a web app, a CLI, a mobile app, a game, firmware, a data pipeline, a library, a scientific tool. Do not assume a stack. Let the codebase tell you what it is, then decide what to look for.
+
+## Phase 1: Understand what this project is
+
+Read just enough to know what kind of project this is. Look at whichever signals actually apply:
+
+- Build / manifest files: \`package.json\`, \`pyproject.toml\`, \`Cargo.toml\`, \`go.mod\`, \`pubspec.yaml\`, \`Podfile\`, Xcode project, Gradle build, \`*.csproj\`, \`CMakeLists.txt\`, Unity/Unreal project files, Makefile — whatever exists.
+- Any README, CLAUDE.md, or AGENTS.md.
+- Top-level directory layout and obvious entry points.
+- Any CI config, lockfile, or config directory that hints at workflow.
+
+**Do NOT read source code yet.** You need only a coarse answer to: what kind of project is this, what platform/stack/language, what stage (greenfield vs mature), and what does the surrounding workflow look like (build, test, release, distribute, deploy — whatever applies for THIS project type).
+
+## Phase 2: Decide which domains to investigate
+
+Based on Phase 1, pick 4–6 domain slices that represent the **recurring work someone actually does on this project** — not abstract "areas of the codebase," but the real activities that eat time, attention, or trust. Do not use a fixed template. The right domains for a Rust CLI are different from an iOS app, a Unity game, a Django backend, a Kubernetes operator, or an ML notebook.
+
+Illustrative only (not prescriptive):
+
+- Web app → shipping features, API changes, handling data safely, deploys
+- Mobile app → building screens, store releases, platform quirks, crash & accessibility triage
+- CLI tool → adding commands, packaging & distribution, user-facing UX, error handling
+- Game → adding content, platform ports, perf passes, build pipeline
+- Library → designing public APIs, cutting releases, downstream compatibility, docs/examples
+- Data / ML → running experiments, pipeline orchestration, reproducibility, serving models
+- Embedded → adding peripherals, size/memory passes, flashing, hardware bring-up
+
+**Announce your chosen domains to the user in one line before spawning agents**, so they can see what you're looking at (e.g. \`Domains: adding content, platform ports, perf passes, build pipeline\`).
+
+## Phase 3: Parallel sweep
+
+Spawn one sub-agent per domain you chose, in parallel using the subagent tool (call it N times in a single response, one task per domain). Each explores its assigned domain and returns skill-worthy opportunities.
+
+**Skill-worthy means**: a recurring activity someone will do on THIS project — shipping, reviewing, migrating, debugging, onboarding, whatever applies — where a reusable instruction set would make it **faster** (efficient), **lower-effort** (easier), or **less likely to break something** (safer). The test is: will this skill save real time, reduce real cognitive load, or prevent real mistakes, repeatedly, on this project? If no, drop it. A domain returning zero candidates is a valid outcome.
+
+Each sub-agent must return candidates in this exact shape, nothing else:
+
+\`\`\`
+[domain] — candidate title
+Why: one sentence on the real friction observed in THIS project
+Search terms: 2–3 keywords the parent should feed to find-skills
+\`\`\`
+
+Don't invent. Don't pad.
+
+## Phase 4: Ecosystem search
+
+After all sub-agents complete, use the **skill** tool to invoke the \`find-skills\` skill. Feed it the aggregated candidate list with search terms. Let find-skills drive discovery across skills.sh, vercel-labs/agent-skills, and anthropics/skills.
+
+For each candidate, record the best 0–1 ecosystem match: skill name, source repo URL. If no fit exists, record "no match". **Do NOT install anything yet.**
+
+## Phase 5: Prioritized recommendation
+
+Rank every candidate that returned a real match by **crucial factor** — a 0–100% score combining:
+
+- **Frequency** — how often someone will do this work on this project
+- **Lift** — how much the skill makes it faster (efficient), lower-effort (easier), or safer (fewer mistakes, broken builds, bad releases) per hit
+- **Fit** — how well the ecosystem match actually matches this project
+
+Present highest first, in this exact format:
+
+\`\`\`
+# Skills Audit
+
+1. <skill-name> — 92%
+   Benefit: <one sentence on what it does for this project>
+   Source: <repo URL>
+   Scope: project
+
+2. <skill-name> — 78%
+   Benefit: …
+   Source: …
+   Scope: project
+\`\`\`
+
+Cap the list at 8. If you'd list more, you're padding. Default scope is \`project\` per find-skills' rules; only mark \`global\` when the skill is genuinely cross-cutting.
+
+If strong candidates had no ecosystem match, list them at the bottom:
+
+\`\`\`
+## Gaps worth authoring
+
+- <candidate title> — <why it matters for this project> — consider scaffolding a custom SKILL.md
+\`\`\`
+
+## Phase 6: Wait for the user
+
+After presenting the list, ask which (if any) to install. Install nothing without explicit confirmation. Once confirmed, hand off to find-skills to perform the actual install.`,
   },
 ];
 

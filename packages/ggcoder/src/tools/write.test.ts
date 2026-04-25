@@ -4,8 +4,20 @@ import path from "node:path";
 import os from "node:os";
 import { createWriteTool } from "./write.js";
 
-function resultToString(result: string | { content: string }): string {
-  return typeof result === "string" ? result : result.content;
+function resultToString(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (result && typeof result === "object" && "content" in result) {
+    const c = (result as { content: unknown }).content;
+    if (typeof c === "string") return c;
+    if (Array.isArray(c)) {
+      return c
+        .map((b: { type: string; text?: string }) =>
+          b.type === "text" ? (b.text ?? "") : "[image]",
+        )
+        .join("\n");
+    }
+  }
+  return String(result);
 }
 
 describe("createWriteTool", () => {

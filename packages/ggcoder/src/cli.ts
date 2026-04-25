@@ -43,7 +43,7 @@ import { PerformanceObserver, performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
 import fs from "node:fs";
 import readline from "node:readline/promises";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { renderApp } from "./ui/render.js";
 import { runJsonMode } from "./modes/json-mode.js";
@@ -63,6 +63,7 @@ import { ensureAppDirs, getAppPaths, loadSavedSettings } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
 import { setStreamDiagnostic, type AgentTool } from "@abukhaled/gg-agent";
 import { buildSystemPrompt } from "./system-prompt.js";
+import { isEyesActive, journalCount } from "@abukhaled/ggcoder-eyes";
 import { createTools } from "./tools/index.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import { setEstimatorModel } from "./core/compaction/token-estimator.js";
@@ -166,8 +167,11 @@ function printHelp(): void {
   const opts: [string, string][] = [
     ["-h, --help", "Show this help message"],
     ["-v, --version", "Show version number"],
-    ["--provider <name>", "AI provider (anthropic, openai, glm, moonshot, xiaomi, ollama)"],
-    ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-4.1)"],
+    [
+      "--provider <name>",
+      "AI provider (anthropic, xiaomi, openai, glm, moonshot, minimax, deepseek, ollama, openrouter)",
+    ],
+    ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-5.5)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Override the system prompt"],
     ["--json", "JSON output mode (for sub-agents)"],
@@ -226,6 +230,24 @@ function main(): void {
 
   // Handle subcommands before parseArgs
   const subcommand = process.argv[2];
+
+  // Passthrough to @abukhaled/ggcoder-eyes CLI. Agents call this from bash as
+  // `ggcoder eyes log rough "..."` etc. — `ggcoder` is guaranteed on PATH
+  // (user launched it), so this avoids depending on nested bin visibility in
+  // global npm/pnpm installs.
+  if (subcommand === "eyes") {
+    let cliPath: string;
+    try {
+      cliPath = _require.resolve("@abukhaled/ggcoder-eyes/cli");
+    } catch {
+      process.stderr.write("ggcoder-eyes package not installed\n");
+      process.exit(1);
+    }
+    const r = spawnSync(process.execPath, [cliPath, ...process.argv.slice(3)], {
+      stdio: "inherit",
+    });
+    process.exit(r.status ?? 0);
+  }
 
   if (subcommand === "login") {
     runLogin().catch((err) => {
@@ -342,7 +364,7 @@ function main(): void {
   if (values.json) {
     const message = positionals[0] ?? "";
     const jsonProvider = (values.provider ?? "anthropic") as Provider;
-    const jsonModel = values.model ?? "claude-opus-4-6";
+    const jsonModel = values.model ?? "claude-opus-4-7";
     const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
     const systemPrompt = values["system-prompt"];
     const cwd = process.cwd();
@@ -363,7 +385,7 @@ function main(): void {
   // RPC mode — headless JSON-over-stdio for IDE integrations
   if (values.rpc) {
     const rpcProvider = (values.provider ?? "anthropic") as Provider;
-    const rpcModel = values.model ?? "claude-opus-4-6";
+    const rpcModel = values.model ?? "claude-opus-4-7";
     const systemPrompt = values["system-prompt"];
     const cwd = process.cwd();
     runRpcMode({
@@ -385,12 +407,13 @@ function main(): void {
   const provider: Provider = saved.provider ?? "anthropic";
 
   function getHardcodedDefault(p: string): string {
-    if (p === "openai") return "gpt-5.4";
+    if (p === "openai") return "gpt-5.5";
     if (p === "glm") return "glm-5.1";
-    if (p === "moonshot") return "kimi-k2.5";
+    if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
+    if (p === "deepseek") return "deepseek-v4-pro";
     if (p === "openrouter") return "qwen/qwen3.6-plus";
-    return "claude-opus-4-6";
+    return "claude-opus-4-7";
   }
 
   const model: string = saved.model ?? getHardcodedDefault(provider);
@@ -428,17 +451,10 @@ async function runInkTUI(opts: {
 }): Promise<void> {
   const { provider, model, cwd } = opts;
 
-  // Set model for token estimation accuracy
-  setEstimatorModel(model);
-
-  // Resolve auth
+  // Resolve auth first so we can pick an active provider the user has
+  // actually logged in with — we must never default to a provider they
+  // haven't authenticated against.
   const paths = await ensureAppDirs();
-  initLogger(paths.logFile, {
-    version: CLI_VERSION,
-    provider,
-    model,
-    thinking: opts.thinkingLevel,
-  });
 
   // Wire stream stall diagnostics into the debug log
   setStreamDiagnostic((phase, data) => {
@@ -448,7 +464,9 @@ async function runInkTUI(opts: {
   const authStorage = new AuthStorage(paths.authFile);
   await authStorage.load();
 
-  // Detect all logged-in providers and preload their credentials (in parallel)
+  // Detect all logged-in providers and preload their credentials (in parallel).
+  // Optimization: only resolve (potentially refreshing OAuth tokens) for the
+  // selected provider — others are checked locally and resolved lazily on use.
   const allProviders: Provider[] = [
     "anthropic",
     "openai",
@@ -456,6 +474,7 @@ async function runInkTUI(opts: {
     "moonshot",
     "xiaomi",
     "minimax",
+    "deepseek",
     "ollama",
     "openrouter",
   ];
@@ -465,16 +484,20 @@ async function runInkTUI(opts: {
     { accessToken: string; accountId?: string; baseUrl?: string }
   > = {};
 
-  // Detect which providers have stored credentials (cheap local check).
-  // Only resolve (potentially refreshing tokens over the network) for the
-  // selected provider — the rest are resolved lazily on first use.
   await Promise.all(
     allProviders.map(async (p) => {
       const stored = await authStorage.getCredentials(p);
       if (stored) {
         loggedInProviders.push(p);
         // Eagerly populate static API-key providers (no network call)
-        if (p === "glm" || p === "moonshot" || p === "xiaomi" || p === "minimax") {
+        if (
+          p === "glm" ||
+          p === "moonshot" ||
+          p === "xiaomi" ||
+          p === "minimax" ||
+          p === "deepseek" ||
+          p === "openrouter"
+        ) {
           credentialsByProvider[p] = {
             accessToken: stored.accessToken,
             accountId: stored.accountId,
@@ -500,7 +523,17 @@ async function runInkTUI(opts: {
   }
 
   // Ollama runs locally — always available, no auth needed
-  loggedInProviders.push("ollama");
+  if (!loggedInProviders.includes("ollama")) loggedInProviders.push("ollama");
+
+  // Set model for token estimation accuracy (after provider is finalized)
+  setEstimatorModel(model);
+
+  initLogger(paths.logFile, {
+    version: CLI_VERSION,
+    provider,
+    model,
+    thinking: opts.thinkingLevel,
+  });
 
   // Resolve credentials for the selected provider.
   // If the provider needs auth but isn't authenticated, fall back to another
@@ -678,6 +711,21 @@ async function runInkTUI(opts: {
     log("INFO", "session", `New session created`, { path: sessionPath });
   }
 
+  // Eyes startup banner — surface open journal signals from past sessions so the
+  // user isn't relying on reading agent prose to know improvements are pending.
+  if (isEyesActive(cwd)) {
+    const openCount = journalCount({ status: "open" }, cwd);
+    if (openCount > 0) {
+      const s = openCount === 1 ? "" : "s";
+      if (!initialHistory) initialHistory = [];
+      initialHistory.push({
+        kind: "info",
+        text: `👁  Eyes: ${openCount} open improvement signal${s} from recent sessions. Run /eyes-improve to triage.`,
+        id: "eyes-banner",
+      });
+    }
+  }
+
   await renderApp({
     provider: effectiveProvider,
     model: effectiveModel,
@@ -774,6 +822,7 @@ async function runLogin(): Promise<void> {
       provider === "moonshot" ||
       provider === "xiaomi" ||
       provider === "minimax" ||
+      provider === "deepseek" ||
       provider === "openrouter"
     ) {
       const keyLabel =
@@ -783,9 +832,11 @@ async function runLogin(): Promise<void> {
             ? "Xiaomi MiMo"
             : provider === "minimax"
               ? "MiniMax"
-              : provider === "openrouter"
-                ? "OpenRouter"
-                : "Moonshot";
+              : provider === "deepseek"
+                ? "DeepSeek"
+                : provider === "openrouter"
+                  ? "OpenRouter"
+                  : "Moonshot";
       const apiKey = await rl.question(chalk.hex("#60a5fa")(`Paste your ${keyLabel} API key: `));
       if (!apiKey.trim()) {
         console.log(chalk.hex("#ef4444")("No API key provided. Login cancelled."));
@@ -1106,11 +1157,12 @@ async function runSessions(): Promise<void> {
   const provider: Provider = saved2.provider ?? "anthropic";
 
   function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.4";
+    if (p === "openai") return "gpt-5.5";
     if (p === "glm") return "glm-5.1";
-    if (p === "moonshot") return "kimi-k2.5";
+    if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
-    return "claude-opus-4-6";
+    if (p === "deepseek") return "deepseek-v4-pro";
+    return "claude-opus-4-7";
   }
 
   const model = saved2.model ?? getDefault(provider);
@@ -1344,22 +1396,20 @@ async function runServe(): Promise<void> {
   }
 
   const saved3 = loadSavedSettings();
-
-  const provider: Provider =
-    (serveValues.provider as Provider | undefined) ?? saved3.provider ?? "anthropic";
-
-  function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.4";
-    if (p === "glm") return "glm-5.1";
-    if (p === "moonshot") return "kimi-k2.5";
-    if (p === "minimax") return "MiniMax-M2.7";
-    return "claude-opus-4-6";
-  }
-
-  const model = serveValues.model ?? saved3.model ?? getDefault(provider);
   const thinkingLevel: ThinkingLevel | undefined = saved3.thinkingEnabled ? "medium" : undefined;
 
   const paths = await ensureAppDirs();
+  const authStorage = new AuthStorage(paths.authFile);
+  await authStorage.load();
+
+  const preferredProvider: Provider =
+    (serveValues.provider as Provider | undefined) ?? saved3.provider ?? "anthropic";
+  const { provider, model } = await resolveActiveProvider(
+    authStorage,
+    preferredProvider,
+    serveValues.model ?? saved3.model,
+  );
+
   initLogger(paths.logFile, {
     version: CLI_VERSION,
     provider,
@@ -1522,22 +1572,20 @@ async function runAgentHome(): Promise<void> {
   }
 
   const saved4 = loadSavedSettings();
-
-  const provider: Provider =
-    (ahValues.provider as Provider | undefined) ?? saved4.provider ?? "anthropic";
-
-  function getDefault(p: string): string {
-    if (p === "openai") return "gpt-5.4";
-    if (p === "glm") return "glm-5.1";
-    if (p === "moonshot") return "kimi-k2.5";
-    if (p === "minimax") return "MiniMax-M2.7";
-    return "claude-opus-4-6";
-  }
-
-  const model = ahValues.model ?? saved4.model ?? getDefault(provider);
   const thinkingLevel: ThinkingLevel | undefined = saved4.thinkingEnabled ? "medium" : undefined;
 
   const paths = await ensureAppDirs();
+  const authStorage = new AuthStorage(paths.authFile);
+  await authStorage.load();
+
+  const preferredProvider: Provider =
+    (ahValues.provider as Provider | undefined) ?? saved4.provider ?? "anthropic";
+  const { provider, model } = await resolveActiveProvider(
+    authStorage,
+    preferredProvider,
+    ahValues.model ?? saved4.model,
+  );
+
   initLogger(paths.logFile, {
     version: CLI_VERSION,
     provider,
@@ -1558,6 +1606,53 @@ async function runAgentHome(): Promise<void> {
 
 // ── Helpers ────────────────────────────────────────────────
 
+/**
+ * Pick the provider/model to start with. If the preferred provider isn't
+ * one the user is logged into, fall back to the first provider they ARE
+ * logged into (in `allProviders` order). Throws if nothing is logged in.
+ *
+ * This prevents the CLI from crashing with "Not logged in" on startup just
+ * because settings.json remembers a provider the user later logged out of.
+ */
+async function resolveActiveProvider(
+  authStorage: AuthStorage,
+  preferred: Provider,
+  savedModel: string | undefined,
+): Promise<{ provider: Provider; model: string; loggedInProviders: Provider[] }> {
+  const allProviders: Provider[] = [
+    "anthropic",
+    "xiaomi",
+    "openai",
+    "glm",
+    "moonshot",
+    "minimax",
+    "deepseek",
+    "openrouter",
+  ];
+  const loggedInProviders: Provider[] = [];
+  for (const p of allProviders) {
+    if (await authStorage.getCredentials(p)) loggedInProviders.push(p);
+  }
+
+  if (loggedInProviders.length === 0) {
+    throw new Error('Not logged in to any provider. Run "ggcoder login" to authenticate.');
+  }
+
+  if (loggedInProviders.includes(preferred)) {
+    return {
+      provider: preferred,
+      model: savedModel ?? getDefaultModel(preferred).id,
+      loggedInProviders,
+    };
+  }
+
+  // Preferred provider isn't authenticated — fall back to the first one
+  // that is, and use that provider's default model (the saved model
+  // belonged to a provider the user can no longer reach).
+  const provider = loggedInProviders[0]!;
+  return { provider, model: getDefaultModel(provider).id, loggedInProviders };
+}
+
 function displayName(provider: Provider): string {
   if (provider === "anthropic") return "Anthropic";
   if (provider === "xiaomi") return "Xiaomi (MiMo)";
@@ -1565,6 +1660,7 @@ function displayName(provider: Provider): string {
   if (provider === "moonshot") return "Moonshot";
   if (provider === "minimax") return "MiniMax";
   if (provider === "ollama") return "Ollama";
+  if (provider === "deepseek") return "DeepSeek";
   if (provider === "openrouter") return "OpenRouter";
   return "OpenAI";
 }
@@ -1586,8 +1682,14 @@ function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
   for (const msg of msgs) {
     if (msg.role === "tool") {
       for (const tr of msg.content) {
+        const text =
+          typeof tr.content === "string"
+            ? tr.content
+            : tr.content
+                .map((b) => (b.type === "text" ? b.text : `[image ${b.mediaType}]`))
+                .join("\n");
         toolResults.set(tr.toolCallId, {
-          content: tr.content,
+          content: text,
           isError: tr.isError ?? false,
         });
       }

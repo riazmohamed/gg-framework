@@ -28,6 +28,8 @@ export function ModelSelector({
     glm: "Z.AI",
     moonshot: "Moonshot",
     xiaomi: "Xiaomi",
+    minimax: "MiniMax",
+    deepseek: "DeepSeek",
     openrouter: "OpenRouter",
   };
 
@@ -47,6 +49,12 @@ export function ModelSelector({
   );
 
   return (
-    <SelectList items={items} onSelect={onSelect} onCancel={onCancel} initialIndex={initialIndex} />
+    <SelectList
+      items={items}
+      onSelect={onSelect}
+      onCancel={onCancel}
+      initialIndex={initialIndex}
+      windowSize={6}
+    />
   );
 }

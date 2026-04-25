@@ -6,6 +6,11 @@ dist/
 .env
 .env.*
 ~/.gg/
+.gg/
+
+# Scratch / ad-hoc test files
+test_*.mjs
+test_*.js
 
 # OS
 .DS_Store

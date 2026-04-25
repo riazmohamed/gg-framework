@@ -215,7 +215,11 @@ function toolCallToText(
  */
 function toolResultToText(tr: ToolResult): string {
   const prefix = tr.isError ? "[Tool Error]" : "[Tool Result]";
-  return `${prefix}\n${truncateString(tr.content, TOOL_RESULT_MAX_CHARS)}`;
+  const text =
+    typeof tr.content === "string"
+      ? tr.content
+      : tr.content.map((b) => (b.type === "text" ? b.text : `[image ${b.mediaType}]`)).join("\n");
+  return `${prefix}\n${truncateString(text, TOOL_RESULT_MAX_CHARS)}`;
 }
 
 /**
