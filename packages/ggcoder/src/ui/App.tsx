@@ -2067,7 +2067,15 @@ export function App(props: AppProps) {
         sm.load().then(async () => {
           await sm.set(
             "defaultProvider",
-            newProvider as "anthropic" | "openai" | "glm" | "moonshot",
+            newProvider as
+              | "anthropic"
+              | "openai"
+              | "glm"
+              | "moonshot"
+              | "minimax"
+              | "xiaomi"
+              | "deepseek"
+              | "openrouter",
           );
           await sm.set("defaultModel", newModelId);
         });
@@ -2704,9 +2712,7 @@ export function App(props: AppProps) {
               update-ready indicator all share a single line. Order is
               intentional: active work (bg tasks) first, actionable signals
               (eyes) next, ambient hint (update ready) last. */}
-          {(bgTasks.length > 0 ||
-            (eyesCount !== undefined && eyesCount > 0) ||
-            updatePending) && (
+          {(bgTasks.length > 0 || (eyesCount !== undefined && eyesCount > 0) || updatePending) && (
             <Box>
               {bgTasks.length > 0 && (
                 <BackgroundTasksBar

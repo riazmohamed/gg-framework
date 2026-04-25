@@ -348,6 +348,9 @@ export class AgentSession {
         if (
           this.provider === "glm" ||
           this.provider === "moonshot" ||
+          this.provider === "minimax" ||
+          this.provider === "xiaomi" ||
+          this.provider === "deepseek" ||
           this.provider === "openrouter"
         ) {
           log("WARN", "auth", `Got 401 for ${this.provider} — API key is invalid or revoked`);

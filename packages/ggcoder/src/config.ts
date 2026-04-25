@@ -63,6 +63,7 @@ const VALID_PROVIDERS = new Set<Provider>([
   "glm",
   "moonshot",
   "minimax",
+  "deepseek",
   "openrouter",
 ]);
 

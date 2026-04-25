@@ -10,6 +10,7 @@ export type Provider =
   | "moonshot"
   | "ollama"
   | "minimax"
+  | "deepseek"
   | "openrouter"
   | "palsu";
 

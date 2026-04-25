@@ -28,6 +28,8 @@ export function ModelSelector({
     glm: "Z.AI",
     moonshot: "Moonshot",
     xiaomi: "Xiaomi",
+    minimax: "MiniMax",
+    deepseek: "DeepSeek",
     openrouter: "OpenRouter",
   };
 

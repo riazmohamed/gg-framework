@@ -166,7 +166,10 @@ function printHelp(): void {
   const opts: [string, string][] = [
     ["-h, --help", "Show this help message"],
     ["-v, --version", "Show version number"],
-    ["--provider <name>", "AI provider (anthropic, xiaomi, openai, glm, moonshot)"],
+    [
+      "--provider <name>",
+      "AI provider (anthropic, xiaomi, openai, glm, moonshot, minimax, deepseek, openrouter)",
+    ],
     ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-5.5)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Override the system prompt"],
@@ -406,6 +409,7 @@ function main(): void {
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
+    if (p === "deepseek") return "deepseek-v4-pro";
     if (p === "openrouter") return "qwen/qwen3.6-plus";
     return "claude-opus-4-7";
   }
@@ -716,6 +720,7 @@ async function runLogin(): Promise<void> {
       provider === "moonshot" ||
       provider === "xiaomi" ||
       provider === "minimax" ||
+      provider === "deepseek" ||
       provider === "openrouter"
     ) {
       const keyLabel =
@@ -725,9 +730,11 @@ async function runLogin(): Promise<void> {
             ? "Xiaomi MiMo"
             : provider === "minimax"
               ? "MiniMax"
-              : provider === "openrouter"
-                ? "OpenRouter"
-                : "Moonshot";
+              : provider === "deepseek"
+                ? "DeepSeek"
+                : provider === "openrouter"
+                  ? "OpenRouter"
+                  : "Moonshot";
       const apiKey = await rl.question(chalk.hex("#60a5fa")(`Paste your ${keyLabel} API key: `));
       if (!apiKey.trim()) {
         console.log(chalk.hex("#ef4444")("No API key provided. Login cancelled."));
@@ -1052,6 +1059,7 @@ async function runSessions(): Promise<void> {
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
+    if (p === "deepseek") return "deepseek-v4-pro";
     return "claude-opus-4-7";
   }
 
@@ -1516,6 +1524,7 @@ async function resolveActiveProvider(
     "glm",
     "moonshot",
     "minimax",
+    "deepseek",
     "openrouter",
   ];
   const loggedInProviders: Provider[] = [];
@@ -1549,6 +1558,7 @@ function displayName(provider: Provider): string {
   if (provider === "moonshot") return "Moonshot";
   if (provider === "minimax") return "MiniMax";
   if (provider === "ollama") return "Ollama";
+  if (provider === "deepseek") return "DeepSeek";
   if (provider === "openrouter") return "OpenRouter";
   return "OpenAI";
 }
