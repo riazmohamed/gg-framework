@@ -50,7 +50,8 @@ import { runJsonMode } from "./modes/json-mode.js";
 import { runRpcMode } from "./modes/rpc-mode.js";
 import { runServeMode } from "./modes/serve-mode.js";
 import { runAgentHomeMode } from "./modes/agent-home-mode.js";
-import { renderLoginSelector } from "./ui/login.js";
+import { renderLoginSelector, renderXiaomiRegionSelector } from "./ui/login.js";
+import { getXiaomiBaseUrl } from "./core/xiaomi-regions.js";
 import { renderSessionSelector } from "./ui/sessions.js";
 import type { CompletedItem } from "./ui/App.js";
 import { formatUserError } from "./utils/error-handler.js";
@@ -727,6 +728,18 @@ async function runLogin(): Promise<void> {
     return;
   }
 
+  // Phase 1.5: Xiaomi keys are region-scoped — prompt for the region before
+  // opening readline (raw-mode selector must not compete with readline).
+  let xiaomiBaseUrl: string | undefined;
+  if (provider === "xiaomi") {
+    const region = await renderXiaomiRegionSelector();
+    if (!region) {
+      console.log(chalk.hex("#6b7280")("Login cancelled."));
+      return;
+    }
+    xiaomiBaseUrl = getXiaomiBaseUrl(region);
+  }
+
   console.log(
     chalk.hex("#60a5fa").bold("\nLogging in to ") +
       chalk.hex("#a78bfa")(displayName(provider)) +
@@ -782,7 +795,7 @@ async function runLogin(): Promise<void> {
         accessToken: apiKey.trim(),
         refreshToken: "",
         expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000 * 100, // ~100 years
-        ...(provider === "xiaomi" ? { baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1" } : {}),
+        ...(provider === "xiaomi" && xiaomiBaseUrl ? { baseUrl: xiaomiBaseUrl } : {}),
       } satisfies OAuthCredentials;
     } else {
       creds =

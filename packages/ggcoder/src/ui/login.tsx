@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import type { Provider } from "@abukhaled/gg-ai";
+import { XIAOMI_REGION_IDS, XIAOMI_REGIONS, type XiaomiRegion } from "../core/xiaomi-regions.js";
 
 const LOGO_LINES = [
   " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
@@ -135,6 +136,97 @@ export function renderLoginSelector(version?: string): Promise<Provider | null> 
 
       // Down arrow
       if (key === "\x1b[B" && selectedIndex < PROVIDERS.length - 1) {
+        selectedIndex++;
+        draw();
+      }
+    };
+
+    process.stdin.on("data", onData);
+  });
+}
+
+// ── Xiaomi region selector ────────────────────────────────
+
+function renderXiaomiRegionScreen(selectedIndex: number): string {
+  const lines: string[] = [];
+
+  lines.push(
+    gradientLine(LOGO_LINES[0]!) +
+      GAP +
+      chalk.hex(PRIMARY).bold("Xiaomi MiMo") +
+      chalk.hex(TEXT_DIM)(" · Select region"),
+  );
+  lines.push(
+    gradientLine(LOGO_LINES[1]!) +
+      GAP +
+      chalk.hex(TEXT_DIM)("Keys are region-specific — pick the region"),
+  );
+  lines.push(gradientLine(LOGO_LINES[2]!) + GAP + chalk.hex(TEXT_DIM)("where you created the key"));
+  lines.push("");
+
+  for (let i = 0; i < XIAOMI_REGION_IDS.length; i++) {
+    const id = XIAOMI_REGION_IDS[i]!;
+    const info = XIAOMI_REGIONS[id];
+    const selected = i === selectedIndex;
+    const marker = selected ? "❯ " : "  ";
+    const labelColor = selected ? PRIMARY : TEXT;
+    lines.push(
+      chalk.hex(labelColor)(marker + info.label) + chalk.hex(TEXT_DIM)(` — ${info.baseUrl}`),
+    );
+  }
+
+  lines.push("");
+  lines.push(chalk.hex(TEXT_DIM)("↑↓ navigate · Enter select · Esc cancel"));
+
+  return lines.join("\n");
+}
+
+export function renderXiaomiRegionSelector(): Promise<XiaomiRegion | null> {
+  return new Promise((resolve) => {
+    let selectedIndex = 0;
+
+    const draw = () => {
+      process.stdout.write("\x1b[u\x1b[J" + renderXiaomiRegionScreen(selectedIndex) + "\n");
+    };
+
+    process.stdout.write("\n\x1b[s");
+    draw();
+
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+
+    const cleanup = () => {
+      process.stdin.removeListener("data", onData);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write("\x1b[u\x1b[J");
+    };
+
+    const onData = (chunk: Buffer) => {
+      const key = chunk.toString();
+
+      // Escape or Ctrl+C → cancel
+      if (key === "\x1b" || key === "\x03") {
+        cleanup();
+        resolve(null);
+        return;
+      }
+
+      // Enter → select
+      if (key === "\r" || key === "\n") {
+        cleanup();
+        resolve(XIAOMI_REGION_IDS[selectedIndex]!);
+        return;
+      }
+
+      // Up arrow
+      if (key === "\x1b[A" && selectedIndex > 0) {
+        selectedIndex--;
+        draw();
+      }
+
+      // Down arrow
+      if (key === "\x1b[B" && selectedIndex < XIAOMI_REGION_IDS.length - 1) {
         selectedIndex++;
         draw();
       }

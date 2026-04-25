@@ -1,5 +1,5 @@
 import type { StreamOptions } from "./types.js";
-import { GGAIError } from "./errors.js";
+import { GGAIError, ProviderError } from "./errors.js";
 import type { StreamResult } from "./utils/event-stream.js";
 import { streamAnthropic } from "./providers/anthropic.js";
 import { streamOpenAI } from "./providers/openai.js";
@@ -16,12 +16,22 @@ providerRegistry.register("anthropic", {
 });
 
 providerRegistry.register("xiaomi", {
-  stream: (options) =>
-    streamOpenAI({
+  stream: (options) => {
+    // Xiaomi issues region-scoped keys (ams, sgp, ...). A key from one region
+    // returns 401 on another region's endpoint. Fail fast with a clear message
+    // if baseUrl is missing rather than silently defaulting to a region that
+    // may not match the user's key.
+    if (!options.baseUrl) {
+      throw new ProviderError(
+        "xiaomi",
+        'Missing baseUrl — Xiaomi keys are region-specific. Run "ogcoder login" and select the region matching your key.',
+      );
+    }
+    return streamOpenAI({
       ...options,
-      baseUrl: options.baseUrl ?? "https://token-plan-sgp.xiaomimimo.com/v1",
       webSearch: false,
-    }),
+    });
+  },
 });
 
 providerRegistry.register("openai", {

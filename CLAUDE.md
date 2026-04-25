@@ -27,8 +27,14 @@ pnpm test                           # Vitest (all packages)
 
 # Single package
 pnpm --filter @abukhaled/gg-ai test          # Test one package
-pnpm --filter @abukhaled/ogcoder test -- src/tools/read.test.ts  # Single test file
-pnpm test -- -t "should read files"          # Test by name pattern
+
+# Single test file — use `exec vitest` directly.
+# `pnpm --filter <pkg> test -- <path>` does NOT forward the path; it runs the
+# whole suite. Use `exec vitest run <path>` instead:
+pnpm --filter @abukhaled/ogcoder exec vitest run src/tools/read.test.ts
+
+# Test by name pattern
+pnpm --filter @abukhaled/ogcoder exec vitest run -t "should read files"
 ```
 
 ## Code Quality — Zero Tolerance
@@ -49,7 +55,8 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 
 ### gg-ai: Provider-Agnostic Streaming
 
-- **Provider registry** (`provider-registry.ts` + `stream.ts`): Map-based dispatch. Built-in providers registered at module load: `anthropic` and `minimax` → `streamAnthropic()` (MiniMax uses an Anthropic-compatible endpoint); `openai`, `glm`, `moonshot`, `xiaomi`, `ollama` → `streamOpenAI()` with provider-specific baseUrl/config.
+- **Provider registry** (`provider-registry.ts` + `stream.ts`): Map-based dispatch. Built-in providers registered at module load: `anthropic` and `minimax` → `streamAnthropic()` (MiniMax uses an Anthropic-compatible endpoint); `openai`, `glm`, `moonshot`, `xiaomi`, `ollama`, `openrouter` → `streamOpenAI()` with provider-specific baseUrl/config. Extensions can register custom providers via `providerRegistry.register()`.
+- **Fail-fast dispatch**: Provider handlers must throw `ProviderError` when required config is missing (e.g. region-scoped `baseUrl`) rather than silently defaulting. Silent fallbacks mask real failures — the canonical example is `xiaomi`, whose keys are region-scoped and which throws if `baseUrl` is not supplied.
 - **Message transform** (`providers/transform.ts`): Converts unified `Message[]` to provider format. Key quirks:
   - Anthropic: `toolu_*` IDs, `thinking` content blocks with signatures, tool results wrapped in user messages
   - OpenAI-compat: IDs remapped to `call_*` prefix, `reasoning_content` field (GLM/Moonshot only), tool results as `tool` role
@@ -72,7 +79,7 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 - **Model router** (`core/model-router.ts`): Per-turn model switching. Modes: `vision` (auto-switch on images/video/docs), `plan-execute` (heavy planner + light executor), `hybrid` (vision priority, then plan-execute).
 - **Compaction** (`core/compaction/compactor.ts`): Triggers at 80% context usage. Keeps system message + recent ~20K tokens intact. Middle section summarized via LLM (tool calls → text, thinking stripped, results truncated). Falls back to extractive summary on failure.
 - **Sessions** (`core/session-manager.ts`): Append-only JSONL with DAG structure (leafId for branching). Streams line-by-line for large files. `repairToolPairs()` fixes interrupted sessions on restore.
-- **Auth**: OAuth PKCE for Anthropic and OpenAI; static API keys for GLM, Moonshot, Xiaomi, MiniMax, and Ollama. All credentials stored in `~/.gg/auth.json`.
+- **Auth**: OAuth PKCE for Anthropic and OpenAI; static API keys for GLM, Moonshot, Xiaomi, MiniMax, Ollama, and OpenRouter. All credentials stored in `~/.gg/auth.json` (file mode `0o600`, written atomically with a file lock via `core/auth-storage.ts`). Xiaomi keys are **region-scoped** — the correct regional `baseUrl` must be captured at login via `core/xiaomi-regions.ts` (a key from `ams` returns 401 on `sgp`). The `runLogin()` flow in `cli.ts` runs a region selector before opening readline; raw-mode Ink-style selectors (see `ui/login.tsx`) cannot coexist with an active readline interface.
 - **Startup** (`cli.ts`): Optimized for fast time-to-interactive. Key patterns:
   - Auto-update check is fire-and-forget (never blocks)
   - OSC 11 theme detection is skipped on WSL (always times out)
