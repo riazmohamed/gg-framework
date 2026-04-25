@@ -51,7 +51,14 @@ function ensureLoaded(): HighlightModule | undefined {
   // Kick off async load for next call
   import("cli-highlight").then(
     (m) => {
-      hlModule = m;
+      // esbuild wraps CJS deps as `{ default: <exports> }`, while Node's
+      // direct CJS-from-ESM import exposes named exports on the namespace.
+      // Handle both shapes.
+      const candidate = m as Partial<HighlightModule> & { default?: HighlightModule };
+      hlModule =
+        typeof candidate.supportsLanguage === "function"
+          ? (candidate as HighlightModule)
+          : candidate.default;
     },
     () => {
       // Failed to load — will fall back to plain text permanently
