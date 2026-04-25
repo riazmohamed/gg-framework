@@ -54,7 +54,9 @@ function ensureLoaded(): HighlightModule | undefined {
       // esbuild wraps CJS deps as `{ default: <exports> }`, while Node's
       // direct CJS-from-ESM import exposes named exports on the namespace.
       // Handle both shapes.
-      const candidate = m as Partial<HighlightModule> & { default?: HighlightModule };
+      const candidate = m as unknown as Partial<HighlightModule> & {
+        default?: HighlightModule;
+      };
       hlModule =
         typeof candidate.supportsLanguage === "function"
           ? (candidate as HighlightModule)

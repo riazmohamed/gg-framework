@@ -2173,7 +2173,6 @@ export function App(props: AppProps) {
         aliases: [] as string[],
         description: cmd.description,
       })),
-      { name: "quit", aliases: ["q", "exit"], description: "Exit the agent" },
     ];
   }, [customCommands]);
 
