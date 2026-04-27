@@ -872,6 +872,13 @@ export function App(props: AppProps) {
       }
 
       const contextWindow = getContextWindow(currentModel);
+      // Reserve = max output budget + ~5K headroom for system prompt + tool
+      // schemas. Otherwise the API rejects requests where the prompt fits the
+      // window but leaves no room for the response (e.g. Codex Mini at 200K
+      // ctx / 100K out — pre-turn estimate may say 160K but a 100K reasoning
+      // response then overflows).
+      const modelInfo = getModel(currentModel);
+      const reserveTokens = (modelInfo?.maxOutputTokens ?? 0) + 5_000;
       // Prefer actual API-reported tokens over char-based estimate, but only
       // when the token count was recorded AFTER the most recent compaction.
       // A count from before compaction is stale — it reflects the old context
@@ -879,7 +886,7 @@ export function App(props: AppProps) {
       const tokensFresh = lastActualTokensTimestampRef.current > lastCompactionTimeRef.current;
       const actualTokens =
         lastActualTokensRef.current > 0 && tokensFresh ? lastActualTokensRef.current : undefined;
-      if (shouldCompact(messages, contextWindow, threshold, actualTokens)) {
+      if (shouldCompact(messages, contextWindow, threshold, actualTokens, reserveTokens)) {
         const before = messages.length;
         const result = await compactConversation(messages);
         lastCompactionTimeRef.current = Date.now();

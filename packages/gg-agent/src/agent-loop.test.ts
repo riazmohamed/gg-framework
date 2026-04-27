@@ -181,7 +181,7 @@ describe("agentLoop", () => {
     expect(original[1]).toEqual(compacted[1]);
   });
 
-  it("throws immediately on context overflow without retrying or compacting", async () => {
+  it("calls transformContext with force=true on context overflow, then throws if compaction can't reduce", async () => {
     const overflowErr = new Error("prompt is too long: 250000 tokens > 200000 maximum");
 
     mockStream.mockReturnValueOnce(
@@ -193,6 +193,8 @@ describe("agentLoop", () => {
       { role: "user", content: "test" },
     ];
 
+    // No-op compaction — returns same array, so the loop must give up and throw
+    // after one force-attempt (no retry stream call).
     const transformContext = vi.fn().mockImplementation((msgs: Message[]) => msgs);
 
     await expect(
@@ -203,13 +205,46 @@ describe("agentLoop", () => {
       }),
     ).rejects.toThrow("prompt is too long");
 
-    // Should NOT have called transformContext with force: true
     const forceCalls = transformContext.mock.calls.filter(
       (c: unknown[]) => (c[1] as { force?: boolean })?.force === true,
     );
-    expect(forceCalls.length).toBe(0);
-    // Should only have been called once (the pre-turn check)
+    expect(forceCalls.length).toBe(1);
+    // Stream should only have been called once — no retry, since compaction was a no-op
     expect(mockStream).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries the turn after force-compaction reduces the messages on context overflow", async () => {
+    const overflowErr = new Error("context_length_exceeded");
+    mockStream
+      .mockReturnValueOnce(mockErrorResult(overflowErr) as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(mockOkResult("recovered") as unknown as ReturnType<typeof stream>);
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+    ];
+
+    const transformContext = vi
+      .fn()
+      .mockImplementation((msgs: Message[], opts?: { force?: boolean }) => {
+        if (opts?.force && msgs.length > 1) {
+          return msgs.slice(0, msgs.length - 1);
+        }
+        return msgs;
+      });
+
+    const { events } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      transformContext,
+    });
+
+    expect(events.some((e) => e.type === "retry" && e.reason === "overflow_compact")).toBe(true);
+    expect(mockStream).toHaveBeenCalledTimes(2);
+    const forceCalls = transformContext.mock.calls.filter(
+      (c: unknown[]) => (c[1] as { force?: boolean })?.force === true,
+    );
+    expect(forceCalls.length).toBe(1);
   });
 
   it("throws on context overflow when no transformContext is provided", async () => {
