@@ -436,13 +436,20 @@ export function InputArea({
   // is empty, click-to-cursor is useless and disabling tracking lets the
   // terminal handle CMD+click for opening links natively.
   const hasInputTextRef = useRef(value.length > 0);
+  // Mirror `disabled` into a ref so closures inside the mouse handler see
+  // the latest agent-running state without rebuilding the whole effect.
+  const disabledRef = useRef(disabled);
+  useEffect(() => {
+    disabledRef.current = disabled;
+  }, [disabled]);
 
   useEffect(() => {
     if (!isActive || !internal_eventEmitter) return;
 
-    // Only enable mouse tracking if there's text — when empty, let the
-    // terminal handle clicks natively (e.g., CMD+click to open links).
-    if (hasInputTextRef.current) {
+    // Only enable mouse tracking if there's text AND the agent isn't running —
+    // during streaming we want scroll wheel to fall through to the terminal
+    // so users can browse the chat without fighting our SGR interception.
+    if (hasInputTextRef.current && !disabled) {
       process.stdout.write(ENABLE_MOUSE);
     }
 
@@ -461,7 +468,7 @@ export function InputArea({
     let mouseDisabled = false;
 
     const reenableMouse = () => {
-      if (mouseDisabled && hasInputTextRef.current) {
+      if (mouseDisabled && hasInputTextRef.current && !disabledRef.current) {
         process.stdout.write(ENABLE_MOUSE);
         mouseDisabled = false;
       }
@@ -627,18 +634,17 @@ export function InputArea({
     };
   }, [isActive, internal_eventEmitter]);
 
-  // Toggle mouse tracking based on input text: disable when empty so the
-  // terminal handles CMD+click for links natively, enable when there's text
-  // so click-to-cursor works.
+  // Toggle mouse tracking based on input text AND agent running state.
+  // Mouse is on only when: input has text, the area is active, and the agent
+  // is not running. Disabling during streaming keeps scroll-wheel native so
+  // users can browse the chat history while a response is being generated.
   useEffect(() => {
+    if (!isActive) return;
     const hasText = value.length > 0;
-    if (hasText !== hasInputTextRef.current) {
-      hasInputTextRef.current = hasText;
-      if (isActive) {
-        process.stdout.write(hasText ? ENABLE_MOUSE : DISABLE_MOUSE);
-      }
-    }
-  }, [value, isActive]);
+    hasInputTextRef.current = hasText;
+    const wantMouse = hasText && !disabled;
+    process.stdout.write(wantMouse ? ENABLE_MOUSE : DISABLE_MOUSE);
+  }, [value, isActive, disabled]);
 
   // Helper: delete selected text and return new value + cursor position.
   // Returns null if no selection is active.
