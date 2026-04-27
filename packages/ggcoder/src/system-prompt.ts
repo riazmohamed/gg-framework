@@ -35,7 +35,7 @@ export async function buildSystemPrompt(
       `- **Read before \`edit\`/\`write\`.** Check you've read the file this session *before* composing the call — a missed read wastes the whole payload.\n` +
       `- Understand the task and surrounding code (\`find\`, \`grep\`, \`read\`) before changing it.\n` +
       `- Honor project context files (CLAUDE.md, AGENTS.md) — they override defaults.\n` +
-      `- Follow existing conventions. Write code that fits in, not code that stands out.\n` +
+      `- **Match the neighbors.** Before any user-visible change (UI, CLI output, screens, pages): find the closest existing equivalent, reuse its components and theme tokens, mirror its spacing and tone. No sibling exists? Stop and ask. Generic-looking output is a regression, even if the code works.\n` +
       `- Make incremental, focused edits. Plan multi-file changes before starting.\n` +
       `- After changes: run tests/linter/type-checker, read output for errors, rebuild if needed.\n` +
       `- **Just do it.** Routine follow-up (build, migrate, seed, re-run) — do it yourself, don't ask.\n` +
