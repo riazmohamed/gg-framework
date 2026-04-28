@@ -267,12 +267,13 @@ describe("Agent E2E — compaction (palsu provider)", () => {
     expect(result.totalTurns).toBe(1);
   });
 
-  it("throws immediately on context overflow without compaction", async () => {
+  it("calls transformContext with force=true on context overflow, then throws if compaction can't reduce", async () => {
     handle = registerPalsuProvider();
     handle.appendResponses(() => {
       throw new Error("prompt is too long: 250000 tokens > 200000 maximum");
     });
 
+    // No-op compaction: returns same array, so the loop should give up after one attempt.
     const transformContext = vi.fn().mockImplementation((msgs: Message[]) => msgs);
 
     const agent = new Agent({
@@ -284,12 +285,46 @@ describe("Agent E2E — compaction (palsu provider)", () => {
 
     await expect(agent.prompt("long conversation")).rejects.toThrow("prompt is too long");
 
-    // transformContext should NOT have been called with force: true
     const forceCalls = transformContext.mock.calls.filter(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (c: any[]) => c[1]?.force === true,
     );
-    expect(forceCalls.length).toBe(0);
+    expect(forceCalls.length).toBe(1);
+  });
+
+  it("retries the turn after force-compaction reduces the message count on context overflow", async () => {
+    handle = registerPalsuProvider();
+    // First call: overflow. Second call: success.
+    handle.appendResponses(() => {
+      throw new Error("context_length_exceeded");
+    });
+    handle.appendResponses(palsuText("recovered"));
+
+    const transformContext = vi
+      .fn()
+      .mockImplementation((msgs: Message[], opts?: { force?: boolean }) => {
+        // Simulate compaction only when forced — drop one message so the loop
+        // sees a reduced array and retries the turn.
+        if (opts?.force && msgs.length > 1) {
+          return msgs.slice(0, msgs.length - 1);
+        }
+        return msgs;
+      });
+
+    const agent = new Agent({
+      provider: "palsu",
+      model: "test",
+      system: "sys",
+      transformContext,
+    });
+
+    const result = await agent.prompt("long conversation");
+    expect(result.totalTurns).toBe(1);
+    const forceCalls = transformContext.mock.calls.filter(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (c: any[]) => c[1]?.force === true,
+    );
+    expect(forceCalls.length).toBe(1);
   });
 
   it("compacts mid-flow during multi-turn tool execution", async () => {

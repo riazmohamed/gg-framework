@@ -21,7 +21,7 @@ import {
   existsSync,
 } from "node:fs";
 
-const MAX_VISIBLE_LINES = 5;
+const MAX_VISIBLE_LINES = 12;
 const PROMPT = "❯ ";
 
 // SGR mouse sequence: ESC [ < button ; col ; row M/m

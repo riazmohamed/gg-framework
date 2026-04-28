@@ -92,7 +92,7 @@ export interface AgentLoopOptions {
 export type ActivityPhase = "waiting" | "thinking" | "generating" | "tools" | "retrying" | "idle";
 
 export interface RetryInfo {
-  reason: "overloaded" | "rate_limit" | "empty_response" | "stream_stall";
+  reason: "overloaded" | "rate_limit" | "empty_response" | "stream_stall" | "overflow_compact";
   attempt: number;
   maxAttempts: number;
   delayMs: number;
