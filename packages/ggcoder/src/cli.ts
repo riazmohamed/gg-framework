@@ -438,6 +438,22 @@ function main(): void {
 
 // ── Ink TUI ───────────────────────────────────────────────
 
+/**
+ * Bail with a friendly message if stdin isn't a TTY. Ink's raw-mode crash is
+ * cryptic; this catches the common case (piped stdin, API shells, CI).
+ */
+function requireInteractiveTTY(): void {
+  if (process.stdin.isTTY) return;
+  process.stderr.write(
+    chalk.red("ggcoder needs an interactive terminal — your stdin isn't a TTY.\n") +
+      chalk.hex("#6b7280")(
+        "Run ggcoder directly in your terminal (not piped or through an API shell). " +
+          'For headless use try "ggcoder --json \'<prompt>\'" or "ggcoder --rpc".\n',
+      ),
+  );
+  process.exit(1);
+}
+
 async function runInkTUI(opts: {
   provider: Provider;
   model: string;
@@ -447,6 +463,8 @@ async function runInkTUI(opts: {
   resumeSessionPath?: string;
   theme?: "auto" | ThemeName;
 }): Promise<void> {
+  requireInteractiveTTY();
+
   const { cwd } = opts;
 
   // Resolve auth first so we can pick an active provider the user has
@@ -671,6 +689,7 @@ async function runInkTUI(opts: {
 // ── Login ──────────────────────────────────────────────────
 
 async function runLogin(): Promise<void> {
+  requireInteractiveTTY();
   process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, { version: CLI_VERSION });
@@ -1036,6 +1055,7 @@ async function runLogout(): Promise<void> {
 // ── Sessions ──────────────────────────────────────────────
 
 async function runSessions(): Promise<void> {
+  requireInteractiveTTY();
   process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, { version: CLI_VERSION });
