@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (uses `ggcoder-eyes` for perception)
 
-Current published version: **4.3.56** (last app-update sync: 2026-04-25).
+Current published version: **4.3.57** (last app-update sync: 2026-04-28).
 
 ## Commands
 
