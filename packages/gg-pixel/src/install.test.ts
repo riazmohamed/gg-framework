@@ -604,6 +604,93 @@ describe("install — re-install with a fresh project rewrites stale keys", () =
     }
   });
 
+  it("strips a pre-marker legacy register() so re-install doesn't end up with two exports", async () => {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "myapp", dependencies: { next: "^15.0.0", react: "^19.0.0" } }),
+    );
+    mkdirSync(join(dir, "app"), { recursive: true });
+    writeFileSync(
+      join(dir, "app/layout.tsx"),
+      `export default function RootLayout({ children }: { children: React.ReactNode }) { return <html><body>{children}</box></html>; }`,
+    );
+    // Hand-write a legacy unmarkered instrumentation.ts (shape produced by
+    // gg-pixel < 4.3.86) BEFORE the install runs.
+    writeFileSync(
+      join(dir, "instrumentation.ts"),
+      `// Next.js auto-loads this file on server start. Pixel hooks the
+// uncaughtExceptionMonitor + unhandledRejection events for API routes,
+// Server Components, and route handlers.
+export async function register() {
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    const { initPixel } = await import("@kenkaiiii/gg-pixel");
+    initPixel({
+      projectKey: process.env.GG_PIXEL_KEY ?? "pk_live_OLD",
+      sink: { kind: "http", ingestUrl: "https://x/ingest" },
+    });
+  }
+}
+`,
+    );
+    const { home, cleanup } = setupHome();
+    try {
+      await install({
+        cwd: dir,
+        homeDir: home,
+        skipPackageInstall: true,
+        fetchFn: fakeFetch({ id: "proj_x", key: "pk_live_NEW" }),
+      });
+      const after = readFileSync(join(dir, "instrumentation.ts"), "utf8");
+      const exports = after.match(/export\s+async\s+function\s+register\s*\(\s*\)/g) ?? [];
+      expect(exports).toHaveLength(1);
+      expect(after).toContain("pk_live_NEW");
+      expect(after).not.toContain("pk_live_OLD");
+      expect(after).toContain(">>> gg-pixel auto-generated");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("findMappingByPath prefers an entry with a secret over a legacy entry at the same path", async () => {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "myapp" }));
+    const { home, cleanup } = setupHome();
+    try {
+      mkdirSync(join(home, ".gg"), { recursive: true });
+      // Two entries for the same project root: legacy (no secret) THEN one with a secret.
+      // Iteration order shouldn't matter — the secret entry must win and be reused.
+      writeFileSync(
+        join(home, ".gg", "projects.json"),
+        JSON.stringify({
+          proj_legacy: { name: "myapp", path: dir },
+          proj_real: {
+            name: "myapp",
+            path: dir,
+            secret: "sk_live_existing_secret_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          },
+        }),
+      );
+      // Also need an env file so the reuse path validates.
+      writeFileSync(join(dir, ".env"), "GG_PIXEL_KEY=pk_live_existing\n");
+
+      let createCalls = 0;
+      const fetchFn: typeof fetch = (async () => {
+        createCalls++;
+        return new Response(
+          JSON.stringify({ id: "proj_should_not_be_used", key: "pk_x", secret: "sk_x" }),
+          { status: 201 },
+        );
+      }) as unknown as typeof fetch;
+
+      const result = await install({ cwd: dir, homeDir: home, skipPackageInstall: true, fetchFn });
+      expect(createCalls).toBe(0); // No new project minted.
+      expect(result.reused).toBe(true);
+      expect(result.projectId).toBe("proj_real");
+      expect(result.projectSecret).toContain("existing_secret");
+    } finally {
+      cleanup();
+    }
+  });
+
   it("preserves user code outside the marker block on re-install", async () => {
     writeFileSync(
       join(dir, "package.json"),

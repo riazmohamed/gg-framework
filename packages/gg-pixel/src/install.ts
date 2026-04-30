@@ -197,10 +197,17 @@ function findMappingByPath(
   } catch {
     return null;
   }
+  // If the same path appears in multiple entries (e.g. legacy entries from a
+  // pre-secret install plus a newer entry from a re-install), prefer the
+  // entry that has a secret — otherwise the install logic falls into the
+  // "no secret stored" branch and mints yet another fresh project.
+  let fallback: { id: string; name: string; path: string; secret?: string } | null = null;
   for (const [id, entry] of Object.entries(map)) {
-    if (entry.path === projectRoot) return { id, ...entry };
+    if (entry.path !== projectRoot) continue;
+    if (entry.secret) return { id, ...entry };
+    if (!fallback) fallback = { id, ...entry };
   }
-  return null;
+  return fallback;
 }
 
 function readEnvKey(envPath: string, key: string): string | null {
@@ -566,8 +573,9 @@ function wireNextjs({ projectRoot, projectKey, ingestUrl }: WiringInput): Wiring
 
 function writeNextInstrumentation(path: string, ingestUrl: string, projectKey?: string): void {
   const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const cleaned = stripLegacyPixelContent(existing);
   const block = nextInstrumentationBlock(ingestUrl, projectKey);
-  const next = upsertPixelBlock(existing, block);
+  const next = upsertPixelBlock(cleaned, block);
   if (next !== existing) writeFileSync(path, next, "utf8");
 }
 
@@ -1164,8 +1172,92 @@ export function upsertPixelBlock(existing: string, block: string): string {
 
 function upsertPixelBlockInFile(filePath: string, block: string): void {
   const existing = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
-  const next = upsertPixelBlock(existing, block);
+  const cleaned = stripLegacyPixelContent(existing);
+  const next = upsertPixelBlock(cleaned, block);
   if (next !== existing) writeFileSync(filePath, next, "utf8");
+}
+
+/**
+ * Remove unmarkered gg-pixel content emitted by older versions of the
+ * installer so re-installs don't end up with two `register()` exports
+ * (or two `initPixel(...)` calls) — one legacy + one in the new markered
+ * block. Conservative: only operates outside the marker delimiters.
+ */
+export function stripLegacyPixelContent(content: string): string {
+  if (!content.includes("@kenkaiiii/gg-pixel")) return content;
+
+  const beginIdx = content.indexOf(PIXEL_MARK_BEGIN);
+  const endIdx = beginIdx === -1 ? -1 : content.indexOf(PIXEL_MARK_END, beginIdx);
+  const insideMarkers = (start: number, end: number): boolean =>
+    beginIdx !== -1 && endIdx !== -1 && start >= beginIdx && end <= endIdx + PIXEL_MARK_END.length;
+
+  // Walk the source and collect ranges to delete. Patterns:
+  //   1. `[leading // comment lines] export async function register() { … gg-pixel … }`
+  //      — Next.js `instrumentation.ts` from the pre-marker installer.
+  //   2. `[leading // comment lines] import { initPixel } … initPixel({ … });`
+  //      — SvelteKit hooks from the pre-marker installer.
+  const ranges: Array<{ start: number; end: number }> = [];
+
+  // (1) brace-balanced register() containing @kenkaiiii/gg-pixel.
+  // The capture group is INSIDE the match — comments are part of m[0], not
+  // before it — so blockStart is just m.index (skipping a leading newline if
+  // we anchored on `\n`).
+  const registerRe =
+    /(?:^|\n)((?:[ \t]*\/\/[^\n]*\n)*)[ \t]*export\s+async\s+function\s+register\s*\(\s*\)\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = registerRe.exec(content)) !== null) {
+    const blockStart = m.index + (content[m.index] === "\n" ? 1 : 0);
+    const openBraceIdx = m.index + m[0].length - 1;
+    let depth = 1;
+    let i = openBraceIdx + 1;
+    while (i < content.length && depth > 0) {
+      const ch = content[i];
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      i++;
+    }
+    if (depth !== 0) continue;
+    const blockEnd = i;
+    const blockText = content.slice(blockStart, blockEnd);
+    if (!blockText.includes("@kenkaiiii/gg-pixel")) continue;
+    if (insideMarkers(blockStart, blockEnd)) continue;
+    const trailingNL = content[blockEnd] === "\n" ? 1 : 0;
+    ranges.push({ start: blockStart, end: blockEnd + trailingNL });
+  }
+
+  // (2) `import { initPixel } from "@kenkaiiii/gg-pixel[/...]"` followed within
+  //     ~2KB by a balanced `initPixel({ … });` call. Same comment-inside-match
+  //     rule as (1).
+  const importRe =
+    /(?:^|\n)((?:[ \t]*\/\/[^\n]*\n)*)[ \t]*import\s*\{\s*initPixel[^}]*\}\s*from\s*"@kenkaiiii\/gg-pixel(?:\/[\w-]+)?"\s*;?\s*\n/g;
+  while ((m = importRe.exec(content)) !== null) {
+    const blockStart = m.index + (content[m.index] === "\n" ? 1 : 0);
+    // Find `initPixel({` after the import statement and brace-match the call.
+    const callIdx = content.indexOf("initPixel(", importRe.lastIndex);
+    if (callIdx === -1 || callIdx - importRe.lastIndex > 2048) continue;
+    const openParen = content.indexOf("(", callIdx);
+    let depth = 1;
+    let i = openParen + 1;
+    while (i < content.length && depth > 0) {
+      const ch = content[i];
+      if (ch === "(" || ch === "{") depth++;
+      else if (ch === ")" || ch === "}") depth--;
+      i++;
+    }
+    if (depth !== 0) continue;
+    // Eat the trailing semicolon + spaces + newline.
+    while (i < content.length && (content[i] === ";" || content[i] === " ")) i++;
+    const trailingNL = content[i] === "\n" ? 1 : 0;
+    const blockEnd = i + trailingNL;
+    if (insideMarkers(blockStart, blockEnd)) continue;
+    ranges.push({ start: blockStart, end: blockEnd });
+  }
+
+  if (ranges.length === 0) return content;
+  ranges.sort((a, b) => b.start - a.start);
+  let out = content;
+  for (const r of ranges) out = out.slice(0, r.start) + out.slice(r.end);
+  return out.replace(/\n{3,}/g, "\n\n");
 }
 
 function injectImport(entryPath: string, initFilePath: string): EntryWiringResult {
