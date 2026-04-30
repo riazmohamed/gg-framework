@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import chalk from "chalk";
 import { getDefaultModel } from "@kenkaiiii/ggcoder/models";
 import type { Message, Provider } from "@kenkaiiii/gg-ai";
@@ -10,6 +12,8 @@ import {
   runStatus,
   type SupportedAuthProvider,
 } from "./core/auth/index.js";
+import { isOnboarded, onboardedMarkerPath, runDoctor } from "./core/doctor.js";
+import { renderDoctorReport } from "./core/doctor-render.js";
 import { discoverSkills } from "./core/skills-loader.js";
 import { discoverStyles } from "./core/styles-loader.js";
 import { SKILLS } from "./skills.js";
@@ -45,15 +49,30 @@ function printHelp(): void {
   process.stdout.write(`ggeditor — video editor agent for DaVinci Resolve and Premiere Pro
 
 USAGE
-  ggeditor          Launch the editor (auto-detects open NLE)
-  ggeditor continue Resume the most recent session
-  ggeditor login    Authenticate
-  ggeditor logout   Clear credentials
-  ggeditor auth     Show stored credentials
+  ggeditor           Launch the editor (auto-detects open NLE)
+  ggeditor continue  Resume the most recent session
+  ggeditor login     Authenticate
+  ggeditor logout    Clear credentials
+  ggeditor auth      Show stored credentials
+  ggeditor doctor    Check ffmpeg, host detection, API keys, etc.
 
 Auth lives in ~/.gg/auth.json — the SAME file ggcoder uses, so logging into
 either CLI works for both.
 `);
+}
+
+/**
+ * Mark the current home as onboarded so we don't re-run the doctor on
+ * subsequent launches. Called after a first-run doctor pass succeeds.
+ */
+function markOnboarded(): void {
+  const path = onboardedMarkerPath();
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, new Date().toISOString() + "\n", "utf8");
+  } catch {
+    // Non-fatal — we'll just re-run onboarding next time.
+  }
 }
 
 async function pickProvider(auth: AuthStorage): Promise<SupportedAuthProvider | undefined> {
@@ -83,6 +102,11 @@ async function main(): Promise<void> {
     await runStatus();
     return;
   }
+  if (sub === "doctor") {
+    const report = runDoctor();
+    process.stdout.write(renderDoctorReport(report));
+    return;
+  }
 
   const isContinue = sub === "continue";
   if (sub && !isContinue) {
@@ -93,6 +117,14 @@ async function main(): Promise<void> {
 
   if (!process.stdin.isTTY) {
     fail("ggeditor requires an interactive terminal");
+  }
+
+  // First-run onboarding — only when neither the marker nor auth.json
+  // exist. Re-runnable any time via `ggeditor doctor`.
+  if (!isOnboarded()) {
+    const report = runDoctor();
+    process.stdout.write(renderDoctorReport(report, { onboarding: true }));
+    markOnboarded();
   }
 
   const auth = new AuthStorage();

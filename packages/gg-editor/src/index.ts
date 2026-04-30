@@ -20,6 +20,11 @@ export type { LazyHost, LazyHostOptions } from "./core/hosts/lazy.js";
 export { checkFfmpeg, checkFfprobe, probeMedia, runFfmpeg } from "./core/media/ffmpeg.js";
 export type { FfmpegResult, MediaProbe } from "./core/media/ffmpeg.js";
 
+// Doctor / first-run onboarding
+export { isOnboarded, onboardedMarkerPath, runDoctor } from "./core/doctor.js";
+export type { CheckSeverity, CheckStatus, DoctorCheck, DoctorReport } from "./core/doctor.js";
+export { renderDoctorReport } from "./core/doctor-render.js";
+
 // System prompt
 export {
   buildEditorSystemPrompt,
