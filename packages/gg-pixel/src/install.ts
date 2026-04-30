@@ -862,13 +862,14 @@ function wireElectron({ projectRoot, pkg, projectKey, ingestUrl }: WiringInput):
         "Could not copy gg-pixel browser IIFE bundle — install @kenkaiiii/gg-pixel and re-run.",
       );
     }
-    let patchedAny = false;
+    let wiredAny = false;
     for (const html of htmlFiles) {
-      if (patchRendererHtml(html, rendererInitPath, projectKey, ingestUrl) === "patched") {
-        patchedAny = true;
-      }
+      const r = patchRendererHtml(html, rendererInitPath, projectKey, ingestUrl);
+      // Both "patched" (changed on disk) and "already" (no-op because the
+      // file is up to date with the current key) count as success.
+      if (r === "patched" || r === "already") wiredAny = true;
     }
-    if (!patchedAny) {
+    if (!wiredAny) {
       warnings.push(
         `Found HTML files in ${rendererDir} but couldn't patch any — they may have unusual CSP or no <head>.`,
       );
@@ -998,6 +999,11 @@ function copyIifeBundle(projectRoot: string, dest: string): boolean {
   return false;
 }
 
+// HTML comment that delimits the auto-injected gg-pixel block in renderer
+// HTML. Used both to recognise an existing injection (so re-installs replace
+// it instead of stacking) and as the human-readable header on fresh writes.
+const PIXEL_HTML_MARKER = "<!-- gg-pixel: auto-wired by ggcoder pixel install -->";
+
 function patchRendererHtml(
   htmlPath: string,
   iifePath: string,
@@ -1010,7 +1016,31 @@ function patchRendererHtml(
   } catch {
     return "not-applicable";
   }
-  if (content.includes("gg-pixel.browser.iife")) return "already";
+
+  // Strip any existing gg-pixel injection (legacy or recent) before re-emitting
+  // with the current key. Detected by the comment marker; conservative match
+  // ends at the first `</script>` after the second injected `<script>` tag.
+  const original = content;
+  const markerIdx = content.indexOf(PIXEL_HTML_MARKER);
+  if (markerIdx !== -1) {
+    // Two consecutive script tags follow the marker. Find the close of the
+    // SECOND one, then eat trailing whitespace/newline.
+    const firstScriptEnd = content.indexOf("</script>", markerIdx);
+    const secondScriptEnd =
+      firstScriptEnd !== -1
+        ? content.indexOf("</script>", firstScriptEnd + "</script>".length)
+        : -1;
+    if (secondScriptEnd !== -1) {
+      let stripEnd = secondScriptEnd + "</script>".length;
+      while (stripEnd < content.length && /\s/.test(content[stripEnd]!)) stripEnd++;
+      // Walk back past leading newline/whitespace before the marker so we
+      // don't leave a blank line in the head.
+      let stripStart = markerIdx;
+      while (stripStart > 0 && /[ \t]/.test(content[stripStart - 1]!)) stripStart--;
+      if (stripStart > 0 && content[stripStart - 1] === "\n") stripStart--;
+      content = content.slice(0, stripStart) + content.slice(stripEnd);
+    }
+  }
 
   const ingestOrigin = new URL(ingestUrl).origin;
   // Match content="..." OR content='...'. Critical: don't use `[^"']` for
@@ -1040,7 +1070,7 @@ function patchRendererHtml(
   );
 
   const relScript = relative(dirname(htmlPath), iifePath).split(sep).join("/");
-  const inject = `\n  <!-- gg-pixel: auto-wired by ggcoder pixel install -->\n  <script src="${relScript}"></script>\n  <script>\n    if (window.GGPixel) GGPixel.initPixel({ projectKey: ${JSON.stringify(projectKey)}, ingestUrl: ${JSON.stringify(ingestUrl)} });\n  </script>\n`;
+  const inject = `\n  ${PIXEL_HTML_MARKER}\n  <script src="${relScript}"></script>\n  <script>\n    if (window.GGPixel) GGPixel.initPixel({ projectKey: ${JSON.stringify(projectKey)}, ingestUrl: ${JSON.stringify(ingestUrl)} });\n  </script>\n`;
   if (/<head[^>]*>/i.test(content)) {
     content = content.replace(/(<head[^>]*>)/i, `$1${inject}`);
   } else if (/<html[^>]*>/i.test(content)) {
@@ -1048,6 +1078,7 @@ function patchRendererHtml(
   } else {
     return "not-applicable";
   }
+  if (content === original) return "already";
   writeFileSync(htmlPath, content, "utf8");
   return "patched";
 }

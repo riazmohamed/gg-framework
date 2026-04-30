@@ -651,6 +651,69 @@ export async function register() {
     }
   });
 
+  it("Electron: re-install replaces the stale key inside renderer HTML and emits no spurious warning", async () => {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "myapp",
+        main: "main.js",
+        dependencies: { electron: "^33.0.0" },
+      }),
+    );
+    writeFileSync(join(dir, "main.js"), `const { app } = require("electron");\napp.whenReady();\n`);
+    mkdirSync(join(dir, "ui"), { recursive: true });
+    // Hand-crafted CSP-bearing HTML with two `<script>` tags so the renderer
+    // detector recognises it as patchable.
+    writeFileSync(
+      join(dir, "ui/index.html"),
+      `<!DOCTYPE html><html><head>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self';">
+  <title>x</title>
+  <script src="app.js"></script>
+</head><body><div id="root"></div></body></html>`,
+    );
+    // Pre-populate the bundle so the install doesn't warn about the missing IIFE.
+    mkdirSync(join(dir, "node_modules/@kenkaiiii/gg-pixel/dist"), { recursive: true });
+    writeFileSync(
+      join(dir, "node_modules/@kenkaiiii/gg-pixel/dist/browser.iife.global.js"),
+      "/*iife*/",
+    );
+    const { home, cleanup } = setupHome();
+    try {
+      await install({
+        cwd: dir,
+        homeDir: home,
+        skipPackageInstall: true,
+        fetchFn: fakeFetch({ id: "proj_first", key: "pk_live_ELECTRON_OLD" }),
+      });
+      const html1 = readFileSync(join(dir, "ui/index.html"), "utf8");
+      expect(html1).toContain("pk_live_ELECTRON_OLD");
+      // Single gg-pixel marker — no stacking.
+      expect(html1.match(/gg-pixel: auto-wired/g) ?? []).toHaveLength(1);
+
+      // Simulate re-install scenario: drop local mapping + env so installer mints a new project.
+      rmSync(join(home, ".gg", "projects.json"));
+      rmSync(join(dir, ".env"));
+
+      const result = await install({
+        cwd: dir,
+        homeDir: home,
+        skipPackageInstall: true,
+        fetchFn: fakeFetch({ id: "proj_second", key: "pk_live_ELECTRON_NEW" }),
+      });
+      const html2 = readFileSync(join(dir, "ui/index.html"), "utf8");
+      expect(html2).toContain("pk_live_ELECTRON_NEW");
+      expect(html2).not.toContain("pk_live_ELECTRON_OLD");
+      expect(html2.match(/gg-pixel: auto-wired/g) ?? []).toHaveLength(1);
+
+      // No "couldn't patch any" warning — the file IS wired correctly even if
+      // patchRendererHtml didn't change anything (e.g. third re-install).
+      expect(result.warnings.find((w) => w.includes("couldn't patch any"))).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
+
   it("findMappingByPath prefers an entry with a secret over a legacy entry at the same path", async () => {
     writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "myapp" }));
     const { home, cleanup } = setupHome();
