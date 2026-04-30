@@ -11,6 +11,10 @@ import { homedir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
+import type * as BabelParser from "@babel/parser";
+import type * as BabelTypes from "@babel/types";
+import type * as Recast from "recast";
+
 const nodeRequire = createRequire(import.meta.url);
 
 export const DEFAULT_INGEST_URL = "https://gg-pixel-server.buzzbeamaustralia.workers.dev";
@@ -662,7 +666,137 @@ function injectNextClientComponent(layoutPath: string, clientInitPath: string): 
   // Strip the .tsx extension for cleanest imports.
   spec = spec.replace(/\.tsx$/, "");
 
-  // 1. Add the import below the existing imports.
+  // Try AST-first so we land <GGPixelClient /> as the first child of <body>
+  // (i.e., a sibling of any auth-gate / provider tree wrapping {children}),
+  // not deeply nested where it would only init after the gate resolves.
+  const astResult = injectClientComponentViaAst(layoutPath, content, spec);
+  if (astResult) return astResult;
+
+  // Fallback: previous regex behaviour. Used when the file doesn't parse as
+  // TSX (extremely rare — would require syntactically broken code) or when
+  // we can't locate the JSX `<body>` element through the AST.
+  return injectClientComponentViaRegex(layoutPath, content, spec);
+}
+
+/**
+ * Parse the layout, find `<body>`, and prepend `<GGPixelClient />` to its
+ * children list. Also adds the import. Uses recast so untouched code stays
+ * byte-identical (only the inserted nodes are reformatted).
+ *
+ * Returns null on any AST issue so the caller can fall back to regex.
+ */
+function injectClientComponentViaAst(
+  layoutPath: string,
+  content: string,
+  importSpec: string,
+): EntryWiringResult | null {
+  let recast: typeof Recast;
+  let bp: typeof BabelParser;
+  let bt: typeof BabelTypes;
+  try {
+    recast = nodeRequire("recast") as typeof Recast;
+    bp = nodeRequire("@babel/parser") as typeof BabelParser;
+    bt = nodeRequire("@babel/types") as typeof BabelTypes;
+  } catch {
+    return null;
+  }
+
+  let ast: ReturnType<typeof recast.parse>;
+  try {
+    ast = recast.parse(content, {
+      parser: {
+        parse: (src: string) =>
+          bp.parse(src, {
+            sourceType: "module",
+            plugins: ["jsx", "typescript"],
+            allowImportExportEverywhere: true,
+            tokens: true,
+          }),
+      },
+    });
+  } catch {
+    return null;
+  }
+
+  const program = (ast as { program: { body: Array<unknown> } }).program;
+  if (!program || !Array.isArray(program.body)) return null;
+
+  const bodyEl = findFirstJsxElementByName(ast, "body");
+  if (!bodyEl) return null; // No <body> — let the regex fallback handle / warn.
+
+  // 1. Prepend <GGPixelClient /> to <body>'s children. Use a JSXText with a
+  //    newline so the output reads naturally even when recast reformats.
+  const newComponent = bt.jsxElement(
+    bt.jsxOpeningElement(bt.jsxIdentifier("GGPixelClient"), [], true),
+    null,
+    [],
+    true,
+  );
+  const leadingText = bt.jsxText("\n        ");
+  const trailingText = bt.jsxText("\n        ");
+  bodyEl.children = [leadingText, newComponent, trailingText, ...bodyEl.children];
+
+  // 2. Insert the import after the last existing import statement.
+  const importDecl = bt.importDeclaration(
+    [bt.importDefaultSpecifier(bt.identifier("GGPixelClient"))],
+    bt.stringLiteral(importSpec),
+  );
+  const body = program.body as Array<{ type: string }>;
+  let insertAt = 0;
+  for (let i = 0; i < body.length; i++) {
+    if (body[i]?.type === "ImportDeclaration") insertAt = i + 1;
+  }
+  body.splice(insertAt, 0, importDecl as unknown as { type: string });
+
+  let out: string;
+  try {
+    out = recast.print(ast).code;
+  } catch {
+    return null;
+  }
+  writeFileSync(layoutPath, out, "utf8");
+  return { kind: "injected", entryPath: layoutPath };
+}
+
+/**
+ * Walks the AST and returns the first JSXElement whose opening name matches.
+ * Uses string type checks rather than babel's typed predicates so we don't
+ * have to coerce loosely-typed walkers through narrow predicate signatures.
+ */
+function findFirstJsxElementByName(ast: unknown, name: string): { children: unknown[] } | null {
+  let found: { children: unknown[] } | null = null;
+  function walk(node: unknown): void {
+    if (found || !node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const c of node) walk(c);
+      return;
+    }
+    const n = node as Record<string, unknown> & { type?: string };
+    if (n.type === "JSXElement") {
+      const opening = n.openingElement as
+        | { type?: string; name?: { type?: string; name?: string } }
+        | undefined;
+      if (opening?.type === "JSXOpeningElement" && opening.name) {
+        const namedNode = opening.name;
+        if (namedNode.type === "JSXIdentifier" && namedNode.name === name) {
+          found = n as unknown as { children: unknown[] };
+          return;
+        }
+      }
+    }
+    for (const key of Object.keys(n)) {
+      walk(n[key]);
+    }
+  }
+  walk(ast);
+  return found;
+}
+
+function injectClientComponentViaRegex(
+  layoutPath: string,
+  content: string,
+  spec: string,
+): EntryWiringResult {
   const importLine = `import GGPixelClient from ${JSON.stringify(spec)};`;
   const lines = content.split("\n");
   let insertImportAt = 0;
@@ -671,12 +805,9 @@ function injectNextClientComponent(layoutPath: string, clientInitPath: string): 
   }
   lines.splice(insertImportAt, 0, importLine);
 
-  // 2. Inject `<GGPixelClient />` inside the body. We look for the last
-  //    `{children}` reference and insert just before it.
   const updated = lines.join("\n");
   const childrenIdx = updated.lastIndexOf("{children}");
   if (childrenIdx === -1) {
-    // Couldn't find {children} — write the import only and warn.
     writeFileSync(layoutPath, updated, "utf8");
     return {
       kind: "skipped",

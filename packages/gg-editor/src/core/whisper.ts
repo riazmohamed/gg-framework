@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createReadStream, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { resolveApiKey } from "./auth/api-keys.js";
 
 /**
  * Whisper transcription backends. Tries local whisper.cpp first (free, fast,
@@ -315,7 +316,7 @@ function transcribeWhisperx(inputPath: string, opts: TranscribeOptions): Promise
     ];
     if (opts.diarize) args.push("--diarize");
     if (opts.language) args.push("--language", opts.language);
-    const hfToken = opts.hfToken ?? process.env.HF_TOKEN;
+    const hfToken = opts.hfToken ?? resolveApiKey("HF_TOKEN", "huggingface");
     if (opts.diarize) {
       if (!hfToken) {
         reject(

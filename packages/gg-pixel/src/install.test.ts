@@ -714,6 +714,116 @@ export async function register() {
     }
   });
 
+  it("Next.js layout: AST-injects <GGPixelClient /> as a sibling of <body> children, not inside wrappers", async () => {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "wrapped-layout", dependencies: { next: "^15", react: "^19" } }),
+    );
+    mkdirSync(join(dir, "app"), { recursive: true });
+    // The drjones-style scenario: children are wrapped in an auth-gating
+    // provider tree. The OLD regex would put <GGPixelClient /> inside the
+    // wrapper (so the pixel only inits after auth resolves). AST should
+    // place it as the first child of <body>, BEFORE any wrappers.
+    writeFileSync(
+      join(dir, "app/layout.tsx"),
+      `import { AuthProvider } from "@/auth";
+import { ThemeProvider } from "@/theme";
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body className="bg-zinc-950">
+        <AuthProvider>
+          <ThemeProvider>{children}</ThemeProvider>
+        </AuthProvider>
+      </body>
+    </html>
+  );
+}
+`,
+    );
+    const { home, cleanup } = setupHome();
+    try {
+      await install({
+        cwd: dir,
+        homeDir: home,
+        skipPackageInstall: true,
+        fetchFn: fakeFetch({ id: "p", key: "k" }),
+      });
+      const after = readFileSync(join(dir, "app/layout.tsx"), "utf8");
+      // Import landed at the top.
+      expect(after).toContain('import GGPixelClient from "../gg-pixel.client"');
+      // <GGPixelClient /> is rendered.
+      expect(after).toContain("<GGPixelClient />");
+      // Crucially: it appears BEFORE the auth provider opens. (`<GGPixelClient />`
+      // index < `<AuthProvider>` index — both inside <body>.)
+      const pixelIdx = after.indexOf("<GGPixelClient />");
+      const authIdx = after.indexOf("<AuthProvider>");
+      expect(pixelIdx).toBeGreaterThan(after.indexOf("<body"));
+      expect(pixelIdx).toBeLessThan(authIdx);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("Next.js layout: preserves byte-for-byte all code recast didn't touch", async () => {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "preserve", dependencies: { next: "^15", react: "^19" } }),
+    );
+    mkdirSync(join(dir, "app"), { recursive: true });
+    const original = `import type { Metadata } from "next";
+import { Geist_Mono } from "next/font/google";
+import "./globals.css";
+
+const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
+
+export const metadata: Metadata = {
+  title: "Preserve test",
+  description: "Original formatting must survive AST patch",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en" className={\`\${geistMono.variable} h-full antialiased\`}>
+      <body className="flex h-full flex-col overflow-hidden" suppressHydrationWarning>
+        {children}
+      </body>
+    </html>
+  );
+}
+`;
+    writeFileSync(join(dir, "app/layout.tsx"), original);
+    const { home, cleanup } = setupHome();
+    try {
+      await install({
+        cwd: dir,
+        homeDir: home,
+        skipPackageInstall: true,
+        fetchFn: fakeFetch({ id: "p", key: "k" }),
+      });
+      const after = readFileSync(join(dir, "app/layout.tsx"), "utf8");
+      // Untouched bits intact:
+      expect(after).toContain('title: "Preserve test"');
+      expect(after).toContain('description: "Original formatting must survive AST patch"');
+      expect(after).toContain("suppressHydrationWarning");
+      expect(after).toContain("Readonly<{");
+      // The template literal in className survived recast intact.
+      expect(after).toContain("`${geistMono.variable} h-full antialiased`");
+      // Pixel landed where it should — first child of body.
+      const pixelIdx = after.indexOf("<GGPixelClient />");
+      const childrenIdx = after.indexOf("{children}");
+      expect(pixelIdx).toBeGreaterThan(0);
+      expect(pixelIdx).toBeLessThan(childrenIdx);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("Next.js: AST-patches a wrapped config (e.g. withSomething(config)) without mangling", async () => {
     writeFileSync(
       join(dir, "package.json"),

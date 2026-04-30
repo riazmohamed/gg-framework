@@ -21,11 +21,11 @@
  *     `existsSync` probes.
  */
 
-import { existsSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { detectHost } from "./hosts/detect.js";
+import { getStoredApiKey } from "./auth/api-keys.js";
 import { checkFfmpeg, checkFfprobe } from "./media/ffmpeg.js";
 
 export type CheckSeverity = "block" | "required" | "optional" | "info";
@@ -58,6 +58,27 @@ export interface InstallableHint {
   needsSudo?: boolean;
 }
 
+/**
+ * Structured prompt action. When present, the doctor's interactive
+ * screen can capture a secret (API key, token) directly and persist
+ * it to the api-keys store — no "open another terminal and run
+ * export X=..." busywork.
+ *
+ * Persistence is on the runner side; this struct just describes WHAT
+ * to capture and WHERE to put it (`store` is a stable id used by
+ * `setStoredApiKey`).
+ */
+export interface PromptHint {
+  /** Title shown above the input: "Paste your OpenAI API key". */
+  label: string;
+  /** Optional one-line guidance under the title (URL where to get it). */
+  hint?: string;
+  /** ApiKeyName from auth/api-keys.ts — "openai" | "huggingface". */
+  store: "openai" | "huggingface";
+  /** Lightweight format check; rejects obviously-wrong input. */
+  validate?: (value: string) => string | undefined;
+}
+
 export interface DoctorCheck {
   /** Stable id (also the check key). */
   id: string;
@@ -73,16 +94,24 @@ export interface DoctorCheck {
    */
   unlocks: string;
   /**
-   * Fix instruction. Multi-line ok. Empty when status=ok.
-   * Platform-appropriate (macOS / linux / win32).
-   */
-  fix?: string;
-  /**
    * Optional structured install command for items where a single
    * package-manager invocation does the job. The CLI offers Y/N
    * confirmation and spawns it directly.
    */
   installable?: InstallableHint;
+  /**
+   * Optional inline secret prompt (API key / token). When the user hits
+   * Enter on this item the doctor captures the value and persists it
+   * to ~/.gg/api-keys.json. Mutually exclusive with `installable` per
+   * action; if both are present, install runs first then prompt.
+   */
+  prompt?: PromptHint;
+  /**
+   * Free-form fix copy for the static `--all` / non-interactive path.
+   * The interactive screen IGNORES this — it uses installable/prompt.
+   * Multi-line is fine here; only `--all` renders it.
+   */
+  fix?: string;
 }
 
 export interface DoctorReport {
@@ -114,17 +143,18 @@ export function isOnboarded(home: string = homedir()): boolean {
  * `--version` style probes.
  */
 export function runDoctor(home: string = homedir()): DoctorReport {
+  // Host (Resolve / Premiere) detection lives in the live banner +
+  // footer at runtime — the doctor doesn't lecture users about which
+  // NLE they have. They know.
   const checks: DoctorCheck[] = [
     checkFfmpegProbe(),
     checkFfprobeProbe(),
+    checkAuthFile(home),
     checkOpenAIKey(),
-    checkAnthropicKey(),
     checkPython(),
-    checkResolve(),
-    checkPremiere(),
     checkWhisperCpp(),
     checkWhisperX(),
-    checkAuthFile(home),
+    checkAnthropicKey(),
   ];
 
   const ready = checks.every((c) => c.severity !== "required" || c.status === "ok");
@@ -180,21 +210,29 @@ function checkFfprobeProbe(): DoctorCheck {
 }
 
 function checkOpenAIKey(): DoctorCheck {
-  const present = !!process.env.OPENAI_API_KEY;
+  const fromEnv = !!process.env.OPENAI_API_KEY;
+  const fromStore = !!getStoredApiKey("openai");
+  const present = fromEnv || fromStore;
   return {
     id: "openai-key",
-    label: "OPENAI_API_KEY",
+    label: "OpenAI API key",
     status: present ? "ok" : "missing",
     severity: "optional",
-    detail: present ? "set in environment" : "not set",
+    detail: fromEnv ? "set (env)" : fromStore ? "set (saved)" : "not set",
     unlocks:
-      "Vision tools: analyze_hook (retention scoring), score_shot, color_match, " +
-      "grade_skin_tones, match_clip_color, and the OpenAI transcription backend.",
+      "Vision tools: analyze_hook, score_shot, color_match, grade_skin_tones, " +
+      "match_clip_color, and the OpenAI transcription backend.",
+    prompt: present
+      ? undefined
+      : {
+          label: "Paste your OpenAI API key",
+          hint: "Get one at https://platform.openai.com/api-keys (free tier available)",
+          store: "openai",
+          validate: (v) => (v.startsWith("sk-") ? undefined : "OpenAI keys start with 'sk-'"),
+        },
     fix: present
       ? undefined
-      : "Get a key at https://platform.openai.com/api-keys, then:\n" +
-        "  export OPENAI_API_KEY=sk-...\n" +
-        "  # add to ~/.zshrc / ~/.bashrc to persist",
+      : "Press Enter to paste your key here — it'll be saved to ~/.gg/api-keys.json.",
   };
 }
 
@@ -208,9 +246,7 @@ function checkAnthropicKey(): DoctorCheck {
     label: "ANTHROPIC_API_KEY",
     status: present ? "ok" : "missing",
     severity: "info",
-    detail: present
-      ? "set in environment (overrides OAuth token if present)"
-      : "not set (OAuth is the recommended path)",
+    detail: present ? "set" : "not set",
     unlocks: "Direct Anthropic API auth without OAuth. Most users should `ggeditor login` instead.",
     fix: undefined,
   };
@@ -224,12 +260,13 @@ function checkPython(): DoctorCheck {
     });
     if (r.status === 0) {
       const out = (r.stdout || r.stderr).trim();
+      const m = /\b(\d+\.\d+(?:\.\d+)?)\b/.exec(out);
       return {
         id: "python",
         label: "Python 3",
         status: "ok",
         severity: "optional",
-        detail: `${cmd}: ${out}`,
+        detail: m ? `v${m[1]}` : "found",
         unlocks:
           "DaVinci Resolve scripting bridge (host integration). Without Python, file-only " +
           "mode still works.",
@@ -241,77 +278,22 @@ function checkPython(): DoctorCheck {
     label: "Python 3",
     status: "missing",
     severity: "optional",
-    detail: "no python3 / python / py interpreter found",
+    detail: "not on PATH",
     unlocks:
       "DaVinci Resolve scripting bridge (host integration). File-only mode works without it.",
     fix:
       platform() === "darwin"
-        ? "brew install python@3.12   # or use python.org installer"
+        ? "brew install python   # latest 3.x (currently 3.14)"
         : platform() === "linux"
           ? "sudo apt install python3   # debian/ubuntu — your distro's package manager otherwise"
           : "winget install Python.Python.3   # or python.org installer",
     installable: buildInstallable({
-      pkg: { darwin: "python@3.12", linux: "python3", win32: "Python.Python.3" },
+      // 'python' is Homebrew's alias for the current default Python 3
+      // bottle (currently 3.14). Tracks Homebrew's choice so we don't
+      // pin a stale minor.
+      pkg: { darwin: "python", linux: "python3", win32: "Python.Python.3" },
       label: "Install Python 3",
     }),
-  };
-}
-
-function checkResolve(): DoctorCheck {
-  const detected = detectHost();
-  if (detected.name === "resolve") {
-    return {
-      id: "resolve",
-      label: "DaVinci Resolve",
-      status: "ok",
-      severity: "optional",
-      detail: "running",
-      unlocks:
-        "Live timeline editing on Resolve: cut, marker, append, color grade, smart reframe, render.",
-    };
-  }
-  // Resolve isn't running — but is it INSTALLED? Check the canonical
-  // install path so the message is precise.
-  const installed = isResolveInstalled();
-  return {
-    id: "resolve",
-    label: "DaVinci Resolve",
-    status: "missing",
-    severity: "optional",
-    detail: installed ? "installed but not running" : "not installed",
-    unlocks:
-      "Live timeline editing on Resolve. Open Resolve before launching ggeditor (or " +
-      "mid-session — the agent re-detects every 2s).",
-    fix: installed
-      ? "Open DaVinci Resolve, then re-run ggeditor (or just keep going — ggeditor will pick " +
-        "it up automatically within a few seconds)."
-      : "Install the free version from https://www.blackmagicdesign.com/products/davinciresolve",
-  };
-}
-
-function checkPremiere(): DoctorCheck {
-  const detected = detectHost();
-  if (detected.name === "premiere") {
-    return {
-      id: "premiere",
-      label: "Adobe Premiere Pro",
-      status: "ok",
-      severity: "optional",
-      detail: "running",
-      unlocks:
-        "Live timeline editing on Premiere via the gg-editor UXP panel (insert / cut / marker " +
-        "/ render). Requires the panel installed (`ggeditor-premiere-panel install`).",
-    };
-  }
-  // Premiere is paid; we don't try to detect installation. Just note it.
-  return {
-    id: "premiere",
-    label: "Adobe Premiere Pro",
-    status: "missing",
-    severity: "optional",
-    detail: "not running",
-    unlocks: "Live timeline editing on Premiere. Open Premiere + install the gg-editor panel.",
-    fix: "Open Premiere Pro, then install the panel:\n  npx @kenkaiiii/gg-editor-premiere-panel install",
   };
 }
 
@@ -324,7 +306,7 @@ function checkWhisperCpp(): DoctorCheck {
         label: "whisper.cpp",
         status: "ok",
         severity: "optional",
-        detail: `${cmd} on PATH`,
+        detail: "installed",
         unlocks:
           "Local transcription (free, fast, private). Without it, transcribe falls back to " +
           "the OpenAI API (requires OPENAI_API_KEY).",
@@ -336,7 +318,7 @@ function checkWhisperCpp(): DoctorCheck {
     label: "whisper.cpp",
     status: "missing",
     severity: "optional",
-    detail: "not on PATH",
+    detail: "not installed",
     unlocks:
       "Local transcription. Without it, transcribe uses the OpenAI API (requires OPENAI_API_KEY).",
     fix:
@@ -355,14 +337,16 @@ function checkWhisperCpp(): DoctorCheck {
 function checkWhisperX(): DoctorCheck {
   const r = spawnSync("whisperx", ["--help"], { encoding: "utf8" });
   const ok = r.status === 0;
-  const hfToken = !!process.env.HF_TOKEN;
+  const fromEnv = !!process.env.HF_TOKEN;
+  const fromStore = !!getStoredApiKey("huggingface");
+  const hfToken = fromEnv || fromStore;
   if (ok && hfToken) {
     return {
       id: "whisperx",
-      label: "whisperx + HF_TOKEN",
+      label: "whisperx",
       status: "ok",
       severity: "optional",
-      detail: "whisperx on PATH, HF_TOKEN set",
+      detail: fromEnv ? "ready (env)" : "ready (saved)",
       unlocks:
         "Speaker diarization (transcribe with diarize=true). Required for read_transcript with " +
         "speaker filters.",
@@ -371,46 +355,78 @@ function checkWhisperX(): DoctorCheck {
   if (ok && !hfToken) {
     return {
       id: "whisperx",
-      label: "whisperx + HF_TOKEN",
+      label: "whisperx",
       status: "warn",
       severity: "optional",
-      detail: "whisperx on PATH but HF_TOKEN not set",
+      detail: "missing HF_TOKEN",
       unlocks: "Speaker diarization (transcribe with diarize=true).",
-      fix:
-        "Get a token at https://huggingface.co/settings/tokens (free), then:\n" +
-        "  export HF_TOKEN=hf_...\n" +
-        "Also accept the pyannote model terms: https://huggingface.co/pyannote/speaker-diarization-3.1",
+      prompt: {
+        label: "Paste your Hugging Face token",
+        hint:
+          "Free at https://huggingface.co/settings/tokens — also accept " +
+          "https://huggingface.co/pyannote/speaker-diarization-3.1 model terms.",
+        store: "huggingface",
+        validate: (v) => (v.startsWith("hf_") ? undefined : "Hugging Face tokens start with 'hf_'"),
+      },
+      fix: "Press Enter to paste your token here — it'll be saved to ~/.gg/api-keys.json.",
     };
   }
   return {
     id: "whisperx",
-    label: "whisperx + HF_TOKEN",
+    label: "whisperx",
     status: "missing",
     severity: "optional",
-    detail: "whisperx not on PATH",
+    detail: "not installed",
     unlocks: "Speaker diarization (transcribe with diarize=true).",
-    fix:
-      "pip install whisperx\n" +
-      "export HF_TOKEN=hf_...   # https://huggingface.co/settings/tokens\n" +
-      "Then accept https://huggingface.co/pyannote/speaker-diarization-3.1 model terms.",
-    // pip install handles the package; HF_TOKEN + license acceptance
-    // remain manual (handled via the `fix` text on the post-install run).
-    installable: hasManager("pip3")
-      ? {
-          label: "Install whisperx (you'll still need HF_TOKEN + accept model terms)",
-          command: "pip3",
-          args: ["install", "--user", "whisperx"],
-          manager: "pip",
-        }
-      : hasManager("pip")
-        ? {
-            label: "Install whisperx (you'll still need HF_TOKEN + accept model terms)",
-            command: "pip",
-            args: ["install", "--user", "whisperx"],
-            manager: "pip",
-          }
-        : undefined,
+    fix: whisperxFixHint(),
+    installable: whisperxInstaller(),
+    // After install succeeds the next doctor pass will see whisperx on
+    // PATH and surface the warn-state with the HF_TOKEN prompt above.
+    // We don't bundle the token prompt with the install action because
+    // pipx output is verbose and we want a clean transition.
   };
+}
+
+/**
+ * Install path for whisperx. We prefer `pipx` because modern Python on
+ * Homebrew / most distros enforces PEP 668 — `pip install --user` is
+ * refused unless you pass `--break-system-packages`. pipx solves this
+ * by isolating each tool in its own venv and exposing the entry point
+ * on PATH. Fallback chain:
+ *   1. pipx — the recommended path on Homebrew/Linux distros (PEP 668-safe).
+ *   2. pip3 with --break-system-packages — last resort when pipx isn't
+ *      installed; the user can always install pipx manually first.
+ *   3. nothing — falls back to the manual `fix` text.
+ */
+function whisperxInstaller(): InstallableHint | undefined {
+  if (hasManager("pipx")) {
+    return {
+      label: "Install whisperx via pipx (you'll still need HF_TOKEN + accept model terms)",
+      command: "pipx",
+      args: ["install", "whisperx"],
+      manager: "pip",
+    };
+  }
+  // No pipx — don't try `pip3 install --user`; PEP 668 will reject it on
+  // any sane Python install. Surface the manual fix instead so the user
+  // sees the right next step (install pipx) rather than a wall of pip
+  // error text.
+  return undefined;
+}
+
+function whisperxFixHint(): string {
+  const installPipx =
+    platform() === "darwin"
+      ? "brew install pipx"
+      : platform() === "linux"
+        ? "sudo apt install pipx   # or your distro's package manager"
+        : "winget install pipx";
+  return (
+    `${installPipx}\n` +
+    "pipx install whisperx\n" +
+    "export HF_TOKEN=hf_...   # https://huggingface.co/settings/tokens\n" +
+    "Then accept https://huggingface.co/pyannote/speaker-diarization-3.1 model terms."
+  );
 }
 
 function checkAuthFile(home: string): DoctorCheck {
@@ -424,10 +440,10 @@ function checkAuthFile(home: string): DoctorCheck {
   })();
   return {
     id: "auth",
-    label: "Auth (~/.gg/auth.json)",
+    label: "Auth",
     status: exists ? "ok" : "missing",
     severity: "required",
-    detail: exists ? `present at ${path}` : "not configured",
+    detail: exists ? "signed in" : "not configured",
     unlocks: "The agent itself. Without auth, ggeditor can't talk to a model provider.",
     fix: exists
       ? undefined
@@ -438,11 +454,17 @@ function checkAuthFile(home: string): DoctorCheck {
 
 // ── Helpers ────────────────────────────────────────────────
 
+/**
+ * Probe a `<cmd> -version` output and return ONLY the version number
+ * (e.g. "v8.0.1"). Trims away program name + copyright noise so the
+ * doctor's right-hand column stays a clean one-word status.
+ */
 function versionLine(cmd: string): string {
   const r = spawnSync(cmd, ["-version"], { encoding: "utf8" });
   if (r.status !== 0) return "found";
   const first = (r.stdout.split(/\r?\n/)[0] || "").trim();
-  return first || "found";
+  const m = /\b(\d+\.\d+(?:\.\d+)?)\b/.exec(first);
+  return m ? `v${m[1]}` : "found";
 }
 
 function ffmpegInstallHint(): string {
@@ -517,15 +539,4 @@ function buildInstallable(opts: {
     };
   }
   return undefined;
-}
-
-function isResolveInstalled(): boolean {
-  if (platform() === "darwin") {
-    return existsSync("/Applications/DaVinci Resolve/DaVinci Resolve.app");
-  }
-  if (platform() === "win32") {
-    return existsSync("C:\\Program Files\\Blackmagic Design\\DaVinci Resolve\\Resolve.exe");
-  }
-  // Linux: Resolve installs into /opt/resolve by default.
-  return existsSync("/opt/resolve/bin/resolve");
 }

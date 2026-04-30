@@ -1,269 +1,467 @@
 /**
- * Interactive doctor runner.
+ * Interactive doctor screen.
  *
- * Used by `ggeditor doctor` and the first-run onboarding flow. Walks
- * through actionable items one at a time:
+ * Modelled directly on `@kenkaiiii/ggcoder/ui/login.tsx`'s
+ * `renderLoginSelector` so the look matches:
  *
- *   - If the item carries an `installable` hint → ask "Install X? [Y/n]".
- *     Yes → spawn the package manager, stream output live, re-run the
- *     doctor, move on. No → print the manual `fix` text, move on.
- *   - If the item only has a `fix` string (manual setup, env var, etc.)
- *     → print it and move on.
+ *   ▄▀▀▀ ▄▀▀▀   GG Editor v0.6.0 · By Ken Kai
+ *   █ ▀█ █ ▀█   Doctor
+ *   ▀▄▄▀ ▀▄▄▀   Environment check
  *
- * The banner matches `runStatus`'s look ("GG Editor — Doctor", orange-
- * bold, two-space indent, dim subline) so the three CLI commands
- * (auth/login/doctor) feel like one product.
+ *   ❯ ✓ ffmpeg            — v8.0.1
+ *     ✓ ffprobe           — v8.0.1
+ *     ○ OpenAI API key    — not set
+ *     ✓ Python 3          — v3.14.3
+ *     …
+ *
+ *   ↑↓ navigate · Enter fix · r refresh · Esc quit
+ *
+ * Mechanics:
+ *   - `\x1b[s` saves the cursor on entry; `\x1b[u\x1b[J` restores +
+ *     clears below for each redraw. No alt-screen buffer (we don't need
+ *     it; the doctor is short and re-runnable).
+ *   - On exit we restore + clear so terminal scrollback is preserved.
+ *   - Enter on an installable runs the package manager directly via
+ *     `spawn` (stdio inherited so the user sees output / answers
+ *     prompts). Enter on a `prompt` opens an inline secret capture.
+ *   - q / Esc / Ctrl+C → quit cleanly.
  */
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import chalk from "chalk";
-import { type DoctorCheck, type DoctorReport, type InstallableHint, runDoctor } from "./doctor.js";
+import { setStoredApiKey } from "./auth/api-keys.js";
+import { type DoctorCheck, type PromptHint, runDoctor } from "./doctor.js";
 import { renderDoctorReport } from "./doctor-render.js";
+import { getPackageVersion } from "./version.js";
 
-const EDITOR_PRIMARY = "#f97316"; // matches login.ts / runStatus
-const EDITOR_ACCENT = "#ec4899";
-const orange = chalk.hex(EDITOR_PRIMARY);
-const pink = chalk.hex(EDITOR_ACCENT);
+const LOGO_LINES = [
+  " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
+  " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
+  " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
+];
+const GRADIENT = [
+  "#fbbf24",
+  "#f59e0b",
+  "#f97316",
+  "#ea580c",
+  "#dc2626",
+  "#e11d48",
+  "#db2777",
+  "#e11d48",
+  "#dc2626",
+  "#ea580c",
+  "#f97316",
+  "#f59e0b",
+];
+const PRIMARY = "#f97316";
+const ACCENT = "#ec4899";
+const TEXT = "#e2e8f0";
+const TEXT_DIM = "#64748b";
+const GAP = "   ";
 
 export interface DoctorRunOptions {
-  /** Print the welcome banner instead of the plain doctor banner. */
+  /** Welcome banner instead of the plain doctor banner. */
   onboarding?: boolean;
-  /** Show the full inventory and exit (no install prompts). */
+  /** Show the full inventory and exit (no interactive screen). */
   all?: boolean;
-  /** Skip every prompt — print the report and exit. Useful in CI. */
+  /** Skip every prompt — print the report once and exit. CI-friendly. */
   nonInteractive?: boolean;
 }
 
 /**
- * Top-level entry. Renders the orange banner, then either
- *   - prints the inventory (`all` or `nonInteractive`), OR
- *   - walks the user through fixable items one at a time.
+ * Top-level entry called by cli.ts.
+ *
+ *   - `--all` → prints the static inventory, no screen.
+ *   - non-TTY / `nonInteractive` → same.
+ *   - everything else → mounts the interactive screen.
  */
 export async function runDoctorInteractive(opts: DoctorRunOptions = {}): Promise<void> {
-  printBanner(opts.onboarding === true);
-
-  // Non-interactive paths: just print and exit.
   if (opts.all || opts.nonInteractive || !process.stdin.isTTY) {
     const report = runDoctor();
+    process.stdout.write(staticBanner(opts.onboarding === true));
     process.stdout.write(
       renderDoctorReport(report, { all: opts.all, onboarding: opts.onboarding }),
     );
     return;
   }
 
-  await walkActionableItems(opts.onboarding === true);
+  await mountSelector(opts.onboarding === true);
 }
 
-// ── Internals ──────────────────────────────────────────────
+// ── Renderers ─────────────────────────────────────────────
 
-function printBanner(onboarding: boolean): void {
-  const title = onboarding ? "Welcome to GG Editor" : "GG Editor — Doctor";
-  process.stdout.write(orange.bold(`\n  ${title}\n`));
-  process.stdout.write(
-    chalk.dim(
-      onboarding
-        ? "  One-time environment check. Re-run any time with `ggeditor doctor`.\n\n"
-        : "  Environment check. Re-run any time.\n\n",
-    ),
-  );
+function gradientLine(text: string): string {
+  let result = "";
+  let colorIdx = 0;
+  for (const ch of text) {
+    if (ch === " ") {
+      result += ch;
+    } else {
+      const color = GRADIENT[Math.min(colorIdx, GRADIENT.length - 1)];
+      result += chalk.hex(color)(ch);
+      colorIdx++;
+    }
+  }
+  return result;
+}
+
+function bannerLines(onboarding: boolean): string[] {
+  const screen = onboarding ? "Welcome" : "Doctor";
+  const subtitle = onboarding ? "First-run environment check" : "Environment check — Enter to fix";
+  return [
+    gradientLine(LOGO_LINES[0]) +
+      GAP +
+      chalk.hex(PRIMARY).bold("GG Editor") +
+      chalk.hex(TEXT_DIM)(` v${getPackageVersion()}`) +
+      chalk.hex(TEXT_DIM)(" \u00b7 By ") +
+      chalk.hex(TEXT).bold("Ken Kai"),
+    gradientLine(LOGO_LINES[1]) + GAP + chalk.hex(ACCENT)(screen),
+    gradientLine(LOGO_LINES[2]) + GAP + chalk.hex(TEXT_DIM)(subtitle),
+  ];
+}
+
+function staticBanner(onboarding: boolean): string {
+  return bannerLines(onboarding).join("\n") + "\n\n";
+}
+
+function statusGlyph(c: DoctorCheck): string {
+  if (c.status === "ok") return chalk.green("\u2713");
+  if (c.status === "warn") return chalk.yellow("!");
+  if (c.severity === "required" || c.severity === "block") return chalk.red("\u2717");
+  return chalk.yellow("\u25cb");
 }
 
 /**
- * Walk through actionable items in priority order. After each step we
- * re-run the doctor so that successful installs unblock follow-on
- * checks (e.g. installing ffmpeg flips both ffmpeg + ffprobe to OK).
+ * One line per item, modelled on login.tsx's provider rows.
+ *
+ *   ❯ ✓ ffmpeg            — v8.0.1
+ *     ○ OpenAI API key    — not set
+ *
+ * The `detail` is the right-side em-dash text (terse — see doctor.ts
+ * for the trimmed strings: "v8.0.1", "set", "not set", etc).
  */
-async function walkActionableItems(onboarding: boolean): Promise<void> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  // Track items the user has explicitly skipped this session so we
-  // don't re-ask about them after every successful install.
-  const skipped = new Set<string>();
+function renderItemLine(c: DoctorCheck, selected: boolean, status: "ok" | "miss" | "warn"): string {
+  const marker = selected ? chalk.hex(PRIMARY)("\u276f ") : "  ";
+  const labelColor =
+    status === "ok"
+      ? selected
+        ? chalk.hex(PRIMARY)
+        : chalk.hex(TEXT)
+      : selected
+        ? chalk.hex(PRIMARY).bold
+        : chalk.hex(TEXT);
+  const label = labelColor(c.label.padEnd(22));
+  return `${marker}${statusGlyph(c)} ${label}${chalk.hex(TEXT_DIM)(` \u2014 ${c.detail}`)}`;
+}
 
-  try {
-    for (let step = 0; step < 20; step++) {
-      const report = runDoctor();
-      const next = pickNextActionable(report, skipped);
-      const total = countActionable(report);
-      const done = countDone(report);
+function renderScreen(
+  items: DoctorCheck[],
+  selectedIdx: number,
+  onboarding: boolean,
+  note?: string,
+  exitPending?: boolean,
+): string {
+  const lines: string[] = [...bannerLines(onboarding), ""];
+  for (let i = 0; i < items.length; i++) {
+    const c = items[i];
+    const status: "ok" | "miss" | "warn" =
+      c.status === "ok" ? "ok" : c.status === "warn" ? "warn" : "miss";
+    lines.push(renderItemLine(c, i === selectedIdx, status));
+  }
+  lines.push("");
+  if (note) lines.push("  " + chalk.hex(ACCENT)(note));
 
-      if (!next) {
-        // Either everything's clean or we've skipped everything we can.
-        const cleanEverything = total === done;
-        if (cleanEverything) {
-          process.stdout.write(
-            "  " +
-              chalk.green("✓ Nothing to fix. You're all good.") +
-              chalk.dim(" Run `ggeditor` to start.\n\n"),
-          );
+  // Footer mirrors ggeditor's main-TUI abort pattern: first Esc / Ctrl+C
+  // shows "Press again to exit"; the second press within 800ms quits.
+  // Avoids accidental quits and matches the look users learned from the
+  // main TUI footer.
+  const footer = exitPending
+    ? chalk.yellow("  Press Esc again to exit")
+    : chalk.hex(TEXT_DIM)("  \u2191\u2193 navigate \u00b7 ") +
+      chalk.hex(PRIMARY)("Enter") +
+      chalk.hex(TEXT_DIM)(" fix \u00b7 ") +
+      chalk.hex(PRIMARY)("r") +
+      chalk.hex(TEXT_DIM)(" refresh \u00b7 ") +
+      chalk.hex(PRIMARY)("Esc") +
+      chalk.hex(TEXT_DIM)(" quit");
+  lines.push(footer);
+  return lines.join("\n");
+}
+
+// ── Interactive selector ──────────────────────────────────
+
+async function mountSelector(onboarding: boolean): Promise<void> {
+  const stdout = process.stdout;
+  const stdin = process.stdin;
+
+  let report = runDoctor();
+  let items = report.checks.filter((c) => c.severity !== "info");
+  let selectedIdx = pickFirstActionable(items);
+  let note: string | undefined;
+  let noteTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Double-press exit (mirrors ggeditor's main TUI). First Esc / Ctrl+C
+  // arms exitPending; second within DOUBLE_PRESS_TIMEOUT_MS confirms.
+  let exitPending = false;
+  let exitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Full-clear + cursor home, then save the position so subsequent
+  // redraws can restore it. Wipes the shell prompt that ran us, so the
+  // doctor screen looks like a standalone view.
+  stdout.write("\x1b[2J\x1b[H\x1b[s");
+
+  const draw = () => {
+    stdout.write(
+      "\x1b[u\x1b[J" + renderScreen(items, selectedIdx, onboarding, note, exitPending) + "\n",
+    );
+  };
+
+  const flashNote = (text: string) => {
+    if (noteTimer) clearTimeout(noteTimer);
+    note = text;
+    draw();
+    noteTimer = setTimeout(() => {
+      note = undefined;
+      draw();
+    }, 2500);
+  };
+
+  const reload = () => {
+    report = runDoctor();
+    items = report.checks.filter((c) => c.severity !== "info");
+    if (selectedIdx >= items.length) selectedIdx = Math.max(0, items.length - 1);
+  };
+
+  draw();
+  stdin.setRawMode(true);
+  stdin.resume();
+
+  return new Promise<void>((resolve) => {
+    const cleanup = () => {
+      if (noteTimer) clearTimeout(noteTimer);
+      if (exitTimer) clearTimeout(exitTimer);
+      stdin.removeListener("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      // Full clear so the user's terminal scrollback isn't polluted with
+      // selector frames; print one summary line as a fresh start.
+      stdout.write("\x1b[2J\x1b[H");
+      const total = items.length;
+      const ok = items.filter((c) => c.status === "ok").length;
+      if (ok === total) {
+        stdout.write(
+          chalk.green("\u2713 Nothing to fix. You're all good.") +
+            chalk.hex(TEXT_DIM)(" Run `ggeditor` to start.\n"),
+        );
+      } else {
+        stdout.write(
+          chalk.hex(TEXT_DIM)(
+            `Doctor closed. ${ok}/${total} ready. Re-run \`ggeditor doctor\` any time.\n`,
+          ),
+        );
+      }
+      resolve();
+    };
+
+    /**
+     * Tear down the selector, fully clear the screen, re-print the
+     * branded banner, then run an async block with normal stdio. The
+     * full clear (\x1b[2J\x1b[H) wipes the prior shell prompt so the
+     * sub-screen looks like a standalone view, not a continuation of
+     * the user's terminal scrollback.
+     */
+    const runWithSubshell = async (block: () => Promise<{ ok: boolean }>): Promise<void> => {
+      stdin.removeListener("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      // Full clear + cursor home, then re-render the banner.
+      stdout.write("\x1b[2J\x1b[H");
+      stdout.write(staticBanner(onboarding));
+
+      let result: { ok: boolean };
+      try {
+        result = await block();
+      } catch (e) {
+        process.stdout.write(chalk.red(`\n  Error: ${(e as Error).message}\n`));
+        result = { ok: false };
+      }
+      // Brief pause so the user sees the outcome.
+      await new Promise((r) => setTimeout(r, 600));
+      // Full clear + re-save cursor + redraw the selector.
+      stdout.write("\x1b[2J\x1b[H\x1b[s");
+      stdin.setRawMode(true);
+      stdin.resume();
+      stdin.on("data", onData);
+      reload();
+      const cur = items[selectedIdx];
+      if (cur) {
+        const newIdx = items.findIndex((c) => c.id === cur.id);
+        selectedIdx = newIdx >= 0 ? newIdx : pickFirstActionable(items);
+      }
+      if (result.ok) flashNote(`Saved`);
+      else draw();
+    };
+
+    const onData = (chunk: Buffer) => {
+      const key = chunk.toString();
+
+      // Esc / Ctrl+C / q — double-press to confirm. First press arms
+      // exitPending and the footer flips to "Press Esc again to exit";
+      // second press within 800ms confirms; otherwise it auto-clears.
+      if (key === "\x1b" || key === "\x03" || key === "q") {
+        if (exitPending) {
+          if (exitTimer) clearTimeout(exitTimer);
+          cleanup();
         } else {
-          process.stdout.write(
-            "  " +
-              chalk.dim(
-                `Skipped the rest. ${done}/${total} ready. Re-run \`ggeditor doctor\` any time.\n\n`,
-              ),
-          );
+          exitPending = true;
+          draw();
+          exitTimer = setTimeout(() => {
+            exitPending = false;
+            draw();
+          }, 800);
         }
         return;
       }
 
-      const proceed = await handleItem(next, rl, onboarding);
-      if (proceed === "skip") skipped.add(next.id);
-      if (proceed === "quit") {
-        process.stdout.write(chalk.dim("  Done. Re-run `ggeditor doctor` any time.\n\n"));
+      // Any other key clears a pending-exit hint without acting on it.
+      if (exitPending) {
+        if (exitTimer) clearTimeout(exitTimer);
+        exitPending = false;
+        draw();
+      }
+
+      // ↑
+      if (key === "\x1b[A" && selectedIdx > 0) {
+        selectedIdx--;
+        draw();
         return;
       }
-    }
-    // Safety bound — should never hit this.
-    process.stdout.write(
-      chalk.dim("  Reached step limit. Re-run `ggeditor doctor` to continue.\n\n"),
-    );
-  } finally {
-    rl.close();
-  }
-}
 
-type StepResult = "next" | "skip" | "quit";
-
-async function handleItem(
-  item: DoctorCheck,
-  rl: ReturnType<typeof createInterface>,
-  onboarding: boolean,
-): Promise<StepResult> {
-  // Header: severity + label + detail.
-  const tag =
-    item.severity === "required" || item.severity === "block"
-      ? chalk.red("required")
-      : item.status === "warn"
-        ? chalk.yellow("needs attention")
-        : chalk.yellow("optional");
-  process.stdout.write(`  ${tag} · ${chalk.bold(item.label)}  ${chalk.dim("— " + item.detail)}\n`);
-  process.stdout.write("  " + chalk.dim(item.unlocks) + "\n\n");
-
-  if (item.installable) {
-    return await offerInstall(item, item.installable, rl);
-  }
-
-  // No structured installer — print the manual fix and move on.
-  if (item.fix) {
-    process.stdout.write(chalk.dim("  Fix:\n"));
-    for (const line of item.fix.split("\n")) {
-      process.stdout.write("    " + chalk.cyan(line) + "\n");
-    }
-    process.stdout.write("\n");
-  }
-
-  // For required items without a structured installer (e.g. auth →
-  // `ggeditor login`) we ask whether to keep going. For optional ones
-  // we just move on.
-  if (item.severity === "required" || item.severity === "block") {
-    const ans = await askYN(rl, "  Continue to the next item?", "y");
-    return ans ? "next" : "quit";
-  }
-  // Onboarding mode: pause briefly so the user reads the fix.
-  if (onboarding) {
-    const ans = await askYN(rl, "  Continue?", "y");
-    return ans ? "next" : "quit";
-  }
-  return "next";
-}
-
-async function offerInstall(
-  item: DoctorCheck,
-  hint: InstallableHint,
-  rl: ReturnType<typeof createInterface>,
-): Promise<StepResult> {
-  const cmdline = `${hint.command} ${hint.args.join(" ")}`;
-  process.stdout.write(`  ${chalk.bold(hint.label)}\n`);
-  process.stdout.write(`    ${pink(cmdline)}\n`);
-  if (hint.needsSudo) {
-    process.stdout.write(chalk.dim("    (will prompt for your sudo password)\n"));
-  }
-  process.stdout.write("\n");
-
-  const yes = await askYN(rl, "  Install now?", "y");
-  if (!yes) {
-    if (item.fix) {
-      process.stdout.write(chalk.dim("  Skipping. To install later:\n"));
-      for (const line of item.fix.split("\n")) {
-        process.stdout.write("    " + chalk.cyan(line) + "\n");
+      // ↓
+      if (key === "\x1b[B" && selectedIdx < items.length - 1) {
+        selectedIdx++;
+        draw();
+        return;
       }
-      process.stdout.write("\n");
-    }
-    return "skip";
-  }
 
-  const exitCode = await spawnInstall(hint);
-  if (exitCode === 0) {
-    process.stdout.write(chalk.green("  ✓ Installed.\n\n"));
-    return "next";
-  }
-  process.stdout.write(
-    chalk.red(`  ✗ Install failed (exit ${exitCode}).`) + chalk.dim(" You can fix it manually:\n"),
-  );
-  if (item.fix) {
-    for (const line of item.fix.split("\n")) {
-      process.stdout.write("    " + chalk.cyan(line) + "\n");
-    }
-  }
-  process.stdout.write("\n");
-  return "skip";
-}
+      // r → refresh
+      if (key === "r") {
+        reload();
+        flashNote("Refreshed");
+        return;
+      }
 
-function spawnInstall(hint: InstallableHint): Promise<number> {
-  return new Promise((resolve) => {
-    const child = spawn(hint.command, hint.args, {
-      stdio: "inherit", // user sees + interacts with the manager directly
-    });
-    child.on("close", (code) => resolve(code ?? 1));
-    child.on("error", () => resolve(1));
+      // Enter → install / prompt / nothing
+      if (key === "\r" || key === "\n") {
+        const cur = items[selectedIdx];
+        if (!cur) return;
+        if (cur.status === "ok") {
+          flashNote("Already done");
+          return;
+        }
+
+        if (cur.installable) {
+          const inst = cur.installable;
+          void runWithSubshell(async () => {
+            process.stdout.write(
+              chalk.hex(TEXT_DIM)("Running: ") +
+                chalk.cyan(`${inst.command} ${inst.args.join(" ")}`) +
+                "\n\n",
+            );
+            const code = await spawnInstall(inst.command, inst.args);
+            if (code === 0) {
+              process.stdout.write(chalk.green("\n\u2713 Installed.\n"));
+              return { ok: true };
+            }
+            process.stdout.write(chalk.red(`\n\u2717 Install failed (exit ${code}).\n`));
+            return { ok: false };
+          });
+          return;
+        }
+
+        if (cur.prompt) {
+          const p = cur.prompt;
+          void runWithSubshell(async () => promptForSecret(p));
+          return;
+        }
+
+        flashNote("No automatic fix");
+      }
+    };
+
+    stdin.on("data", onData);
   });
 }
 
-async function askYN(
-  rl: ReturnType<typeof createInterface>,
-  prompt: string,
-  defaultAns: "y" | "n",
-): Promise<boolean> {
-  const suffix = defaultAns === "y" ? chalk.dim(" [Y/n] ") : chalk.dim(" [y/N] ");
-  const raw = (await rl.question(prompt + suffix)).trim().toLowerCase();
-  if (raw === "") return defaultAns === "y";
-  if (raw === "y" || raw === "yes") return true;
-  if (raw === "n" || raw === "no") return false;
-  // Anything else: re-ask once, then fall through to default.
-  const retry = (await rl.question(chalk.dim('  Please answer "y" or "n": '))).trim().toLowerCase();
-  if (retry === "y" || retry === "yes") return true;
-  if (retry === "n" || retry === "no") return false;
-  return defaultAns === "y";
-}
+// ── Helpers ───────────────────────────────────────────────
 
-/**
- * Pick the next actionable item (block > required > optional-warn >
- * optional-missing) that the user hasn't already skipped this session.
- * Info-severity items are never returned.
- */
-function pickNextActionable(report: DoctorReport, skipped: Set<string>): DoctorCheck | undefined {
-  const tiers: Array<{
-    severity: DoctorCheck["severity"];
-    statuses: DoctorCheck["status"][];
-  }> = [
+function pickFirstActionable(items: DoctorCheck[]): number {
+  // Priority: required-missing/warn → optional-warn → optional-missing → 0.
+  const tiers: Array<{ severity: DoctorCheck["severity"]; statuses: DoctorCheck["status"][] }> = [
     { severity: "block", statuses: ["missing", "warn"] },
     { severity: "required", statuses: ["missing", "warn"] },
     { severity: "optional", statuses: ["warn"] },
     { severity: "optional", statuses: ["missing"] },
   ];
   for (const tier of tiers) {
-    const hit = report.checks.find(
-      (c) => c.severity === tier.severity && tier.statuses.includes(c.status) && !skipped.has(c.id),
+    const idx = items.findIndex(
+      (c) => c.severity === tier.severity && tier.statuses.includes(c.status),
     );
-    if (hit) return hit;
+    if (idx >= 0) return idx;
   }
-  return undefined;
+  return 0;
 }
 
-function countActionable(report: DoctorReport): number {
-  return report.checks.filter((c) => c.severity !== "info").length;
+function spawnInstall(command: string, args: string[]): Promise<number> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: "inherit" });
+    child.on("close", (code) => resolve(code ?? 1));
+    child.on("error", () => resolve(1));
+  });
 }
 
-function countDone(report: DoctorReport): number {
-  return report.checks.filter((c) => c.severity !== "info" && c.status === "ok").length;
+/**
+ * Prompt the user for a secret, validate it, persist via setStoredApiKey.
+ *
+ * Echoes input as it's typed — these are API keys, and node has no
+ * built-in masked-input primitive without dragging in a dep. Anyone
+ * with shell access could `cat ~/.gg/api-keys.json` anyway.
+ */
+async function promptForSecret(p: PromptHint): Promise<{ ok: boolean }> {
+  const dim = chalk.hex(TEXT_DIM);
+  const primary = chalk.hex(PRIMARY);
+  const accent = chalk.hex(ACCENT);
+  // Caller (runWithSubshell) has already cleared the screen + printed
+  // the banner. We just add the prompt body.
+  process.stdout.write("  " + primary.bold(p.label) + "\n");
+  if (p.hint) process.stdout.write("  " + dim(p.hint) + "\n");
+  process.stdout.write("  " + dim("(blank + Enter to cancel)") + "\n\n");
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const value = (await rl.question("  " + accent("\u276f "))).trim();
+      if (value.length === 0) {
+        process.stdout.write(dim("  Cancelled.\n"));
+        return { ok: false };
+      }
+      const err = p.validate?.(value);
+      if (err) {
+        process.stdout.write(chalk.yellow(`  ! ${err}\n`));
+        continue;
+      }
+      try {
+        setStoredApiKey(p.store, value);
+      } catch (e) {
+        process.stdout.write(chalk.red(`  \u2717 Failed to save: ${(e as Error).message}\n`));
+        return { ok: false };
+      }
+      process.stdout.write(chalk.green("  \u2713 Saved to ~/.gg/api-keys.json (chmod 600).\n"));
+      return { ok: true };
+    }
+    process.stdout.write(dim("  Too many invalid attempts. Cancelled.\n"));
+    return { ok: false };
+  } finally {
+    rl.close();
+  }
 }

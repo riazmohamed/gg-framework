@@ -11,6 +11,7 @@
  * so the agent can feed them straight into set_primary_correction.
  */
 import { readFileSync } from "node:fs";
+import { resolveApiKey } from "./auth/api-keys.js";
 
 export interface CdlValues {
   slope: [number, number, number];
@@ -61,7 +62,7 @@ export async function deriveColorMatch(
   targetFramePath: string,
   opts: ColorMatchOptions = {},
 ): Promise<CdlValues> {
-  const apiKey = opts.apiKey ?? process.env.OPENAI_API_KEY;
+  const apiKey = opts.apiKey ?? resolveApiKey("OPENAI_API_KEY", "openai");
   if (!apiKey) throw new Error("OPENAI_API_KEY required for color_match.");
 
   const refB64 = readFileSync(referenceFramePath).toString("base64");

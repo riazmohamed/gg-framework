@@ -19,6 +19,7 @@
  * Only one vision call covers both paths.
  */
 import { readFileSync } from "node:fs";
+import { resolveApiKey } from "./auth/api-keys.js";
 import { runFfmpeg } from "./media/ffmpeg.js";
 
 export interface SkinGradeColorBalance {
@@ -115,7 +116,7 @@ export async function deriveSkinGrade(
   targetFramePath: string,
   opts: SkinGradeOptions = {},
 ): Promise<SkinGrade> {
-  const apiKey = opts.apiKey ?? process.env.OPENAI_API_KEY;
+  const apiKey = opts.apiKey ?? resolveApiKey("OPENAI_API_KEY", "openai");
   if (!apiKey) throw new Error("OPENAI_API_KEY required for skin-tone matching.");
 
   const refB64 = readFileSync(referenceFramePath).toString("base64");

@@ -1,6 +1,6 @@
 {
   "name": "@kenkaiiii/gg-pixel",
-  "version": "4.3.92",
+  "version": "4.3.93",
   "type": "module",
   "description": "Universal error tracking pixel optimized for autonomous coding agents",
   "license": "MIT",
@@ -43,7 +43,10 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "magicast": "^0.5.2"
+    "@babel/parser": "^7.29.0",
+    "@babel/types": "^7.29.0",
+    "magicast": "^0.5.2",
+    "recast": "^0.23.11"
   },
   "peerDependencies": {
     "better-sqlite3": "^11.7.0 || ^12"

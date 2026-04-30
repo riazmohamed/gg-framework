@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { resolveApiKey } from "./auth/api-keys.js";
 
 /**
  * Vision shot scoring via OpenAI's chat completions API.
@@ -63,7 +64,7 @@ export async function scoreFrames(
   frames: FrameToScore[],
   opts: ScoreOptions = {},
 ): Promise<ShotScore[]> {
-  const apiKey = opts.apiKey ?? process.env.OPENAI_API_KEY;
+  const apiKey = opts.apiKey ?? resolveApiKey("OPENAI_API_KEY", "openai");
   if (!apiKey) throw new Error("OPENAI_API_KEY required for vision scoring.");
   if (frames.length === 0) return [];
 

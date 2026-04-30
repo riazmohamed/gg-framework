@@ -53,9 +53,10 @@ export async function runLogin(opts: { provider?: SupportedAuthProvider } = {}):
   if (opts.provider) {
     provider = opts.provider;
   } else {
+    const { getPackageVersion } = await import("../version.js");
     const picked = await renderLoginSelector({
       brand: "GG Editor",
-      version: "0.1.0",
+      version: getPackageVersion(),
       gradient: EDITOR_GRADIENT,
       primary: EDITOR_PRIMARY,
       accent: EDITOR_ACCENT,
@@ -179,8 +180,15 @@ export async function runStatus(): Promise<void> {
   await storage.load();
   const providers = await storage.listProviders();
 
-  process.stdout.write(orange.bold("\n  GG Editor — Auth\n"));
-  process.stdout.write(chalk.dim(`  ${storage.path}\n\n`));
+  const { renderCliBanner } = await import("../cli-banner.js");
+  const { getPackageVersion } = await import("../version.js");
+  process.stdout.write(
+    renderCliBanner({
+      version: getPackageVersion(),
+      screen: "Auth",
+      subtitle: storage.path,
+    }),
+  );
 
   if (providers.length === 0) {
     process.stdout.write(chalk.yellow("  No credentials stored. Run `ggeditor login`.\n"));

@@ -14,6 +14,7 @@ import {
 } from "./core/auth/index.js";
 import { isOnboarded, onboardedMarkerPath } from "./core/doctor.js";
 import { runDoctorInteractive } from "./core/doctor-runner.js";
+import { getPackageVersion } from "./core/version.js";
 import { discoverSkills } from "./core/skills-loader.js";
 import { discoverStyles } from "./core/styles-loader.js";
 import { SKILLS } from "./skills.js";
@@ -225,7 +226,7 @@ async function main(): Promise<void> {
     hostAvailable: caps.isAvailable,
     hostReason: caps.unavailableReason,
     cwd,
-    version: "0.1.0",
+    version: getPackageVersion(),
     persistSessions: true,
     onShutdown: cleanup,
   });

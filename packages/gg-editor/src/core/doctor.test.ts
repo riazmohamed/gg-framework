@@ -24,9 +24,7 @@ describe("runDoctor", () => {
         "ffmpeg",
         "ffprobe",
         "openai-key",
-        "premiere",
         "python",
-        "resolve",
         "whisper-cpp",
         "whisperx",
       ].sort(),
@@ -95,7 +93,7 @@ describe("isOnboarded / onboardedMarkerPath", () => {
     const r = runDoctor(home);
     const auth = r.checks.find((c) => c.id === "auth")!;
     expect(auth.status).toBe("ok");
-    expect(auth.detail).toContain("auth.json");
+    expect(auth.detail).toBe("signed in");
   });
 
   it("auth check reports missing on a fresh home", () => {
@@ -108,25 +106,16 @@ describe("isOnboarded / onboardedMarkerPath", () => {
 });
 
 describe("doctor severity / status invariants", () => {
-  it("OPENAI_API_KEY status follows the env var", () => {
+  it("OPENAI_API_KEY check returns ok when the env var is set", () => {
     const prev = process.env.OPENAI_API_KEY;
-    delete process.env.OPENAI_API_KEY;
-    try {
-      const r = runDoctor();
-      const k = r.checks.find((c) => c.id === "openai-key")!;
-      expect(k.status).toBe("missing");
-      expect(k.severity).toBe("optional");
-      expect(k.fix).toContain("OPENAI_API_KEY");
-    } finally {
-      if (prev !== undefined) process.env.OPENAI_API_KEY = prev;
-    }
-
     process.env.OPENAI_API_KEY = "test-fake-key";
     try {
       const r = runDoctor();
       const k = r.checks.find((c) => c.id === "openai-key")!;
       expect(k.status).toBe("ok");
+      expect(k.severity).toBe("optional");
       expect(k.fix).toBeUndefined();
+      expect(k.prompt).toBeUndefined();
     } finally {
       if (prev === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = prev;
@@ -147,9 +136,9 @@ describe("doctor severity / status invariants", () => {
     expect(fp.severity).toBe("required");
   });
 
-  it("host probes (resolve/premiere) are optional", () => {
+  it("does not include host (resolve/premiere) checks — those live in the runtime UI", () => {
     const r = runDoctor();
-    expect(r.checks.find((c) => c.id === "resolve")!.severity).toBe("optional");
-    expect(r.checks.find((c) => c.id === "premiere")!.severity).toBe("optional");
+    expect(r.checks.find((c) => c.id === "resolve")).toBeUndefined();
+    expect(r.checks.find((c) => c.id === "premiere")).toBeUndefined();
   });
 });

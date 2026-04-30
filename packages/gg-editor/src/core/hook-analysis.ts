@@ -22,6 +22,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { resolveApiKey } from "./auth/api-keys.js";
 
 export interface HookAnalysisFinding {
   /** Stable id for this issue. */
@@ -148,7 +149,7 @@ export async function runHookVision(
   laterFramePath: string,
   opts: HookVisionOptions = {},
 ): Promise<HookVisionResponse> {
-  const apiKey = opts.apiKey ?? process.env.OPENAI_API_KEY;
+  const apiKey = opts.apiKey ?? resolveApiKey("OPENAI_API_KEY", "openai");
   if (!apiKey) throw new Error("OPENAI_API_KEY required for analyze_hook.");
 
   const earlyB64 = readFileSync(earlyFramePath).toString("base64");
