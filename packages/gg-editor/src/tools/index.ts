@@ -16,6 +16,11 @@ import { createConcatVideosTool } from "./concat-videos.js";
 import { createColorMatchTool } from "./color-match.js";
 import { createGradeSkinTonesTool } from "./grade-skin-tones.js";
 import { createMatchClipColorTool } from "./match-clip-color.js";
+import { createCutFillerWordsTool } from "./cut-filler-words.js";
+import { createPunchInTool } from "./punch-in.js";
+import { createAnalyzeHookTool } from "./analyze-hook.js";
+import { createWriteKeywordCaptionsTool } from "./write-keyword-captions.js";
+import { createAddSfxAtCutsTool } from "./add-sfx-at-cuts.js";
 import { createComposeLayeredTool } from "./compose-layered.js";
 import { createCopyGradeTool } from "./copy-grade.js";
 import { createDetectSpeakerChangesTool } from "./detect-speaker-changes.js";
@@ -167,6 +172,13 @@ export function createEditorTools(opts: CreateEditorToolsOptions): AgentTool[] {
     createWriteLowerThirdTool(cwd),
     createWriteTitleCardTool(cwd),
 
+    // Retention-tuning ops (the YouTube / TikTok / Reels pipeline)
+    createCutFillerWordsTool(cwd),
+    createPunchInTool(cwd),
+    createAnalyzeHookTool(cwd),
+    createWriteKeywordCaptionsTool(cwd),
+    createAddSfxAtCutsTool(cwd),
+
     // Host-independent media ops
     createProbeMediaTool(cwd),
     createExtractAudioTool(cwd),
@@ -204,6 +216,11 @@ export { createCrossfadeVideosTool } from "./crossfade-videos.js";
 export { createColorMatchTool } from "./color-match.js";
 export { createGradeSkinTonesTool } from "./grade-skin-tones.js";
 export { createMatchClipColorTool } from "./match-clip-color.js";
+export { createCutFillerWordsTool } from "./cut-filler-words.js";
+export { createPunchInTool } from "./punch-in.js";
+export { createAnalyzeHookTool } from "./analyze-hook.js";
+export { createWriteKeywordCaptionsTool } from "./write-keyword-captions.js";
+export { createAddSfxAtCutsTool } from "./add-sfx-at-cuts.js";
 export { createComposeLayeredTool } from "./compose-layered.js";
 export { createCopyGradeTool } from "./copy-grade.js";
 export { createDetectSpeakerChangesTool } from "./detect-speaker-changes.js";

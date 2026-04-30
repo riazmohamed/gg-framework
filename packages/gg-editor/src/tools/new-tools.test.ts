@@ -26,6 +26,11 @@ import { createKenBurnsTool } from "./ken-burns.js";
 import { createTransitionVideosTool } from "./transition-videos.js";
 import { createGradeSkinTonesTool } from "./grade-skin-tones.js";
 import { createMatchClipColorTool } from "./match-clip-color.js";
+import { createCutFillerWordsTool } from "./cut-filler-words.js";
+import { createPunchInTool } from "./punch-in.js";
+import { createAnalyzeHookTool } from "./analyze-hook.js";
+import { createWriteKeywordCaptionsTool } from "./write-keyword-captions.js";
+import { createAddSfxAtCutsTool } from "./add-sfx-at-cuts.js";
 
 /**
  * Tool-wrapper tests — exercise the zod validation + error formatting layer
@@ -451,5 +456,177 @@ describe("transition_videos tool", () => {
       ctx as Parameters<typeof tool.execute>[1],
     );
     expect(r as string).toMatch(/^error:/);
+  });
+});
+
+describe("cut_filler_words tool", () => {
+  it("errors cleanly when transcript is missing", async () => {
+    const tool = createCutFillerWordsTool("/tmp");
+    const r = await tool.execute(
+      {
+        transcript: "/no/such/transcript.json",
+        sourceVideo: "/no/such/video.mp4",
+      },
+      ctx as Parameters<typeof tool.execute>[1],
+    );
+    expect(r as string).toMatch(/^error:/);
+  });
+
+  it("rejects transcripts without word timings", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "gg-fillercut-"));
+    const path = join(dir, "transcript.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        language: "en",
+        durationSec: 5,
+        segments: [{ start: 0, end: 5, text: "um hello uh world" }],
+      }),
+    );
+    const tool = createCutFillerWordsTool(dir);
+    const r = await tool.execute(
+      { transcript: "transcript.json", sourceVideo: "video.mp4" },
+      ctx as Parameters<typeof tool.execute>[1],
+    );
+    expect(r as string).toMatch(/no word-level timings/);
+  });
+});
+
+describe("punch_in tool", () => {
+  it("rejects when neither ranges nor cutPoints supplied", async () => {
+    const tool = createPunchInTool("/tmp");
+    const r = await tool.execute(
+      { input: "in.mp4", output: "out.mp4" },
+      ctx as Parameters<typeof tool.execute>[1],
+    );
+    // Either ffmpeg-missing OR our 'neither ranges nor cutPoints' error
+    // OR probe failure on a missing file. All are clean errors.
+    expect(r as string).toMatch(/^error:/);
+  });
+
+  it("rejects when input == output", async () => {
+    const tool = createPunchInTool("/tmp");
+    const r = await tool.execute(
+      {
+        input: "a.mp4",
+        output: "a.mp4",
+        ranges: [{ startSec: 1, endSec: 2 }],
+      },
+      ctx as Parameters<typeof tool.execute>[1],
+    );
+    expect(r as string).toMatch(/identical|ffmpeg/);
+  });
+});
+
+describe("analyze_hook tool", () => {
+  it("rejects when OPENAI_API_KEY is missing", async () => {
+    const prev = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      const tool = createAnalyzeHookTool("/tmp");
+      const r = await tool.execute(
+        { input: "video.mp4" },
+        ctx as Parameters<typeof tool.execute>[1],
+      );
+      expect(r as string).toMatch(/^error:.*(OPENAI_API_KEY|ffmpeg)/);
+    } finally {
+      if (prev !== undefined) process.env.OPENAI_API_KEY = prev;
+    }
+  });
+});
+
+describe("write_keyword_captions tool", () => {
+  it("emits an .ass file with two styles for a word-timestamped transcript", async () => {
+    const { mkdtempSync, writeFileSync, readFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "gg-kw-"));
+    const transcriptPath = join(dir, "t.json");
+    writeFileSync(
+      transcriptPath,
+      JSON.stringify({
+        language: "en",
+        durationSec: 2,
+        segments: [
+          {
+            start: 0,
+            end: 2,
+            text: "the retention graph spikes",
+            words: [
+              { start: 0, end: 0.3, text: "the" },
+              { start: 0.35, end: 0.85, text: "retention" },
+              { start: 0.9, end: 1.3, text: "graph" },
+              { start: 1.35, end: 1.9, text: "spikes" },
+            ],
+          },
+        ],
+      }),
+    );
+    const tool = createWriteKeywordCaptionsTool(dir);
+    const r = await tool.execute(
+      { transcript: "t.json", output: "caps.ass" },
+      ctx as Parameters<typeof tool.execute>[1],
+    );
+    const parsed = JSON.parse(r as string);
+    expect(parsed.path).toBe(join(dir, "caps.ass"));
+    const ass = readFileSync(parsed.path, "utf8");
+    expect(ass).toContain("Style: Default");
+    expect(ass).toContain("Style: Keyword");
+    expect(ass).toContain("retention");
+  });
+
+  it("errors when the transcript has no word timings", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "gg-kw-"));
+    const path = join(dir, "t.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        language: "en",
+        durationSec: 1,
+        segments: [{ start: 0, end: 1, text: "no word timings here" }],
+      }),
+    );
+    const tool = createWriteKeywordCaptionsTool(dir);
+    const r = await tool.execute(
+      { transcript: "t.json", output: "caps.ass" },
+      ctx as Parameters<typeof tool.execute>[1],
+    );
+    expect(r as string).toMatch(/no word timings/);
+  });
+});
+
+describe("add_sfx_at_cuts tool", () => {
+  it("surfaces a clean error when input file is missing", async () => {
+    const tool = createAddSfxAtCutsTool("/tmp");
+    const r = await tool.execute(
+      {
+        input: "/no/such/in.mp4",
+        sfx: "/no/such/whoosh.wav",
+        output: "/tmp/out.mp4",
+        cutPoints: [1, 2, 3],
+      },
+      ctx as Parameters<typeof tool.execute>[1],
+    );
+    expect(r as string).toMatch(/^error:/);
+  });
+
+  it("rejects when input == output", async () => {
+    const tool = createAddSfxAtCutsTool("/tmp");
+    const r = await tool.execute(
+      {
+        input: "a.mp4",
+        sfx: "sfx.wav",
+        output: "a.mp4",
+        cutPoints: [1],
+      },
+      ctx as Parameters<typeof tool.execute>[1],
+    );
+    expect(r as string).toMatch(/identical|ffmpeg/);
   });
 });

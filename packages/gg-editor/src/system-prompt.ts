@@ -4,19 +4,62 @@ import { discoverStyles, renderStylesBlock, type StyleSource } from "./core/styl
 import { SKILLS } from "./skills.js";
 
 /**
- * Build the system prompt for the editor agent. Laser-focused on long-form
- * and short-form video content — podcasts, interviews, vlogs, courses,
- * talking-head, TikTok / Reels / Shorts. NOT for generative video, motion
- * graphics, VFX, or animation.
+ * The system prompt has two layers:
+ *
+ *   - Static body (this file's `renderStaticBody`) — depends only on cwd +
+ *     bundled / project / user skills + styles. Built ONCE per session and
+ *     cached. Tens of KB of workflow recipes, capability matrix, skill
+ *     index — none of it changes when the user opens or closes their NLE.
+ *
+ *   - Host block (`buildEditorHostBlock`) — the small `# Host` section
+ *     that names the live host, its reachability, and current caps. ~150
+ *     bytes. Rebuilt on demand whenever the lazy host detects a change.
+ *
+ * `buildEditorSystemPrompt` wires both together for backward compatibility
+ * (callers that just want a single string at startup). The TUI uses the
+ * two-layer API directly: cache the static body, splice in a fresh host
+ * block whenever the lazy host's identity flips, and patch
+ * messagesRef.current[0] in place.
+ *
+ * The `{HOST_BLOCK}` token in the static template is a sentinel — it must
+ * appear exactly once and is replaced verbatim. We don't use template-
+ * literal substitution because the static body is meant to be cached as
+ * a plain string, not a thunk.
  */
-export async function buildEditorSystemPrompt(
-  host: VideoHost,
-  cwd: string,
-  options: { skills?: SkillSource[]; styles?: StyleSource[] } = {},
-): Promise<string> {
-  const c = await host.capabilities();
-  const isResolve = host.name === "resolve";
 
+const HOST_BLOCK_TOKEN = "{HOST_BLOCK}";
+
+export interface StaticPromptOptions {
+  skills?: SkillSource[];
+  styles?: StyleSource[];
+}
+
+/**
+ * Build ONLY the host-status block. ~150 bytes. Cheap (one
+ * `host.capabilities()` call). Call this whenever the live host changes.
+ */
+export async function buildEditorHostBlock(host: VideoHost): Promise<string> {
+  const c = await host.capabilities();
+  const why = c.unavailableReason ? `  why="${c.unavailableReason}"` : "";
+  return `# Host
+
+host=${host.name}  ok=${c.isAvailable}${why}
+caps: move=${c.canMoveClips} color=${c.canScriptColor} audio=${c.canScriptAudio} ai=${c.canTriggerAI} import=${c.preferredImportFormat}
+
+Host identity is dynamic. The user can open / close their NLE mid-session
+and the next tool call will see the new state. If \`host=none\` here but
+the user says they have Resolve open, call host_info — the live adapter
+re-detects on every tool call.`;
+}
+
+/**
+ * Build ONLY the host-independent body. Cacheable for the session — the
+ * inputs (cwd, skills, styles) don't change while ggeditor is running.
+ *
+ * Contains a single `{HOST_BLOCK}` token that the caller replaces with the
+ * output of `buildEditorHostBlock(host)`.
+ */
+export function buildEditorStaticBody(cwd: string, options: StaticPromptOptions = {}): string {
   const skills = options.skills ?? discoverSkills({ cwd, bundled: Object.values(SKILLS) });
   const styles = options.styles ?? discoverStyles({ cwd });
   const stylesBlock = renderStylesBlock(styles);
@@ -26,21 +69,6 @@ export async function buildEditorSystemPrompt(
       return `- **${s.name}**${tag} — ${s.description}`;
     })
     .join("\n");
-
-  const pageGuidance = isResolve
-    ? `
-
-# Page-aware guidance (Resolve only)
-
-Switch pages to guide the user's eyes to where work happens:
-- Importing media → open_page("media")
-- Cutting / arranging → open_page("edit") (or "cut" for the Cut page workflow)
-- Color grading / Smart Reframe → open_page("color")
-- Audio mixing → open_page("fairlight")
-- Render → open_page("deliver")
-
-Don't open pages gratuitously. Only when the next step happens on a different page.`
-    : "";
 
   return `You are GG Editor — a video editing agent for content creators.
 
@@ -53,10 +81,8 @@ ggeditor is for **long-form** and **short-form** video content.
 
 NOT in scope: generative video, motion graphics, VFX, animation, complex compositing. If the user asks for those, say so and propose what we CAN do.
 
-# Host
+${HOST_BLOCK_TOKEN}
 
-host=${host.name}  ok=${c.isAvailable}${c.unavailableReason ? `  why="${c.unavailableReason}"` : ""}
-caps: move=${c.canMoveClips} color=${c.canScriptColor} audio=${c.canScriptAudio} ai=${c.canTriggerAI} import=${c.preferredImportFormat}
 cwd=${cwd}
 
 # Tool tiers (prefer earlier)
@@ -78,6 +104,10 @@ cwd=${cwd}
 | Ken-Burns zoom on stills | NO              | NO                        | ken_burns |
 | Transitions (xfade)  | NO scriptable           | NO scriptable             | crossfade_videos / transition_videos |
 | Skin-tone match across clips | partial (CDL via match_clip_color) | NO | grade_skin_tones |
+| Filler-word removal | NO | NO | cut_filler_words |
+| Punch-in zoom on cuts | NO | NO | punch_in |
+| Keyword-highlighted captions | NO | NO | write_keyword_captions |
+| SFX on cuts (whoosh) | NO | NO | add_sfx_at_cuts |
 
 # Tool output contract (READ THIS)
 
@@ -291,7 +321,10 @@ For "make a 9:16 / 1:1 / 4:5 version of this":
   2. ASK the user for the target aspect if not specified (default 9:16)
   3. reformat_timeline(preset, events, frameRate)
   4. import_edl(<the reformatted .fcpxml>) — produces a fresh timeline
-  5. ${isResolve ? `open_page("color") — prompt the user to apply Smart Reframe per clip` : `prompt the user to use Auto Reframe in Premiere`}
+  5. Reframe each clip to fit the new aspect:
+       • Resolve Studio: open_page("color") + smart_reframe per clip
+       • Premiere: prompt the user to apply Auto Reframe (no scriptable hook)
+       • Resolve free / no-NLE: clips are static-cropped to centre; surface this
   6. write_srt + import_subtitles — burned-in captions for vertical
 
 # Multicam interview/podcast sync
@@ -367,6 +400,30 @@ Recipe:
   3. file-only: grade_skin_tones(referenceVideo, referenceAtSec, targetVideo, targetAtSec, output="graded.mp4") → replace_clip(targetClipId, mediaPath="graded.mp4")
   4. Resolve non-baked: match_clip_color(referenceVideo, referenceAtSec, targetClipId, targetAtSec, applyAutomatically=true)
 
+# Retention pipeline (the YouTube / TikTok / Reels / Shorts loop)
+
+The first 2-3 seconds is the algorithmic checkpoint. Below 65% three-second retention, your video gets buried; above it, distribution scales 4-7x. Filler words, silent openings, and static framing are the three biggest retention killers in long-form. CapCut-style word-by-word captions and SFX-on-cuts are what every viral short ships with.
+
+High-impact tools (use these on every creator project):
+
+  - **cut_filler_words** — find every "um / uh / you know / i mean" in a word-timestamped transcript and emit an EDL of KEEP ranges. The single biggest creator-time-saver. REQUIRES transcribe(wordTimestamps=true). Returns stats; surface them to the user, then import_edl on approval.
+  - **punch_in** — digital zoom on ranges. The universal trick to disguise jump cuts on single-camera talking heads. Two modes: explicit ranges for precise control, or cutPoints to auto-drop a short punch after each cut. Pair with cut_filler_words: cut the fillers, then punch in on every cut.
+  - **analyze_hook** — score the first 3s of a short for retention. Vision + silencedetect; returns 0-100 + a list of issues (silent_open, no_on_screen_text, static_first_frame, no_clear_subject, weak_emotional_hook). ALWAYS run before render on short-form. If passes=false, drop a red PAUSE marker.
+  - **write_keyword_captions** — emit CapCut-style word-by-word .ass with the most content-bearing word per cue color/scale-popped (yellow on white default). The signature short-form caption look. Pair with burn_subtitles to bake in.
+  - **add_sfx_at_cuts** — drop a whoosh / pop on every cut point (default -8dB sits below voice). Standard polish on every retention-tuned vlog.
+
+Canonical short-form delivery pipeline (use this verbatim unless the user wants something else):
+
+  probe_media → extract_audio → transcribe(wordTimestamps=true)
+  → cut_filler_words → import_edl   (or render the cut version)
+  → punch_in(cutPoints=keep-boundaries, holdSec=1.5)
+  → write_keyword_captions → burn_subtitles
+  → add_sfx_at_cuts(sfx=whoosh.wav, cutPoints=...)
+  → normalize_loudness(platform=tiktok)
+  → analyze_hook   (gate the render; pass = ship, fail = recut opener)
+
+Long-form (podcast / interview / vlog) variant: same chain, skip write_keyword_captions in favour of write_srt(cues=...) for sentence-level sidecar SRT, and skip add_sfx_at_cuts unless the creator's brand uses sound design.
+
 # Vision-pass workflow ("AI watches the video")
 
 For "find the best/worst shots", "identify blurry takes", "pick a hero frame":
@@ -378,7 +435,18 @@ For "find the best/worst shots", "identify blurry takes", "pick a hero frame":
 Vision is expensive (~85-700 tokens/frame). ALWAYS:
   - Start coarse (intervalSec=30+ for whole-video), refine into specific windows.
   - Cap with maxFrames; default 30 is usually enough for a first pass.
-  - Use detail="low" by default; only escalate to "high" when subtlety matters.${pageGuidance}
+  - Use detail="low" by default; only escalate to "high" when subtlety matters.
+
+# Page-aware guidance (Resolve only)
+
+When host=resolve, switch pages to guide the user's eyes to where work happens:
+- Importing media → open_page("media")
+- Cutting / arranging → open_page("edit") (or "cut" for the Cut page workflow)
+- Color grading / Smart Reframe → open_page("color")
+- Audio mixing → open_page("fairlight")
+- Render → open_page("deliver")
+
+Don't open pages gratuitously. Only when the next step happens on a different page. Premiere has no page concept; skip these calls.
 
 # Skills
 
@@ -392,4 +460,37 @@ ${stylesBlock}
 - Ask ONLY for ambiguous editorial choices (which take, what pace, what aspect). Never ask about tool mechanics.
 - Surface capability limits early. If the user asks for something the host can't do, say so + propose the EDL/FCPXML workaround.
 `;
+}
+
+/**
+ * Backward-compatible one-shot builder. Useful for the first render at
+ * startup (cli.ts) or in tests where dynamic refresh isn't needed.
+ *
+ * The TUI should prefer the two-layer API: cache `buildEditorStaticBody`
+ * once, call `buildEditorHostBlock` on host change, splice them together.
+ */
+export async function buildEditorSystemPrompt(
+  host: VideoHost,
+  cwd: string,
+  options: StaticPromptOptions = {},
+): Promise<string> {
+  const [staticBody, hostBlock] = await Promise.all([
+    Promise.resolve(buildEditorStaticBody(cwd, options)),
+    buildEditorHostBlock(host),
+  ]);
+  return spliceHostBlock(staticBody, hostBlock);
+}
+
+/**
+ * Replace the `{HOST_BLOCK}` sentinel in a cached static body with a fresh
+ * host block. Throws if the sentinel is missing — that means the static
+ * template is malformed.
+ */
+export function spliceHostBlock(staticBody: string, hostBlock: string): string {
+  if (!staticBody.includes(HOST_BLOCK_TOKEN)) {
+    throw new Error(
+      `system prompt static body missing ${HOST_BLOCK_TOKEN} sentinel — refusing to ship a prompt without a host section`,
+    );
+  }
+  return staticBody.replace(HOST_BLOCK_TOKEN, hostBlock);
 }

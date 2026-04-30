@@ -13,13 +13,21 @@ export {
   ResolveAdapter,
 } from "./core/hosts/index.js";
 export type { VideoHost } from "./core/hosts/index.js";
+export { createLazyHost } from "./core/hosts/lazy.js";
+export type { LazyHost, LazyHostOptions } from "./core/hosts/lazy.js";
 
 // Media
 export { checkFfmpeg, checkFfprobe, probeMedia, runFfmpeg } from "./core/media/ffmpeg.js";
 export type { FfmpegResult, MediaProbe } from "./core/media/ffmpeg.js";
 
 // System prompt
-export { buildEditorSystemPrompt } from "./system-prompt.js";
+export {
+  buildEditorSystemPrompt,
+  buildEditorStaticBody,
+  buildEditorHostBlock,
+  spliceHostBlock,
+} from "./system-prompt.js";
+export type { StaticPromptOptions } from "./system-prompt.js";
 
 // Auth (shared with ggcoder via ~/.gg/auth.json)
 export {

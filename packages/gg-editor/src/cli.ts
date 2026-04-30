@@ -10,14 +10,12 @@ import {
   runStatus,
   type SupportedAuthProvider,
 } from "./core/auth/index.js";
-import { createHost } from "./core/hosts/index.js";
 import { discoverSkills } from "./core/skills-loader.js";
 import { discoverStyles } from "./core/styles-loader.js";
 import { SKILLS } from "./skills.js";
-import { PremiereAdapter } from "./core/hosts/premiere/adapter.js";
-import { ResolveAdapter } from "./core/hosts/resolve/adapter.js";
+import { createLazyHost } from "./core/hosts/lazy.js";
 import { hasLastSession, loadLastSession } from "./core/sessions.js";
-import { buildEditorSystemPrompt } from "./system-prompt.js";
+import { buildEditorStaticBody, buildEditorSystemPrompt } from "./system-prompt.js";
 import { createEditorTools } from "./tools/index.js";
 import { renderEditorTui } from "./ui/render.js";
 
@@ -147,12 +145,18 @@ async function main(): Promise<void> {
     (PROVIDER_ORDER as string[]).includes(p),
   ) as Provider[];
 
-  const host = createHost();
+  // Lazy host: re-detects on every tool call (cached for 2s) so opening
+  // Resolve / Premiere mid-session is picked up without restarting.
+  const host = createLazyHost();
   const caps = await host.capabilities();
   const cwd = process.cwd();
 
   const skills = discoverSkills({ cwd, bundled: Object.values(SKILLS) });
   const styles = discoverStyles({ cwd });
+  // Static body is host-independent and cached for the session. The host
+  // block is spliced in at startup and re-spliced by App.tsx whenever the
+  // user opens / closes their NLE.
+  const staticPromptBody = buildEditorStaticBody(cwd, { skills, styles });
   const system = await buildEditorSystemPrompt(host, cwd, { skills, styles });
   const reviewConfig =
     provider === "anthropic" ||
@@ -164,8 +168,7 @@ async function main(): Promise<void> {
   const tools = createEditorTools({ host, cwd, reviewConfig, skills });
 
   const cleanup = () => {
-    if (host instanceof ResolveAdapter) host.shutdown();
-    if (host instanceof PremiereAdapter) host.shutdown();
+    host.shutdown();
   };
   process.on("SIGINT", () => {
     cleanup();
@@ -180,6 +183,8 @@ async function main(): Promise<void> {
     accountId,
     tools,
     systemPrompt: system,
+    staticPromptBody,
+    host,
     priorMessages,
     loggedInProviders,
     hostName: host.name,

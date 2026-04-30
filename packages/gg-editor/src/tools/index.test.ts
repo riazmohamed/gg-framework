@@ -85,6 +85,12 @@ const EXPECTED_TOOLS = [
   "pick_best_takes",
   "multicam_sync",
   "detect_speaker_changes",
+  // Retention-tuning ops (the YouTube / TikTok / Reels pipeline)
+  "cut_filler_words",
+  "punch_in",
+  "analyze_hook",
+  "write_keyword_captions",
+  "add_sfx_at_cuts",
   // Skills
   "read_skill",
 ];

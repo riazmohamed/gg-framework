@@ -19,8 +19,9 @@ import { useTheme } from "@kenkaiiii/ggcoder/ui/theme";
 import type { Message, Provider } from "@kenkaiiii/gg-ai";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { Banner } from "./components/Banner.js";
-import { createHost, detectHost } from "../core/hosts/index.js";
+import type { LazyHost } from "../core/hosts/lazy.js";
 import { saveSession } from "../core/sessions.js";
+import { buildEditorHostBlock, spliceHostBlock } from "../system-prompt.js";
 
 // Editor brand pulse — amber → orange → rose. Distinct from ggcoder's blue/purple.
 const THINKING_BORDER_COLORS = ["#fbbf24", "#f97316", "#ec4899", "#f97316", "#fbbf24"];
@@ -36,6 +37,19 @@ export interface AppProps {
   accountId?: string;
   tools: AgentTool[];
   systemPrompt: string;
+  /**
+   * Cached host-independent prompt body. Contains a `{HOST_BLOCK}` sentinel
+   * that the App splices a fresh host block into whenever the live host
+   * changes. Splitting prevents reflowing tens of KB of static workflow
+   * recipes every 3s on the polling tick.
+   */
+  staticPromptBody: string;
+  /**
+   * Lazy host shared with the CLI. Re-detects on demand (cached 2s) so the
+   * polling loop and the agent's tool calls see the same live adapter,
+   * instead of each spawning their own.
+   */
+  host: LazyHost;
   /** Prior messages for resume; empty array for fresh session. */
   priorMessages: Message[];
 
@@ -159,18 +173,25 @@ export function App(props: AppProps) {
     markers: number;
   } | null>(null);
 
+  // Track the currently-installed host name in the system message so we
+  // only rebuild + splice when the host identity actually flips. Reading
+  // back from messagesRef is unreliable (it's mutated by the agent loop)
+  // so we keep our own pointer.
+  const installedHostNameRef = useRef<string>(props.hostName);
+
   useEffect(() => {
     let cancelled = false;
+    const host = props.host;
     const tick = async () => {
-      const detected = detectHost();
-      const fresh = createHost(detected.name === "none" ? "none" : detected.name);
       try {
-        const caps = await fresh.capabilities();
+        const caps = await host.capabilities();
         if (cancelled) return;
+        const liveName = host.name;
+        const liveDisplay = host.displayName;
         setHostStatus((prev) => {
           const next = {
-            name: fresh.name,
-            displayName: fresh.displayName,
+            name: liveName,
+            displayName: liveDisplay,
             available: caps.isAvailable,
             reason: caps.unavailableReason,
           };
@@ -184,11 +205,30 @@ export function App(props: AppProps) {
           return next;
         });
 
+        // If the host *identity* changed, rebuild the host block of the
+        // system prompt and patch messagesRef.current[0] in place. The
+        // static body is reused — only ~150 bytes of host-specific text
+        // is regenerated.
+        if (installedHostNameRef.current !== liveName) {
+          try {
+            const hostBlock = await buildEditorHostBlock(host);
+            if (cancelled) return;
+            const fresh = spliceHostBlock(props.staticPromptBody, hostBlock);
+            const sys = messagesRef.current[0];
+            if (sys && sys.role === "system") {
+              messagesRef.current[0] = { role: "system", content: fresh };
+            }
+            installedHostNameRef.current = liveName;
+          } catch {
+            /* ignore — keep the previous prompt rather than crash */
+          }
+        }
+
         // Only fetch timeline when host is connected. Cheap (~30ms) but
         // still pointless if nothing's there.
-        if (caps.isAvailable && fresh.name !== "none") {
+        if (caps.isAvailable && liveName !== "none") {
           try {
-            const t = await fresh.getTimeline();
+            const t = await host.getTimeline();
             if (cancelled) return;
             setTimelineGlance({
               name: t.name,
@@ -216,7 +256,7 @@ export function App(props: AppProps) {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [props.hostName]);
+  }, [props.host, props.staticPromptBody, props.hostName]);
 
   const nextId = () => ++idCounter.current;
 
