@@ -466,8 +466,8 @@ function getInlineSummary(name: string, result: string, isError: boolean): strin
       return `${lines.length} line${lines.length !== 1 ? "s" : ""}`;
     }
     case "write": {
-      const firstLine = result.split("\n")[0];
-      return firstLine;
+      const match = result.match(/^Wrote \d+ lines?/);
+      return match ? match[0] : result.split("\n")[0];
     }
     case "bash": {
       const match = result.match(/^Exit code: (.+)/);
