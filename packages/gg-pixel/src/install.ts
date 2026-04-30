@@ -566,15 +566,12 @@ function wireNextjs({ projectRoot, projectKey, ingestUrl }: WiringInput): Wiring
 
 function writeNextInstrumentation(path: string, ingestUrl: string, projectKey?: string): void {
   const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
-  if (existing.includes("@kenkaiiii/gg-pixel")) return; // idempotent
-
-  const newContent = existing
-    ? existing + "\n" + nextInstrumentationAppend(ingestUrl, projectKey)
-    : nextInstrumentationStandalone(ingestUrl, projectKey);
-  writeFileSync(path, newContent, "utf8");
+  const block = nextInstrumentationBlock(ingestUrl, projectKey);
+  const next = upsertPixelBlock(existing, block);
+  if (next !== existing) writeFileSync(path, next, "utf8");
 }
 
-function nextInstrumentationStandalone(ingestUrl: string, projectKey?: string): string {
+function nextInstrumentationBlock(ingestUrl: string, projectKey?: string): string {
   const fallback = projectKey ? ` ?? ${JSON.stringify(projectKey)}` : "";
   return `// Next.js auto-loads this file on server start. Pixel hooks the
 // uncaughtExceptionMonitor + unhandledRejection events for API routes,
@@ -587,21 +584,7 @@ export async function register() {
       sink: { kind: "http", ingestUrl: ${JSON.stringify(`${ingestUrl}/ingest`)} },
     });
   }
-}
-`;
-}
-
-function nextInstrumentationAppend(ingestUrl: string, projectKey?: string): string {
-  const fallback = projectKey ? ` ?? ${JSON.stringify(projectKey)}` : "";
-  return `// gg-pixel: server-side error tracking
-import { initPixel } from "@kenkaiiii/gg-pixel";
-if (typeof process !== "undefined" && process.env.NEXT_RUNTIME === "nodejs") {
-  initPixel({
-    projectKey: process.env.GG_PIXEL_KEY${fallback},
-    sink: { kind: "http", ingestUrl: ${JSON.stringify(`${ingestUrl}/ingest`)} },
-  });
-}
-`;
+}`;
 }
 
 function findNextLayout(projectRoot: string): string | null {
@@ -745,15 +728,22 @@ function wireSveltekit({ projectRoot, projectKey, ingestUrl }: WiringInput): Wir
   const serverPath = join(projectRoot, "src/hooks.server.ts");
   const clientPath = join(projectRoot, "src/hooks.client.ts");
   if (!existsSync(dirname(serverPath))) mkdirSync(dirname(serverPath), { recursive: true });
-  appendOrCreate(
+
+  upsertPixelBlockInFile(
     serverPath,
-    `import { initPixel } from "@kenkaiiii/gg-pixel";\ninitPixel({\n  projectKey: process.env.GG_PIXEL_KEY ?? ${JSON.stringify(projectKey)},\n  sink: { kind: "http", ingestUrl: ${JSON.stringify(`${ingestUrl}/ingest`)} },\n});\n`,
-    "@kenkaiiii/gg-pixel",
+    `import { initPixel } from "@kenkaiiii/gg-pixel";
+initPixel({
+  projectKey: process.env.GG_PIXEL_KEY ?? ${JSON.stringify(projectKey)},
+  sink: { kind: "http", ingestUrl: ${JSON.stringify(`${ingestUrl}/ingest`)} },
+});`,
   );
-  appendOrCreate(
+  upsertPixelBlockInFile(
     clientPath,
-    `import { initPixel } from "@kenkaiiii/gg-pixel/browser";\ninitPixel({\n  projectKey: ${JSON.stringify(projectKey)},\n  ingestUrl: ${JSON.stringify(ingestUrl)},\n});\n`,
-    "@kenkaiiii/gg-pixel/browser",
+    `import { initPixel } from "@kenkaiiii/gg-pixel/browser";
+initPixel({
+  projectKey: ${JSON.stringify(projectKey)},
+  ingestUrl: ${JSON.stringify(ingestUrl)},
+});`,
   );
   return {
     primaryInitPath: clientPath,
@@ -1139,14 +1129,43 @@ function pickPath(root: string, candidates: string[]): string | null {
   return null;
 }
 
-function appendOrCreate(filePath: string, snippet: string, marker: string): void {
-  if (existsSync(filePath)) {
-    const existing = readFileSync(filePath, "utf8");
-    if (existing.includes(marker)) return;
-    writeFileSync(filePath, existing + "\n" + snippet, "utf8");
-    return;
+// Wrap an auto-generated snippet between markers so re-installs (which mint
+// a fresh project_id+key+secret when the local mapping is legacy) can replace
+// the previous block in-place instead of bailing on a "looks already wired"
+// check and leaving a stale key behind. User code outside the markers is
+// preserved untouched.
+const PIXEL_MARK_BEGIN = "// >>> gg-pixel auto-generated — do not edit between these markers <<<";
+const PIXEL_MARK_END = "// >>> /gg-pixel <<<";
+
+export function wrapPixelBlock(content: string): string {
+  return `${PIXEL_MARK_BEGIN}\n${content.replace(/\s+$/, "")}\n${PIXEL_MARK_END}\n`;
+}
+
+/**
+ * If `existing` already contains a markered gg-pixel block, replace it with a
+ * freshly-wrapped `block`. Otherwise append the wrapped block to the end of
+ * `existing`. Idempotent when the new block matches the existing one.
+ */
+export function upsertPixelBlock(existing: string, block: string): string {
+  const wrapped = wrapPixelBlock(block);
+  const beginIdx = existing.indexOf(PIXEL_MARK_BEGIN);
+  if (beginIdx !== -1) {
+    const endIdx = existing.indexOf(PIXEL_MARK_END, beginIdx);
+    if (endIdx !== -1) {
+      const after = endIdx + PIXEL_MARK_END.length;
+      const trailNL = existing[after] === "\n" ? 1 : 0;
+      return existing.slice(0, beginIdx) + wrapped + existing.slice(after + trailNL);
+    }
   }
-  writeFileSync(filePath, snippet, "utf8");
+  if (existing.length === 0) return wrapped;
+  const sep = existing.endsWith("\n") ? "" : "\n";
+  return existing + sep + "\n" + wrapped;
+}
+
+function upsertPixelBlockInFile(filePath: string, block: string): void {
+  const existing = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
+  const next = upsertPixelBlock(existing, block);
+  if (next !== existing) writeFileSync(filePath, next, "utf8");
 }
 
 function injectImport(entryPath: string, initFilePath: string): EntryWiringResult {

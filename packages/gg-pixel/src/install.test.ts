@@ -515,6 +515,138 @@ describe("install — hybrid framework wiring", () => {
   });
 });
 
+describe("install — re-install with a fresh project rewrites stale keys", () => {
+  function setupHome() {
+    const home = mkdtempSync(join(tmpdir(), "gg-pixel-home-"));
+    return { home, cleanup: () => rmSync(home, { recursive: true, force: true }) };
+  }
+
+  it("Next.js: re-install with a new key replaces the stale fallback inside the marker block", async () => {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "myapp", dependencies: { next: "^15.0.0", react: "^19.0.0" } }),
+    );
+    mkdirSync(join(dir, "app"), { recursive: true });
+    writeFileSync(
+      join(dir, "app/layout.tsx"),
+      `export default function RootLayout({ children }: { children: React.ReactNode }) {\n  return <html><body>{children}</body></html>;\n}\n`,
+    );
+    const { home, cleanup } = setupHome();
+    try {
+      // First install — gets old key.
+      await install({
+        cwd: dir,
+        homeDir: home,
+        skipPackageInstall: true,
+        fetchFn: fakeFetch({ id: "proj_first", key: "pk_live_OLD_KEY" }),
+      });
+      const inst1 = readFileSync(join(dir, "instrumentation.ts"), "utf8");
+      expect(inst1).toContain("pk_live_OLD_KEY");
+      expect(inst1).toContain(">>> gg-pixel auto-generated");
+
+      // Simulate the legacy-mapping scenario: blow away the local mapping so the
+      // installer mints a fresh project on the next run.
+      rmSync(join(home, ".gg", "projects.json"));
+      rmSync(join(dir, ".env"));
+
+      await install({
+        cwd: dir,
+        homeDir: home,
+        skipPackageInstall: true,
+        fetchFn: fakeFetch({ id: "proj_second", key: "pk_live_NEW_KEY" }),
+      });
+      const inst2 = readFileSync(join(dir, "instrumentation.ts"), "utf8");
+      expect(inst2).toContain("pk_live_NEW_KEY");
+      expect(inst2).not.toContain("pk_live_OLD_KEY");
+      // Exactly one markered block — no accumulation across installs.
+      const matches = inst2.match(/>>> gg-pixel auto-generated/g) ?? [];
+      expect(matches).toHaveLength(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("SvelteKit: re-install replaces the stale key in hooks.{server,client}.ts", async () => {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "myapp", devDependencies: { "@sveltejs/kit": "^2.0.0" } }),
+    );
+    const { home, cleanup } = setupHome();
+    try {
+      await install({
+        cwd: dir,
+        homeDir: home,
+        skipPackageInstall: true,
+        fetchFn: fakeFetch({ id: "proj_first", key: "pk_live_SVK_OLD" }),
+      });
+      const server1 = readFileSync(join(dir, "src/hooks.server.ts"), "utf8");
+      const client1 = readFileSync(join(dir, "src/hooks.client.ts"), "utf8");
+      expect(server1).toContain("pk_live_SVK_OLD");
+      expect(client1).toContain("pk_live_SVK_OLD");
+
+      rmSync(join(home, ".gg", "projects.json"));
+      rmSync(join(dir, ".env"));
+
+      await install({
+        cwd: dir,
+        homeDir: home,
+        skipPackageInstall: true,
+        fetchFn: fakeFetch({ id: "proj_second", key: "pk_live_SVK_NEW" }),
+      });
+      const server2 = readFileSync(join(dir, "src/hooks.server.ts"), "utf8");
+      const client2 = readFileSync(join(dir, "src/hooks.client.ts"), "utf8");
+      expect(server2).toContain("pk_live_SVK_NEW");
+      expect(server2).not.toContain("pk_live_SVK_OLD");
+      expect(client2).toContain("pk_live_SVK_NEW");
+      expect(client2).not.toContain("pk_live_SVK_OLD");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("preserves user code outside the marker block on re-install", async () => {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "myapp", dependencies: { next: "^15.0.0", react: "^19.0.0" } }),
+    );
+    mkdirSync(join(dir, "app"), { recursive: true });
+    writeFileSync(
+      join(dir, "app/layout.tsx"),
+      `export default function RootLayout({ children }: { children: React.ReactNode }) { return <html><body>{children}</body></html>; }`,
+    );
+    const { home, cleanup } = setupHome();
+    try {
+      await install({
+        cwd: dir,
+        homeDir: home,
+        skipPackageInstall: true,
+        fetchFn: fakeFetch({ id: "proj_first", key: "pk_live_OLD" }),
+      });
+      // User adds custom Sentry init *outside* our markered block.
+      const before = readFileSync(join(dir, "instrumentation.ts"), "utf8");
+      const userBlock = `\n// user code: Sentry init\nexport function userHook() { return 42; }\n`;
+      writeFileSync(join(dir, "instrumentation.ts"), before + userBlock, "utf8");
+
+      rmSync(join(home, ".gg", "projects.json"));
+      rmSync(join(dir, ".env"));
+
+      await install({
+        cwd: dir,
+        homeDir: home,
+        skipPackageInstall: true,
+        fetchFn: fakeFetch({ id: "proj_second", key: "pk_live_NEW" }),
+      });
+      const after = readFileSync(join(dir, "instrumentation.ts"), "utf8");
+      expect(after).toContain("pk_live_NEW");
+      expect(after).not.toContain("pk_live_OLD");
+      expect(after).toContain("Sentry init"); // user code untouched
+      expect(after).toContain("userHook"); // user code untouched
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("install — idempotency", () => {
   it("reuses the existing project_id and key when re-running on the same directory", async () => {
     writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "myapp" }));
