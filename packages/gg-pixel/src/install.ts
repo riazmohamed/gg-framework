@@ -890,6 +890,11 @@ function wireElectron({ projectRoot, pkg, projectKey, ingestUrl }: WiringInput):
       "renderer.ts",
       "renderer.tsx",
       "renderer.js",
+      // `src/renderer.{ts,tsx,js}` is the convention used by multi-window
+      // Electron apps that keep all renderer entries in src/.
+      "src/renderer.ts",
+      "src/renderer.tsx",
+      "src/renderer.js",
       "src/index.tsx",
       "src/index.jsx",
       "src/main.tsx",
@@ -951,7 +956,10 @@ function resolveMainEntryFromPkg(projectRoot: string, pkg: PackageJson): string 
   ]);
 }
 
-const RENDERER_HTML_DIRS = ["ui", "renderer", "src/renderer", "public", "static"];
+// Directories the installer scans for renderer HTML files. `src` covers the
+// common multi-window Electron pattern where each window has a paired
+// `src/<name>.html` + `src/<name>.ts` entry (shortformed-style apps).
+const RENDERER_HTML_DIRS = ["ui", "renderer", "src/renderer", "src", "public", "static"];
 
 function findRendererHtmlFiles(projectRoot: string): string[] {
   for (const dir of RENDERER_HTML_DIRS) {

@@ -714,6 +714,60 @@ export async function register() {
     }
   });
 
+  it("Electron multi-window: detects HTMLs in src/ and patches each one", async () => {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "shortformed-like",
+        main: "main.js",
+        dependencies: { electron: "^33.0.0" },
+      }),
+    );
+    writeFileSync(join(dir, "main.js"), `const { app } = require("electron");\napp.whenReady();\n`);
+    mkdirSync(join(dir, "src"), { recursive: true });
+    // Two HTML windows + a renderer.ts entry — what shortformed-style apps look like.
+    const htmlBody = (title: string) =>
+      `<!DOCTYPE html><html><head>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self';">
+  <title>${title}</title>
+  <script src="${title.toLowerCase()}.js"></script>
+</head><body><div id="root"></div></body></html>`;
+    writeFileSync(join(dir, "src/index.html"), htmlBody("Index"));
+    writeFileSync(join(dir, "src/editor.html"), htmlBody("Editor"));
+    writeFileSync(join(dir, "src/renderer.ts"), `console.log("renderer entry");\n`);
+    // Pre-stage the IIFE bundle so install doesn't warn about it missing.
+    mkdirSync(join(dir, "node_modules/@kenkaiiii/gg-pixel/dist"), { recursive: true });
+    writeFileSync(
+      join(dir, "node_modules/@kenkaiiii/gg-pixel/dist/browser.iife.global.js"),
+      "/*iife*/",
+    );
+    const { home, cleanup } = setupHome();
+    try {
+      const result = await install({
+        cwd: dir,
+        homeDir: home,
+        skipPackageInstall: true,
+        fetchFn: fakeFetch({ id: "proj_x", key: "pk_live_MULTI" }),
+      });
+      // Both HTMLs got the marker + the current key.
+      const idx = readFileSync(join(dir, "src/index.html"), "utf8");
+      const ed = readFileSync(join(dir, "src/editor.html"), "utf8");
+      expect(idx).toContain("gg-pixel: auto-wired");
+      expect(idx).toContain("pk_live_MULTI");
+      expect(ed).toContain("gg-pixel: auto-wired");
+      expect(ed).toContain("pk_live_MULTI");
+      // No "couldn't auto-detect renderer entry" warning — the HTML path took
+      // over because src/ is now in RENDERER_HTML_DIRS.
+      expect(
+        result.warnings.find((w) =>
+          w.includes("Could not auto-detect the Electron renderer entry"),
+        ),
+      ).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
+
   it("findMappingByPath prefers an entry with a secret over a legacy entry at the same path", async () => {
     writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "myapp" }));
     const { home, cleanup } = setupHome();
