@@ -1,6 +1,6 @@
 {
   "name": "@kenkaiiii/gg-pixel",
-  "version": "4.3.88",
+  "version": "4.3.89",
   "type": "module",
   "description": "Universal error tracking pixel optimized for autonomous coding agents",
   "license": "MIT",
@@ -42,12 +42,18 @@
     "check": "tsc --noEmit",
     "test": "vitest run"
   },
-  "dependencies": {
-    "better-sqlite3": "^11.7.0"
+  "peerDependencies": {
+    "better-sqlite3": "^11.7.0 || ^12"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
+    "better-sqlite3": "^11.7.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.4"
   },

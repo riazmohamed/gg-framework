@@ -1,8 +1,39 @@
 import { homedir } from "node:os";
 import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import Database from "better-sqlite3";
 import type { Sink, WireEvent } from "../types.js";
+
+// `better-sqlite3` is an OPTIONAL peer dependency. Apps that only use the
+// HTTP sink (the common case) don't need it installed — keeping it out of
+// the eager import graph also avoids the deprecated `prebuild-install`
+// warning and its tight node-engines constraint at every `npm install`.
+const requireBSQ = createRequire(import.meta.url);
+
+interface BSqStatement {
+  run(args: Record<string, unknown>): unknown;
+}
+interface BSqDb {
+  pragma(s: string): unknown;
+  exec(s: string): void;
+  prepare(s: string): BSqStatement;
+  close(): unknown;
+}
+type BSqCtor = new (path: string) => BSqDb;
+
+function loadBetterSqlite3(): BSqCtor {
+  try {
+    const mod = requireBSQ("better-sqlite3") as BSqCtor | { default: BSqCtor };
+    return typeof mod === "function" ? mod : mod.default;
+  } catch (err) {
+    throw new Error(
+      '@kenkaiiii/gg-pixel: `kind: "local"` requires the optional peer dependency `better-sqlite3`. ' +
+        "Install it with `npm install better-sqlite3` (or your package manager's equivalent). " +
+        `Underlying error: ${(err as Error).message}`,
+      { cause: err },
+    );
+  }
+}
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS events (
@@ -25,10 +56,11 @@ const SCHEMA = `
 `;
 
 export class LocalSqliteSink implements Sink {
-  private readonly db: Database.Database;
-  private readonly insert: Database.Statement;
+  private readonly db: BSqDb;
+  private readonly insert: BSqStatement;
 
   constructor(path?: string) {
+    const Database = loadBetterSqlite3();
     const resolved = path ?? join(homedir(), ".gg", "errors.db");
     mkdirSync(dirname(resolved), { recursive: true });
     this.db = new Database(resolved);
