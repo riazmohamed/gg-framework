@@ -10,7 +10,10 @@ import {
   writeProjectsMapping,
   renderInitFile,
   wireEntryFile,
+  findFirstJsxElementByName,
 } from "./install.js";
+import { parse as recastParse } from "recast";
+import * as bp from "@babel/parser";
 
 let dir: string;
 beforeEach(() => {
@@ -136,8 +139,12 @@ describe("detectPackageManager", () => {
     writeFileSync(join(dir, "pnpm-lock.yaml"), "");
     expect(detectPackageManager(dir)).toBe("pnpm");
   });
-  it("detects bun", () => {
+  it("detects bun via legacy bun.lockb", () => {
     writeFileSync(join(dir, "bun.lockb"), "");
+    expect(detectPackageManager(dir)).toBe("bun");
+  });
+  it("detects bun via modern bun.lock (Bun 1.2+)", () => {
+    writeFileSync(join(dir, "bun.lock"), "");
     expect(detectPackageManager(dir)).toBe("bun");
   });
   it("detects yarn", () => {
@@ -1287,5 +1294,52 @@ describe("install — file artifacts on disk", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("findFirstJsxElementByName", () => {
+  // Use the same recast.parse(...) call wireFramework uses, so the AST has the
+  // recast wrappers + token back-references that previously blew the stack.
+  function parseLayout(src: string): unknown {
+    return recastParse(src, {
+      parser: {
+        parse: (s: string) =>
+          bp.parse(s, {
+            sourceType: "module",
+            plugins: ["jsx", "typescript"],
+            allowImportExportEverywhere: true,
+            tokens: true,
+          }),
+      },
+    });
+  }
+
+  it("finds <body> in a Next.js root layout without crashing or timing out", () => {
+    const layout = `export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body className="antialiased">
+        {children}
+      </body>
+    </html>
+  );
+}
+`;
+    const ast = parseLayout(layout);
+    const start = Date.now();
+    const body = findFirstJsxElementByName(ast, "body");
+    const elapsed = Date.now() - start;
+    expect(body).not.toBeNull();
+    expect(Array.isArray(body!.children)).toBe(true);
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it("returns null when the element isn't present", () => {
+    const layout = `export default function Page() {
+  return <main>{"hi"}</main>;
+}
+`;
+    const ast = parseLayout(layout);
+    expect(findFirstJsxElementByName(ast, "body")).toBeNull();
   });
 });

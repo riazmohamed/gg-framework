@@ -249,7 +249,9 @@ function main(): void {
 
   if (subcommand === "pixel") {
     runPixel().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
+      // Log the full stack — `pixel install` failures are usually bugs in our
+      // own AST/wiring code, and the stack is the only useful diagnostic.
+      log("ERROR", "fatal", err instanceof Error ? (err.stack ?? err.message) : String(err));
       closeLogger();
       process.stderr.write(formatUserError(err) + "\n");
       process.exit(1);

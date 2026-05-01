@@ -274,7 +274,13 @@ async function safeText(r: Response): Promise<string> {
 
 export function detectPackageManager(projectRoot: string): PackageManager {
   if (existsSync(join(projectRoot, "pnpm-lock.yaml"))) return "pnpm";
-  if (existsSync(join(projectRoot, "bun.lockb"))) return "bun";
+  // Bun 1.2+ defaults to the text-based `bun.lock`; older versions used the
+  // binary `bun.lockb`. Either lockfile means this is a Bun project — falling
+  // through to npm partially mutates `node_modules` in a layout incompatible
+  // with `bun.lock`, leaving the user to rm -rf and re-bun-install to recover.
+  if (existsSync(join(projectRoot, "bun.lock")) || existsSync(join(projectRoot, "bun.lockb"))) {
+    return "bun";
+  }
   if (existsSync(join(projectRoot, "yarn.lock"))) return "yarn";
   return "npm";
 }
@@ -762,13 +768,40 @@ function injectClientComponentViaAst(
  * Walks the AST and returns the first JSXElement whose opening name matches.
  * Uses string type checks rather than babel's typed predicates so we don't
  * have to coerce loosely-typed walkers through narrow predicate signatures.
+ *
+ * Recast's parsed AST isn't a clean Babel tree — it wraps nodes and attaches
+ * `original`/`tokens`/`loc`/`comments` back-references that share substructure.
+ * A naive recursive walker over `Object.keys` revisits those references and on
+ * real Next.js root layouts (`<html><body>...</body></html>`) blows the stack.
+ * Guard with a `WeakSet` of visited objects, a depth cap, and a skip-list for
+ * the metadata keys that aren't part of the syntactic tree.
  */
-function findFirstJsxElementByName(ast: unknown, name: string): { children: unknown[] } | null {
+export function findFirstJsxElementByName(
+  ast: unknown,
+  name: string,
+): { children: unknown[] } | null {
   let found: { children: unknown[] } | null = null;
-  function walk(node: unknown): void {
+  const seen = new WeakSet<object>();
+  const MAX_DEPTH = 500;
+  const SKIP_KEYS = new Set([
+    "loc",
+    "tokens",
+    "original",
+    "comments",
+    "leadingComments",
+    "trailingComments",
+    "innerComments",
+    "range",
+    "start",
+    "end",
+  ]);
+  function walk(node: unknown, depth: number): void {
     if (found || !node || typeof node !== "object") return;
+    if (depth > MAX_DEPTH) return;
+    if (seen.has(node as object)) return;
+    seen.add(node as object);
     if (Array.isArray(node)) {
-      for (const c of node) walk(c);
+      for (const c of node) walk(c, depth + 1);
       return;
     }
     const n = node as Record<string, unknown> & { type?: string };
@@ -785,10 +818,11 @@ function findFirstJsxElementByName(ast: unknown, name: string): { children: unkn
       }
     }
     for (const key of Object.keys(n)) {
-      walk(n[key]);
+      if (SKIP_KEYS.has(key)) continue;
+      walk(n[key], depth + 1);
     }
   }
-  walk(ast);
+  walk(ast, 0);
   return found;
 }
 
