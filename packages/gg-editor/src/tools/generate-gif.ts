@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, runFfmpeg } from "../core/media/ffmpeg.js";
+import { safeResolveOutputPath } from "../core/safe-paths.js";
 
 const GenerateGifParams = z.object({
   input: z.string().describe("Source video file."),
@@ -42,7 +43,8 @@ export function createGenerateGifTool(cwd: string): AgentTool<typeof GenerateGif
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const inAbs = resolvePath(cwd, args.input);
-        const outAbs = resolvePath(cwd, args.output);
+        const resolved = safeResolveOutputPath(cwd, args.output);
+        const outAbs = resolved.path;
         if (!/\.gif$/i.test(outAbs)) {
           return err("output must end in .gif", `got: ${outAbs}`);
         }
@@ -95,7 +97,15 @@ export function createGenerateGifTool(cwd: string): AgentTool<typeof GenerateGif
           { signal: ctx.signal },
         );
         if (p2.code !== 0) return err(`paletteuse exited ${p2.code}`);
-        return compact({ ok: true, path: outAbs, startSec: start, durationSec: dur, fps, width });
+        return compact({
+          ok: true,
+          path: outAbs,
+          startSec: start,
+          durationSec: dur,
+          fps,
+          width,
+          ...(resolved.redirected ? { redirected: true, reason: resolved.reason } : {}),
+        });
       } catch (e) {
         return err((e as Error).message);
       }

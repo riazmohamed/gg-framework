@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, runFfmpeg } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const OverlayWatermarkParams = z.object({
   input: z.string().describe("Source video."),
@@ -36,7 +37,7 @@ export function createOverlayWatermarkTool(cwd: string): AgentTool<typeof Overla
       try {
         const inAbs = resolvePath(cwd, args.input);
         const wmAbs = resolvePath(cwd, args.watermark);
-        const outAbs = resolvePath(cwd, args.output);
+        const outAbs = safeOutputPath(cwd, args.output);
         if (inAbs === outAbs || wmAbs === outAbs) {
           return err("output collides with an input");
         }

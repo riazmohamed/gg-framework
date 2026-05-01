@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { NoneAdapter } from "../core/hosts/none/adapter.js";
+import { ResolveAdapter } from "../core/hosts/resolve/adapter.js";
 import { createAddMarkerTool } from "./add-marker.js";
 import { createAppendClipTool } from "./append-clip.js";
 import { createCreateTimelineTool } from "./create-timeline.js";
@@ -11,6 +12,8 @@ import { createImportSubtitlesTool } from "./import-subtitles.js";
 import { createImportToMediaPoolTool } from "./import-to-media-pool.js";
 import { createOpenPageTool } from "./open-page.js";
 import { createRippleDeleteTool } from "./ripple-delete.js";
+import { createFusionCompTool } from "./fusion-comp.js";
+import { createHostEvalTool } from "./host-eval.js";
 import { createSetClipSpeedTool } from "./set-clip-speed.js";
 
 /**
@@ -117,5 +120,48 @@ describe("host-mutation tool wrappers — error formatting against NoneAdapter",
       ctx,
     );
     expect(r).toMatch(/^error:/);
+  });
+
+  it("fusion_comp returns 'error: not_supported' on hosts without Fusion", async () => {
+    const r = await createFusionCompTool(new NoneAdapter()).execute({ action: "list_nodes" }, ctx);
+    expect(typeof r).toBe("string");
+    expect(r).toMatch(/^error: not_supported/);
+  });
+
+  it("host_eval returns 'error: not_supported' when host has no scripting bridge", async () => {
+    // NoneAdapter has no executeCode method — the tool must fail closed
+    // with a clear not_supported error rather than throw.
+    const r = await createHostEvalTool(new NoneAdapter()).execute({ code: "set_result(1)" }, ctx);
+    expect(typeof r).toBe("string");
+    expect(r).toMatch(/^error: not_supported/);
+    // Should hint at the fix.
+    expect(r).toMatch(/Open Resolve or Premiere/);
+  });
+});
+
+describe("capability cache invalidation", () => {
+  it("ResolveAdapter.capabilities() does not return a cached object across calls", async () => {
+    // The previous design cached `cachedCapabilities` once, so a closed-Resolve
+    // session looked permanently available. We dropped the cache; now each call
+    // produces a fresh object reflecting the latest reachability check.
+    const adapter = new ResolveAdapter();
+    const a = await adapter.capabilities();
+    const b = await adapter.capabilities();
+    expect(a).not.toBe(b); // distinct objects
+    expect(a.canScriptColor).toBe(b.canScriptColor); // values still consistent
+  });
+
+  it("ResolveAdapter.capabilities() reflects post-shutdown reachability without restart", async () => {
+    // shutdown() kills the bridge. The next capabilities() call must produce
+    // an answer based on a fresh env-check, not on a cached snapshot taken
+    // before shutdown.
+    const adapter = new ResolveAdapter();
+    const before = await adapter.capabilities();
+    adapter.shutdown();
+    const after = await adapter.capabilities();
+    // Whatever the env says now, the second call must have re-evaluated it.
+    expect(typeof after.isAvailable).toBe("boolean");
+    // Same shape, fresh object.
+    expect(after).not.toBe(before);
   });
 });

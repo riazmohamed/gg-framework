@@ -111,6 +111,7 @@ The full transcript stays on disk. The agent only ever pulls slices it actually 
 │                   │             set_primary_correction, │
 │                   │             copy_grade,             │
 │                   │             color_match (Resolve)   │
+│                   ├─ Motion gx: fusion_comp (Resolve)  │
 │                   ├─ Audio:     measure_loudness,       │
 │                   │             normalize_loudness,     │
 │                   │             clean_audio             │
@@ -204,7 +205,9 @@ Drop your own recipes as `.md` files in either:
 
 They get listed in the system prompt with the bundled ones (tagged `(project)` / `(user)`) and load via `read_skill(name="<filename-without-md>")`. The first non-heading line of each file is used as the description. User skills override project; project overrides bundled (silent override — the badge in the prompt makes it explicit).
 
-Not in scope: generative video, motion graphics, VFX, animation, complex compositing. If you ask for those, the agent will say so and propose what we CAN do.
+**Motion graphics:** simple text + lower-thirds via `fusion_comp` (Resolve only — Studio drives the Fusion node graph from the bridge). For cross-host pixel-baked chyrons, `write_lower_third` + `burn_subtitles` works on every host.
+
+Still out of scope: generative video, VFX, animation, 3D, particles, complex compositing. If you ask for those, the agent will say so and propose what we CAN do.
 
 ---
 
@@ -252,6 +255,7 @@ Not in scope: generative video, motion graphics, VFX, animation, complex composi
 | `generate_gif` | File | Two-pass palettegen GIF for social previews |
 | `overlay_watermark` | File | PNG watermark with corner positioning, opacity, scale |
 | `compose_thumbnail` | File | Frame extract + drawtext headline = YouTube/TikTok thumbnail |
+| `fusion_comp` | API | Drive a Fusion comp — lower-thirds, title cards via Background + TextPlus + Merge nodes (Resolve only) |
 | `add_track` | API | Append video / audio / subtitle track on the active timeline (Resolve) |
 | `set_clip_volume` | API | Per-clip audio gain in dB (Resolve) |
 | `pre_render_check` | API | Composite QA: empty timeline, PAUSE markers, loudness, captions |

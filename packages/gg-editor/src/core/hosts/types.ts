@@ -9,6 +9,34 @@ import type {
 } from "../../types.js";
 
 /**
+ * Discriminated union of every fusion_comp action the bridge supports. Kept
+ * in lockstep with `m_fusion_comp` in bridge-source.ts.
+ */
+export type FusionCompArgs =
+  | { action: "list_nodes"; clipId?: string }
+  | { action: "add_node"; toolId: string; name?: string; clipId?: string }
+  | { action: "delete_node"; name: string; clipId?: string }
+  | {
+      action: "connect";
+      fromNode: string;
+      toNode: string;
+      fromOutput?: string;
+      toInput?: string;
+      clipId?: string;
+    }
+  | { action: "set_input"; node: string; input: string; value: unknown; clipId?: string }
+  | { action: "get_input"; node: string; input: string; clipId?: string }
+  | {
+      action: "set_keyframe";
+      node: string;
+      input: string;
+      frame: number;
+      value: unknown;
+      clipId?: string;
+    }
+  | { action: "set_render_range"; start: number; end: number; clipId?: string };
+
+/**
  * VideoHost — the NLE-agnostic interface every adapter implements.
  *
  * The agent only ever sees these methods. The adapter is responsible for
@@ -181,6 +209,39 @@ export interface VideoHost {
   openPage?(
     name: "media" | "cut" | "edit" | "fusion" | "color" | "fairlight" | "deliver",
   ): Promise<void>;
+
+  /**
+   * Drive a Fusion composition (motion-graphics graph) inside Resolve.
+   * Optional; Resolve-only — adapters without a Fusion equivalent omit it.
+   *
+   * `clipId` (optional): scope the call to that clip's first Fusion comp
+   * (or auto-create one). When omitted, operates on the active Fusion-page
+   * comp.
+   *
+   * Actions are dispatched server-side; see `bridge-source.ts:m_fusion_comp`
+   * for the canonical action set.
+   */
+  executeFusionComp?(args: FusionCompArgs): Promise<unknown>;
+
+  /**
+   * Escape hatch — run a snippet of host-native scripting code with the live
+   * NLE objects pre-bound and return its result + captured stdout. Optional;
+   * only adapters with a real scripting bridge implement it (Resolve = Python,
+   * Premiere = ExtendScript). The `none` adapter omits it.
+   *
+   * Usage rule (enforced by the tool's system-prompt guidance, not the type):
+   * this is for things no named tool covers. Don't use it to do work the
+   * dedicated tools already do — those tools have validation, output shaping,
+   * and capability fallbacks this raw path skips.
+   *
+   * Resolve pre-bound globals: resolve, project, projectManager, mediaPool,
+   * mediaStorage, timeline, fusion, dvr; result via `set_result(value)` or
+   * top-level `result =`.
+   *
+   * Premiere pre-bound globals: app, project, sequence, qe; result via
+   * `setResult(value)` or top-level `result = `.
+   */
+  executeCode?(code: string): Promise<{ result: unknown; stdout?: string }>;
 }
 
 /**

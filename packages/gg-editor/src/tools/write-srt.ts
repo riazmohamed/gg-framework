@@ -1,9 +1,10 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve as resolvePath } from "node:path";
+import { dirname } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { compact, err } from "../core/format.js";
 import { buildSrt, buildWordLevelSrt } from "../core/srt.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const CueSchema = z.object({
   start: z.number().min(0).describe("Cue start in seconds."),
@@ -64,7 +65,7 @@ export function createWriteSrtTool(cwd: string): AgentTool<typeof WriteSrtParams
             "ensure at least one cue has non-empty text and end > start",
           );
         }
-        const abs = resolvePath(cwd, output);
+        const abs = safeOutputPath(cwd, output);
         mkdirSync(dirname(abs), { recursive: true });
         writeFileSync(abs, text, "utf8");
         return compact({

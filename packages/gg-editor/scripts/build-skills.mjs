@@ -10,6 +10,10 @@ const short = readFileSync(resolve(pkgRoot, "src/skills/short-form-content-edit.
 const chapters = readFileSync(resolve(pkgRoot, "src/skills/chapter-markers.md"), "utf8");
 const keyframing = readFileSync(resolve(pkgRoot, "src/skills/keyframing-and-titles.md"), "utf8");
 const skinTone = readFileSync(resolve(pkgRoot, "src/skills/skin-tone-matching.md"), "utf8");
+const fusionLowerThird = readFileSync(
+  resolve(pkgRoot, "src/skills/fusion-lower-third.md"),
+  "utf8",
+);
 
 function esc(s) {
   return s
@@ -46,6 +50,9 @@ const out = [
   "",
   "const SKIN_TONE_MATCHING = `" + esc(skinTone) + "`;",
   "",
+  "const FUSION_LOWER_THIRD = `" + esc(fusionLowerThird) + "`;",
+  "",
+
   "export const SKILLS: Record<string, BundledSkill> = {",
   '  "long-form-content-edit": {',
   '    name: "long-form-content-edit",',
@@ -76,6 +83,12 @@ const out = [
   "    description:",
   '      "Recipe for matching faces across clips when host scripting can\'t reach power windows or qualifiers. Two paths: grade_skin_tones (file-only, every host \u2014 bakes a vision-derived colorbalance + selectivecolor + eq grade into a new mp4, pair with replace_clip) and match_clip_color (Resolve only \u2014 derives the same grade as a CDL and pipes it through set_primary_correction, non-baked). Both share one vision pass over a reference frame and a target frame; below confidence 0.4 the grade is unreliable.",',
   "    content: SKIN_TONE_MATCHING,",
+  "  },",
+  '  "fusion-lower-third": {',
+  '    name: "fusion-lower-third",',
+  "    description:",
+  '      "Recipe for building a name/title chyron natively in DaVinci Resolve\'s Fusion page via fusion_comp. Walks the agent through Background + TextPlus + Merge node graph, wiring, text styling, lower-third positioning, and keyframed fade in/out via Merge.Blend. Resolve-only (Studio); for cross-host pixel-baked chyrons fall back to write_lower_third + burn_subtitles.",',
+  "    content: FUSION_LOWER_THIRD,",
   "  },",
   "};",
   "",

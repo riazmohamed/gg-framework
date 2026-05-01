@@ -51,6 +51,8 @@ const EXPECTED_TOOLS = [
   "color_match",
   "grade_skin_tones",
   "match_clip_color",
+  // Motion graphics (Resolve only)
+  "fusion_comp",
   // Audio cleanup + loudness
   "measure_loudness",
   "normalize_loudness",
@@ -93,6 +95,8 @@ const EXPECTED_TOOLS = [
   "add_sfx_at_cuts",
   // Skills
   "read_skill",
+  // Escape hatch (always registered; rejects with not_supported on host=none)
+  "host_eval",
 ];
 
 describe("createEditorTools", () => {

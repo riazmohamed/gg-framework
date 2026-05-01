@@ -31,6 +31,98 @@ describe.skipIf(skipReason)("ResolveBridge (integration with fake Resolve)", () 
     writeFileSync(
       join(fakeModulesDir, "DaVinciResolveScript.py"),
       String.raw`
+class _FusionInput:
+    def __init__(self, name, value=None):
+        self._name = name
+        self._value = value
+        self._keys = {}
+        self._connected_to = None
+    def __call__(self): return self._value
+    def SetKeyFrames(self, m):
+        self._keys.update(m)
+        return True
+    def ConnectTo(self, output):
+        self._connected_to = output
+        return True
+
+class _FusionOutput:
+    def __init__(self, owner): self._owner = owner
+
+class _FusionTool:
+    def __init__(self, tool_id, name=None):
+        self._tool_id = tool_id
+        self._name = name or tool_id + "1"
+        self._inputs = {}
+        self._connections = []
+    def GetAttrs(self, key=None):
+        attrs = {"TOOLS_RegID": self._tool_id, "TOOLS_Name": self._name}
+        return attrs.get(key) if key else attrs
+    def SetAttrs(self, m):
+        if "TOOLS_Name" in m:
+            self._name = m["TOOLS_Name"]
+        return True
+    def __getattr__(self, name):
+        # Auto-create input handles on access (Fusion behaviour: any input
+        # name resolves to an input object). Underscore-prefixed names are
+        # reserved for internal state — raise AttributeError so the
+        # getattr(obj, _x, default) idiom returns the default.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        d = self.__dict__.setdefault("_inputs", {})
+        if name not in d:
+            d[name] = _FusionInput(name)
+        return d[name]
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+            return
+        d = self.__dict__.setdefault("_inputs", {})
+        inp = d.setdefault(name, _FusionInput(name))
+        inp._value = value
+    def FindMainOutput(self, idx): return _FusionOutput(self)
+    def FindMainInput(self, idx):
+        d = self.__dict__.setdefault("_inputs", {})
+        if "Input" not in d:
+            d["Input"] = _FusionInput("Input")
+        return d["Input"]
+    def Delete(self):
+        # Mark deleted; the parent comp tracks the live list by identity.
+        self._deleted = True
+
+class _Comp:
+    def __init__(self):
+        self._tools = {}
+        self._attrs = {}
+        self._keyframes = []
+    def AddTool(self, tool_id):
+        t = _FusionTool(tool_id)
+        suffix = sum(1 for x in self._tools.values() if x._tool_id == tool_id) + 1
+        t._name = f"{tool_id}{suffix}"
+        # Use object identity as the key so renames via SetAttrs don't strand
+        # the entry; FindTool walks values to look up by current _name.
+        self._tools[id(t)] = t
+        return t
+    def FindTool(self, name):
+        for t in self._tools.values():
+            if not getattr(t, "_deleted", False) and t._name == name:
+                return t
+        return None
+    def GetToolList(self, selected=False):
+        return {k: v for k, v in self._tools.items() if not getattr(v, "_deleted", False)}
+    def SetKeyFrames(self, m):
+        self._keyframes.append(m)
+        return True
+    def SetAttrs(self, m):
+        self._attrs.update(m)
+        return True
+
+_FUSION_COMP = _Comp()
+
+class _Fusion:
+    def GetCurrentComp(self): return _FUSION_COMP
+
+_FUSION_INSTANCE = _Fusion()
+
 class _Item:
     def __init__(self, name, start, end):
         self._name, self._start, self._end = name, start, end
@@ -38,6 +130,7 @@ class _Item:
         self.cdl = None
         self.copied_to = None
         self.props = {}
+        self._fusion_comps = []
     def GetUniqueId(self): return f"id-{self._name}"
     def GetName(self): return self._name
     def GetStart(self): return self._start
@@ -46,9 +139,16 @@ class _Item:
         self.lut = (idx, path)
         return True
     def SetCDL(self, cdl):
+        # Real Resolve silently no-ops SetCDL when the user isn't on the
+        # color page. Mirror that here so the bridge's auto-retry logic
+        # (which OpenPage(color)s and retries) is exercised end-to-end.
+        if _Resolve._opened_page != "color":
+            return False
         self.cdl = dict(cdl)
         return True
     def CopyGrades(self, targets):
+        if _Resolve._opened_page != "color":
+            return False
         self.copied_to = list(targets)
         return True
     def SetClipProperty(self, k, v):
@@ -60,6 +160,12 @@ class _Item:
     def SmartReframe(self, *args):
         self._reframed = args
         return True
+    def GetFusionCompCount(self): return len(self._fusion_comps)
+    def GetFusionCompByIndex(self, i): return self._fusion_comps[i - 1]
+    def AddFusionComp(self):
+        c = _Comp()
+        self._fusion_comps.append(c)
+        return c
 
 _TIMELINE_ITEMS = [_Item("clip-a", 0, 600), _Item("clip-b", 600, 1200)]
 
@@ -171,9 +277,11 @@ class _Resolve:
     def GetMediaStorage(self): return _MediaStorage()
     def GetProductName(self): return "FakeResolve"
     def GetVersionString(self): return "0.0-test"
+    def GetCurrentPage(self): return _Resolve._opened_page
     def OpenPage(self, name):
         _Resolve._opened_page = name
         return True
+    def Fusion(self): return _FUSION_INSTANCE
 
 def scriptapp(name): return _Resolve()
 `,
@@ -360,6 +468,28 @@ def scriptapp(name): return _Resolve()
     }
   });
 
+  it("set_primary_correction auto-opens the Color page when SetCDL fails", async () => {
+    // The fake SetCDL returns False unless _Resolve._opened_page == 'color'.
+    // We deliberately steer the page to 'edit' first, then call CDL — the
+    // bridge should silently OpenPage('color') and retry, succeeding.
+    const b = new ResolveBridge();
+    try {
+      await b.call("open_page", { name: "edit" });
+      const r = await b.call<{ clipId: string }>("set_primary_correction", {
+        clipId: "id-clip-a",
+        saturation: 1.0,
+      });
+      expect(r.clipId).toBe("id-clip-a");
+      // Verify the bridge actually flipped the page on our behalf.
+      const probe = await b.call<{ result: string }>("execute_code", {
+        code: "set_result(resolve.GetCurrentPage())",
+      });
+      expect(probe.result).toBe("color");
+    } finally {
+      b.kill();
+    }
+  });
+
   it("lists render presets", async () => {
     const b = new ResolveBridge();
     try {
@@ -483,5 +613,223 @@ def scriptapp(name): return _Resolve()
     } finally {
       b.kill();
     }
+  });
+
+  describe("execute_code (escape hatch)", () => {
+    it("returns a value via set_result", async () => {
+      const b = new ResolveBridge();
+      try {
+        const r = await b.call<{ result: unknown }>("execute_code", {
+          code: "set_result(project.GetCurrentTimeline().GetName())",
+        });
+        expect(r.result).toBe("Fake Timeline");
+      } finally {
+        b.kill();
+      }
+    });
+
+    it("returns a value via top-level `result =`", async () => {
+      const b = new ResolveBridge();
+      try {
+        const r = await b.call<{ result: unknown }>("execute_code", {
+          code: "result = resolve.GetProductName()",
+        });
+        expect(r.result).toBe("FakeResolve");
+      } finally {
+        b.kill();
+      }
+    });
+
+    it("captures stdout", async () => {
+      const b = new ResolveBridge();
+      try {
+        const r = await b.call<{ result: unknown; stdout?: string }>("execute_code", {
+          code: "print('hello'); print('world'); set_result(42)",
+        });
+        expect(r.result).toBe(42);
+        expect(r.stdout).toContain("hello");
+        expect(r.stdout).toContain("world");
+      } finally {
+        b.kill();
+      }
+    });
+
+    it("surfaces python exceptions with stdout tail", async () => {
+      const b = new ResolveBridge();
+      try {
+        await expect(
+          b.call("execute_code", {
+            code: "print('before crash'); raise ValueError('boom')",
+          }),
+        ).rejects.toThrow(/ValueError: boom[\s\S]*before crash/);
+      } finally {
+        b.kill();
+      }
+    });
+
+    it("rejects empty code", async () => {
+      const b = new ResolveBridge();
+      try {
+        await expect(b.call("execute_code", { code: "" })).rejects.toThrow(
+          /non-empty 'code' string/,
+        );
+      } finally {
+        b.kill();
+      }
+    });
+
+    it("coerces non-JSON-serialisable results to repr", async () => {
+      const b = new ResolveBridge();
+      try {
+        // The fake _Resolve object has no JSON encoder; should come back as repr.
+        const r = await b.call<{ result: unknown }>("execute_code", {
+          code: "set_result(resolve)",
+        });
+        expect(typeof r.result).toBe("string");
+        expect(r.result as string).toMatch(/_Resolve/);
+      } finally {
+        b.kill();
+      }
+    });
+  });
+
+  describe("fusion_comp", () => {
+    it("adds a TextPlus node and reads it back via list_nodes", async () => {
+      const b = new ResolveBridge();
+      try {
+        const added = await b.call<{ name: string; toolId: string }>("fusion_comp", {
+          action: "add_node",
+          toolId: "TextPlus",
+          name: "LowerThirdText",
+        });
+        expect(added.toolId).toBe("TextPlus");
+        expect(added.name).toBe("LowerThirdText");
+
+        const listed = await b.call<{ count: number; nodes: Array<{ name: string }> }>(
+          "fusion_comp",
+          { action: "list_nodes" },
+        );
+        expect(listed.count).toBeGreaterThan(0);
+        expect(listed.nodes.some((n) => n.name === "LowerThirdText")).toBe(true);
+      } finally {
+        b.kill();
+      }
+    });
+
+    it("set_input + get_input round-trip", async () => {
+      const b = new ResolveBridge();
+      try {
+        await b.call("fusion_comp", {
+          action: "add_node",
+          toolId: "TextPlus",
+          name: "Title",
+        });
+        await b.call("fusion_comp", {
+          action: "set_input",
+          node: "Title",
+          input: "StyledText",
+          value: "Hello",
+        });
+        const got = await b.call<{ value: unknown }>("fusion_comp", {
+          action: "get_input",
+          node: "Title",
+          input: "StyledText",
+        });
+        expect(got.value).toBe("Hello");
+      } finally {
+        b.kill();
+      }
+    });
+
+    it("connect wires two nodes", async () => {
+      const b = new ResolveBridge();
+      try {
+        await b.call("fusion_comp", { action: "add_node", toolId: "Background", name: "BG" });
+        await b.call("fusion_comp", { action: "add_node", toolId: "TextPlus", name: "TXT" });
+        await b.call("fusion_comp", { action: "add_node", toolId: "Merge", name: "COMP" });
+        const r = await b.call<{ from: string; to: string }>("fusion_comp", {
+          action: "connect",
+          fromNode: "BG",
+          toNode: "COMP",
+          toInput: "Background",
+        });
+        expect(r.from).toBe("BG");
+        expect(r.to).toBe("COMP");
+      } finally {
+        b.kill();
+      }
+    });
+
+    it("set_keyframe and set_render_range succeed", async () => {
+      const b = new ResolveBridge();
+      try {
+        await b.call("fusion_comp", {
+          action: "add_node",
+          toolId: "Transform",
+          name: "XF",
+        });
+        const k = await b.call<{ frame: number }>("fusion_comp", {
+          action: "set_keyframe",
+          node: "XF",
+          input: "Center",
+          frame: 24,
+          value: [0.5, 0.5],
+        });
+        expect(k.frame).toBe(24);
+        const rr = await b.call<{ start: number; end: number }>("fusion_comp", {
+          action: "set_render_range",
+          start: 0,
+          end: 120,
+        });
+        expect(rr.start).toBe(0);
+        expect(rr.end).toBe(120);
+      } finally {
+        b.kill();
+      }
+    });
+
+    it("delete_node removes a node", async () => {
+      const b = new ResolveBridge();
+      try {
+        await b.call("fusion_comp", { action: "add_node", toolId: "Glow", name: "GLOW1" });
+        const r = await b.call<{ deleted: string }>("fusion_comp", {
+          action: "delete_node",
+          name: "GLOW1",
+        });
+        expect(r.deleted).toBe("GLOW1");
+      } finally {
+        b.kill();
+      }
+    });
+
+    it("unknown action errors with action list", async () => {
+      const b = new ResolveBridge();
+      try {
+        await expect(b.call("fusion_comp", { action: "teleport" })).rejects.toThrow(
+          /unknown fusion_comp action/,
+        );
+      } finally {
+        b.kill();
+      }
+    });
+  });
+
+  describe("auto-respawn after death", () => {
+    it("respawns the bridge on the next call after kill()", async () => {
+      const b = new ResolveBridge();
+      try {
+        const a = await b.call<{ pong: boolean }>("ping");
+        expect(a.pong).toBe(true);
+        // Simulate Resolve quitting / Python crashing.
+        b.kill();
+        // Next call must succeed: ensureStarted() should detect the dead
+        // flag and respawn from scratch instead of returning the stale
+        // (resolved) readyPromise tied to a killed child.
+        const c = await b.call<{ pong: boolean }>("ping");
+        expect(c.pong).toBe(true);
+      } finally {
+        b.kill();
+      }
+    });
   });
 });

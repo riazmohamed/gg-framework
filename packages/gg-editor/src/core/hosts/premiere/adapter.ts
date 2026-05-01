@@ -5,12 +5,29 @@ import type {
   Frame,
   FrameRange,
   HostCapabilities,
+  HostRuntime,
   MarkerInfo,
   TimelineState,
 } from "../../../types.js";
 import { PREMIERE_COLOR_INDEX, RESOLVE_TO_PREMIERE_INDEX } from "../../marker-colors.js";
 import { HostUnsupportedError, type VideoHost } from "../types.js";
-import { PremiereBridge } from "./bridge.js";
+import { PremiereBridge, type PremiereTransportKind } from "./bridge.js";
+
+/**
+ * Translate the bridge's internal transport kind to the runtime label exposed
+ * via HostCapabilities. Pure function — exported via the static helper for
+ * unit testing.
+ */
+function mapTransportToRuntime(t: PremiereTransportKind): HostRuntime {
+  switch (t) {
+    case "http-uxp":
+      return "uxp";
+    case "http-cep":
+      return "cep";
+    case "osascript-cep":
+      return "osascript";
+  }
+}
 
 /** Inverse of PREMIERE_COLOR_INDEX — numeric index back to color name. */
 const PREMIERE_INDEX_TO_NAME: Record<number, string> = Object.fromEntries(
@@ -44,14 +61,24 @@ export class PremiereAdapter implements VideoHost {
   readonly name = "premiere" as const;
   readonly displayName = "Adobe Premiere Pro";
 
-  private cachedCapabilities?: HostCapabilities;
   private bridge = new PremiereBridge();
 
+  // Capabilities are re-checked on every call so a closed-Premiere session is
+  // visible immediately to host_info instead of being masked by a stale cache.
   async capabilities(): Promise<HostCapabilities> {
-    if (this.cachedCapabilities) return this.cachedCapabilities;
-
     const reachable = await this.checkReachable();
-    this.cachedCapabilities = {
+    // Map our internal transport kind to a public runtime label, and attach a
+    // deprecation notice for anything on the CEP/ExtendScript sunset path.
+    const transport = this.bridge.getTransportKind();
+    const runtime = transport ? mapTransportToRuntime(transport) : undefined;
+    const deprecationNotice =
+      runtime === "cep" || runtime === "osascript"
+        ? "Adobe is removing CEP/ExtendScript support in September 2026. " +
+          "Install the UXP panel for Premiere 25.6+: " +
+          "`npx @kenkaiiii/gg-editor-premiere-panel install --uxp`."
+        : undefined;
+
+    return {
       canMoveClips: true,
       canScriptColor: false,
       canScriptAudio: true,
@@ -59,8 +86,9 @@ export class PremiereAdapter implements VideoHost {
       preferredImportFormat: "xml",
       isAvailable: reachable.ok,
       unavailableReason: reachable.ok ? undefined : reachable.reason,
+      ...(runtime ? { runtime } : {}),
+      ...(deprecationNotice ? { deprecationNotice } : {}),
     };
-    return this.cachedCapabilities;
   }
 
   async getTimeline(): Promise<TimelineState> {
@@ -235,6 +263,10 @@ export class PremiereAdapter implements VideoHost {
   // openPage is intentionally NOT implemented — Premiere has no page concept.
   // The agent should consult host_info.caps before calling it.
 
+  async executeCode(code: string): Promise<{ result: unknown; stdout?: string }> {
+    return this.bridge.call<{ result: unknown; stdout?: string }>("execute_code", { code });
+  }
+
   shutdown(): void {
     this.bridge.shutdown();
   }
@@ -244,9 +276,16 @@ export class PremiereAdapter implements VideoHost {
     return snapColorToPremiere(color);
   }
 
+  // Exposed for unit testing.
+  static _mapTransportToRuntimeForTest(t: PremiereTransportKind): HostRuntime {
+    return mapTransportToRuntime(t);
+  }
+
   // ── Private ────────────────────────────────────────────────
 
-  private async checkReachable(): Promise<{ ok: true } | { ok: false; reason: string }> {
+  private async checkReachable(): Promise<
+    { ok: true; transport: PremiereTransportKind } | { ok: false; reason: string }
+  > {
     const platformOk = await PremiereBridge.checkReachable();
     if (!platformOk.ok) return platformOk;
 
@@ -260,10 +299,12 @@ export class PremiereAdapter implements VideoHost {
         ],
         { encoding: "utf8" },
       );
-      if (r.status === 0 && r.stdout.trim() === "true") return { ok: true };
+      if (r.status === 0 && r.stdout.trim() === "true") {
+        return { ok: true, transport: platformOk.transport };
+      }
       return { ok: false, reason: "Premiere Pro is not running." };
     }
-    return { ok: true };
+    return { ok: true, transport: platformOk.transport };
   }
 }
 

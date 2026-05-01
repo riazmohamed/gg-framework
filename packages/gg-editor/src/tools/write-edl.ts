@@ -1,9 +1,10 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve as resolvePath } from "node:path";
+import { dirname } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { buildEdl, totalRecordFrames } from "../core/edl.js";
 import { compact, err } from "../core/format.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const EventSchema = z.object({
   reel: z
@@ -45,7 +46,7 @@ export function createWriteEdlTool(cwd: string): AgentTool<typeof WriteEdlParams
     async execute({ output, title, frameRate, events, dropFrame }) {
       try {
         const text = buildEdl({ title, frameRate, events, dropFrame });
-        const abs = resolvePath(cwd, output);
+        const abs = safeOutputPath(cwd, output);
         mkdirSync(dirname(abs), { recursive: true });
         writeFileSync(abs, text, "utf8");
         const totalFrames = totalRecordFrames(events);

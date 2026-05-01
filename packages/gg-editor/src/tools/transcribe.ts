@@ -3,6 +3,7 @@ import { dirname, resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { compact, err } from "../core/format.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 import { detectApiKey, detectLocalWhisper, transcribe } from "../core/whisper.js";
 
 const TranscribeParams = z.object({
@@ -51,7 +52,7 @@ export function createTranscribeTool(cwd: string): AgentTool<typeof TranscribePa
       const { input, output, backend, modelPath, language } = args;
       try {
         const inAbs = resolvePath(cwd, input);
-        const outAbs = resolvePath(cwd, output);
+        const outAbs = safeOutputPath(cwd, output);
 
         const want = backend === "auto" ? undefined : backend;
         const local = detectLocalWhisper();

@@ -1,10 +1,11 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve as resolvePath } from "node:path";
+import { dirname } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { buildFcpxml } from "../core/fcpxml.js";
 import { compact, err } from "../core/format.js";
 import { reformatSpec } from "../core/reformat.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const EventSchema = z.object({
   reel: z.string(),
@@ -44,7 +45,7 @@ export function createReformatTimelineTool(cwd: string): AgentTool<typeof Reform
           height: spec.height,
           events,
         });
-        const abs = resolvePath(cwd, output);
+        const abs = safeOutputPath(cwd, output);
         mkdirSync(dirname(abs), { recursive: true });
         writeFileSync(abs, text, "utf8");
         return compact({

@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, runFfmpeg } from "../core/media/ffmpeg.js";
+import { safeResolveOutputPath } from "../core/safe-paths.js";
 
 const ComposeThumbnailParams = z.object({
   input: z.string().describe("Source video."),
@@ -53,7 +54,8 @@ export function createComposeThumbnailTool(cwd: string): AgentTool<typeof Compos
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const inAbs = resolvePath(cwd, args.input);
-        const outAbs = resolvePath(cwd, args.output);
+        const resolved = safeResolveOutputPath(cwd, args.output);
+        const outAbs = resolved.path;
         const fontFile = args.fontFile ? resolvePath(cwd, args.fontFile) : pickFont();
         if (!fontFile) {
           return err(
@@ -101,7 +103,13 @@ export function createComposeThumbnailTool(cwd: string): AgentTool<typeof Compos
             "verify atSec is in range and ffmpeg has --enable-libfreetype",
           );
         }
-        return compact({ ok: true, path: outAbs, atSec: args.atSec, fontFile });
+        return compact({
+          ok: true,
+          path: outAbs,
+          atSec: args.atSec,
+          fontFile,
+          ...(resolved.redirected ? { redirected: true, reason: resolved.reason } : {}),
+        });
       } catch (e) {
         return err((e as Error).message);
       }

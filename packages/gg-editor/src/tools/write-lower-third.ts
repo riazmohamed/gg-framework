@@ -1,9 +1,10 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve as resolvePath } from "node:path";
+import { dirname } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { compact, err } from "../core/format.js";
 import { buildLowerThirdAss } from "../core/text-overlay.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const LowerThirdSchema = z.object({
   primaryText: z.string().min(1).describe("Big text — name / topic."),
@@ -43,7 +44,7 @@ export function createWriteLowerThirdTool(cwd: string): AgentTool<typeof WriteLo
     async execute({ output, width, height, items }) {
       try {
         const ass = buildLowerThirdAss(items, { width, height });
-        const outAbs = resolvePath(cwd, output);
+        const outAbs = safeOutputPath(cwd, output);
         mkdirSync(dirname(outAbs), { recursive: true });
         writeFileSync(outAbs, ass, "utf8");
         return compact({ ok: true, path: outAbs, items: items.length });

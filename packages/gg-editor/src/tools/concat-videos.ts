@@ -15,6 +15,7 @@ import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, runFfmpeg } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const ConcatVideosParams = z.object({
   inputs: z.array(z.string().min(1)).min(2).describe("Videos to join in order."),
@@ -43,7 +44,7 @@ export function createConcatVideosTool(cwd: string): AgentTool<typeof ConcatVide
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const absInputs = inputs.map((p) => resolvePath(cwd, p));
-        const outAbs = resolvePath(cwd, output);
+        const outAbs = safeOutputPath(cwd, output);
         for (const a of absInputs) {
           if (a === outAbs)
             return err("output path collides with an input", "pick a different output");

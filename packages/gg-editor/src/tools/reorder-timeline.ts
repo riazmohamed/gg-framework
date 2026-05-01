@@ -1,12 +1,13 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { buildFcpxml } from "../core/fcpxml.js";
 import { compact, err } from "../core/format.js";
 import type { VideoHost } from "../core/hosts/types.js";
 import { reorderToEvents } from "../core/reorder.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const ReorderTimelineParams = z.object({
   newOrder: z
@@ -57,7 +58,7 @@ export function createReorderTimelineTool(
           events,
         });
         const outAbs = fcpxmlOutput
-          ? resolvePath(cwd, fcpxmlOutput)
+          ? safeOutputPath(cwd, fcpxmlOutput)
           : join(mkdtempSync(join(tmpdir(), "gg-reorder-")), "reorder.fcpxml");
         if (fcpxmlOutput) mkdirSync(dirname(outAbs), { recursive: true });
         writeFileSync(outAbs, xml, "utf8");

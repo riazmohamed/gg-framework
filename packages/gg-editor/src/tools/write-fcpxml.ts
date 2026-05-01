@@ -1,9 +1,10 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve as resolvePath } from "node:path";
+import { dirname } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { buildFcpxml, totalRecordFramesFcpxml } from "../core/fcpxml.js";
 import { compact, err } from "../core/format.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const EventSchema = z.object({
   reel: z.string().describe("Source identifier — same reel = same asset in the FCPXML."),
@@ -35,7 +36,7 @@ export function createWriteFcpxmlTool(cwd: string): AgentTool<typeof WriteFcpxml
     async execute({ output, title, frameRate, width, height, events }) {
       try {
         const text = buildFcpxml({ title, frameRate, width, height, events });
-        const abs = resolvePath(cwd, output);
+        const abs = safeOutputPath(cwd, output);
         mkdirSync(dirname(abs), { recursive: true });
         writeFileSync(abs, text, "utf8");
         const totalFrames = totalRecordFramesFcpxml(events);

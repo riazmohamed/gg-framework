@@ -1,9 +1,10 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve as resolvePath } from "node:path";
+import { dirname } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { compact, err } from "../core/format.js";
 import { buildTitleCardAss } from "../core/text-overlay.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const TitleCardSchema = z.object({
   text: z.string().min(1),
@@ -48,7 +49,7 @@ export function createWriteTitleCardTool(cwd: string): AgentTool<typeof WriteTit
     async execute({ output, width, height, items }) {
       try {
         const ass = buildTitleCardAss(items, { width, height });
-        const outAbs = resolvePath(cwd, output);
+        const outAbs = safeOutputPath(cwd, output);
         mkdirSync(dirname(outAbs), { recursive: true });
         writeFileSync(outAbs, ass, "utf8");
         return compact({ ok: true, path: outAbs, items: items.length });

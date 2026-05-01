@@ -39,10 +39,36 @@ export class ResolveBridge {
   private bridgePath?: string;
 
   /**
+   * The child process is dead when:
+   *   - we never spawned it,
+   *   - it exited naturally (exitCode !== null),
+   *   - or it was signalled (signalCode !== null).
+   *
+   * Node's ChildProcess exposes both fields directly so we don't keep a
+   * parallel `dead` flag in sync — the standard idiom across real codebases
+   * (mastra, openclaw, AFFiNE, midscene, paseo, takt, rivet) reads them
+   * straight off the child.
+   */
+  private isChildDead(): boolean {
+    if (!this.child) return true;
+    return this.child.exitCode !== null || this.child.signalCode !== null;
+  }
+
+  /**
    * Start the bridge. Idempotent — subsequent calls return the same readiness
-   * promise.
+   * promise. After the bridge dies (Resolve quit, Python crash), the next
+   * call respawns from scratch.
    */
   ensureStarted(): Promise<void> {
+    // Recovery: if the previous bridge died, drop the cached promise and
+    // respawn. Concurrent callers all observe the same fresh promise because
+    // we set `readyPromise` synchronously before returning.
+    if (this.readyPromise && this.isChildDead()) {
+      this.readyPromise = undefined;
+      this.handshakeDone = false;
+      this.buffer = "";
+      this.child = undefined;
+    }
     if (this.readyPromise) return this.readyPromise;
 
     this.readyPromise = new Promise<void>((resolve, reject) => {
@@ -62,7 +88,7 @@ export class ResolveBridge {
       writeFileSync(scriptPath, BRIDGE_PY, { encoding: "utf8" });
       this.bridgePath = scriptPath;
 
-      const env = resolveEnv();
+      const env = resolveEnv(py);
       const child = spawn(py.cmd, [...py.args, scriptPath], {
         env,
         stdio: ["pipe", "pipe", "pipe"],
@@ -83,6 +109,7 @@ export class ResolveBridge {
       });
 
       child.on("error", (err) => {
+        // child.exitCode/signalCode will be set by the runtime; no extra flag needed.
         reject(new Error(`Failed to spawn Python: ${err.message}`));
       });
 
@@ -176,7 +203,10 @@ export class ResolveBridge {
     opts: { signal?: AbortSignal } = {},
   ): Promise<T> {
     await this.ensureStarted();
-    if (!this.child || this.child.killed) {
+    // Use the same exitCode/signalCode probe `ensureStarted` does — catches
+    // both natural exits and signals. `child.killed` only goes true after
+    // an explicit kill() and would miss e.g. a Python crash mid-flight.
+    if (this.isChildDead()) {
       throw new Error("Resolve bridge is not running.");
     }
     if (opts.signal?.aborted) {
@@ -229,6 +259,9 @@ export class ResolveBridge {
       }
       this.child.kill();
     }
+    // Drop the reference so isChildDead() returns true on the next call.
+    // Node's exit event will fire async; we don't wait for it — the next
+    // ensureStarted() sees `child === undefined` and respawns from scratch.
     this.child = undefined;
   }
 
@@ -239,9 +272,15 @@ export class ResolveBridge {
 
 // ── Helpers ─────────────────────────────────────────────────
 
-interface PythonCmd {
+export interface PythonCmd {
   cmd: string;
   args: string[];
+  /**
+   * `sys.prefix` of the interpreter, when probing succeeded. Used on Windows
+   * to set PYTHONHOME — multi-Python systems need it set or Resolve 20.3 can
+   * crash on bridge startup (samuelgursky/davinci-resolve-mcp #26).
+   */
+  prefix?: string;
 }
 
 /**
@@ -266,7 +305,17 @@ export function findPython(): PythonCmd | undefined {
     });
     if (r.status === 0) {
       const out = (r.stdout || r.stderr || "").trim();
-      if (/Python 3\./.test(out)) return c;
+      if (/Python 3\./.test(out)) {
+        // Best-effort: probe sys.prefix for PYTHONHOME on Windows. We do this
+        // here (not in resolveEnv) so we pay the spawn cost exactly once.
+        const pr = spawnSync(c.cmd, [...c.args, "-c", "import sys;print(sys.prefix)"], {
+          encoding: "utf8",
+          windowsHide: true,
+        });
+        const prefix =
+          pr.status === 0 && typeof pr.stdout === "string" ? pr.stdout.trim() : undefined;
+        return prefix ? { ...c, prefix } : c;
+      }
     }
   }
   return undefined;
@@ -280,7 +329,7 @@ export function findPython(): PythonCmd | undefined {
  * Honours pre-set env vars (so power users with custom installs aren't
  * overridden).
  */
-export function resolveEnv(): NodeJS.ProcessEnv {
+export function resolveEnv(py?: PythonCmd): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
 
   const apiDefault = defaultApiPath();
@@ -302,6 +351,16 @@ export function resolveEnv(): NodeJS.ProcessEnv {
   env.PYTHONIOENCODING = env.PYTHONIOENCODING ?? "utf-8";
   // Don't write .pyc to the embedded script's tempdir.
   env.PYTHONDONTWRITEBYTECODE = "1";
+
+  // PYTHONHOME on Windows: when multiple Python installs sit on PATH (system,
+  // Microsoft Store, conda, virtualenvs), the embedded interpreter Resolve
+  // hosts can pick up the wrong stdlib and crash on import. Pinning
+  // PYTHONHOME to the *probed* interpreter's sys.prefix avoids that.
+  // No-op on macOS / Linux — they don't suffer this and forcing PYTHONHOME
+  // can break Homebrew/pyenv setups.
+  if (platform() === "win32" && py?.prefix && !env.PYTHONHOME) {
+    env.PYTHONHOME = py.prefix;
+  }
 
   return env;
 }

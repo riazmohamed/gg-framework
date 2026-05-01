@@ -5,6 +5,7 @@ import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { buildAss } from "../core/ass.js";
 import { compact, err } from "../core/format.js";
 import { buildKeywordCaptions } from "../core/keyword-captions.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 import type { Transcript } from "../core/whisper.js";
 
 const WriteKeywordCaptionsParams = z.object({
@@ -176,7 +177,7 @@ export function createWriteKeywordCaptionsTool(
           title: "GG Editor — keyword captions",
         });
 
-        const outAbs = resolvePath(cwd, args.output);
+        const outAbs = safeOutputPath(cwd, args.output);
         mkdirSync(dirname(outAbs), { recursive: true });
         writeFileSync(outAbs, ass, "utf8");
 

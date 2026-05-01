@@ -14,11 +14,11 @@
  *
  * The proxy preserves the VideoHost contract:
  *   - `name` / `displayName` are getters returning the live adapter's value.
- *   - Optional methods (`openPage`, `smartReframe`, `setClipVolume`) are
- *     exposed via getters that return either a bound function or `undefined`,
- *     so existing existence checks (`if (host.openPage)`,
- *     `typeof host.openPage === 'function'`) remain authoritative against
- *     the live adapter at the moment of the check.
+ *   - Optional methods (`openPage`, `smartReframe`, `setClipVolume`,
+ *     `executeCode`) are exposed via getters that return either a bound
+ *     function or `undefined`, so existing existence checks
+ *     (`if (host.openPage)`, `typeof host.openPage === 'function'`) remain
+ *     authoritative against the live adapter at the moment of the check.
  *   - `shutdown()` (not part of VideoHost) cleans up the underlying adapter
  *     for the CLI's exit handler.
  *
@@ -179,6 +179,22 @@ export function createLazyHost(opts: LazyHostOptions = {}): LazyHost {
     get() {
       const live = resolve();
       return live.setClipVolume ? live.setClipVolume.bind(live) : undefined;
+    },
+  });
+  Object.defineProperty(lazy, "executeCode", {
+    enumerable: true,
+    configurable: false,
+    get() {
+      const live = resolve();
+      return live.executeCode ? live.executeCode.bind(live) : undefined;
+    },
+  });
+  Object.defineProperty(lazy, "executeFusionComp", {
+    enumerable: true,
+    configurable: false,
+    get() {
+      const live = resolve();
+      return live.executeFusionComp ? live.executeFusionComp.bind(live) : undefined;
     },
   });
 

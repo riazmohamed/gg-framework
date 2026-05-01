@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, runFfmpeg } from "../core/media/ffmpeg.js";
+import { safeResolveOutputPath } from "../core/safe-paths.js";
 
 const ExtractFrameParams = z.object({
   input: z.string().describe("Source video file."),
@@ -36,7 +37,8 @@ export function createExtractFrameTool(cwd: string): AgentTool<typeof ExtractFra
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const inAbs = resolvePath(cwd, input);
-        const outAbs = resolvePath(cwd, output);
+        const resolved = safeResolveOutputPath(cwd, output);
+        const outAbs = resolved.path;
         mkdirSync(dirname(outAbs), { recursive: true });
         const args = [
           "-ss",
@@ -54,7 +56,12 @@ export function createExtractFrameTool(cwd: string): AgentTool<typeof ExtractFra
         if (r.code !== 0) {
           return err(`ffmpeg exited ${r.code}`, "verify atSec is within file duration");
         }
-        return compact({ ok: true, path: outAbs, atSec });
+        return compact({
+          ok: true,
+          path: outAbs,
+          atSec,
+          ...(resolved.redirected ? { redirected: true, reason: resolved.reason } : {}),
+        });
       } catch (e) {
         return err((e as Error).message);
       }

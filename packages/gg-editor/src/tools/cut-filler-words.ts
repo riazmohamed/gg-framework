@@ -13,6 +13,7 @@ import {
 } from "../core/filler-words.js";
 import { compact, err } from "../core/format.js";
 import { probeMedia } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 import type { Transcript } from "../core/whisper.js";
 
 const CutFillerWordsParams = z.object({
@@ -183,7 +184,7 @@ export function createCutFillerWordsTool(cwd: string): AgentTool<typeof CutFille
         });
 
         const outAbs = args.edlOutput
-          ? resolvePath(cwd, args.edlOutput)
+          ? safeOutputPath(cwd, args.edlOutput)
           : join(mkdtempSync(join(tmpdir(), "gg-fillercut-")), "fillers.edl");
         if (args.edlOutput) mkdirSync(dirname(outAbs), { recursive: true });
         writeFileSync(outAbs, edl, "utf8");

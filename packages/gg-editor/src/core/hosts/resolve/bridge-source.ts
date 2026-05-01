@@ -355,6 +355,23 @@ def _fmt3(triple):
     return "%g %g %g" % (float(triple[0]), float(triple[1]), float(triple[2]))
 
 
+def _ensure_color_page():
+    """Best-effort switch to the Color page when the current page isn't already
+    color. Returns True if we issued an OpenPage call, False otherwise. Used by
+    SetCDL / CopyGrades retry logic — those API calls silently no-op on the
+    wrong page even though the values land in the data model.
+    """
+    try:
+        r = get_resolve()
+        cur = r.GetCurrentPage() if hasattr(r, "GetCurrentPage") else None
+        if cur == "color":
+            return False
+        r.OpenPage("color")
+        return True
+    except Exception:
+        return False
+
+
 def m_set_primary_correction(params):
     clip_id = str(params["clipId"])
     node_index = int(params.get("nodeIndex", 1) or 1)
@@ -372,9 +389,15 @@ def m_set_primary_correction(params):
         cdl["Saturation"] = "%g" % float(params["saturation"])
     ok = item.SetCDL(cdl)
     if not ok:
+        # Common cause: agent set CDL while user was on another page. Auto-
+        # switch to Color and retry once. If it fails again, the user/clip is
+        # genuinely the problem — surface the original message.
+        if _ensure_color_page():
+            ok = item.SetCDL(cdl)
+    if not ok:
         raise RuntimeError(
             f"SetCDL returned False for node {node_index}. "
-            f"fix: open the Color page (open_page('color')) and retry."
+            f"fix: ensure the clip exists and the project's color page is reachable."
         )
     return {"clipId": clip_id, "nodeIndex": node_index}
 
@@ -390,8 +413,11 @@ def m_copy_grade(params):
         raise RuntimeError("this Resolve version's TimelineItem has no CopyGrades")
     ok = src.CopyGrades(targets)
     if not ok:
+        if _ensure_color_page():
+            ok = src.CopyGrades(targets)
+    if not ok:
         raise RuntimeError(
-            "CopyGrades returned False. fix: open the Color page (open_page('color')) and retry."
+            "CopyGrades returned False. fix: ensure source + targets are valid timeline items."
         )
     return {"sourceClipId": source_id, "copied": len(targets)}
 
@@ -592,6 +618,352 @@ def m_import_subtitles(params):
     return {"imported": True, "attached": True}
 
 
+# ── Fusion ──────────────────────────────────────────────────
+#
+# Fusion compositions live either at the timeline-clip level (every
+# TimelineItem can carry one or more 'Fusion comps') OR at the project level
+# via the standalone Fusion page. The agent operates on whichever the user
+# is currently focused on — we resolve the comp once per call:
+#
+#   - clipId given:    item.GetFusionCompByIndex(1) on that timeline item.
+#   - no clipId:       fusion.GetCurrentComp() on the active Fusion page.
+#
+# We deliberately keep the surface narrow (8 actions, the Fusion-page tools
+# every short-form workflow needs) instead of mirroring the entire Fusion
+# Python API. Power users have m_execute_code for the rest.
+
+
+def _resolve_fusion_comp(clip_id):
+    if clip_id:
+        item = _find_timeline_item(clip_id)
+        if not hasattr(item, "GetFusionCompCount") or not hasattr(item, "GetFusionCompByIndex"):
+            raise RuntimeError("this Resolve version's TimelineItem has no Fusion comp accessors")
+        count = int(item.GetFusionCompCount() or 0)
+        if count < 1:
+            # Try to add one. Modern Resolve exposes AddFusionComp; older
+            # builds need the user to do it manually on the Fusion page.
+            if hasattr(item, "AddFusionComp"):
+                comp = item.AddFusionComp()
+                if comp is None:
+                    raise RuntimeError(f"AddFusionComp returned None for clip {clip_id}")
+                return comp
+            raise RuntimeError(
+                f"clip {clip_id} has no Fusion comp; create one in Resolve (right-click → New Fusion Composition) first."
+            )
+        comp = item.GetFusionCompByIndex(1)
+        if comp is None:
+            raise RuntimeError(f"GetFusionCompByIndex(1) returned None for clip {clip_id}")
+        return comp
+    # No clip — use the active Fusion page comp.
+    r = get_resolve()
+    try:
+        fusion = r.Fusion()
+    except Exception as e:
+        raise RuntimeError(f"Resolve.Fusion() unavailable: {e}")
+    if fusion is None:
+        raise RuntimeError("Fusion is not available in this Resolve build")
+    comp = fusion.GetCurrentComp() if hasattr(fusion, "GetCurrentComp") else None
+    if comp is None:
+        raise RuntimeError(
+            "No active Fusion comp. fix: switch to the Fusion page (open_page('fusion')) on a clip with a comp, or pass clipId."
+        )
+    return comp
+
+
+def _fusion_node_summary(node):
+    # Best-effort, never throws — the caller is reading a list of nodes.
+    try:
+        name = node.GetAttrs("TOOLS_Name") if hasattr(node, "GetAttrs") else None
+    except Exception:
+        name = None
+    try:
+        toolid = node.GetAttrs("TOOLS_RegID") if hasattr(node, "GetAttrs") else None
+    except Exception:
+        toolid = None
+    if not name and hasattr(node, "Name"):
+        try:
+            name = node.Name
+        except Exception:
+            pass
+    if not toolid and hasattr(node, "ID"):
+        try:
+            toolid = node.ID
+        except Exception:
+            pass
+    return {"name": name, "toolId": toolid}
+
+
+def m_fusion_comp(params):
+    action = str(params.get("action") or "")
+    if not action:
+        raise RuntimeError("fusion_comp requires an 'action' field")
+    clip_id = params.get("clipId")
+    comp = _resolve_fusion_comp(str(clip_id) if clip_id else None)
+
+    if action == "list_nodes":
+        nodes = []
+        try:
+            tool_list = comp.GetToolList(False) or {}
+        except Exception as e:
+            raise RuntimeError(f"GetToolList failed: {e}")
+        # GetToolList returns a 1-indexed dict on some builds; iterate values.
+        try:
+            iterator = tool_list.values() if hasattr(tool_list, "values") else list(tool_list)
+        except Exception:
+            iterator = []
+        for node in iterator:
+            nodes.append(_fusion_node_summary(node))
+        return {"nodes": nodes, "count": len(nodes)}
+
+    if action == "add_node":
+        tool_id = str(params.get("toolId") or "")
+        if not tool_id:
+            raise RuntimeError("add_node requires 'toolId' (e.g. 'TextPlus', 'Background', 'Merge')")
+        if not hasattr(comp, "AddTool"):
+            raise RuntimeError("this Resolve build's Comp has no AddTool")
+        node = comp.AddTool(tool_id)
+        if node is None:
+            raise RuntimeError(f"AddTool('{tool_id}') returned None; verify the tool ID exists")
+        wanted_name = params.get("name")
+        if wanted_name and hasattr(node, "SetAttrs"):
+            try:
+                node.SetAttrs({"TOOLS_Name": str(wanted_name)})
+            except Exception:
+                pass
+        return _fusion_node_summary(node)
+
+    if action == "delete_node":
+        name = str(params.get("name") or "")
+        if not name:
+            raise RuntimeError("delete_node requires 'name'")
+        node = comp.FindTool(name) if hasattr(comp, "FindTool") else None
+        if node is None:
+            raise RuntimeError(f"node not found: {name}")
+        if not hasattr(node, "Delete"):
+            raise RuntimeError("this Resolve build's Tool has no Delete")
+        node.Delete()
+        return {"deleted": name}
+
+    if action == "connect":
+        from_name = str(params.get("fromNode") or "")
+        to_name = str(params.get("toNode") or "")
+        from_output = str(params.get("fromOutput") or "Output")
+        to_input = str(params.get("toInput") or "Input")
+        if not from_name or not to_name:
+            raise RuntimeError("connect requires 'fromNode' and 'toNode'")
+        a = comp.FindTool(from_name)
+        b = comp.FindTool(to_name)
+        if a is None or b is None:
+            raise RuntimeError(f"node not found (from={from_name}, to={to_name})")
+        try:
+            out = a.FindMainOutput(1) if from_output == "Output" else getattr(a, from_output, None)
+        except Exception:
+            out = None
+        if out is None:
+            raise RuntimeError(f"output '{from_output}' not found on {from_name}")
+        try:
+            inp = getattr(b, to_input, None)
+            if inp is None and hasattr(b, "FindMainInput"):
+                inp = b.FindMainInput(1)
+        except Exception:
+            inp = None
+        if inp is None:
+            raise RuntimeError(f"input '{to_input}' not found on {to_name}")
+        try:
+            inp.ConnectTo(out)
+        except Exception as e:
+            raise RuntimeError(f"ConnectTo failed: {e}")
+        return {"from": from_name, "to": to_name}
+
+    if action == "set_input":
+        name = str(params.get("node") or "")
+        input_name = str(params.get("input") or "")
+        if not name or not input_name:
+            raise RuntimeError("set_input requires 'node' and 'input'")
+        if "value" not in params:
+            raise RuntimeError("set_input requires 'value'")
+        node = comp.FindTool(name)
+        if node is None:
+            raise RuntimeError(f"node not found: {name}")
+        try:
+            attr = getattr(node, input_name)
+        except Exception:
+            raise RuntimeError(f"input '{input_name}' not found on {name}")
+        try:
+            # Fusion inputs accept assignment directly: node.Input = value.
+            setattr(node, input_name, params["value"])
+        except Exception as e:
+            raise RuntimeError(f"set_input failed: {e}")
+        return {"node": name, "input": input_name}
+
+    if action == "get_input":
+        name = str(params.get("node") or "")
+        input_name = str(params.get("input") or "")
+        if not name or not input_name:
+            raise RuntimeError("get_input requires 'node' and 'input'")
+        node = comp.FindTool(name)
+        if node is None:
+            raise RuntimeError(f"node not found: {name}")
+        try:
+            attr = getattr(node, input_name)
+        except Exception:
+            raise RuntimeError(f"input '{input_name}' not found on {name}")
+        value = None
+        try:
+            # Fusion inputs are callable for current-value access on some builds.
+            value = attr() if callable(attr) else attr
+        except Exception:
+            value = attr
+        try:
+            json.dumps(value)
+        except Exception:
+            value = repr(value)
+        return {"node": name, "input": input_name, "value": value}
+
+    if action == "set_keyframe":
+        name = str(params.get("node") or "")
+        input_name = str(params.get("input") or "")
+        frame = params.get("frame")
+        if frame is None or not name or not input_name or "value" not in params:
+            raise RuntimeError("set_keyframe requires 'node', 'input', 'frame', 'value'")
+        node = comp.FindTool(name)
+        if node is None:
+            raise RuntimeError(f"node not found: {name}")
+        try:
+            attr = getattr(node, input_name)
+        except Exception:
+            raise RuntimeError(f"input '{input_name}' not found on {name}")
+        try:
+            # Comp.SetKeyFrames is the canonical path; older builds use
+            # input.SetKeyFrames or .SetExpression. Try the modern one first.
+            ok = comp.SetKeyFrames({attr: {int(frame): params["value"]}})
+        except Exception:
+            ok = False
+        if not ok and hasattr(attr, "SetKeyFrames"):
+            try:
+                attr.SetKeyFrames({int(frame): params["value"]})
+                ok = True
+            except Exception:
+                ok = False
+        if not ok:
+            raise RuntimeError("could not set keyframe via Comp.SetKeyFrames or Input.SetKeyFrames")
+        return {"node": name, "input": input_name, "frame": int(frame)}
+
+    if action == "set_render_range":
+        start = params.get("start")
+        end = params.get("end")
+        if start is None or end is None:
+            raise RuntimeError("set_render_range requires 'start' and 'end'")
+        try:
+            comp.SetAttrs({"COMPN_RenderStart": int(start), "COMPN_RenderEnd": int(end)})
+        except Exception as e:
+            raise RuntimeError(f"SetAttrs failed: {e}")
+        return {"start": int(start), "end": int(end)}
+
+    raise RuntimeError(
+        f"unknown fusion_comp action: {action}; valid: list_nodes, add_node, delete_node, connect, set_input, get_input, set_keyframe, set_render_range"
+    )
+
+
+def m_execute_code(params):
+    """Escape hatch: run arbitrary user code with the Resolve API pre-bound.
+
+    Pre-bound globals available to the snippet:
+      resolve, project, projectManager, mediaPool, mediaStorage, timeline,
+      fusion (lazy — None if Fusion comp is unavailable), dvr (the
+      DaVinciResolveScript module itself).
+
+    Result delivery (in priority order):
+      1. Call set_result(value) — explicit, supports any JSON-serialisable value.
+      2. Assign to a top-level 'result' variable.
+      3. Otherwise: stdout text only.
+
+    stdout is captured and returned regardless. The snippet runs in the same
+    process as every other bridge call, so a crash here CAN take the bridge
+    down. We trap exceptions but a segfault in fusionscript.so cannot be caught.
+    """
+    code = params.get("code")
+    if not isinstance(code, str) or not code.strip():
+        raise RuntimeError("execute_code requires a non-empty 'code' string.")
+
+    import io
+    import contextlib
+
+    resolve = get_resolve()
+    project_manager = resolve.GetProjectManager()
+    project = project_manager.GetCurrentProject() if project_manager else None
+    media_pool = project.GetMediaPool() if project else None
+    media_storage = resolve.GetMediaStorage()
+    try:
+        timeline = project.GetCurrentTimeline() if project else None
+    except Exception:
+        timeline = None
+    try:
+        fusion = resolve.Fusion()
+    except Exception:
+        fusion = None
+
+    # JSON-serialisability check that won't crash on Resolve API objects (which
+    # are PyRemoteObject and not JSON-able). Anything non-serialisable is
+    # coerced to its repr so the agent at least sees what came back.
+    def _safe(value):
+        try:
+            json.dumps(value)
+            return value
+        except Exception:
+            return repr(value)
+
+    holder = {"result": None, "set": False}
+
+    def set_result(value):
+        holder["result"] = _safe(value)
+        holder["set"] = True
+
+    g = {
+        "__builtins__": __builtins__,
+        "resolve": resolve,
+        "project": project,
+        "projectManager": project_manager,
+        "mediaPool": media_pool,
+        "mediaStorage": media_storage,
+        "timeline": timeline,
+        "fusion": fusion,
+        "dvr": dvr,
+        "set_result": set_result,
+        "json": json,
+    }
+    l = {}
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        try:
+            exec(code, g, l)
+        except Exception as ex:
+            # Re-raise with the captured stdout attached so the agent gets both
+            # the print() output that ran before the crash AND the error.
+            stdout = buf.getvalue()
+            tail = ("\nstdout: " + stdout[-1500:]) if stdout else ""
+            raise RuntimeError(f"{ex.__class__.__name__}: {ex}{tail}") from ex
+
+    stdout = buf.getvalue()
+
+    # Result resolution: explicit set_result wins; else top-level 'result'.
+    if holder["set"]:
+        result_value = holder["result"]
+    elif "result" in l:
+        result_value = _safe(l["result"])
+    else:
+        result_value = None
+
+    out = {"result": result_value}
+    if stdout:
+        # Cap stdout to keep tool output token-economical.
+        if len(stdout) > 4000:
+            stdout = stdout[:2000] + "\n…[truncated]…\n" + stdout[-1500:]
+        out["stdout"] = stdout
+    return out
+
+
 METHODS = {
     "ping": m_ping,
     "get_timeline": m_get_timeline,
@@ -616,6 +988,8 @@ METHODS = {
     "add_track": m_add_track,
     "set_clip_volume": m_set_clip_volume,
     "import_subtitles": m_import_subtitles,
+    "fusion_comp": m_fusion_comp,
+    "execute_code": m_execute_code,
 }
 
 

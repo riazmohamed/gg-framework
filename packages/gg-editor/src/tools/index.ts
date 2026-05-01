@@ -39,6 +39,7 @@ import { createDetectSilenceTool } from "./detect-silence.js";
 import { createExtractAudioTool } from "./extract-audio.js";
 import { createGetMarkersTool } from "./get-markers.js";
 import { createGetTimelineTool } from "./get-timeline.js";
+import { createHostEvalTool } from "./host-eval.js";
 import { createHostInfoTool } from "./host-info.js";
 import { createImportEdlTool } from "./import-edl.js";
 import { createImportSubtitlesTool } from "./import-subtitles.js";
@@ -52,6 +53,7 @@ import { createMulticamSyncTool } from "./multicam-sync.js";
 import { createNormalizeLoudnessTool } from "./normalize-loudness.js";
 import { createPreRenderCheckTool } from "./pre-render-check.js";
 import { createExtractFrameTool } from "./extract-frame.js";
+import { createFusionCompTool } from "./fusion-comp.js";
 import { createSaveProjectTool } from "./save-project.js";
 import { createWriteAssTool } from "./write-ass.js";
 import { createOpenPageTool } from "./open-page.js";
@@ -145,6 +147,9 @@ export function createEditorTools(opts: CreateEditorToolsOptions): AgentTool[] {
     createGradeSkinTonesTool(cwd),
     createMatchClipColorTool(host, cwd),
 
+    // Motion graphics (Resolve only — Premiere returns not_supported)
+    createFusionCompTool(host),
+
     // Audio cleanup + loudness (file-only; works on every host)
     createMeasureLoudnessTool(cwd),
     createNormalizeLoudnessTool(cwd),
@@ -193,6 +198,10 @@ export function createEditorTools(opts: CreateEditorToolsOptions): AgentTool[] {
 
     // Skills
     createReadSkillTool(skills),
+
+    // Escape hatch — ALWAYS register; throws not_supported on host=none.
+    // Read host-eval.ts for the contract: only use when no named tool fits.
+    createHostEvalTool(host),
   ];
 
   if (reviewConfig) {
@@ -238,10 +247,12 @@ export { createDetectSilenceTool } from "./detect-silence.js";
 export { createExtractAudioTool } from "./extract-audio.js";
 export { createGetMarkersTool } from "./get-markers.js";
 export { createGetTimelineTool } from "./get-timeline.js";
+export { createHostEvalTool } from "./host-eval.js";
 export { createHostInfoTool } from "./host-info.js";
 export { createImportEdlTool } from "./import-edl.js";
 export { createImportSubtitlesTool } from "./import-subtitles.js";
 export { createExtractFrameTool } from "./extract-frame.js";
+export { createFusionCompTool } from "./fusion-comp.js";
 export { createImportToMediaPoolTool } from "./import-to-media-pool.js";
 export { createGenerateGifTool } from "./generate-gif.js";
 export { createInsertBrollTool } from "./insert-broll.js";

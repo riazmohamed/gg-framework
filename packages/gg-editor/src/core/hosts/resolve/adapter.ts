@@ -9,7 +9,12 @@ import type {
   MarkerInfo,
   TimelineState,
 } from "../../../types.js";
-import { HostUnsupportedError, type VideoHost } from "../types.js";
+/* HostCapabilities is the runtime answer to "can the agent talk to Resolve
+right now?" — we deliberately do NOT cache it. A cached `isAvailable: true`
+outlives a closed-Resolve session and silently lies. checkReachable() is a
+sync env-var stat (~0.1ms), so re-running it on every host_info call is
+free and always truthful. */
+import { HostUnsupportedError, type FusionCompArgs, type VideoHost } from "../types.js";
 import { toResolveColor } from "../../marker-colors.js";
 import { findPython, ResolveBridge, resolveEnv } from "./bridge.js";
 
@@ -39,14 +44,12 @@ export class ResolveAdapter implements VideoHost {
   readonly name = "resolve" as const;
   readonly displayName = "DaVinci Resolve";
 
-  private cachedCapabilities?: HostCapabilities;
   private bridge = new ResolveBridge();
 
   async capabilities(): Promise<HostCapabilities> {
-    if (this.cachedCapabilities) return this.cachedCapabilities;
-
+    // Re-checked on every call — see top-of-file comment.
     const reachable = this.checkReachable();
-    this.cachedCapabilities = {
+    return {
       canMoveClips: false,
       canScriptColor: true,
       canScriptAudio: false,
@@ -54,8 +57,10 @@ export class ResolveAdapter implements VideoHost {
       preferredImportFormat: "edl",
       isAvailable: reachable.ok,
       unavailableReason: reachable.ok ? undefined : reachable.reason,
+      // Resolve uses Blackmagic's first-party Python scripting API — no
+      // deprecation pressure, unlike the Adobe CEP/UXP situation.
+      runtime: "native",
     };
-    return this.cachedCapabilities;
   }
 
   async getTimeline(): Promise<TimelineState> {
@@ -205,6 +210,14 @@ export class ResolveAdapter implements VideoHost {
     name: "media" | "cut" | "edit" | "fusion" | "color" | "fairlight" | "deliver",
   ): Promise<void> {
     await this.bridge.call("open_page", { name });
+  }
+
+  async executeCode(code: string): Promise<{ result: unknown; stdout?: string }> {
+    return this.bridge.call<{ result: unknown; stdout?: string }>("execute_code", { code });
+  }
+
+  async executeFusionComp(args: FusionCompArgs): Promise<unknown> {
+    return this.bridge.call("fusion_comp", args as unknown as Record<string, unknown>);
   }
 
   /**

@@ -6,6 +6,7 @@ import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { buildFcpxml, type FcpxmlEvent } from "../core/fcpxml.js";
 import { compact, err } from "../core/format.js";
 import type { VideoHost } from "../core/hosts/types.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const LayerSchema = z.object({
   reel: z.string().describe("Source identifier — same reel = same asset."),
@@ -98,7 +99,7 @@ export function createComposeLayeredTool(
         });
         const xml = buildFcpxml({ title, frameRate, width, height, events });
         const outAbs = fcpxmlOutput
-          ? resolvePath(cwd, fcpxmlOutput)
+          ? safeOutputPath(cwd, fcpxmlOutput)
           : join(mkdtempSync(join(tmpdir(), "gg-compose-")), "composed.fcpxml");
         if (fcpxmlOutput) mkdirSync(dirname(outAbs), { recursive: true });
         writeFileSync(outAbs, xml, "utf8");
