@@ -2,8 +2,9 @@ import path from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { resolvePath, rejectSymlink } from "./path-utils.js";
-import { fuzzyFindText, countOccurrences, generateDiff } from "./edit-diff.js";
+import { fuzzyFindText, countOccurrences, generateDiff, findClosestSnippet } from "./edit-diff.js";
 import { localOperations, type ToolOperations } from "./operations.js";
+import { assertFresh, recordWrite, type ReadTracker } from "./read-tracker.js";
 
 const EditItem = z.object({
   old_text: z.string().describe("The exact text to find and replace"),
@@ -35,7 +36,7 @@ const EditParams = z.object({
 
 export function createEditTool(
   cwd: string,
-  readFiles?: Set<string>,
+  readFiles?: ReadTracker,
   ops: ToolOperations = localOperations,
   planModeRef?: { current: boolean },
 ): AgentTool<typeof EditParams> {
@@ -55,9 +56,7 @@ export function createEditTool(
       const resolved = resolvePath(cwd, file_path);
       await rejectSymlink(resolved);
 
-      if (readFiles && !readFiles.has(resolved)) {
-        throw new Error("File must be read first before editing. Use the read tool first.");
-      }
+      await assertFresh(readFiles, resolved, ops);
 
       const original = await ops.readFile(resolved);
       const hasCRLF = original.includes("\r\n");
@@ -65,6 +64,7 @@ export function createEditTool(
 
       let working = originalNormalized;
       const fileName = path.basename(resolved);
+      const errors: string[] = [];
 
       for (let i = 0; i < edits.length; i++) {
         const { old_text, new_text } = edits[i];
@@ -75,21 +75,27 @@ export function createEditTool(
 
         const occurrences = countOccurrences(working, normalizedOld);
         if (occurrences === 0) {
-          throw new Error(
+          const hint = findClosestSnippet(working, normalizedOld);
+          const hintLine = hint ? `\nClosest match in file:\n${hint}` : "";
+          errors.push(
             `old_text not found in ${fileName}${label}. ` +
-              "Text must match verbatim — do not paraphrase. Re-read the file if unsure.",
+              "Text must match verbatim — do not paraphrase. Re-read the file if unsure." +
+              hintLine,
           );
+          continue;
         }
         if (occurrences > 1) {
-          throw new Error(
+          errors.push(
             `old_text found ${occurrences} times in ${fileName}${label}. ` +
               "Include more surrounding context to make the match unique.",
           );
+          continue;
         }
 
         const match = fuzzyFindText(working, normalizedOld);
         if (!match.found) {
-          throw new Error(`old_text not found in ${fileName}${label}.`);
+          errors.push(`old_text not found in ${fileName}${label}.`);
+          continue;
         }
 
         working =
@@ -98,8 +104,18 @@ export function createEditTool(
           working.slice(match.index + match.matchLength);
       }
 
+      if (errors.length > 0) {
+        const header =
+          errors.length === 1
+            ? errors[0]
+            : `${errors.length} of ${edits.length} edits failed; no changes written.\n\n` +
+              errors.map((e, i) => `[${i + 1}] ${e}`).join("\n\n");
+        throw new Error(header);
+      }
+
       const finalContent = hasCRLF ? working.replace(/\n/g, "\r\n") : working;
       await ops.writeFile(resolved, finalContent);
+      await recordWrite(readFiles, resolved, finalContent, ops);
 
       const relPath = path.relative(cwd, resolved);
       const diff = generateDiff(originalNormalized, working, relPath);

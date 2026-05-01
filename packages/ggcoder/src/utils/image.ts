@@ -132,6 +132,15 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
+/** Map sharp's detected format string to an Anthropic-compatible media type. */
+const SHARP_FORMAT_TO_MEDIA: Record<string, string> = {
+  png: "image/png",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+};
+
 /**
  * Downscale an image buffer so it fits within both MAX_IMAGE_DIMENSION per side
  * (Anthropic's hard pixel cap for many-image requests) and MAX_IMAGE_BYTES.
@@ -145,6 +154,14 @@ export async function shrinkToFit(
   const origW = meta.width ?? 4096;
   const origH = meta.height ?? 4096;
   const exceedsDim = origW > MAX_IMAGE_DIMENSION || origH > MAX_IMAGE_DIMENSION;
+
+  // Trust the buffer over the caller-supplied mediaType: if a file was named
+  // foo.png but is actually a JPEG, sharp tells the truth and Anthropic
+  // rejects mismatched media types with a 400.
+  const detected = meta.format ? SHARP_FORMAT_TO_MEDIA[meta.format] : undefined;
+  if (detected && detected !== mediaType) {
+    mediaType = detected;
+  }
 
   // Short-circuit: within both limits — return as-is.
   if (!exceedsDim && buffer.length <= MAX_IMAGE_BYTES) {

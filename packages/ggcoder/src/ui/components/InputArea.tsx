@@ -200,6 +200,7 @@ interface InputAreaProps {
   onShiftTab?: () => void;
   onToggleTasks?: () => void;
   onToggleSkills?: () => void;
+  onTogglePixel?: () => void;
   onTogglePlanMode?: () => void;
   cwd: string;
   commands?: SlashCommandInfo[];
@@ -265,6 +266,7 @@ export function InputArea({
   onShiftTab,
   onToggleTasks,
   onToggleSkills,
+  onTogglePixel,
   onTogglePlanMode,
   cwd,
   commands = [],
@@ -748,6 +750,12 @@ export function InputArea({
       // Ctrl+S toggles skills overlay
       if (key.ctrl && input === "s") {
         onToggleSkills?.();
+        return;
+      }
+
+      // Ctrl+E toggles pixel (errors) overlay
+      if (key.ctrl && input === "e") {
+        onTogglePixel?.();
         return;
       }
 

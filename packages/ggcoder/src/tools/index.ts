@@ -17,6 +17,7 @@ import { createSkillTool } from "./skill.js";
 import { createEnterPlanTool } from "./enter-plan.js";
 import { createExitPlanTool } from "./exit-plan.js";
 import { localOperations, type ToolOperations } from "./operations.js";
+import type { ReadTracker } from "./read-tracker.js";
 import type { AgentDefinition } from "../core/agents.js";
 import type { Skill } from "../core/skills.js";
 
@@ -41,7 +42,7 @@ export interface CreateToolsResult {
 }
 
 export function createTools(cwd: string, opts?: CreateToolsOptions): CreateToolsResult {
-  const readFiles = new Set<string>();
+  const readFiles: ReadTracker = new Map();
   const processManager = new ProcessManager();
   const ops = opts?.operations ?? localOperations;
   const planModeRef = opts?.planModeRef;

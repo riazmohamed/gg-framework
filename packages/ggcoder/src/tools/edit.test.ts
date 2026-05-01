@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createEditTool } from "./edit.js";
+import { recordRead, type ReadTracker } from "./read-tracker.js";
 
 function resultToString(result: unknown): string {
   if (typeof result === "string") return result;
@@ -11,6 +12,12 @@ function resultToString(result: unknown): string {
     return details?.diff ?? "";
   }
   return "";
+}
+
+async function markRead(tracker: ReadTracker, filePath: string): Promise<void> {
+  const stat = await fs.stat(filePath);
+  const content = await fs.readFile(filePath, "utf-8");
+  recordRead(tracker, filePath, content, stat.mtimeMs);
 }
 
 describe("createEditTool", () => {
@@ -129,7 +136,7 @@ describe("createEditTool", () => {
     const filePath = path.join(tmpDir, "unread.txt");
     await fs.writeFile(filePath, "content\n");
 
-    const readFiles = new Set<string>();
+    const readFiles: ReadTracker = new Map();
     const tool = createEditTool(tmpDir, readFiles);
 
     await expect(
@@ -140,12 +147,12 @@ describe("createEditTool", () => {
     ).rejects.toThrow("File must be read first");
   });
 
-  it("allows edit when file is in readFiles set", async () => {
+  it("allows edit when file is in readFiles tracker", async () => {
     const filePath = path.join(tmpDir, "tracked.txt");
     await fs.writeFile(filePath, "alpha beta\n");
 
-    const readFiles = new Set<string>();
-    readFiles.add(path.resolve(tmpDir, "tracked.txt"));
+    const readFiles: ReadTracker = new Map();
+    await markRead(readFiles, filePath);
 
     const tool = createEditTool(tmpDir, readFiles);
     const result = await tool.execute(
@@ -159,6 +166,98 @@ describe("createEditTool", () => {
 
     const written = await fs.readFile(filePath, "utf-8");
     expect(written).toBe("gamma beta\n");
+  });
+
+  it("rejects edit when the file changed since it was read", async () => {
+    const filePath = path.join(tmpDir, "stale.txt");
+    await fs.writeFile(filePath, "alpha\n");
+
+    const readFiles: ReadTracker = new Map();
+    await markRead(readFiles, filePath);
+
+    // Simulate an external formatter rewriting the file (different bytes,
+    // forced bumped mtime so the fast-path mtime check trips).
+    await fs.writeFile(filePath, "ALPHA\n");
+    const future = new Date(Date.now() + 5_000);
+    await fs.utimes(filePath, future, future);
+
+    const tool = createEditTool(tmpDir, readFiles);
+    await expect(
+      tool.execute(
+        { file_path: "stale.txt", edits: [{ old_text: "ALPHA", new_text: "beta" }] },
+        { signal: new AbortController().signal, toolCallId: "test-stale" },
+      ),
+    ).rejects.toThrow(/modified since/);
+  });
+
+  it("allows consecutive edits without re-reading (recordWrite refreshes)", async () => {
+    const filePath = path.join(tmpDir, "consec.txt");
+    await fs.writeFile(filePath, "one\ntwo\n");
+
+    const readFiles: ReadTracker = new Map();
+    await markRead(readFiles, filePath);
+
+    const tool = createEditTool(tmpDir, readFiles);
+    await tool.execute(
+      { file_path: "consec.txt", edits: [{ old_text: "one", new_text: "ONE" }] },
+      { signal: new AbortController().signal, toolCallId: "test-consec-1" },
+    );
+    // Second edit must succeed without an explicit re-read.
+    await tool.execute(
+      { file_path: "consec.txt", edits: [{ old_text: "two", new_text: "TWO" }] },
+      { signal: new AbortController().signal, toolCallId: "test-consec-2" },
+    );
+
+    const written = await fs.readFile(filePath, "utf-8");
+    expect(written).toBe("ONE\nTWO\n");
+  });
+
+  it("appends a 'Closest match' snippet when old_text is not found", async () => {
+    const filePath = path.join(tmpDir, "snippet.txt");
+    await fs.writeFile(
+      filePath,
+      "import { useState } from 'react';\n\nexport function Counter() {\n  const [count, setCount] = useState(0);\n  return <div>{count}</div>;\n}\n",
+    );
+
+    const tool = createEditTool(tmpDir);
+    await expect(
+      tool.execute(
+        {
+          file_path: "snippet.txt",
+          edits: [
+            {
+              old_text: "const [count, setCount] = useState(1);",
+              new_text: "const [count, setCount] = useState(2);",
+            },
+          ],
+        },
+        { signal: new AbortController().signal, toolCallId: "test-snippet" },
+      ),
+    ).rejects.toThrow(/Closest match in file:[\s\S]*useState\(0\)/);
+  });
+
+  it("aggregates multiple edit failures into one error", async () => {
+    const filePath = path.join(tmpDir, "agg.txt");
+    await fs.writeFile(filePath, "alpha\nbeta\ngamma\n");
+
+    const tool = createEditTool(tmpDir);
+    await expect(
+      tool.execute(
+        {
+          file_path: "agg.txt",
+          edits: [
+            { old_text: "alpha", new_text: "ALPHA" },
+            { old_text: "MISSING", new_text: "X" },
+            { old_text: "ALSO_MISSING", new_text: "Y" },
+          ],
+        },
+        { signal: new AbortController().signal, toolCallId: "test-agg" },
+      ),
+    ).rejects.toThrow(/2 of 3 edits failed[\s\S]*\[1\][\s\S]*\[2\]/);
+
+    // Atomic — nothing written.
+    const written = await fs.readFile(filePath, "utf-8");
+    expect(written).toBe("alpha\nbeta\ngamma\n");
   });
 
   it("throws when old_text is not found", async () => {

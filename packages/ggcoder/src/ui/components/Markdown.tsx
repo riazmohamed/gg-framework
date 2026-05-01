@@ -102,34 +102,17 @@ export const Markdown = React.memo(function Markdown({
     return { body, trailingFragment };
   }, [children]);
 
-  // Throttle markdown parsing during streaming: only re-parse when the
-  // stabilised body has changed by a meaningful amount (100+ chars) or
-  // on the final value. This reduces expensive marked.lexer calls from
-  // ~30/sec to ~5-10/sec during heavy streaming.
-  //
   // Layered caching:
   // 1. Plain-text fast path — skip marked.lexer() entirely for text with no markdown syntax
-  // 2. LRU cache (500 entries) — avoids re-parsing completed messages on scroll
-  // 3. Streaming throttle — skip re-parse if body grew < 100 chars
-  const lastParsedBodyRef = useRef("");
-  const lastAnsiRef = useRef("");
-
+  // 2. LRU cache (500 entries, keyed by body+theme+width) — avoids re-parsing
+  //    completed messages on scroll and unchanged streaming bodies
+  //
+  // The 16ms flush in useAgentLoop already caps re-renders at ~60Hz; an
+  // additional char-delta throttle would lag the visible output.
   const ansiOutput = useMemo(() => {
     const body = stabilised.body;
-    const delta = body.length - lastParsedBodyRef.current.length;
-
-    // Streaming throttle: skip if delta is small and we already have output
-    if (lastAnsiRef.current && delta > 0 && delta < 100) {
-      return lastAnsiRef.current;
-    }
-
-    // Check LRU cache first (mainly benefits completed messages on re-render)
-    const cached = markdownAnsiCache.get(body);
-    if (cached) {
-      lastParsedBodyRef.current = body;
-      lastAnsiRef.current = cached;
-      return cached;
-    }
+    const cached = markdownAnsiCache.get(body, theme.name, columns);
+    if (cached) return cached;
 
     // Plain-text fast path: skip marked.lexer() for text with no markdown syntax
     let tokens: Token[];
@@ -147,9 +130,7 @@ export const Markdown = React.memo(function Markdown({
     }
 
     const result = tokensToAnsi(tokens, theme, columns);
-    lastParsedBodyRef.current = body;
-    lastAnsiRef.current = result;
-    markdownAnsiCache.set(body, result);
+    markdownAnsiCache.set(body, theme.name, columns, result);
     return result;
   }, [stabilised.body, theme, columns]);
 

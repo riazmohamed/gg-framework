@@ -247,6 +247,18 @@ function main(): void {
     process.exit(r.status ?? 0);
   }
 
+  if (subcommand === "pixel") {
+    runPixel().catch((err) => {
+      // Log the full stack — `pixel install` failures are usually bugs in our
+      // own AST/wiring code, and the stack is the only useful diagnostic.
+      log("ERROR", "fatal", err instanceof Error ? (err.stack ?? err.message) : String(err));
+      closeLogger();
+      process.stderr.write(formatUserError(err) + "\n");
+      process.exit(1);
+    });
+    return;
+  }
+
   if (subcommand === "login") {
     runLogin().catch((err) => {
       log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
@@ -438,6 +450,22 @@ function main(): void {
 
 // ── Ink TUI ───────────────────────────────────────────────
 
+/**
+ * Bail with a friendly message if stdin isn't a TTY. Ink's raw-mode crash is
+ * cryptic; this catches the common case (piped stdin, API shells, CI).
+ */
+function requireInteractiveTTY(): void {
+  if (process.stdin.isTTY) return;
+  process.stderr.write(
+    chalk.red("ggcoder needs an interactive terminal — your stdin isn't a TTY.\n") +
+      chalk.hex("#6b7280")(
+        "Run ggcoder directly in your terminal (not piped or through an API shell). " +
+          'For headless use try "ggcoder --json \'<prompt>\'" or "ggcoder --rpc".\n',
+      ),
+  );
+  process.exit(1);
+}
+
 async function runInkTUI(opts: {
   provider: Provider;
   model: string;
@@ -446,7 +474,10 @@ async function runInkTUI(opts: {
   continueRecent?: boolean;
   resumeSessionPath?: string;
   theme?: "auto" | ThemeName;
+  initialOverlay?: "pixel";
 }): Promise<void> {
+  requireInteractiveTTY();
+
   const { cwd } = opts;
 
   // Resolve auth first so we can pick an active provider the user has
@@ -535,6 +566,22 @@ async function runInkTUI(opts: {
     onEnterPlan: (reason) => onEnterPlanRef.current(reason),
     onExitPlan: (planPath) => onExitPlanRef.current(planPath),
   });
+
+  // Rebuilds the cwd-bound tools for a different project root. Used by the
+  // pixel-fix flow so the agent operates in the error's project, not in
+  // wherever ggcoder was launched from.
+  const rebuildToolsForCwd = (newCwd: string) => {
+    const { tools: rebuilt } = createTools(newCwd, {
+      agents,
+      skills,
+      provider,
+      model,
+      planModeRef,
+      onEnterPlan: (reason) => onEnterPlanRef.current(reason),
+      onExitPlan: (planPath) => onExitPlanRef.current(planPath),
+    });
+    return rebuilt;
+  };
 
   // Connect MCP servers
   const mcpManager = new MCPClientManager();
@@ -663,6 +710,8 @@ async function runInkTUI(opts: {
     onEnterPlanRef,
     onExitPlanRef,
     skills,
+    initialOverlay: opts.initialOverlay,
+    rebuildToolsForCwd,
   });
 
   closeLogger();
@@ -671,6 +720,7 @@ async function runInkTUI(opts: {
 // ── Login ──────────────────────────────────────────────────
 
 async function runLogin(): Promise<void> {
+  requireInteractiveTTY();
   process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, { version: CLI_VERSION });
@@ -1036,6 +1086,7 @@ async function runLogout(): Promise<void> {
 // ── Sessions ──────────────────────────────────────────────
 
 async function runSessions(): Promise<void> {
+  requireInteractiveTTY();
   process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, { version: CLI_VERSION });
@@ -1502,6 +1553,128 @@ async function runAgentHome(): Promise<void> {
   });
 }
 
+// ── Pixel ──────────────────────────────────────────────────
+
+async function runPixel(): Promise<void> {
+  const sub = process.argv[3];
+  const rest = process.argv.slice(4);
+
+  if (sub === "install") {
+    const { runPixelInstall } = await import("./core/pixel.js");
+    const opts = parsePixelInstallArgs(rest);
+    await runPixelInstall(opts);
+    return;
+  }
+
+  if (sub === "fix") {
+    const errorId = rest[0];
+    if (!errorId) {
+      process.stderr.write("Usage: ggcoder pixel fix <error_id>\n");
+      process.exit(1);
+    }
+    const { fixError } = await import("./core/pixel-fix.js");
+    const result = await fixError(errorId);
+    if (result.outcome === "awaiting_review") {
+      console.log(chalk.hex("#4ade80")(`✓ ${result.reason}`));
+    } else {
+      console.log(chalk.hex("#ef4444")(`✗ ${result.reason}`));
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (sub === "run") {
+    const { runQueue } = await import("./core/pixel-fix.js");
+    const result = await runQueue();
+    console.log(
+      chalk.bold(`${result.fixed} fixed · ${result.failed} failed · ${result.total} total`),
+    );
+    if (result.failed > 0) process.exit(1);
+    return;
+  }
+
+  if (sub === "--help" || sub === "-h") {
+    printPixelHelp();
+    return;
+  }
+
+  if (sub === "list") {
+    const { listAllErrors } = await import("./core/pixel.js");
+    await listAllErrors();
+    return;
+  }
+
+  if (sub) {
+    process.stderr.write(`Unknown pixel subcommand: ${sub}\n`);
+    printPixelHelp();
+    process.exit(1);
+  }
+
+  // No subcommand → launch the Ink TUI with the pixel overlay open. The fix
+  // flow runs through the same agent loop as a Task, streaming live in the
+  // chat instead of spawning a subprocess.
+  // Non-TTY (CI, piped) → fall back to text list.
+  if (!process.stdin.isTTY) {
+    const { listAllErrors } = await import("./core/pixel.js");
+    await listAllErrors();
+    return;
+  }
+
+  const saved = loadSavedSettings();
+  const provider: Provider = saved.provider ?? "anthropic";
+  const model: string = saved.model ?? defaultModelFor(provider);
+  await runInkTUI({
+    provider,
+    model,
+    cwd: process.cwd(),
+    thinkingLevel: saved.thinkingEnabled ? "medium" : undefined,
+    theme: saved.theme,
+    initialOverlay: "pixel",
+  });
+}
+
+function defaultModelFor(p: string): string {
+  if (p === "openai") return "gpt-5.5";
+  if (p === "glm") return "glm-5.1";
+  if (p === "moonshot") return "kimi-k2.6";
+  if (p === "minimax") return "MiniMax-M2.7";
+  if (p === "deepseek") return "deepseek-v4-pro";
+  if (p === "openrouter") return "qwen/qwen3.6-plus";
+  return "claude-opus-4-7";
+}
+
+interface ParsedInstall {
+  ingestUrl?: string;
+  name?: string;
+  skipPackageInstall: boolean;
+}
+
+function parsePixelInstallArgs(args: string[]): ParsedInstall {
+  const out: ParsedInstall = { skipPackageInstall: false };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--ingest-url") out.ingestUrl = args[++i];
+    else if (a === "--name") out.name = args[++i];
+    else if (a === "--skip-install") out.skipPackageInstall = true;
+  }
+  return out;
+}
+
+function printPixelHelp(): void {
+  console.log(`ggcoder pixel — error tracking + auto-fix queue
+
+Usage:
+  ggcoder pixel                  List open errors across every registered project
+  ggcoder pixel install          Register the current project and wire up the SDK
+  ggcoder pixel fix <error_id>   Fix one specific error end-to-end
+  ggcoder pixel run              Auto-fix every open error across all projects
+
+  ggcoder pixel install --name <name>      Override the project name
+  ggcoder pixel install --ingest-url <url> Use a custom backend URL
+  ggcoder pixel install --skip-install     Don't run the package manager
+`);
+}
+
 // ── Helpers ────────────────────────────────────────────────
 
 /**
@@ -1609,27 +1782,67 @@ function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
         if (content) items.push({ kind: "assistant", text: content, id: `restore-${id++}` });
         continue;
       }
-      // Count block types for debugging
       for (const block of content) {
         blockTypeCounts[block.type] = (blockTypeCounts[block.type] ?? 0) + 1;
       }
-      // Process content blocks in order — text and tool calls
-      const text = extractText(content);
-      if (text) items.push({ kind: "assistant", text, id: `restore-${id++}` });
+      // Pair server_tool_result blocks with their server_tool_call by id
+      // (both live in the same assistant message for provider-side tools).
+      const serverResults = new Map<string, { resultType: string; data: unknown }>();
       for (const block of content) {
-        if (block.type === "tool_call") {
-          const result = toolResults.get(block.id);
-          items.push({
-            kind: "tool_done",
-            name: block.name,
-            args: block.args,
-            result: result?.content ?? "",
-            isError: result?.isError ?? false,
-            durationMs: 0,
-            id: `restore-${id++}`,
+        if (block.type === "server_tool_result") {
+          serverResults.set(block.toolUseId, {
+            resultType: block.resultType,
+            data: block.data,
           });
         }
       }
+      // Walk blocks in order. Buffer consecutive text blocks into a single
+      // assistant item (mirrors live rendering), and flush the buffer before
+      // each tool_call / server_tool_call so chronology is preserved.
+      let textBuf = "";
+      const flushText = () => {
+        if (textBuf) {
+          items.push({ kind: "assistant", text: textBuf, id: `restore-${id++}` });
+          textBuf = "";
+        }
+      };
+      for (const block of content) {
+        switch (block.type) {
+          case "text":
+            if (block.text) textBuf += (textBuf ? "\n" : "") + block.text;
+            break;
+          case "tool_call": {
+            flushText();
+            const result = toolResults.get(block.id);
+            items.push({
+              kind: "tool_done",
+              name: block.name,
+              args: block.args,
+              result: result?.content ?? "",
+              isError: result?.isError ?? false,
+              durationMs: 0,
+              id: `restore-${id++}`,
+            });
+            break;
+          }
+          case "server_tool_call": {
+            flushText();
+            const serverResult = serverResults.get(block.id);
+            items.push({
+              kind: "server_tool_done",
+              name: block.name,
+              input: block.input,
+              resultType: serverResult?.resultType ?? "",
+              data: serverResult?.data ?? null,
+              durationMs: 0,
+              id: `restore-${id++}`,
+            });
+            break;
+          }
+          // thinking, image, raw, server_tool_result: not surfaced in restored history
+        }
+      }
+      flushText();
     }
   }
 

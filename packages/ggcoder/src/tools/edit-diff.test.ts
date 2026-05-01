@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fuzzyFindText, countOccurrences, generateDiff } from "./edit-diff.js";
+import { fuzzyFindText, countOccurrences, generateDiff, findClosestSnippet } from "./edit-diff.js";
 
 describe("fuzzyFindText", () => {
   it("finds exact match with usedFuzzy=false", () => {
@@ -58,6 +58,71 @@ describe("countOccurrences", () => {
     const searchStraight = 'say "hi"';
     // Exact won't match because of smart quotes, fuzzy should find 1
     expect(countOccurrences(contentSmartQuote, searchStraight)).toBe(1);
+  });
+});
+
+describe("findClosestSnippet", () => {
+  const content = [
+    "import { useState } from 'react';",
+    "",
+    "export function Counter() {",
+    "  const [count, setCount] = useState(0);",
+    "  return <div>{count}</div>;",
+    "}",
+  ].join("\n");
+
+  it("finds the closest line by token overlap and returns numbered context", () => {
+    const snippet = findClosestSnippet(content, "const [count, setCount] = useState(1);", 1);
+    expect(snippet).not.toBeNull();
+    expect(snippet).toContain("useState(0)");
+    // Numbered (cat -n style)
+    expect(snippet).toMatch(/^\s+\d+\t/m);
+  });
+
+  it("returns null when there are no shared tokens", () => {
+    const snippet = findClosestSnippet(content, "completely unrelated zzzqqq xxx");
+    expect(snippet).toBeNull();
+  });
+
+  it("returns null on empty oldText", () => {
+    expect(findClosestSnippet(content, "")).toBeNull();
+    expect(findClosestSnippet(content, "   \n\n")).toBeNull();
+  });
+
+  it("respects contextLines", () => {
+    const snippet = findClosestSnippet(content, "const [count, setCount] = useState(1);", 0);
+    expect(snippet).toBe("     4\t  const [count, setCount] = useState(0);");
+  });
+
+  it("returns multiple matches separated by --- when several regions tie", () => {
+    const multi = [
+      "function handleClick() {",
+      "  setCount(count + 1);",
+      "}",
+      "",
+      "function handleReset() {",
+      "  setCount(0);",
+      "}",
+      "",
+      "function handleDouble() {",
+      "  setCount(count * 2);",
+      "}",
+    ].join("\n");
+
+    const snippet = findClosestSnippet(multi, "setCount(count - 1);", 0, 3);
+    expect(snippet).not.toBeNull();
+    const parts = snippet!.split("\n---\n");
+    expect(parts.length).toBeGreaterThanOrEqual(2);
+    // Every part should reference setCount
+    for (const p of parts) expect(p).toContain("setCount");
+  });
+
+  it("keeps a single match when one candidate dominates", () => {
+    const snippet = findClosestSnippet(content, "const [count, setCount] = useState(1);", 1);
+    // Only line 4 has the full token set; line 1 (just `useState`) is dropped
+    // by the bestScore/3 cutoff.
+    expect(snippet).not.toBeNull();
+    expect(snippet!.split("\n---\n")).toHaveLength(1);
   });
 });
 

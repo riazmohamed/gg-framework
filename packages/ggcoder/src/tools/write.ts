@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { resolvePath, rejectSymlink } from "./path-utils.js";
 import { localOperations, type ToolOperations } from "./operations.js";
+import { assertFresh, recordWrite, type ReadTracker } from "./read-tracker.js";
 
 const WriteParams = z.object({
   file_path: z.string().describe("The file path to write to"),
@@ -12,7 +13,7 @@ const WriteParams = z.object({
 
 export function createWriteTool(
   cwd: string,
-  readFiles?: Set<string>,
+  readFiles?: ReadTracker,
   ops: ToolOperations = localOperations,
   planModeRef?: { current: boolean },
 ): AgentTool<typeof WriteParams> {
@@ -39,17 +40,19 @@ export function createWriteTool(
         await fs.mkdir(plansDir, { recursive: true });
       }
 
-      // Block overwriting existing files that haven't been read
-      if (readFiles && !readFiles.has(resolved)) {
+      // Block overwriting existing files that haven't been read, or that
+      // changed since the last read.
+      if (readFiles) {
         const exists = await ops.stat(resolved).then(
           () => true,
           () => false,
         );
         if (exists) {
-          throw new Error("File must be read first before overwriting. Use the read tool first.");
+          await assertFresh(readFiles, resolved, ops);
         }
       }
       await ops.writeFile(resolved, content);
+      await recordWrite(readFiles, resolved, content, ops);
       const lines = content.split("\n").length;
       return `Wrote ${lines} lines to ${resolved}`;
     },

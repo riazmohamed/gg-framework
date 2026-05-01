@@ -6,6 +6,7 @@ import { resolvePath, rejectSymlink } from "./path-utils.js";
 import { truncateHead } from "./truncate.js";
 import { writeOverflow } from "./overflow.js";
 import { localOperations, type ToolOperations } from "./operations.js";
+import { recordRead, type ReadTracker } from "./read-tracker.js";
 import { IMAGE_EXTENSIONS, IMAGE_MEDIA_TYPES, shrinkToFit } from "../utils/image.js";
 
 export const BINARY_EXTENSIONS = new Set([
@@ -70,7 +71,7 @@ const ReadParams = z.object({
 
 export function createReadTool(
   cwd: string,
-  readFiles?: Set<string>,
+  readFiles?: ReadTracker,
   ops: ToolOperations = localOperations,
 ): AgentTool<typeof ReadParams> {
   return {
@@ -84,7 +85,6 @@ export function createReadTool(
     async execute({ file_path, offset, limit }) {
       const resolved = resolvePath(cwd, file_path);
       await rejectSymlink(resolved);
-      readFiles?.add(resolved);
       const ext = path.extname(resolved).toLowerCase();
 
       // Image: read as binary, shrink to fit provider limits, return as
@@ -131,6 +131,8 @@ export function createReadTool(
         if (code === "EISDIR") return `Is a directory, not a file: ${resolved}`;
         throw err;
       }
+      const stat = await ops.stat(resolved);
+      recordRead(readFiles, resolved, raw, stat.mtimeMs);
       let lines = raw.split("\n");
 
       // Apply offset/limit

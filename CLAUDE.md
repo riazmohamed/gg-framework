@@ -12,6 +12,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution |
 | `packages/ggcoder` | `@abukhaled/ogcoder` | CLI coding agent (`ogcoder` binary) |
 | `packages/ggcoder-eyes` | `@abukhaled/ggcoder-eyes` | Project-agnostic perception probes — screenshots, logs, HTTP, capture sinks |
+| `packages/gg-pixel` | `@kenkaiiii/gg-pixel` | Universal error tracking SDK (Node + Browser + Deno + Workers) |
+| `packages/gg-pixel-server` | (private — Cloudflare Worker) | Ingest backend (Workers + D1) |
+| `packages/gg-editor` | `@kenkaiiii/gg-editor` | Video editing agent (DaVinci Resolve / Premiere) |
+| `packages/gg-editor-premiere-panel` | `@kenkaiiii/gg-editor-premiere-panel` | CEP panel bridge for Premiere |
 
 **Install**: `npm i -g @abukhaled/ogcoder`
 
@@ -133,6 +137,31 @@ To add a registry command: add an entry in `createBuiltinCommands()` array. If i
 - **agentLoop**: pure async generator — call LLM, yield deltas, execute tools, loop on tool_use
 - **resolveActiveProvider**: `cli.ts` helper that picks the logged-in provider at startup with fallback
 - **Zod schemas**: tool parameters defined with Zod, converted to JSON Schema at provider boundary
+
+## Pixel — error tracking + auto-fix queue
+
+`@kenkaiiii/gg-pixel` is a drop-in error tracking SDK. Errors flow to a Cloudflare Worker (`gg-pixel-server`) backed by D1. `ogcoder pixel` opens an in-Ink overlay that lists open errors per project and hands each one off to the existing agent loop — same UX as the Task pane.
+
+### CLI
+
+```bash
+ogcoder pixel install          # Detect framework, wire up SDK + .env, register project key
+ogcoder pixel                  # Open the in-Ink overlay (also: Ctrl+E inside running ogcoder)
+ogcoder pixel fix <error_id>   # Fix one error end-to-end (subprocess flow, for non-TTY use)
+ogcoder pixel run              # Auto-fix every open error (non-interactive)
+```
+
+### In-Ink fix flow (the main path)
+
+`Ctrl+E` from inside ogcoder, or `ogcoder pixel`, opens `PixelOverlay`. Keys: `↑↓ navigate · Enter fix one · f fix all · d delete · Esc close`.
+
+When a fix starts, `startPixelFix(errorId)` in `App.tsx` swaps four things in lockstep before calling `agentLoop.run(prep.prompt)`: `process.chdir(prep.projectPath)`, rebuild all cwd-baked tools, swap system prompt with new project root, and update `setDisplayedCwd` (also bump `staticKey` so Banner remounts). Reset chat state AFTER chdir is committed.
+
+`onDone` in `useAgentLoop` finalizes the fix: `finalizePixelFix(prep)` observes the `fix/pixel-{id}` branch + commits and patches the D1 status to `awaiting_review` or `failed`. Run-all picks up the next open error via the same path.
+
+### Backend
+
+`packages/gg-pixel-server/` — Hono on Workers + D1. Routes: `POST /ingest` (SDK auth via publishable `project_key`, dedupes by `(project_id, fingerprint)`, capped at 10K unique fingerprints); `POST /api/projects` (rate-limited, returns `{ id, key, secret }`); `GET/PATCH/DELETE /api/errors/:id` and `GET /api/projects/:id/errors` (all bearer-authed via project secret, scoped to owner). `~/.gg/projects.json` stores `{ name, path, secret }` per project.
 
 ## Organization Rules
 

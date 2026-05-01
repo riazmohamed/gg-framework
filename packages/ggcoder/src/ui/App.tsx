@@ -40,6 +40,8 @@ import { Banner } from "./components/Banner.js";
 import { PlanOverlay } from "./components/PlanOverlay.js";
 import { ModelSelector } from "./components/ModelSelector.js";
 import { TaskOverlay } from "./components/TaskOverlay.js";
+import { PixelOverlay } from "./components/PixelOverlay.js";
+import type { PreparedPixelFix } from "../core/pixel-fix.js";
 import { SkillsOverlay } from "./components/SkillsOverlay.js";
 import { EyesOverlay } from "./components/EyesOverlay.js";
 import { ThemeSelector } from "./components/ThemeSelector.js";
@@ -529,6 +531,8 @@ export interface AppProps {
   onEnterPlanRef?: { current: (reason?: string) => void };
   onExitPlanRef?: { current: (planPath: string) => Promise<string> };
   skills?: Skill[];
+  initialOverlay?: "pixel";
+  rebuildToolsForCwd?: (cwd: string) => AgentTool[];
 }
 
 // ── App Component ──────────────────────────────────────────
@@ -556,26 +560,22 @@ export function App(props: AppProps) {
     sessionTitle,
   });
 
-  // Items scrolled into Static (history).  For restored sessions, skip the
-  // banner and add restored items via useEffect so Ink's <Static> treats them
-  // as incremental additions (large initial arrays can race with Static's
-  // internal useLayoutEffect and get dropped before being flushed).
-  const isRestoredSession = props.initialHistory && props.initialHistory.length > 0;
-  const [history, setHistory] = useState<CompletedItem[]>(
-    isRestoredSession ? [] : [{ kind: "banner", id: "banner" }],
-  );
-  const restoredRef = useRef(false);
-  useEffect(() => {
-    if (isRestoredSession && !restoredRef.current) {
-      restoredRef.current = true;
-      setHistory((prev) => compactHistory([...prev, ...trimFlushedItems(props.initialHistory!)]));
+  // Items scrolled into Static (history). For restored sessions, seed the
+  // initial array directly — matches how every other Ink chat agent passes
+  // messages to <Static> (cat-code, harness, p90-cli, openai-chatgpt, lms,
+  // gatsby). Ink's Static (build/components/Static.js) starts with index=0
+  // so slice(0) returns the full array regardless of length.
+  const [history, setHistory] = useState<CompletedItem[]>(() => {
+    if (props.initialHistory && props.initialHistory.length > 0) {
+      return compactHistory(trimFlushedItems(props.initialHistory));
     }
-  }, [isRestoredSession, props.initialHistory]);
+    return [{ kind: "banner", id: "banner" }];
+  });
   // Items from the current/last turn — rendered in the live area so they stay visible
   const [liveItems, setLiveItems] = useState<CompletedItem[]>([]);
   const [overlay, setOverlay] = useState<
-    "model" | "tasks" | "skills" | "plan" | "theme" | "eyes" | null
-  >(null);
+    "model" | "tasks" | "skills" | "plan" | "theme" | "eyes" | "pixel" | null
+  >(props.initialOverlay ?? null);
   const [taskCount, setTaskCount] = useState(() => getTaskCount(props.cwd));
   const [eyesCount, setEyesCount] = useState<number | undefined>(() =>
     isEyesActive(props.cwd) ? journalCount({ status: "open" }, props.cwd) : undefined,
@@ -586,7 +586,11 @@ export function App(props: AppProps) {
   const [runAllTasks, setRunAllTasks] = useState(false);
   const runAllTasksRef = useRef(false);
   const startTaskRef = useRef<(title: string, prompt: string, taskId: string) => void>(() => {});
+  const runAllPixelRef = useRef(false);
+  const currentPixelFixRef = useRef<PreparedPixelFix | null>(null);
+  const startPixelFixRef = useRef<(errorId: string) => void>(() => {});
   const cwdRef = useRef(props.cwd);
+  const [displayedCwd, setDisplayedCwd] = useState(props.cwd);
   const [staticKey, setStaticKey] = useState(0);
   const [doneStatus, setDoneStatus] = useState<{
     durationMs: number;
@@ -638,10 +642,11 @@ export function App(props: AppProps) {
   const activeAccountId = currentCreds?.accountId ?? props.accountId;
   const activeBaseUrl = currentCreds?.baseUrl ?? props.baseUrl;
 
-  // Load git branch
+  // Load git branch — re-runs whenever the displayed cwd changes (e.g. when
+  // a pixel fix moves the agent into a different project root).
   useEffect(() => {
-    getGitBranch(props.cwd).then(setGitBranch);
-  }, [props.cwd]);
+    getGitBranch(displayedCwd).then(setGitBranch);
+  }, [displayedCwd]);
 
   // Periodic update check during long sessions
   useEffect(() => {
@@ -1487,10 +1492,47 @@ export function App(props: AppProps) {
             }
           }, 500);
         }
+
+        // Pixel fix: observe branch + commits, patch status, optionally pick
+        // up the next open error if run-all is active.
+        const pendingFix = currentPixelFixRef.current;
+        if (pendingFix) {
+          currentPixelFixRef.current = null;
+          void (async () => {
+            try {
+              const { finalizePixelFix } = await import("../core/pixel-fix.js");
+              const result = await finalizePixelFix(pendingFix);
+              log("INFO", "pixel", `Pixel fix done: ${result.outcome}`, {
+                errorId: pendingFix.errorId,
+                reason: result.reason,
+              });
+            } catch (err) {
+              log("ERROR", "pixel", `Pixel finalize failed: ${(err as Error).message}`);
+            }
+
+            if (runAllPixelRef.current) {
+              setTimeout(() => {
+                void (async () => {
+                  const { fetchPixelEntries } = await import("../core/pixel.js");
+                  const data = await fetchPixelEntries();
+                  const next = data.entries.find((e) => e.status === "open");
+                  if (next) {
+                    startPixelFixRef.current(next.errorId);
+                  } else {
+                    setRunAllPixel(false);
+                    log("INFO", "pixel", "Run-all complete — no more open errors");
+                  }
+                })();
+              }, 500);
+            }
+          })();
+        }
       }, []),
       onAborted: useCallback(() => {
         log("WARN", "agent", "Agent run aborted by user");
         setRunAllTasks(false);
+        setRunAllPixel(false);
+        currentPixelFixRef.current = null;
         setDoneStatus(null);
         setLiveItems((prev) => {
           const next = prev.map((item): CompletedItem => {
@@ -2178,7 +2220,7 @@ export function App(props: AppProps) {
             version={props.version}
             model={currentModel}
             provider={currentProvider}
-            cwd={props.cwd}
+            cwd={displayedCwd}
             taskCount={taskCount}
           />
         );
@@ -2407,11 +2449,95 @@ export function App(props: AppProps) {
     runAllTasksRef.current = runAllTasks;
   }, [runAllTasks]);
 
+  const startPixelFix = useCallback(
+    (errorId: string) => {
+      void (async () => {
+        try {
+          const { preparePixelFix } = await import("../core/pixel-fix.js");
+          const prep = await preparePixelFix(errorId);
+          currentPixelFixRef.current = prep;
+
+          // Move the agent into the error's project root. Four things must
+          // change in lockstep, otherwise the agent (or the chrome around
+          // it) shows the wrong project:
+          //   1. process.cwd  — for any code reading it directly
+          //   2. cwd-bound tools (read/write/bash/grep/…) — baked at creation
+          //   3. the system prompt's "Working directory: …" line — the only
+          //      place the model itself learns where it is
+          //   4. displayedCwd state — Banner + Footer read this for display
+          try {
+            process.chdir(prep.projectPath);
+          } catch (err) {
+            log("WARN", "pixel", `chdir failed: ${(err as Error).message}`);
+          }
+          cwdRef.current = prep.projectPath;
+          setDisplayedCwd(prep.projectPath);
+          if (props.rebuildToolsForCwd) {
+            setCurrentTools(props.rebuildToolsForCwd(prep.projectPath));
+          }
+          const newSystemPrompt = await buildSystemPrompt(
+            prep.projectPath,
+            props.skills,
+            false,
+            undefined,
+          );
+
+          // Now that the cwd swap is committed, reset chat. Doing this BEFORE
+          // the chdir would print a banner with the old cwd, then bumping
+          // staticKey would print a second banner with the new cwd — leaving
+          // two banners stacked in the scrollback.
+          stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+          setHistory([{ kind: "banner", id: "banner" }]);
+          setLiveItems([]);
+          setStaticKey((k) => k + 1);
+          messagesRef.current = messagesRef.current.slice(0, 1);
+          agentLoop.reset();
+          persistedIndexRef.current = messagesRef.current.length;
+          const sm = sessionManagerRef.current;
+          if (sm) {
+            void sm.create(prep.projectPath, currentProvider, currentModel).then((s) => {
+              sessionPathRef.current = s.path;
+              log("INFO", "pixel", "New session for pixel fix", { path: s.path });
+            });
+          }
+
+          if (messagesRef.current[0]?.role === "system") {
+            messagesRef.current[0] = { role: "system", content: newSystemPrompt };
+          } else {
+            messagesRef.current.unshift({ role: "system", content: newSystemPrompt });
+          }
+
+          const title = `Fix ${errorId.slice(0, 12)}… in ${prep.projectName}`;
+          const taskItem: TaskItem = { kind: "task", title, id: getId() };
+          setLastUserMessage(title);
+          setDoneStatus(null);
+          setLiveItems([taskItem]);
+
+          await agentLoop.run(prep.prompt);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log("ERROR", "pixel", msg);
+          currentPixelFixRef.current = null;
+          setRunAllPixel(false);
+          setLiveItems((prev) => [...prev, { kind: "error", message: msg, id: getId() }]);
+        }
+      })();
+    },
+    [props.cwd, stdout, agentLoop, currentProvider, currentModel],
+  );
+  startPixelFixRef.current = startPixelFix;
+
+  const [runAllPixel, setRunAllPixel] = useState(false);
+  useEffect(() => {
+    runAllPixelRef.current = runAllPixel;
+  }, [runAllPixel]);
+
   const isTaskView = overlay === "tasks";
   const isSkillsView = overlay === "skills";
   const isPlanView = overlay === "plan";
   const isEyesView = overlay === "eyes";
-  const isOverlayView = isTaskView || isSkillsView || isPlanView || isEyesView;
+  const isPixelView = overlay === "pixel";
+  const isOverlayView = isTaskView || isSkillsView || isPlanView || isEyesView || isPixelView;
 
   return (
     <Box flexDirection="column" width={columns}>
@@ -2450,6 +2576,27 @@ export function App(props: AppProps) {
               markTaskInProgress(props.cwd, next.id);
               startTask(next.title, next.prompt, next.id);
             }
+          }}
+        />
+      ) : isPixelView ? (
+        <PixelOverlay
+          version={props.version}
+          agentRunning={agentLoop.isRunning}
+          onClose={() => {
+            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+            setStaticKey((k) => k + 1);
+            setOverlay(null);
+          }}
+          onFixOne={(entry) => {
+            setOverlay(null);
+            startPixelFix(entry.errorId);
+          }}
+          onFixAll={(entries) => {
+            const first = entries.find((e) => e.status === "open") ?? entries[0];
+            if (!first) return;
+            setOverlay(null);
+            setRunAllPixel(true);
+            startPixelFix(first.errorId);
           }}
         />
       ) : isSkillsView ? (
@@ -2670,6 +2817,10 @@ export function App(props: AppProps) {
               stdout?.write("\x1b[2J\x1b[3J\x1b[H");
               setOverlay("skills");
             }}
+            onTogglePixel={() => {
+              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+              setOverlay("pixel");
+            }}
             onTogglePlanMode={() => {
               const next = !planMode;
               setPlanMode(next);
@@ -2706,7 +2857,7 @@ export function App(props: AppProps) {
             <Footer
               model={currentModel}
               tokensIn={agentLoop.contextUsed}
-              cwd={props.cwd}
+              cwd={displayedCwd}
               gitBranch={gitBranch}
               thinkingEnabled={thinkingEnabled}
               planMode={planMode}

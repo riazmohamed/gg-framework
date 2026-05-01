@@ -116,9 +116,8 @@ describe("checkAndAutoUpdate", () => {
 
     const result = checkAndAutoUpdate("1.0.0");
 
-    expect(result).toContain("Updating");
-    expect(result).toContain("1.0.0");
     expect(result).toContain("2.0.0");
+    expect(result).toContain("Installing in the background");
     expect(vi.mocked(spawn)).toHaveBeenCalled();
 
     // Should clear the pending flag
