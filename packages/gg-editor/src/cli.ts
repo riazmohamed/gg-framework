@@ -215,6 +215,15 @@ async function main(): Promise<void> {
     model,
     apiKey: token,
     accountId,
+    // OAuth tokens expire mid-session (Anthropic ~8h, OpenAI shorter). Without
+    // this callback, useAgentLoop reuses the startup token forever — the next
+    // turn after expiry returns 401 and the CLI dies. Re-resolve before each
+    // turn (and on 401 retry with forceRefresh) using whatever provider the
+    // user has currently selected via /model.
+    resolveCredentials: async (p, opts) => {
+      const c = await auth.resolveCredentials(p as SupportedAuthProvider, opts);
+      return { apiKey: c.accessToken, accountId: c.accountId };
+    },
     tools,
     systemPrompt: system,
     staticPromptBody,

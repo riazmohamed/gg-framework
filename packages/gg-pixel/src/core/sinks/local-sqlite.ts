@@ -4,10 +4,11 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { Sink, WireEvent } from "../types.js";
 
-// `better-sqlite3` is an OPTIONAL peer dependency. Apps that only use the
-// HTTP sink (the common case) don't need it installed — keeping it out of
-// the eager import graph also avoids the deprecated `prebuild-install`
-// warning and its tight node-engines constraint at every `npm install`.
+// `better-sqlite3` is loaded lazily and is NOT declared as a peer dep.
+// Apps that only use the HTTP sink (the common case) don't need it installed —
+// keeping it out of both the eager import graph and the package manifest avoids
+// the deprecated `prebuild-install` warning and a Windows native-build attempt
+// at every `npm install`. Users who pick `kind: "local"` install it themselves.
 const requireBSQ = createRequire(import.meta.url);
 
 interface BSqStatement {
@@ -27,7 +28,7 @@ function loadBetterSqlite3(): BSqCtor {
     return typeof mod === "function" ? mod : mod.default;
   } catch (err) {
     throw new Error(
-      '@kenkaiiii/gg-pixel: `kind: "local"` requires the optional peer dependency `better-sqlite3`. ' +
+      '@kenkaiiii/gg-pixel: `kind: "local"` requires `better-sqlite3` to be installed. ' +
         "Install it with `npm install better-sqlite3` (or your package manager's equivalent). " +
         `Underlying error: ${(err as Error).message}`,
       { cause: err },

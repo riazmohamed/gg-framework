@@ -35,6 +35,16 @@ export interface AppProps {
   model: string;
   apiKey: string;
   accountId?: string;
+  /**
+   * Resolve fresh OAuth credentials before each turn (and on 401 retry with
+   * `forceRefresh: true`). Without this, the static `apiKey` above is reused
+   * forever — sessions die when the token expires mid-conversation.
+   * Receives the *current* provider, since the user can swap via /model.
+   */
+  resolveCredentials?: (
+    provider: Provider,
+    opts?: { forceRefresh?: boolean },
+  ) => Promise<{ apiKey: string; accountId?: string }>;
   tools: AgentTool[];
   systemPrompt: string;
   /**
@@ -271,6 +281,12 @@ export function App(props: AppProps) {
       apiKey: props.apiKey,
       accountId: props.accountId,
       thinking: thinkingEnabled ? "medium" : undefined,
+      // Pull fresh creds before each turn so OAuth refresh + provider swaps
+      // via /model both flow through. Without this, an 8h Anthropic token
+      // that expires mid-session takes the whole CLI down.
+      resolveCredentials: props.resolveCredentials
+        ? (opts) => props.resolveCredentials!(currentProvider, opts)
+        : undefined,
     },
     {
       onTurnText: (text, thinking, thinkingMs) => {

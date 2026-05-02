@@ -24,7 +24,11 @@ export async function loginOpenAI(callbacks: OAuthLoginCallbacks): Promise<OAuth
   url.searchParams.set("state", state);
   url.searchParams.set("id_token_add_organizations", "true");
   url.searchParams.set("codex_cli_simplified_flow", "true");
-  url.searchParams.set("originator", "ggeditor");
+  // OpenAI's Codex auth server validates `originator` against a known list when
+  // `codex_cli_simplified_flow=true` is set. `ggcoder` is the registered value;
+  // `ggeditor` is rejected. Both CLIs share ~/.gg/auth.json anyway, so reusing
+  // ggcoder's originator is correct rather than a workaround.
+  url.searchParams.set("originator", "ggcoder");
 
   let code: string;
   try {

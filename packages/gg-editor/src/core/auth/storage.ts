@@ -84,10 +84,15 @@ export class AuthStorage {
   }
 
   /**
-   * Returns valid credentials, auto-refreshing if expired. Throws if no
-   * credentials are stored for this provider.
+   * Returns valid credentials, auto-refreshing if expired. When
+   * `forceRefresh` is true, refreshes even if the stored token hasn't
+   * expired — used to recover from 401s when the provider revoked the
+   * token before the local expiry. Throws if no credentials are stored.
    */
-  async resolveCredentials(provider: SupportedAuthProvider): Promise<OAuthCredentials> {
+  async resolveCredentials(
+    provider: SupportedAuthProvider,
+    opts?: { forceRefresh?: boolean },
+  ): Promise<OAuthCredentials> {
     await this.ensureLoaded();
     const creds = this.data[provider];
     if (!creds) throw new NotLoggedInError(provider);
@@ -96,7 +101,7 @@ export class AuthStorage {
     // OpenRouter) don't have a refresh path — they're stored API keys.
     if (STATIC_KEY_PROVIDERS.has(provider)) return creds;
 
-    if (Date.now() < creds.expiresAt) return creds;
+    if (!opts?.forceRefresh && Date.now() < creds.expiresAt) return creds;
 
     // Coalesce concurrent refresh calls.
     const existing = this.refreshLocks.get(provider);
