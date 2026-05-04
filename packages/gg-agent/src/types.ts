@@ -150,6 +150,8 @@ export interface AgentOptions {
   provider: StreamOptions["provider"];
   model: string;
   system?: string;
+  /** Prior conversation messages (excluding system) to hydrate the Agent on construction. Used for session resume. */
+  priorMessages?: Message[];
   tools?: AgentTool[];
   serverTools?: ServerToolDefinition[];
   maxTurns?: number;
