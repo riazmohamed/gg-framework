@@ -137,6 +137,12 @@ export function useAgentLoop(
       isError: boolean,
       durationMs: number,
       details?: unknown,
+      // Args are included so consumers don't have to look them up via
+      // `activeToolCalls` state — by the time onToolEnd fires, that state
+      // may be stale (the call has already been pulled from the active
+      // list, or React hasn't flushed the update yet). Pass through so
+      // tool-result rendering always has the original args available.
+      args?: Record<string, unknown>,
     ) => void;
     onServerToolCall?: (id: string, name: string, input: unknown) => void;
     onServerToolResult?: (toolUseId: string, resultType: string, data: unknown) => void;
@@ -479,6 +485,7 @@ export function useAgentLoop(
                   event.isError,
                   durationMs,
                   event.details,
+                  tc?.args,
                 );
                 // Track lines changed for edit tools
                 if (toolName === "edit" && !event.isError) {

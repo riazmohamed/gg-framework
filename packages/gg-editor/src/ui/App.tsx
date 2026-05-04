@@ -23,6 +23,7 @@ import type { LazyHost } from "../core/hosts/lazy.js";
 import { saveSession } from "../core/sessions.js";
 import { buildEditorHostBlock, spliceHostBlock } from "../system-prompt.js";
 import { EDITOR_PROMPT_COMMANDS, getEditorPromptCommand } from "../prompt-commands.js";
+import { ggEditorFormatters } from "./tool-formatters.js";
 
 // Editor brand pulse — amber → orange → rose. Distinct from ggcoder's blue/purple.
 const THINKING_BORDER_COLORS = ["#fbbf24", "#f97316", "#ec4899", "#f97316", "#fbbf24"];
@@ -331,14 +332,17 @@ export function App(props: AppProps) {
       },
       // Running tool calls are rendered live from agentLoop.activeToolCalls
       // OUTSIDE of <Static>; only the completed result enters scrollback here.
-      onToolEnd: (toolCallId, name, result, isError, _durationMs, details) => {
-        const active = agentLoop.activeToolCalls.find((tc) => tc.toolCallId === toolCallId);
+      onToolEnd: (toolCallId, name, result, isError, _durationMs, details, args) => {
+        // Use the args passed through from onToolEnd directly. Looking them up
+        // via `agentLoop.activeToolCalls` here is racey — by the time onToolEnd
+        // fires the call has been pulled from the active list, so most tools
+        // would land on `{}` and lose every detail/inline summary.
         queueFlush({
           id: nextId(),
           kind: "tool_done",
           toolCallId,
           name,
-          args: active?.args ?? {},
+          args: args ?? {},
           result,
           isError,
           details,
@@ -562,7 +566,13 @@ export function App(props: AppProps) {
 
       {/* Live tool calls in flight (rendered OUTSIDE Static so they update). */}
       {agentLoop.activeToolCalls.map((tc) => (
-        <ToolExecution key={tc.toolCallId} status="running" name={tc.name} args={tc.args} />
+        <ToolExecution
+          key={tc.toolCallId}
+          status="running"
+          name={tc.name}
+          args={tc.args}
+          formatters={ggEditorFormatters}
+        />
       ))}
 
       {/* Pinned activity indicator (the "thinking bar"). */}
@@ -715,6 +725,7 @@ function renderItem(item: HistoryItem): React.JSX.Element {
       result={item.result}
       isError={item.isError}
       details={item.details}
+      formatters={ggEditorFormatters}
     />
   );
 }

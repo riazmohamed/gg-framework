@@ -23,12 +23,28 @@ function truncateLine(line: string, cols: number, reservedChars = 6): string {
   return line.length > max ? line.slice(0, max) + "…" : line;
 }
 
+/**
+ * Optional formatter that downstream consumers (e.g. gg-editor) can pass to
+ * customise the per-tool header and inline summary without forking this
+ * component. Each fn returns `undefined` to fall back to the built-in
+ * behaviour. Same shape applies to running + done states.
+ */
+export interface ToolExecutionFormatters {
+  /** Override the bold tool label, e.g. "Cut Filler Words". */
+  formatLabel?: (name: string, args: Record<string, unknown>) => string | undefined;
+  /** Override the parenthetical detail, e.g. `"transcript.json"` → `Cut Filler Words(transcript.json)`. */
+  formatDetail?: (name: string, args: Record<string, unknown>) => string | undefined;
+  /** Override the inline summary at done time, e.g. "removed 47 fillers". */
+  formatInline?: (name: string, result: string, isError: boolean) => string | undefined;
+}
+
 interface ToolRunningProps {
   status: "running";
   name: string;
   args: Record<string, unknown>;
   /** Live progress output (e.g., bash streaming stdout). */
   progressOutput?: string;
+  formatters?: ToolExecutionFormatters;
 }
 
 interface ToolDoneProps {
@@ -38,6 +54,7 @@ interface ToolDoneProps {
   result: string;
   isError: boolean;
   details?: unknown;
+  formatters?: ToolExecutionFormatters;
 }
 
 type ToolExecutionProps = ToolRunningProps | ToolDoneProps;
@@ -55,7 +72,12 @@ export function ToolExecution(props: ToolExecutionProps) {
   if (props.status === "running") {
     // Server-style tools (web_search) — blinking dot + spinner "Searching..."
     if (SERVER_STYLE_TOOLS.has(props.name)) {
-      const { label, detail } = getToolHeaderParts(props.name, props.args);
+      const { label, detail } = applyFormatters(
+        getToolHeaderParts(props.name, props.args),
+        props.name,
+        props.args,
+        props.formatters,
+      );
       const headerContentWidth = Math.max(10, columns - HEADER_PREFIX);
       return (
         <Box flexDirection="column" marginTop={1}>
@@ -137,7 +159,12 @@ export function ToolExecution(props: ToolExecutionProps) {
 
   // Server-style tools (web_search) — match ServerToolExecution done display
   if (SERVER_STYLE_TOOLS.has(name)) {
-    const { label, detail } = getToolHeaderParts(name, args);
+    const { label, detail } = applyFormatters(
+      getToolHeaderParts(name, args),
+      name,
+      args,
+      props.formatters,
+    );
     const searchCount = (result.match(/^\d+\./gm) ?? []).length;
     const summaryText = isError
       ? result.split("\n")[0]
@@ -192,7 +219,12 @@ export function ToolExecution(props: ToolExecutionProps) {
   const diffText = editDetails?.diff ?? (result.includes("---") ? result : undefined);
   const isDiff = name === "edit" && !isError && !!diffText;
 
-  const { label, detail } = getToolHeaderParts(name, args);
+  const { label, detail } = applyFormatters(
+    getToolHeaderParts(name, args),
+    name,
+    args,
+    props.formatters,
+  );
   const body = isDiff
     ? buildDiffBody(diffText!, args, columns)
     : buildResultBody(name, result, isError, columns);
@@ -201,7 +233,9 @@ export function ToolExecution(props: ToolExecutionProps) {
 
   // Compact display — no body to show, but show inline summary
   if (!body) {
-    const inline = getInlineSummary(name, result, isError);
+    const inline =
+      props.formatters?.formatInline?.(name, result, isError) ??
+      getInlineSummary(name, result, isError);
     return (
       <Box marginTop={1} flexDirection="row">
         <ToolUseLoader status={isError ? "error" : "done"} />
@@ -389,11 +423,7 @@ function toolDisplayName(name: string): string {
     // mcp__zai_vision__analyze_image → "analyze_image"
     const parts = name.split("__");
     const toolFn = parts[2] ?? parts[1] ?? "mcp";
-    // Convert snake_case to Title Case: analyze_image → Analyze Image
-    return toolFn
-      .split("_")
-      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-      .join(" ");
+    return snakeToTitle(toolFn);
   }
   switch (name) {
     case "bash":
@@ -419,8 +449,49 @@ function toolDisplayName(name: string): string {
     case "tasks":
       return "Task";
     default:
-      return name.charAt(0).toUpperCase() + name.slice(1);
+      // snake_case → Title Case so downstream consumers (gg-editor's 91 tools,
+      // future MCP tools, custom tools) get readable names without each
+      // having to add an explicit case here. Includes camelCase split too
+      // so `cutFillerWords` also formats cleanly.
+      return snakeToTitle(name);
   }
+}
+
+/**
+ * Convert `snake_case` or `camelCase` to `Title Case`.
+ *   read_skill         → Read Skill
+ *   cut_filler_words   → Cut Filler Words
+ *   analyzeHook        → Analyze Hook
+ */
+function snakeToTitle(s: string): string {
+  return s
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2") // camelCase → snake_case bridge
+    .split("_")
+    .filter((w) => w.length > 0)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+}
+
+/**
+ * Apply consumer-supplied formatter overrides on top of the built-in header
+ * parts. Returns a fresh `{label, detail}` with overrides applied.
+ *
+ * Each override is opt-in: returning `undefined` means "use the built-in."
+ * Empty-string is a meaningful override ("hide the detail").
+ */
+function applyFormatters(
+  builtin: { label: string; detail: string },
+  name: string,
+  args: Record<string, unknown>,
+  formatters?: ToolExecutionFormatters,
+): { label: string; detail: string } {
+  if (!formatters) return builtin;
+  const label = formatters.formatLabel?.(name, args);
+  const detail = formatters.formatDetail?.(name, args);
+  return {
+    label: label !== undefined ? label : builtin.label,
+    detail: detail !== undefined ? detail : builtin.detail,
+  };
 }
 
 // ── MCP detail arg extraction ─────────────────────────────
