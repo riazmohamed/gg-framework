@@ -1,6 +1,7 @@
 import { resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import { bundledSfxDescriptionList, listBundledSfxNames, resolveSfx } from "../core/bundled-sfx.js";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, probeMedia, runFfmpeg } from "../core/media/ffmpeg.js";
 import { buildSfxOnCutsFilter } from "../core/sfx-on-cuts.js";
@@ -10,7 +11,9 @@ const AddSfxAtCutsParams = z.object({
   sfx: z
     .string()
     .describe(
-      "SFX file (whoosh, pop, swoosh, riser…). Stereo wav / mp3. 200ms-1s long is typical.",
+      `SFX. Pass a bundled name (synthesised on demand, cached at ~/.gg/sfx-cache/) OR a file path. ` +
+        `Bundled names: ${listBundledSfxNames().join(", ")}. ` +
+        `For a custom file: stereo wav / mp3, 200 ms–1 s long is typical.`,
     ),
   output: z.string().describe("Output file. Re-encoded; uses input video codec passthrough."),
   cutPoints: z
@@ -66,20 +69,31 @@ export function createAddSfxAtCutsTool(cwd: string): AgentTool<typeof AddSfxAtCu
   return {
     name: "add_sfx_at_cuts",
     description:
-      "Drop a SFX (whoosh / pop / swoosh) at each cut point and mix it onto the existing " +
-      "audio. The standard sound-design polish on every retention-tuned vlog or short. " +
-      "Default gain -8dB sits below the voice; optional -3 to -6dB voice ducking. Video is " +
-      "copied through untouched. File-only — works in every host. Pair with cut_filler_words " +
-      "/ detect_silence for automatic cut-point feeds.",
+      `Drop a SFX at each cut point and mix it onto the existing audio. The standard ` +
+      `sound-design polish on every retention-tuned vlog or short. Pass a bundled name and ` +
+      `the synthesiser handles it (no file needed) — available: ${bundledSfxDescriptionList()}. ` +
+      `Default gain -8 dB sits below voice; optional -3 to -6 dB voice ducking. Video is ` +
+      `copied through untouched. Pair with cut_filler_words / detect_silence for automatic ` +
+      `cut-point feeds.`,
     parameters: AddSfxAtCutsParams,
     async execute(args, ctx) {
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const inAbs = resolvePath(cwd, args.input);
-        const sfxAbs = resolvePath(cwd, args.sfx);
         const outAbs = resolvePath(cwd, args.output);
         if (inAbs === outAbs) {
           return err("output and input are identical", "use a different output path");
+        }
+
+        // Resolve bundled name OR file path. Synthesises on first cache miss.
+        let sfxAbs: string;
+        let sfxInfo: { bundled: boolean; name?: string };
+        try {
+          const r = await resolveSfx(args.sfx, cwd, ctx.signal);
+          sfxAbs = r.path;
+          sfxInfo = { bundled: r.bundled, name: r.name };
+        } catch (e) {
+          return err((e as Error).message, "use a bundled SFX name or supply a real file path");
         }
 
         const probe = probeMedia(inAbs);
@@ -127,7 +141,11 @@ export function createAddSfxAtCutsTool(cwd: string): AgentTool<typeof AddSfxAtCu
         if (r.code !== 0) {
           return err(`ffmpeg failed: ${tail(r.stderr)}`);
         }
-        return compact({ path: outAbs, hits });
+        return compact({
+          path: outAbs,
+          hits,
+          sfx: sfxInfo.bundled ? `bundled:${sfxInfo.name}` : sfxAbs,
+        });
       } catch (e) {
         return err((e as Error).message);
       }
