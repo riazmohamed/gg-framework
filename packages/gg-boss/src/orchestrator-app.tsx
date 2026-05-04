@@ -8,14 +8,16 @@ import {
   CompactionDone,
   CompactionSpinner,
   InputArea,
+  MessageResponse,
   ModelSelector,
   StreamingArea,
   ToolExecution,
+  ToolUseLoader,
   UserMessage,
 } from "@kenkaiiii/ggcoder/ui";
 import { useDoublePress } from "@kenkaiiii/ggcoder/ui/hooks/double-press";
 import type { Provider } from "@kenkaiiii/gg-ai";
-import { TerminalSizeProvider } from "@kenkaiiii/ggcoder/ui/hooks/terminal-size";
+import { TerminalSizeProvider, useTerminalSize } from "@kenkaiiii/ggcoder/ui/hooks/terminal-size";
 import { BossFooter } from "./boss-footer.js";
 import { BossBanner } from "./banner.js";
 import { bossStore, useBossState } from "./boss-store.js";
@@ -30,6 +32,7 @@ import type {
   WorkerView,
 } from "./boss-store.js";
 import { BOSS_SLASH_COMMANDS, canonicalName, parseSlash, buildHelpText } from "./slash-commands.js";
+import { bossToolFormatters } from "./tool-formatters.js";
 import type { GGBoss } from "./orchestrator.js";
 
 interface BannerRow {
@@ -367,31 +370,125 @@ function ToolHistoryRow({ item }: { item: ToolItem }): React.ReactElement {
       result={item.result}
       isError={item.isError}
       details={item.details}
+      formatters={bossToolFormatters}
     />
   );
 }
 
 // ── Worker rows (gg-boss specific) ─────────────────────────
 
+type WorkerStatusGrade = "DONE" | "UNVERIFIED" | "PARTIAL" | "BLOCKED" | "INFO";
+
+/**
+ * Pull the `Status:` line out of a worker's final text (the brief in
+ * tools.ts asks every worker to end with one of: DONE | UNVERIFIED |
+ * PARTIAL | BLOCKED | INFO). Returns null if the line is missing or invalid.
+ */
+function parseStatusGrade(text: string): WorkerStatusGrade | null {
+  const match = text.match(/^\s*Status:\s*(DONE|UNVERIFIED|PARTIAL|BLOCKED|INFO)\s*$/im);
+  if (!match) return null;
+  return match[1].toUpperCase() as WorkerStatusGrade;
+}
+
+/**
+ * Compress the worker's full final-text response down to a single short line.
+ * Strips markdown, collapses whitespace, takes the first sentence then hard-caps
+ * at `maxLen` so the line never wraps in the MessageResponse gutter. Drops the
+ * structured-summary block entirely — its data is shown via the Status badge.
+ */
+function summarizeFinalText(text: string, maxLen: number): string {
+  if (!text) return "";
+  // Drop the structured-summary block (Changed/Skipped/Verified/Notes/Status)
+  // — that data is surfaced via the Status badge + Notes pulled separately.
+  const beforeSummary = text.split(/^Changed:|^Skipped:|^Verified:|^Notes:|^Status:/im)[0];
+  const stripped = beforeSummary
+    .replace(/```[\s\S]*?```/g, "[code]")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/^\s*[-*]\s+/gm, "")
+    .replace(/^#+\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!stripped) return "";
+  const firstSentence = stripped.match(/^[^.!?\n]+[.!?]/);
+  const candidate = firstSentence ? firstSentence[0] : stripped;
+  if (candidate.length <= maxLen) return candidate;
+  return candidate.slice(0, Math.max(1, maxLen - 1)) + "…";
+}
+
+function statusGradeColor(
+  grade: WorkerStatusGrade | null,
+  theme: ReturnType<typeof useTheme>,
+): string {
+  switch (grade) {
+    case "DONE":
+      return theme.success;
+    case "UNVERIFIED":
+    case "PARTIAL":
+      return theme.warning;
+    case "BLOCKED":
+      return theme.error;
+    case "INFO":
+      return theme.textDim;
+    default:
+      return theme.textDim;
+  }
+}
+
 function WorkerEventRow({ item }: { item: WorkerEventItem }): React.ReactElement {
   const theme = useTheme();
-  const tools =
-    item.toolsUsed.length > 0
-      ? item.toolsUsed.map((t) => (t.ok ? t.name : `${t.name}✗`)).join(", ")
-      : "(no tools)";
+  const { columns } = useTerminalSize();
+  const failedCount = item.toolsUsed.filter((t) => !t.ok).length;
+  const total = item.toolsUsed.length;
+  const grade = parseStatusGrade(item.finalText);
+  // Loader status: prefer the worker's self-reported grade. Fall back to
+  // tool-error count if the worker omitted Status (older runs / non-conforming).
+  const loaderStatus =
+    grade === "BLOCKED" || failedCount > 0
+      ? "error"
+      : grade === "UNVERIFIED" || grade === "PARTIAL"
+        ? "queued"
+        : "done";
+  const headerColor = loaderStatus === "error" ? theme.toolError : theme.toolName;
+  const toolSummary =
+    total === 0
+      ? "no tools"
+      : failedCount > 0
+        ? `${total} tools (${failedCount} failed)`
+        : `${total} tool${total === 1 ? "" : "s"}`;
+  // MessageResponse uses 6 chars for "  ⎿  " gutter; reserve a few more for
+  // safety (terminal scrollback, "…" suffix). Single-line cap.
+  const summaryMaxLen = Math.max(20, columns - 10);
+  const summary = summarizeFinalText(item.finalText, summaryMaxLen);
   return (
-    <Box paddingX={1} marginTop={1} flexDirection="column">
-      <Box>
-        <Text color={theme.success}>{"▸ "}</Text>
-        <Text color={theme.primary} bold>
-          {item.project}
-        </Text>
-        <Text color={theme.textDim}>{`  turn ${item.turnIndex}  ·  ${tools}`}</Text>
-      </Box>
-      {item.finalText && (
-        <Box paddingLeft={2}>
-          <Text color={theme.textDim}>{item.finalText}</Text>
+    <Box flexDirection="column" marginTop={1}>
+      <Box flexDirection="row">
+        <ToolUseLoader status={loaderStatus} />
+        <Box flexGrow={1}>
+          <Text wrap="wrap">
+            <Text color={headerColor} bold>
+              {item.project}
+            </Text>
+            <Text color={theme.text}>{`  turn ${item.turnIndex}`}</Text>
+            <Text color={theme.textDim}>{`  ·  ${toolSummary}`}</Text>
+            {grade && (
+              <>
+                <Text color={theme.textDim}>{"  ·  "}</Text>
+                <Text color={statusGradeColor(grade, theme)} bold>
+                  {grade}
+                </Text>
+              </>
+            )}
+          </Text>
         </Box>
+      </Box>
+      {summary && (
+        <MessageResponse>
+          <Text color={theme.textDim} wrap="truncate">
+            {summary}
+          </Text>
+        </MessageResponse>
       )}
     </Box>
   );
@@ -400,17 +497,23 @@ function WorkerEventRow({ item }: { item: WorkerEventItem }): React.ReactElement
 function WorkerErrorRow({ item }: { item: WorkerErrorItem }): React.ReactElement {
   const theme = useTheme();
   return (
-    <Box paddingX={1} marginTop={1} flexDirection="column">
-      <Box>
-        <Text color={theme.error}>{"✗ "}</Text>
-        <Text color={theme.error} bold>
-          {item.project}
+    <Box flexDirection="column" marginTop={1}>
+      <Box flexDirection="row">
+        <ToolUseLoader status="error" />
+        <Box flexGrow={1}>
+          <Text wrap="wrap">
+            <Text color={theme.toolError} bold>
+              {item.project}
+            </Text>
+            <Text color={theme.textDim}>{"  worker error"}</Text>
+          </Text>
+        </Box>
+      </Box>
+      <MessageResponse>
+        <Text color={theme.error} wrap="wrap">
+          {item.message}
         </Text>
-        <Text color={theme.textDim}>{"  worker error"}</Text>
-      </Box>
-      <Box paddingLeft={2}>
-        <Text color={theme.error}>{item.message}</Text>
-      </Box>
+      </MessageResponse>
     </Box>
   );
 }
@@ -461,7 +564,14 @@ function StreamingTurnView({
 
 function StreamingToolRow({ tool }: { tool: StreamingTool }): React.ReactElement {
   if (tool.status === "running") {
-    return <ToolExecution status="running" name={tool.name} args={tool.args} />;
+    return (
+      <ToolExecution
+        status="running"
+        name={tool.name}
+        args={tool.args}
+        formatters={bossToolFormatters}
+      />
+    );
   }
   return (
     <ToolExecution
@@ -471,6 +581,7 @@ function StreamingToolRow({ tool }: { tool: StreamingTool }): React.ReactElement
       result={tool.result ?? ""}
       isError={tool.status === "error"}
       details={tool.details}
+      formatters={bossToolFormatters}
     />
   );
 }

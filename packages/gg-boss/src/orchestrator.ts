@@ -1,6 +1,12 @@
 import { Agent, isAbortError } from "@kenkaiiii/gg-agent";
-import { AuthStorage, compact, getContextWindow, shouldCompact } from "@kenkaiiii/ggcoder";
-import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import {
+  AuthStorage,
+  compact,
+  estimateConversationTokens,
+  getContextWindow,
+  shouldCompact,
+} from "@kenkaiiii/ggcoder";
+import type { Message, Provider, ThinkingLevel, Usage } from "@kenkaiiii/gg-ai";
 import { Worker } from "./worker.js";
 import { EventQueue } from "./event-queue.js";
 import { createBossTools } from "./tools.js";
@@ -133,6 +139,14 @@ export class GGBoss {
     // and we never want to write the system prompt to disk (it's rebuilt each
     // session from current project list) — so subtract one for it.
     this.lastPersistedIndex = this.bossAgent.getMessages().length;
+
+    // Seed the context-bar estimate so it shows real progress before the first
+    // turn_end event fires. Especially critical on `ggboss continue` where
+    // we'd otherwise show 0% over a session that's already half-full.
+    const initialMessages = this.bossAgent.getMessages();
+    if (initialMessages.length > 1) {
+      bossStore.setBossInputTokens(estimateConversationTokens(initialMessages));
+    }
   }
 
   enqueueUserMessage(text: string): void {
@@ -342,10 +356,13 @@ export class GGBoss {
               bossStore.endTool(e.toolCallId, e.isError, e.durationMs, e.result, e.details);
               break;
             case "turn_end":
-              // Latest turn's input tokens IS the current context size (each turn
-              // re-sends the whole conversation), so just track the most recent.
-              if (e.usage?.inputTokens != null) {
-                bossStore.setBossInputTokens(e.usage.inputTokens);
+              // Mirror ggcoder/useAgentLoop: total context = uncached input +
+              // cache reads + cache writes (Anthropic separates input/output,
+              // others share the window so include output too). Without adding
+              // cache, prompt-cached calls report a tiny inputTokens delta and
+              // the footer bar appears stuck at 0%.
+              if (e.usage) {
+                bossStore.setBossInputTokens(computeContextUsed(e.usage, this.opts.bossProvider));
               }
               // Flush trailing text from this turn. Subsequent turns may add more.
               bossStore.flushPendingText();
@@ -419,6 +436,16 @@ ${s.finalText || "(empty)"}`;
   }
   return `[event:worker_error] project="${event.project}" timestamp=${event.timestamp}
 ${event.message}`;
+}
+
+/**
+ * Total context used in tokens. Mirrors ggcoder/useAgentLoop: Anthropic counts
+ * uncached input + cache reads/writes (output is metered separately); other
+ * providers share a single window so output counts too.
+ */
+function computeContextUsed(usage: Usage, provider: Provider): number {
+  const inputContext = (usage.inputTokens ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+  return provider === "anthropic" ? inputContext : inputContext + (usage.outputTokens ?? 0);
 }
 
 /**

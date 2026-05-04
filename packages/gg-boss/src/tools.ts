@@ -9,6 +9,42 @@ export interface BossToolDeps {
   lastSummaries: Map<string, WorkerTurnSummary>;
 }
 
+/**
+ * Hardcoded framing prepended to every prompt the boss dispatches to a worker.
+ *
+ * The boss already sees every tool a worker calls (via worker_turn_complete
+ * events), so workers don't need to narrate or recap. This brief asks for a
+ * tight structured summary instead — keeps `final_text` short and scannable
+ * in the boss's context, and saves the boss from having to add this guidance
+ * to every prompt itself.
+ *
+ * Lives here (not in the boss system prompt) because it's a worker-side
+ * instruction — only seen by the worker, never by the boss.
+ */
+const WORKER_PROMPT_BRIEF = `You're being driven by gg-boss, an orchestrator. Your tool usage is already visible to it — don't narrate which tools you ran or recap the request.
+
+End your response with a tight structured summary. Omit any line that doesn't apply:
+
+Changed: <files modified, comma-separated, with the specific change in parentheses where it adds clarity — e.g. "src/auth.ts (added retry guard)">
+Skipped: <anything the prompt asked for that you didn't do, with a one-line reason each>
+Verified: <what you ran or checked to confirm correctness — e.g. "pnpm test (15/15 pass)", "tsc --noEmit clean">
+Notes: <ONE line; only if there's something gg-boss must know that the above doesn't capture>
+Status: <one of: DONE | UNVERIFIED | PARTIAL | BLOCKED | INFO>
+
+Status meanings (be honest — gg-boss routes off this):
+- DONE: task complete AND you verified it (tests ran, types check, behaviour confirmed)
+- UNVERIFIED: task complete but you didn't / couldn't validate it
+- PARTIAL: did some of the task; the rest is in Skipped
+- BLOCKED: couldn't make progress, needs gg-boss to unblock or re-prompt
+- INFO: no work was performed — the prompt was a question and you answered it
+
+If Status is INFO, answer the question in one or two lines and skip the rest of the summary.
+
+No preamble. No apologies. Be factual.
+
+Task:
+`;
+
 const listWorkersParams = z.object({});
 const getWorkerStatusParams = z.object({
   project: z.string().describe("Project name as listed by list_workers."),
@@ -19,6 +55,12 @@ const promptWorkerParams = z.object({
     .string()
     .describe(
       "The instruction to send to the worker. Be specific — the worker has full coding tools (read, write, edit, bash, grep, etc.).",
+    ),
+  fresh: z
+    .boolean()
+    .optional()
+    .describe(
+      "Set true when this prompt is a meaningful direction change from whatever this worker was doing — different feature, different area of the codebase, unrelated goal. The worker's prior conversation is wiped and a new session file is started. Default false (worker continues its existing context).",
     ),
 });
 const getWorkerSummaryParams = z.object({
@@ -56,7 +98,7 @@ export function createBossTools(deps: BossToolDeps): AgentTool[] {
   const promptWorker: AgentTool<typeof promptWorkerParams> = {
     name: "prompt_worker",
     description:
-      "Send a prompt to a worker. Fire-and-forget — returns immediately. You will be notified via a worker_turn_complete event when the worker finishes. Do NOT call this on a worker whose status is 'working'.",
+      "Send a prompt to a worker. Fire-and-forget — returns immediately. You will be notified via a worker_turn_complete event when the worker finishes. Do NOT call this on a worker whose status is 'working'. Use `fresh: true` when the prompt is unrelated to the worker's prior conversation (different feature, different file area) — wipes its context to keep things lean.",
     parameters: promptWorkerParams,
     async execute(args) {
       const w = workers.get(args.project);
@@ -64,8 +106,18 @@ export function createBossTools(deps: BossToolDeps): AgentTool[] {
       if (w.getStatus() === "working") {
         return `Worker "${args.project}" is currently working — wait for its completion event before prompting again.`;
       }
-      await w.prompt(args.message);
-      return `Prompt sent to "${args.project}". Worker is now running.`;
+      // Reset the worker's session BEFORE sending the prompt when the boss
+      // flagged this as a direction change.
+      if (args.fresh) {
+        await w.newSession();
+      }
+      // Wrap the boss's intent with the structured-summary brief so workers
+      // respond tersely. The boss only ever sees `args.message` — this happens
+      // strictly worker-side.
+      await w.prompt(WORKER_PROMPT_BRIEF + args.message);
+      return args.fresh
+        ? `Fresh session opened for "${args.project}". Prompt sent. Worker is now running.`
+        : `Prompt sent to "${args.project}". Worker is now running.`;
     },
   };
 

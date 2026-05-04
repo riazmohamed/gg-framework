@@ -29,13 +29,20 @@ function truncateLine(line: string, cols: number, reservedChars = 6): string {
  * component. Each fn returns `undefined` to fall back to the built-in
  * behaviour. Same shape applies to running + done states.
  */
+/** Inline summary is either plain text (uses textDim) or styled with a hex color. */
+export type InlineSummary = string | { text: string; color: string };
+
 export interface ToolExecutionFormatters {
   /** Override the bold tool label, e.g. "Cut Filler Words". */
   formatLabel?: (name: string, args: Record<string, unknown>) => string | undefined;
   /** Override the parenthetical detail, e.g. `"transcript.json"` → `Cut Filler Words(transcript.json)`. */
   formatDetail?: (name: string, args: Record<string, unknown>) => string | undefined;
-  /** Override the inline summary at done time, e.g. "removed 47 fillers". */
-  formatInline?: (name: string, result: string, isError: boolean) => string | undefined;
+  /**
+   * Override the inline summary at done time. Return a string for the default
+   * dim color, or `{ text, color }` to render in a custom color (e.g. gg-boss
+   * uses this to randomise the "dispatched" color per call).
+   */
+  formatInline?: (name: string, result: string, isError: boolean) => InlineSummary | undefined;
 }
 
 interface ToolRunningProps {
@@ -236,6 +243,8 @@ export function ToolExecution(props: ToolExecutionProps) {
     const inline =
       props.formatters?.formatInline?.(name, result, isError) ??
       getInlineSummary(name, result, isError);
+    const inlineText = typeof inline === "string" ? inline : inline?.text;
+    const inlineColor = inline && typeof inline === "object" ? inline.color : theme.textDim;
     return (
       <Box marginTop={1} flexDirection="row">
         <ToolUseLoader status={isError ? "error" : "done"} />
@@ -251,7 +260,7 @@ export function ToolExecution(props: ToolExecutionProps) {
                 {")"}
               </Text>
             )}
-            {inline && <Text color={theme.textDim}> {inline}</Text>}
+            {inlineText && <Text color={inlineColor}> {inlineText}</Text>}
           </Text>
         </Box>
       </Box>

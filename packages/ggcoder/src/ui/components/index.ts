@@ -9,6 +9,8 @@ export { UserMessage } from "./UserMessage.js";
 export { AssistantMessage } from "./AssistantMessage.js";
 export { DiffView } from "./DiffView.js";
 export { ToolExecution, type ToolExecutionFormatters } from "./ToolExecution.js";
+export { ToolUseLoader } from "./ToolUseLoader.js";
+export { MessageResponse } from "./MessageResponse.js";
 export { Footer } from "./Footer.js";
 export { StreamingArea } from "./StreamingArea.js";
 export { InputArea } from "./InputArea.js";

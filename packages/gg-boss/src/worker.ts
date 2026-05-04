@@ -88,6 +88,17 @@ export class Worker {
     await this.session.switchModel(provider, model);
   }
 
+  /**
+   * Wipe this worker's conversation history and start a new session file.
+   * Used by `prompt_worker(..., fresh: true)` when the boss declares the
+   * incoming task is a meaningful direction change — keeps the worker's
+   * context lean instead of dragging stale exploration along forever.
+   */
+  async newSession(): Promise<void> {
+    await this.session.newSession();
+    this.turnCount = 0;
+  }
+
   private wireEvents(): void {
     const bus = this.session.eventBus;
 
