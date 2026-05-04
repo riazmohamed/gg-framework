@@ -7,9 +7,7 @@ import { keepRangesFromFillers, keepRangesToFrameRanges } from "../core/filler-w
 
 describe("text_based_cut keep-range math (via keepRangesFromFillers)", () => {
   it("emits two keeps when one cut is in the middle", () => {
-    const cuts = [
-      { startSec: 5, endSec: 10, text: "x", startWordIndex: 0, endWordIndex: 0 },
-    ];
+    const cuts = [{ startSec: 5, endSec: 10, text: "x", startWordIndex: 0, endWordIndex: 0 }];
     const keeps = keepRangesFromFillers(cuts, 30, 0);
     expect(keeps).toEqual([
       { startSec: 0, endSec: 5 },
@@ -23,10 +21,11 @@ describe("text_based_cut keep-range math (via keepRangesFromFillers)", () => {
     expect(keeps).toEqual([{ startSec: 5, endSec: 30 }]);
   });
 
-  it("frame-aligns with inward rounding", () => {
+  it("frame-aligns with OUTWARD rounding to preserve speech in partial frames", () => {
     const keeps = [{ startSec: 1.05, endSec: 2.95 }];
-    // 30 fps: ceil(31.5)=32, floor(88.5)=88
-    expect(keepRangesToFrameRanges(keeps, 30)).toEqual([{ startFrame: 32, endFrame: 88 }]);
+    // 30 fps: floor(31.5)=31, ceil(88.5)=89 — expands keep by one frame on
+    // each end. Was inward (32, 88), which lost ~33 ms per junction.
+    expect(keepRangesToFrameRanges(keeps, 30)).toEqual([{ startFrame: 31, endFrame: 89 }]);
   });
 
   it("returns empty when cuts cover the entire source", () => {

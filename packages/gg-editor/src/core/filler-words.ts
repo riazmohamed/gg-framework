@@ -66,13 +66,23 @@ export interface DetectFillersOptions {
   /** Filler vocabulary; defaults to DEFAULT_FILLERS. Case-insensitive. */
   fillers?: readonly string[];
   /**
-   * Pad the cut start by this many ms so the trailing audio of the
-   * preceding word isn't clipped. Default 20ms.
+   * Trim the filler-cut start by this many ms so the trailing audio of
+   * the PREVIOUS word isn't clipped. Positive = keep more of the previous
+   * word (cut starts later than whisper's word boundary). Default 0 ms.
+   *
+   * Note: this used to default to 20 ms with the OPPOSITE sign — the cut
+   * would EXPAND outward by 20 ms on each side, eating ~5 s of speech
+   * across a typical podcast cut. Reverted to a 0 default in commit
+   * `keep more of the speaker's actual audio` (May 2026); set to a small
+   * positive value (e.g. 15 ms) only if whisper is over-reporting word
+   * end times in your specific dataset.
    */
   paddingStartMs?: number;
   /**
-   * Pad the cut end by this many ms so the leading audio of the next
-   * word isn't clipped. Default 20ms.
+   * Trim the filler-cut end by this many ms so the leading audio of the
+   * NEXT word isn't clipped. Positive = keep more of the next word (cut
+   * ends earlier than whisper's word boundary). Default 0 ms. See note on
+   * paddingStartMs above for the bug-fix history.
    */
   paddingEndMs?: number;
   /**
@@ -117,8 +127,11 @@ export function detectFillerRanges(
   transcript: Transcript,
   opts: DetectFillersOptions = {},
 ): FillerRange[] {
-  const padStart = (opts.paddingStartMs ?? 20) / 1000;
-  const padEnd = (opts.paddingEndMs ?? 20) / 1000;
+  // Default 0 ms — trust whisper's word timings. Previously defaulted to
+  // 20 ms with the wrong sign, producing 5+ s of unintended speech loss
+  // across a 73-cut podcast. See DetectFillersOptions docs.
+  const padStart = (opts.paddingStartMs ?? 0) / 1000;
+  const padEnd = (opts.paddingEndMs ?? 0) / 1000;
   const mergeGap = (opts.mergeGapMs ?? 150) / 1000;
   const aggressive = opts.aggressiveSingleWords ?? true;
 
@@ -147,8 +160,18 @@ export function detectFillerRanges(
       }
       const startWord = words[i];
       const endWord = words[i + match.length - 1];
-      const startSec = Math.max(0, startWord.start - padStart);
-      const endSec = endWord.end + padEnd;
+      // Padding now SHRINKS the filler range — positive padStart means
+      // the cut starts LATER (preserves more of the previous word's tail);
+      // positive padEnd means the cut ends EARLIER (preserves more of the
+      // next word's head). Old code used `- padStart` / `+ padEnd` which
+      // EXPANDED the cut outward, eating ~40 ms per filler.
+      const rawStart = startWord.start + padStart;
+      const rawEnd = endWord.end - padEnd;
+      // Clamp: padding can't make the filler range negative-duration; if
+      // it would, keep the original word boundaries unpadded.
+      const startSec =
+        rawEnd > rawStart ? Math.max(0, rawStart) : Math.max(0, startWord.start);
+      const endSec = rawEnd > rawStart ? rawEnd : endWord.end;
       out.push({
         startSec,
         endSec,
@@ -229,8 +252,19 @@ export function keepRangesToTimelineCuts(keeps: KeepRange[]): number[] {
 }
 
 /**
- * Frame-align keep ranges. Rounds INWARD (start ceils, end floors) so
- * cuts never extend into a filler.
+ * Frame-align keep ranges. Rounds OUTWARD (start floors, end ceils) so
+ * we never DROP speech that lives in a partial frame at the keep's edge.
+ *
+ * Was: rounds inward (start ceils, end floors). Inward rounding never
+ * extends INTO an adjacent filler, but it ALSO loses up to one frame at
+ * each end of every keep — ~33 ms at 30 fps, ~17 ms at 60 fps. Across
+ * a 73-cut podcast that's 5+ seconds of speech disappearing into
+ * sub-frame rounding error.
+ *
+ * Trade-off: outward rounding can include up to one frame of an adjacent
+ * filler at each junction. That's ~33 ms at 30 fps — well within whisper
+ * timing noise (typically ±50 ms) and inaudible compared to losing 5 s
+ * of actual speech. Worth it.
  */
 export function keepRangesToFrameRanges(
   keeps: KeepRange[],
@@ -238,8 +272,8 @@ export function keepRangesToFrameRanges(
 ): Array<{ startFrame: number; endFrame: number }> {
   const out: Array<{ startFrame: number; endFrame: number }> = [];
   for (const k of keeps) {
-    const sf = Math.ceil(k.startSec * fps);
-    const ef = Math.floor(k.endSec * fps);
+    const sf = Math.floor(k.startSec * fps);
+    const ef = Math.ceil(k.endSec * fps);
     if (ef > sf) out.push({ startFrame: sf, endFrame: ef });
   }
   return out;

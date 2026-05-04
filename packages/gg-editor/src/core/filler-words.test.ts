@@ -106,18 +106,34 @@ describe("detectFillerRanges", () => {
     expect(detectFillerRanges(t)).toEqual([]);
   });
 
-  it("applies start/end padding to cut ranges", () => {
+  it("padding SHRINKS the cut range (preserves speech around the filler)", () => {
     const t = makeTranscript("hello um world");
     const um = t.segments[0].words![1];
     const fillers = detectFillerRanges(t, { paddingStartMs: 50, paddingEndMs: 50 });
-    expect(fillers[0].startSec).toBeCloseTo(um.start - 0.05, 3);
-    expect(fillers[0].endSec).toBeCloseTo(um.end + 0.05, 3);
+    // padStart=50ms means cut starts 50ms LATER than the word boundary —
+    // i.e. we keep MORE of the previous word's tail.
+    expect(fillers[0].startSec).toBeCloseTo(um.start + 0.05, 3);
+    expect(fillers[0].endSec).toBeCloseTo(um.end - 0.05, 3);
   });
 
-  it("clamps the start padding so it never goes negative", () => {
+  it("default padding is 0 — trust whisper's word boundaries", () => {
+    const t = makeTranscript("hello um world");
+    const um = t.segments[0].words![1];
+    const fillers = detectFillerRanges(t);
+    // No padding by default: cut spans exactly the word's reported timing.
+    expect(fillers[0].startSec).toBeCloseTo(um.start, 3);
+    expect(fillers[0].endSec).toBeCloseTo(um.end, 3);
+  });
+
+  it("falls back to unpadded boundaries when padding would invert the range", () => {
+    // 200ms of padding on a 100ms word would produce a negative duration.
+    // We clamp by reverting to the unpadded word boundaries rather than
+    // emitting a degenerate range.
     const t = makeTranscript("um hello world");
-    const fillers = detectFillerRanges(t, { paddingStartMs: 9999 });
-    expect(fillers[0].startSec).toBe(0);
+    const um = t.segments[0].words![0];
+    const fillers = detectFillerRanges(t, { paddingStartMs: 200, paddingEndMs: 200 });
+    expect(fillers[0].startSec).toBeCloseTo(um.start, 3);
+    expect(fillers[0].endSec).toBeCloseTo(um.end, 3);
   });
 });
 
@@ -163,15 +179,25 @@ describe("keepRangesFromFillers", () => {
 });
 
 describe("keepRangesToFrameRanges", () => {
-  it("rounds inward (ceil start, floor end)", () => {
+  it("rounds OUTWARD (floor start, ceil end) to preserve speech in partial frames", () => {
     const keeps = [{ startSec: 0.4, endSec: 1.6 }];
     const frames = keepRangesToFrameRanges(keeps, 30);
+    // floor(0.4 * 30) = 12 ; ceil(1.6 * 30) = 48
     expect(frames).toEqual([{ startFrame: 12, endFrame: 48 }]);
   });
 
-  it("drops zero-frame ranges after rounding", () => {
-    // ceil(0.97 * 30) = 30; floor(1.0 * 30) = 30 — zero-frame range, dropped.
+  it("keeps tiny ranges intact (used to drop them with inward rounding)", () => {
+    // floor(0.97 * 30) = 29 ; ceil(1.0 * 30) = 30 — 1-frame keep, valid.
+    // (Was zero-frame and dropped under inward rounding — the bug that ate 5+ s
+    //  of speech across 73 cuts.)
     const keeps = [{ startSec: 0.97, endSec: 1.0 }];
+    const frames = keepRangesToFrameRanges(keeps, 30);
+    expect(frames).toEqual([{ startFrame: 29, endFrame: 30 }]);
+  });
+
+  it("drops zero-frame ranges (start equals end after rounding)", () => {
+    // floor(1.0 * 30) = 30 ; ceil(1.0 * 30) = 30 — same frame, dropped.
+    const keeps = [{ startSec: 1.0, endSec: 1.0 }];
     const frames = keepRangesToFrameRanges(keeps, 30);
     expect(frames).toEqual([]);
   });
