@@ -22,6 +22,8 @@ import { Banner } from "./components/Banner.js";
 import type { LazyHost } from "../core/hosts/lazy.js";
 import { saveSession } from "../core/sessions.js";
 import { buildEditorHostBlock, spliceHostBlock } from "../system-prompt.js";
+import { EDITOR_PROMPT_COMMANDS, getEditorPromptCommand } from "../prompt-commands.js";
+import { ggEditorFormatters } from "./tool-formatters.js";
 
 // Editor brand pulse — amber → orange → rose. Distinct from ggcoder's blue/purple.
 const THINKING_BORDER_COLORS = ["#fbbf24", "#f97316", "#ec4899", "#f97316", "#fbbf24"];
@@ -35,6 +37,16 @@ export interface AppProps {
   model: string;
   apiKey: string;
   accountId?: string;
+  /**
+   * Resolve fresh OAuth credentials before each turn (and on 401 retry with
+   * `forceRefresh: true`). Without this, the static `apiKey` above is reused
+   * forever — sessions die when the token expires mid-conversation.
+   * Receives the *current* provider, since the user can swap via /model.
+   */
+  resolveCredentials?: (
+    provider: Provider,
+    opts?: { forceRefresh?: boolean },
+  ) => Promise<{ apiKey: string; accountId?: string }>;
   tools: AgentTool[];
   systemPrompt: string;
   /**
@@ -96,10 +108,36 @@ type HistoryItem =
 
 // Names are bare (no `/` prefix) — ggcoder's slash menu prepends `/` for
 // display. Including a `/` here would render as `//`.
+//
+// Order is intentional, follows the typical creator session arc:
+//   1. Setup       — one-time per channel
+//   2. Workflow    — the main verb ("make me a YouTube video")
+//   3. QA          — audit before ship; diagnose after under-performance
+//   4. Session UI  — model swap, clear scrollback
+//   5. Meta        — help, then quit (always last)
+//
+// Prompt commands (group 1–3) come from `prompt-commands.ts` — looked up by
+// name in the same handleSubmit dispatcher. Local UI commands (group 4–5)
+// are handled inline because they manipulate React state directly.
+function promptCmd(name: string) {
+  const c = EDITOR_PROMPT_COMMANDS.find((x) => x.name === name);
+  if (!c) throw new Error(`gg-editor: missing prompt command '${name}' — check prompt-commands.ts`);
+  return { name: c.name, aliases: c.aliases, description: c.description };
+}
+
 const EDITOR_COMMANDS = [
+  // 1. Setup (one-time per channel)
+  promptCmd("setup-channel"),
+  // 2. Workflow (the main verb)
+  promptCmd("youtube"),
+  // 3. QA — pre-render audit, post-render diagnosis
+  promptCmd("audit"),
+  promptCmd("diagnose"),
+  // 4. Session UI
   { name: "model", aliases: ["m"], description: "switch model" },
-  { name: "help", aliases: ["?"], description: "show available commands" },
   { name: "clear", aliases: [], description: "clear visible history (doesn't reset agent)" },
+  // 5. Meta — help next-to-last, quit always last
+  { name: "help", aliases: ["?"], description: "show available commands" },
   { name: "quit", aliases: ["exit", "q"], description: "exit cleanly" },
 ];
 
@@ -271,6 +309,12 @@ export function App(props: AppProps) {
       apiKey: props.apiKey,
       accountId: props.accountId,
       thinking: thinkingEnabled ? "medium" : undefined,
+      // Pull fresh creds before each turn so OAuth refresh + provider swaps
+      // via /model both flow through. Without this, an 8h Anthropic token
+      // that expires mid-session takes the whole CLI down.
+      resolveCredentials: props.resolveCredentials
+        ? (opts) => props.resolveCredentials!(currentProvider, opts)
+        : undefined,
     },
     {
       onTurnText: (text, thinking, thinkingMs) => {
@@ -288,14 +332,17 @@ export function App(props: AppProps) {
       },
       // Running tool calls are rendered live from agentLoop.activeToolCalls
       // OUTSIDE of <Static>; only the completed result enters scrollback here.
-      onToolEnd: (toolCallId, name, result, isError, _durationMs, details) => {
-        const active = agentLoop.activeToolCalls.find((tc) => tc.toolCallId === toolCallId);
+      onToolEnd: (toolCallId, name, result, isError, _durationMs, details, args) => {
+        // Use the args passed through from onToolEnd directly. Looking them up
+        // via `agentLoop.activeToolCalls` here is racey — by the time onToolEnd
+        // fires the call has been pulled from the active list, so most tools
+        // would land on `{}` and lose every detail/inline summary.
         queueFlush({
           id: nextId(),
           kind: "tool_done",
           toolCallId,
           name,
-          args: active?.args ?? {},
+          args: args ?? {},
           result,
           isError,
           details,
@@ -344,17 +391,30 @@ export function App(props: AppProps) {
         return;
       }
       if (value === "/help" || value === "/?") {
+        const fmt = (c: { name: string; aliases: string[]; description: string }) =>
+          `- \`/${c.name}\`${c.aliases.length ? " " + c.aliases.map((a) => `\`/${a}\``).join(" ") : ""} — ${c.description}`;
+        const setup = EDITOR_PROMPT_COMMANDS.filter((c) => c.name === "setup-channel").map(fmt);
+        const workflow = EDITOR_PROMPT_COMMANDS.filter((c) => c.name === "youtube").map(fmt);
+        const qa = EDITOR_PROMPT_COMMANDS.filter((c) =>
+          ["audit", "diagnose"].includes(c.name),
+        ).map(fmt);
         setHistoryItems((items) => [
           ...items,
           {
             id: nextId(),
             kind: "assistant",
             text:
-              "**Slash commands**\n\n" +
+              "**Setup** (one-time per channel)\n\n" +
+              setup.join("\n") +
+              "\n\n**Workflow**\n\n" +
+              workflow.join("\n") +
+              "\n\n**Quality checks**\n\n" +
+              qa.join("\n") +
+              "\n\n**Session**\n\n" +
               "- `/model` `/m` — switch model\n" +
-              "- `/quit` `/exit` `/q` — exit\n" +
               "- `/clear` — clear visible history (doesn't reset agent)\n" +
-              "- `/help` `/?` — this help\n\n" +
+              "- `/help` `/?` — this help\n" +
+              "- `/quit` `/exit` `/q` — exit\n\n" +
               "**Keys**\n\n" +
               "- `Shift-Tab` toggle thinking\n" +
               "- `ESC` interrupt the agent\n" +
@@ -368,6 +428,29 @@ export function App(props: AppProps) {
       if (value === "/model" || value === "/m") {
         setOverlay("model");
         return;
+      }
+
+      // Bundled prompt commands — dispatch to the agent loop with the
+      // command's prompt as the user message. Mirrors ggcoder's pattern.
+      // Args after the command name are appended as "## User Instructions".
+      if (value.startsWith("/")) {
+        const parts = value.slice(1).split(" ");
+        const cmdName = parts[0];
+        const cmdArgs = parts.slice(1).join(" ").trim();
+        const cmd = getEditorPromptCommand(cmdName);
+        if (cmd) {
+          const fullPrompt = cmdArgs
+            ? `${cmd.prompt}\n\n## User Instructions\n\n${cmdArgs}`
+            : cmd.prompt;
+          // Show the user's literal /command invocation in scrollback so the
+          // history stays a faithful transcript; the expanded prompt itself
+          // goes to the agent loop only.
+          lastUserMessageRef.current = value;
+          setLastUserMessage(value);
+          setHistoryItems((items) => [...items, { id: nextId(), kind: "user", text: value }]);
+          void agentLoop.run(fullPrompt);
+          return;
+        }
       }
 
       lastUserMessageRef.current = value;
@@ -483,7 +566,13 @@ export function App(props: AppProps) {
 
       {/* Live tool calls in flight (rendered OUTSIDE Static so they update). */}
       {agentLoop.activeToolCalls.map((tc) => (
-        <ToolExecution key={tc.toolCallId} status="running" name={tc.name} args={tc.args} />
+        <ToolExecution
+          key={tc.toolCallId}
+          status="running"
+          name={tc.name}
+          args={tc.args}
+          formatters={ggEditorFormatters}
+        />
       ))}
 
       {/* Pinned activity indicator (the "thinking bar"). */}
@@ -636,6 +725,7 @@ function renderItem(item: HistoryItem): React.JSX.Element {
       result={item.result}
       isError={item.isError}
       details={item.details}
+      formatters={ggEditorFormatters}
     />
   );
 }

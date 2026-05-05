@@ -1,6 +1,6 @@
 {
   "name": "@kenkaiiii/gg-editor",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "type": "module",
   "description": "CLI video editor agent. Drives DaVinci Resolve and Premiere Pro via API + hotkeys + GUI fallback.",
   "license": "MIT",
@@ -23,7 +23,8 @@
   ],
   "scripts": {
     "build:skills": "node scripts/build-skills.mjs",
-    "build": "node scripts/build-skills.mjs && tsc",
+    "build:python": "node scripts/copy-python.mjs",
+    "build": "node scripts/build-skills.mjs && tsc && node scripts/copy-python.mjs",
     "check": "node scripts/build-skills.mjs && tsc --noEmit",
     "test": "node scripts/build-skills.mjs && vitest run"
   },

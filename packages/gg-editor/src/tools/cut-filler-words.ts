@@ -9,6 +9,7 @@ import {
   detectFillerRanges,
   keepRangesFromFillers,
   keepRangesToFrameRanges,
+  keepRangesToTimelineCuts,
   summarizeFillers,
 } from "../core/filler-words.js";
 import { compact, err } from "../core/format.js";
@@ -107,7 +108,10 @@ export function createCutFillerWordsTool(cwd: string): AgentTool<typeof CutFille
       "Detect and remove filler words ('um', 'uh', 'you know', 'i mean', …) from a " +
       "word-timestamped transcript. Emits an EDL of KEEP ranges (the parts to keep, with " +
       "small padding so cuts don't clip syllables). REQUIRES word-level timings — call " +
-      "transcribe(wordTimestamps=true) first. Returns {path, stats, keeps}; agent should " +
+      "transcribe(wordTimestamps=true) first. Returns {path, stats, keeps, timelineCutPoints}; " +
+      "⚠️ pass `timelineCutPoints` (NOT source transcript timestamps) to add_sfx_to_timeline / " +
+      "add_sfx_at_cuts — those tools work in TIMELINE space, and source-space points drift after " +
+      "every cut. Agent should " +
       "show the stats to the user, then import_edl(path) when approved. The single biggest " +
       "creator-time-saver on long-form talking-head content.",
     parameters: CutFillerWordsParams,
@@ -160,6 +164,10 @@ export function createCutFillerWordsTool(cwd: string): AgentTool<typeof CutFille
 
         const keeps = keepRangesFromFillers(fillers, totalSec);
         const frameKeeps = keepRangesToFrameRanges(keeps, fps);
+        // Timeline-space cut points: where each junction lands AFTER the
+        // EDL is imported. Pass these to add_sfx_to_timeline /
+        // add_sfx_at_cuts — NOT the source-space filler timestamps.
+        const timelineCutPoints = keepRangesToTimelineCuts(keeps);
 
         if (frameKeeps.length === 0) {
           return err(
@@ -199,6 +207,10 @@ export function createCutFillerWordsTool(cwd: string): AgentTool<typeof CutFille
           keeps: keeps.length,
           fps,
           totalSec,
+          // TIMELINE-space cut points (one per junction between keeps). Use
+          // these for add_sfx_to_timeline / add_sfx_at_cuts. Source-space
+          // timestamps from the transcript would drift after each cut.
+          timelineCutPoints,
           // Surface a short list so the agent can quote it back to the user.
           sample: fillers.slice(0, 10).map((f) => ({
             atSec: +f.startSec.toFixed(2),

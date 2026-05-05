@@ -5,7 +5,8 @@
  *
  *   {
  *     "openai": "sk-...",
- *     "huggingface": "hf_..."
+ *     "huggingface": "hf_...",
+ *     "pexels": "..."
  *   }
  *
  * Used by vision tools (analyze_hook / score_shot / color_match /
@@ -18,11 +19,12 @@ import { dirname, join } from "node:path";
 
 const API_KEYS_PATH = join(homedir(), ".gg", "api-keys.json");
 
-export type ApiKeyName = "openai" | "huggingface";
+export type ApiKeyName = "openai" | "huggingface" | "pexels";
 
 interface KeyStore {
   openai?: string;
   huggingface?: string;
+  pexels?: string;
 }
 
 let _cache: KeyStore | undefined;

@@ -70,7 +70,7 @@ describe("buildMixFilter", () => {
     const f = buildMixFilter({ deess: { freqHz: 6500, thresholdDb: -25 } });
     expect(f).toMatch(/^adynamicequalizer/);
     expect(f).toContain("dfrequency=6500");
-    expect(f).toContain("mode=cut");
+    expect(f).toContain("mode=cutabove");
   });
 
   it("chains multiple effects in canonical order: gate, eq, deess, comp, reverb, limiter", () => {

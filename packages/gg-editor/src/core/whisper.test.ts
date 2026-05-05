@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   detectApiKey,
   detectLocalWhisper,
+  openAIResponseToTranscript,
+  planOpenAIRequest,
   regroupTokensIntoSegments,
   whisperxJsonToTranscript,
 } from "./whisper.js";
@@ -117,6 +119,146 @@ describe("whisperxJsonToTranscript", () => {
     expect(t.language).toBe("de");
     expect(t.segments).toEqual([]);
     expect(t.durationSec).toBe(0);
+  });
+});
+
+describe("planOpenAIRequest", () => {
+  // Per https://platform.openai.com/docs/api-reference/audio:
+  //   - whisper-1                only model with verbose_json + timestamp_granularities
+  //   - gpt-4o-(mini-)transcribe response_format must be 'json' (verbose_json rejected)
+  //   - gpt-4o-transcribe-diarize must use 'diarized_json'; chunking required >30s
+  it("whisper-1 always asks for verbose_json (segment timing comes free)", () => {
+    const p = planOpenAIRequest("whisper-1", {});
+    expect(p.responseFormat).toBe("verbose_json");
+    expect(p.emitsTimestamps).toBe(true);
+    expect(p.emitsSpeakers).toBe(false);
+    expect(p.chunkingStrategy).toBeUndefined();
+  });
+
+  it("gpt-4o-transcribe forces json (verbose_json would 400)", () => {
+    const p = planOpenAIRequest("gpt-4o-transcribe", { wordTimestamps: true });
+    expect(p.responseFormat).toBe("json");
+    expect(p.emitsTimestamps).toBe(false);
+    expect(p.emitsSpeakers).toBe(false);
+  });
+
+  it("gpt-4o-mini-transcribe forces json", () => {
+    const p = planOpenAIRequest("gpt-4o-mini-transcribe", {});
+    expect(p.responseFormat).toBe("json");
+  });
+
+  it("gpt-4o-transcribe-diarize defaults to diarized_json + auto chunking", () => {
+    const p = planOpenAIRequest("gpt-4o-transcribe-diarize", {});
+    expect(p.responseFormat).toBe("diarized_json");
+    expect(p.emitsSpeakers).toBe(true);
+    expect(p.emitsTimestamps).toBe(true);
+    expect(p.chunkingStrategy).toBe("auto");
+  });
+
+  it("honours an explicit chunkingStrategy on diarize", () => {
+    const p = planOpenAIRequest("gpt-4o-transcribe-diarize", { chunkingStrategy: "auto" });
+    expect(p.chunkingStrategy).toBe("auto");
+  });
+});
+
+describe("openAIResponseToTranscript", () => {
+  it("verbose_json: lifts segments + word timing onto our shape", () => {
+    const t = openAIResponseToTranscript(
+      {
+        text: "Hello world.",
+        language: "en",
+        duration: 2.5,
+        segments: [{ start: 0, end: 2.5, text: " Hello world." }],
+        words: [
+          { start: 0, end: 0.5, word: "Hello" },
+          { start: 0.6, end: 2.5, word: "world." },
+        ],
+      },
+      {
+        responseFormat: "verbose_json",
+        emitsTimestamps: true,
+        emitsSpeakers: false,
+        chunkingStrategy: undefined,
+      },
+      { wordTimestamps: true },
+    );
+    expect(t.language).toBe("en");
+    expect(t.segments).toHaveLength(1);
+    expect(t.segments[0].text).toBe("Hello world.");
+    expect(t.segments[0].words).toHaveLength(2);
+    expect(t.segments[0].speaker).toBeUndefined();
+  });
+
+  it("json (gpt-4o-transcribe): synthesises a single segment from text + duration", () => {
+    const t = openAIResponseToTranscript(
+      { text: "  full transcript here.  ", language: "en", duration: 12.34 },
+      {
+        responseFormat: "json",
+        emitsTimestamps: false,
+        emitsSpeakers: false,
+        chunkingStrategy: undefined,
+      },
+      {},
+    );
+    expect(t.segments).toHaveLength(1);
+    expect(t.segments[0].text).toBe("full transcript here.");
+    expect(t.segments[0].start).toBe(0);
+    expect(t.segments[0].end).toBe(12.34);
+    expect(t.durationSec).toBe(12.34);
+  });
+
+  it("json with empty text: returns no segments rather than a 0-length stub", () => {
+    const t = openAIResponseToTranscript(
+      { text: "" },
+      {
+        responseFormat: "json",
+        emitsTimestamps: false,
+        emitsSpeakers: false,
+        chunkingStrategy: undefined,
+      },
+      {},
+    );
+    expect(t.segments).toEqual([]);
+  });
+
+  it("diarized_json: passes through speaker labels per segment", () => {
+    const t = openAIResponseToTranscript(
+      {
+        segments: [
+          { start: 0, end: 4.2, text: "Welcome.", speaker: "A" },
+          { start: 4.8, end: 7.1, text: "Thanks.", speaker: "B" },
+        ],
+      },
+      {
+        responseFormat: "diarized_json",
+        emitsTimestamps: true,
+        emitsSpeakers: true,
+        chunkingStrategy: "auto",
+      },
+      { language: "en" },
+    );
+    expect(t.segments[0].speaker).toBe("A");
+    expect(t.segments[1].speaker).toBe("B");
+    expect(t.language).toBe("en");
+    expect(t.durationSec).toBe(7.1); // last segment.end fallback when duration absent
+  });
+
+  it("strips speaker fields when the plan says model doesn't emit them", () => {
+    // Defensive: even if the response includes speaker (it shouldn't), don't
+    // forward speaker labels we can't trust.
+    const t = openAIResponseToTranscript(
+      {
+        segments: [{ start: 0, end: 1, text: "hi", speaker: "SHOULD_BE_DROPPED" }],
+      },
+      {
+        responseFormat: "verbose_json",
+        emitsTimestamps: true,
+        emitsSpeakers: false,
+        chunkingStrategy: undefined,
+      },
+      {},
+    );
+    expect(t.segments[0].speaker).toBeUndefined();
   });
 });
 

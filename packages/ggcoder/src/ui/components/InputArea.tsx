@@ -207,6 +207,17 @@ interface InputAreaProps {
   /** Number of open eyes-journal signals. `undefined` when eyes is inactive in
    * this project (hides the badge entirely). Zero hides it too. */
   eyesCount?: number;
+  /**
+   * Locked badge rendered before the prompt arrow on the first visual line.
+   * The user cannot delete or edit it — typed text always follows. Used by
+   * downstream tools (gg-boss) to show the active scope/project pill.
+   */
+  scopeBadge?: React.ReactNode;
+  /**
+   * Fired when the user presses Tab (outside slash-completion mode). Used by
+   * downstream tools (gg-boss) to cycle the scope badge.
+   */
+  onTab?: () => void;
 }
 
 // Border (1 each side) + padding (1 each side) = 4 characters of overhead
@@ -271,6 +282,8 @@ export function InputArea({
   cwd,
   commands = [],
   eyesCount,
+  scopeBadge,
+  onTab,
 }: InputAreaProps) {
   const theme = useTheme();
   const eyesBadge =
@@ -1071,7 +1084,11 @@ export function InputArea({
           setValue(cmd);
           setCursor(cmd.length);
           setSelectionAnchor(null);
+          return;
         }
+        // Outside slash mode, Tab is delegated — used by gg-boss to cycle
+        // the scope badge.
+        onTab?.();
         return;
       }
 
@@ -1300,6 +1317,7 @@ export function InputArea({
                   </Text>
                 ) : (
                   <>
+                    {scopeBadge}
                     {eyesBadge}
                     <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
                       {PROMPT}
@@ -1537,6 +1555,7 @@ export function InputArea({
 
             return (
               <Box key={i}>
+                {i === 0 ? scopeBadge : null}
                 {i === 0 ? eyesBadge : null}
                 <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
                   {i === 0 ? PROMPT : "  "}

@@ -1,3 +1,8 @@
+---
+name: chapter-markers
+description: Author YouTube/podcast chapter timestamps from a transcript: 5–15 chapters, first at 00:00, ≥30s apart, only at real topic shifts. Drops purple markers + emits a YouTube-formatted description block.
+---
+
 # chapter-markers
 
 **When to use:** YouTube videos, podcasts, courses, long-form interviews. The

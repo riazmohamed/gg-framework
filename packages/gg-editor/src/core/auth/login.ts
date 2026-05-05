@@ -1,16 +1,14 @@
 import { createInterface } from "node:readline/promises";
-import { spawn } from "node:child_process";
-import { platform } from "node:os";
 import chalk from "chalk";
 import { renderLoginSelector } from "@abukhaled/ogcoder/ui/login";
-import { loginAnthropic } from "./anthropic.js";
-import { loginOpenAI } from "./openai.js";
-import { AuthStorage } from "./storage.js";
 import {
-  STATIC_KEY_PROVIDERS,
+  AuthStorage,
+  loginAnthropic,
+  loginOpenAI,
   type OAuthCredentials,
-  type SupportedAuthProvider,
-} from "./types.js";
+} from "@abukhaled/ogcoder/auth";
+import { openBrowser } from "@abukhaled/ogcoder/utils/open-browser";
+import { STATIC_KEY_PROVIDERS, type SupportedAuthProvider } from "./types.js";
 
 /**
  * Editor brand palette — same warm sunset used by the main TUI. Applied to
@@ -131,7 +129,7 @@ function makeCallbacks() {
   return {
     onOpenUrl: (url: string) => {
       process.stdout.write(chalk.dim("\nOpening browser:\n  ") + url + "\n\n");
-      tryOpenBrowser(url);
+      openBrowser(url);
     },
     onPromptCode: async (message: string): Promise<string> => {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -147,20 +145,7 @@ function makeCallbacks() {
   };
 }
 
-function tryOpenBrowser(url: string): void {
-  const cmd = platform() === "darwin" ? "open" : platform() === "win32" ? "start" : "xdg-open";
-  try {
-    const child = spawn(cmd, [url], {
-      detached: true,
-      stdio: "ignore",
-      shell: platform() === "win32",
-      windowsHide: true,
-    });
-    child.unref();
-  } catch {
-    /* user pastes URL manually */
-  }
-}
+
 
 export async function runLogout(provider?: SupportedAuthProvider): Promise<void> {
   const storage = new AuthStorage();

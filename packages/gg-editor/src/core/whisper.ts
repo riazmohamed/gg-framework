@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { abortError, wireChildAbort } from "./child-abort.js";
 import { createReadStream, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -44,6 +45,27 @@ export interface Transcript {
   segments: TranscriptSegment[];
 }
 
+/**
+ * OpenAI transcription model identifiers — see
+ * https://platform.openai.com/docs/api-reference/audio/createTranscription.
+ *
+ *   - `whisper-1`              Legacy Whisper V2. Only model with `verbose_json` +
+ *                              word/segment timestamp_granularities. Best when you
+ *                              need word-level timing (caption burn-in).
+ *   - `gpt-4o-transcribe`      GPT-4o speech model (~$0.006/min). Higher accuracy.
+ *                              JSON-only response — text + duration only, NO segments.
+ *   - `gpt-4o-mini-transcribe` Cheaper sibling (~$0.003/min). JSON-only.
+ *   - `gpt-4o-transcribe-diarize` Built-in speaker diarization. Returns segments with
+ *                              `speaker` labels via `diarized_json`. Replaces the
+ *                              whisperx + HF_TOKEN + pyannote chain. Requires
+ *                              `chunking_strategy: "auto"` for inputs > 30s.
+ */
+export type OpenAITranscriptionModel =
+  | "whisper-1"
+  | "gpt-4o-transcribe"
+  | "gpt-4o-mini-transcribe"
+  | "gpt-4o-transcribe-diarize";
+
 export interface TranscribeOptions {
   /** Force a backend; otherwise auto-pick (whisperx if diarize=true, else local first, then api). */
   backend?: "local" | "api" | "whisperx";
@@ -51,27 +73,43 @@ export interface TranscribeOptions {
   modelPath?: string;
   /** OpenAI API key (env OPENAI_API_KEY otherwise). */
   apiKey?: string;
-  /** OpenAI model id (default: whisper-1). */
-  apiModel?: string;
+  /**
+   * OpenAI model id. Default `whisper-1` because it's the only model that
+   * returns word/segment timestamps — required by burn_subtitles and the
+   * caption pipeline. Pick `gpt-4o-transcribe-diarize` for built-in speaker
+   * labels (no whisperx install needed).
+   */
+  apiModel?: OpenAITranscriptionModel;
   /** ISO-639-1 language code; whisper auto-detects when omitted. */
   language?: string;
   /** Request word-level timestamps. Required for word-by-word burned captions. */
   wordTimestamps?: boolean;
   /**
-   * Run speaker diarization. Requires the `whisperx` CLI on PATH and a Hugging
-   * Face token in HF_TOKEN (whisperx uses pyannote, which gates the model behind
-   * a free HF account). Output transcripts include `speaker` per segment.
+   * Run speaker diarization. Two paths exist:
+   *  1. Set `apiModel: "gpt-4o-transcribe-diarize"` — server-side diarization,
+   *     no extra dependencies. Recommended.
+   *  2. Set `backend: "whisperx"` (or omit and let auto-detect kick in) —
+   *     local whisperx + pyannote, requires `whisperx` on PATH and HF_TOKEN.
+   * The `diarize: true` flag alone routes to whisperx for backwards compat.
    */
   diarize?: boolean;
   /** HF token override (otherwise reads HF_TOKEN env). Used by whisperx --hf_token. */
   hfToken?: string;
   /** whisperx model size. Default "base". */
   whisperxModel?: string;
+  /**
+   * Server-side audio chunking for the OpenAI gpt-4o-transcribe family. Set to
+   * `"auto"` to have the server normalize loudness, run VAD, and chunk the file
+   * (up to 1500s for transcribe, 1400s for transcribe-diarize, both within the
+   * 25 MB upload cap). Required for `gpt-4o-transcribe-diarize` on inputs > 30s
+   * — auto-enabled in that case if you don't set it.
+   */
+  chunkingStrategy?: "auto";
   /** Abort signal. */
   signal?: AbortSignal;
 }
 
-// ── Backend detection ───────────────────────────────────────
+// ── Backend detection ──────────────────────────────────
 
 export function detectLocalWhisper(): { cmd: string; argsPrefix: string[] } | undefined {
   // whisper.cpp ships under several names depending on build:
@@ -110,11 +148,26 @@ export async function transcribe(
   const wantApi = opts.backend === "api";
   const wantWhisperx = opts.backend === "whisperx" || opts.diarize === true;
 
+  // Diarize via OpenAI (gpt-4o-transcribe-diarize) takes precedence over
+  // whisperx when explicitly requested by model id — no install needed.
+  const wantDiarizeApi = opts.apiModel === "gpt-4o-transcribe-diarize";
+  if (wantDiarizeApi) {
+    const apiKey = detectApiKey(opts.apiKey);
+    if (!apiKey) {
+      throw new Error(
+        "gpt-4o-transcribe-diarize requires OPENAI_API_KEY. Either set it, " +
+          "or set backend: 'whisperx' to diarize locally.",
+      );
+    }
+    return transcribeOpenAI(inputPath, apiKey, opts);
+  }
+
   if (wantWhisperx) {
     if (!detectWhisperx()) {
       throw new Error(
         "whisperx not on PATH. Install: pip install whisperx. " +
-          "Diarization also requires HF_TOKEN (free account at huggingface.co).",
+          "Diarization also requires HF_TOKEN (free account at huggingface.co). " +
+          "Or set apiModel: 'gpt-4o-transcribe-diarize' for server-side diarization.",
       );
     }
     return transcribeWhisperx(inputPath, opts);
@@ -178,9 +231,15 @@ function transcribeLocal(
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d.toString()));
     child.stderr.on("data", (d) => (stderr += d.toString()));
-    opts.signal?.addEventListener("abort", () => child.kill("SIGTERM"));
-    child.on("error", reject);
+    const cleanup = wireChildAbort(opts.signal, child, {
+      onAbort: () => reject(abortError("transcribe aborted")),
+    });
+    child.on("error", (e) => {
+      cleanup();
+      reject(e);
+    });
     child.on("close", (code) => {
+      cleanup();
       if (code !== 0) {
         reject(new Error(`whisper.cpp exited ${code}: ${stderr.slice(-500)}`));
         return;
@@ -333,9 +392,15 @@ function transcribeWhisperx(inputPath: string, opts: TranscribeOptions): Promise
     const child = spawn("whisperx", args, { stdio: ["ignore", "pipe", "pipe"] });
     let stderr = "";
     child.stderr.on("data", (d) => (stderr += d.toString()));
-    opts.signal?.addEventListener("abort", () => child.kill("SIGTERM"));
-    child.on("error", reject);
+    const cleanup = wireChildAbort(opts.signal, child, {
+      onAbort: () => reject(abortError("whisperx aborted")),
+    });
+    child.on("error", (e) => {
+      cleanup();
+      reject(e);
+    });
     child.on("close", (code) => {
+      cleanup();
       if (code !== 0) {
         reject(new Error(`whisperx exited ${code}: ${stderr.slice(-500)}`));
         return;
@@ -358,11 +423,81 @@ function transcribeWhisperx(inputPath: string, opts: TranscribeOptions): Promise
 
 // ── OpenAI API ──────────────────────────────────────────────
 
+/**
+ * Per-model request shape. The OpenAI transcription API rejects mismatched
+ * combinations (e.g. response_format=verbose_json on gpt-4o-transcribe), so we
+ * route per model. Pure function — exported for unit tests.
+ */
+export interface OpenAIRequestPlan {
+  /** What to put in the `response_format` form field. */
+  responseFormat: "verbose_json" | "json" | "diarized_json";
+  /** True if the model+request supports word-level + segment-level timing. */
+  emitsTimestamps: boolean;
+  /** True if the response will include speaker labels. */
+  emitsSpeakers: boolean;
+  /**
+   * Effective chunking_strategy to send (or undefined to omit). Auto-enables
+   * "auto" for diarize when the caller didn't explicitly set one.
+   */
+  chunkingStrategy: "auto" | undefined;
+}
+
+export function planOpenAIRequest(
+  model: OpenAITranscriptionModel,
+  opts: Pick<TranscribeOptions, "wordTimestamps" | "chunkingStrategy">,
+): OpenAIRequestPlan {
+  switch (model) {
+    case "whisper-1":
+      // The only model that supports verbose_json + timestamp_granularities.
+      return {
+        responseFormat: "verbose_json",
+        emitsTimestamps: true,
+        emitsSpeakers: false,
+        chunkingStrategy: opts.chunkingStrategy,
+      };
+    case "gpt-4o-transcribe":
+    case "gpt-4o-mini-transcribe":
+      // GPT-4o transcribe family: JSON-only, no segments, no word timestamps.
+      // Higher accuracy than whisper-1 but you lose timing — picks like
+      // burn_subtitles still want whisper-1.
+      return {
+        responseFormat: "json",
+        emitsTimestamps: false,
+        emitsSpeakers: false,
+        chunkingStrategy: opts.chunkingStrategy,
+      };
+    case "gpt-4o-transcribe-diarize":
+      // diarized_json is required to receive speaker segments. Server requires
+      // chunking_strategy for inputs > 30s — we always send "auto" unless the
+      // caller explicitly set a different strategy.
+      return {
+        responseFormat: "diarized_json",
+        emitsTimestamps: true,
+        emitsSpeakers: true,
+        chunkingStrategy: opts.chunkingStrategy ?? "auto",
+      };
+  }
+}
+
+/**
+ * Response shape covering all three OpenAI variants we route. Optional fields
+ * are present on different models:
+ *   - whisper-1 verbose_json: text, language, duration, segments[], words[]
+ *   - gpt-4o-(mini-)transcribe json: text, language?, duration?
+ *   - gpt-4o-transcribe-diarize diarized_json: text, segments[{speaker,start,end,text}]
+ */
 interface OpenAITranscriptionResponse {
-  text: string;
+  text?: string;
   language?: string;
   duration?: number;
-  segments?: Array<{ start: number; end: number; text: string }>;
+  segments?: Array<{
+    start: number;
+    end: number;
+    text: string;
+    /** Only on diarized_json. */
+    speaker?: string;
+  }>;
+  /** verbose_json + timestamp_granularities=word. */
   words?: Array<{ start: number; end: number; word: string }>;
 }
 
@@ -374,68 +509,84 @@ async function transcribeOpenAI(
   const stat = statSync(inputPath);
   if (stat.size > 25 * 1024 * 1024) {
     throw new Error(
-      `OpenAI transcription file size limit is 25MB (got ${(stat.size / 1024 / 1024).toFixed(1)}MB). ` +
-        "Compress audio first (e.g. mono 16kHz WAV via extract_audio).",
+      `OpenAI transcription has a 25MB upload cap (got ${(stat.size / 1024 / 1024).toFixed(1)}MB). ` +
+        "Compress to mono 16kHz WAV via extract_audio (a 25-min interview fits comfortably). " +
+        "chunking_strategy splits long audio server-side but doesn't bypass the upload cap.",
     );
   }
 
-  // Build multipart body manually — keeps the package dep-free (no axios/form-data).
-  const boundary = `----gg-editor-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const model = opts.apiModel ?? "whisper-1";
+  const model: OpenAITranscriptionModel = opts.apiModel ?? "whisper-1";
+  const plan = planOpenAIRequest(model, opts);
+
+  // Use native FormData/Blob — Node 20+ has them as globals. Cleaner than
+  // hand-rolling multipart, and the openai SDK does the same internally.
   const fileBuf = await streamToBuffer(createReadStream(inputPath));
-  const fileName = basename(inputPath);
-
-  const parts: (string | Buffer)[] = [];
-  const push = (s: string) => parts.push(s);
-  push(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${model}\r\n`);
-  push(
-    `--${boundary}\r\nContent-Disposition: form-data; name="response_format"\r\n\r\nverbose_json\r\n`,
-  );
-  if (opts.wordTimestamps) {
-    push(
-      `--${boundary}\r\nContent-Disposition: form-data; name="timestamp_granularities[]"\r\n\r\nword\r\n`,
-    );
-    push(
-      `--${boundary}\r\nContent-Disposition: form-data; name="timestamp_granularities[]"\r\n\r\nsegment\r\n`,
-    );
+  const form = new FormData();
+  form.append("model", model);
+  form.append("response_format", plan.responseFormat);
+  if (plan.responseFormat === "verbose_json" && opts.wordTimestamps) {
+    form.append("timestamp_granularities[]", "word");
+    form.append("timestamp_granularities[]", "segment");
   }
-  if (opts.language) {
-    push(
-      `--${boundary}\r\nContent-Disposition: form-data; name="language"\r\n\r\n${opts.language}\r\n`,
-    );
+  if (plan.chunkingStrategy) {
+    form.append("chunking_strategy", plan.chunkingStrategy);
   }
-  push(
-    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\n` +
-      `Content-Type: application/octet-stream\r\n\r\n`,
-  );
-  parts.push(fileBuf);
-  push(`\r\n--${boundary}--\r\n`);
-
-  const body = Buffer.concat(
-    parts.map((p) => (typeof p === "string" ? Buffer.from(p, "utf8") : p)),
+  if (opts.language && model !== "gpt-4o-transcribe-diarize") {
+    // diarize model rejects language; the others accept it.
+    form.append("language", opts.language);
+  }
+  form.append(
+    "file",
+    new Blob([new Uint8Array(fileBuf)], { type: "application/octet-stream" }),
+    basename(inputPath),
   );
 
   const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": `multipart/form-data; boundary=${boundary}`,
-    },
-    body,
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form,
     signal: opts.signal,
   });
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
-    throw new Error(`OpenAI transcription HTTP ${res.status}: ${errText.slice(0, 300)}`);
+    throw new Error(
+      `OpenAI transcription HTTP ${res.status} (model=${model}): ${errText.slice(0, 300)}`,
+    );
   }
 
   const data = (await res.json()) as OpenAITranscriptionResponse;
+  return openAIResponseToTranscript(data, plan, opts);
+}
+
+/**
+ * Pure-data conversion: OpenAI transcription response → our Transcript shape.
+ * Exported for unit tests; production code calls this after fetch.
+ */
+export function openAIResponseToTranscript(
+  data: OpenAITranscriptionResponse,
+  plan: OpenAIRequestPlan,
+  opts: Pick<TranscribeOptions, "language" | "wordTimestamps">,
+): Transcript {
+  // gpt-4o-(mini-)transcribe returns `text` only. Synthesise a single segment
+  // covering the whole clip so downstream tools (read_transcript, write_srt)
+  // still see *something* useful.
+  if (!plan.emitsTimestamps) {
+    const text = (data.text ?? "").trim();
+    return {
+      language: data.language ?? opts.language ?? "unknown",
+      durationSec: data.duration ?? 0,
+      segments: text ? [{ start: 0, end: data.duration ?? 0, text }] : [],
+    };
+  }
+
   const segments = (data.segments ?? []).map((s) => ({
     start: s.start,
     end: s.end,
     text: s.text.trim(),
+    ...(plan.emitsSpeakers && s.speaker ? { speaker: s.speaker } : {}),
   })) as TranscriptSegment[];
+
   if (opts.wordTimestamps && data.words && segments.length > 0) {
     // Distribute words into the segment whose [start,end] contains the word's
     // midpoint. Linear walk; both arrays are already in order.
@@ -450,7 +601,7 @@ async function transcribeOpenAI(
   }
   return {
     language: data.language ?? opts.language ?? "unknown",
-    durationSec: data.duration ?? 0,
+    durationSec: data.duration ?? segments.at(-1)?.end ?? 0,
     segments,
   };
 }

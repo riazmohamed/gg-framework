@@ -1,3 +1,8 @@
+---
+name: skin-tone-matching
+description: Match faces across clips when host scripting can't reach power windows or qualifiers. Two paths: grade_skin_tones (file-only — bakes a vision-derived colorbalance + selectivecolor + eq into a new mp4, pair with replace_clip) and match_clip_color (Resolve only — derives the same grade as a CDL via set_primary_correction).
+---
+
 # skin-tone-matching
 
 **When to use:** the host's face looks different across clips — warmer in

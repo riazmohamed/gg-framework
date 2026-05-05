@@ -26,10 +26,14 @@ export function createBurnSubtitlesTool(cwd: string): AgentTool<typeof BurnSubti
   return {
     name: "burn_subtitles",
     description:
-      "Hardcode subtitles into a video. Accepts both .srt and .ass — for styled vertical captions " +
-      "you'll want .ass via write_ass. The output is a fresh re-encode (subtitles can't be burned " +
-      "without re-encoding video). Audio is copied unchanged. End-of-pipeline tool: run AFTER " +
-      "loudness normalization and any cleanup.",
+      "BAKE captions into a video as pixels — file-only, final-delivery tool. " +
+      "⚠️ When a host (Resolve / Premiere) is connected and the user is still editing, " +
+      "prefer `write_srt` + `import_subtitles` to attach the captions as a sidecar / subtitle " +
+      "track instead. The user can then tweak timing, scrub, undo. Use this pixel-burn tool " +
+      "ONLY when (a) the user has explicitly asked for a final flat mp4, OR (b) host=none, OR " +
+      "(c) the deliverable is a vertical Short with stylised burned captions (in which case " +
+      "pass an .ass produced by `write_ass` / `write_keyword_captions`). End-of-pipeline: " +
+      "run AFTER loudness normalisation and any cleanup.",
     parameters: BurnSubtitlesParams,
     async execute({ input, subtitles, output, videoCodec, crf }, ctx) {
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");

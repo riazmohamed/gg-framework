@@ -16,6 +16,8 @@ export function createHostInfoTool(host: VideoHost): AgentTool<typeof HostInfoPa
       const c = await host.capabilities();
       // Compact key abbreviations: move/color/audio/ai/import. The agent only
       // needs to know what's possible — verbose labels just bloat context.
+      // `runtime` and `deprecated` are surfaced so the agent can warn users on
+      // sunset paths (Adobe CEP/ExtendScript end-of-life Sept 2026).
       return compact({
         host: host.name,
         ok: c.isAvailable,
@@ -27,6 +29,8 @@ export function createHostInfoTool(host: VideoHost): AgentTool<typeof HostInfoPa
           ai: c.canTriggerAI,
           import: c.preferredImportFormat,
         },
+        ...(c.runtime ? { runtime: c.runtime } : {}),
+        ...(c.deprecationNotice ? { deprecated: c.deprecationNotice } : {}),
       });
     },
   };

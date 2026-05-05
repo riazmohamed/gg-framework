@@ -1,36 +1,94 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+/**
+ * Bundle every src/skills/<name>.md into a TS string constant + a SKILLS
+ * registry. Auto-discovered from disk so adding a skill = drop a markdown
+ * file. Description is read from YAML frontmatter `description:` (matching
+ * the Anthropic skill spec), falling back to the first non-heading line.
+ *
+ * Why a generated TS file: skills must ship inside the npm package without
+ * depending on disk layout. Embedding as TS strings is the simplest path —
+ * tsc compiles them straight into dist.
+ */
+
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(here, "..");
+const skillsDir = resolve(pkgRoot, "src/skills");
 
-const long = readFileSync(resolve(pkgRoot, "src/skills/long-form-content-edit.md"), "utf8");
-const short = readFileSync(resolve(pkgRoot, "src/skills/short-form-content-edit.md"), "utf8");
-const chapters = readFileSync(resolve(pkgRoot, "src/skills/chapter-markers.md"), "utf8");
-const keyframing = readFileSync(resolve(pkgRoot, "src/skills/keyframing-and-titles.md"), "utf8");
-const skinTone = readFileSync(resolve(pkgRoot, "src/skills/skin-tone-matching.md"), "utf8");
-const fusionLowerThird = readFileSync(
-  resolve(pkgRoot, "src/skills/fusion-lower-third.md"),
-  "utf8",
-);
+const files = readdirSync(skillsDir)
+  .filter((f) => f.endsWith(".md"))
+  .sort();
+
+const skills = files.map((f) => {
+  const name = f.replace(/\.md$/, "");
+  const content = readFileSync(resolve(skillsDir, f), "utf8");
+  const fm = parseFrontmatter(content);
+  const description = fm.description ?? extractDescription(stripFrontmatter(content));
+  return { name: fm.name ?? name, content, description };
+});
 
 function esc(s) {
-  return s
-    .replace(/\\/g, "\\\\")
-    .replace(/`/g, "\\`")
-    .replace(/\$\{/g, "\\${");
+  return s.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${");
 }
 
-const out = [
+function parseFrontmatter(raw) {
+  if (!raw.startsWith("---")) return {};
+  const end = raw.indexOf("\n---", 3);
+  if (end < 0) return {};
+  const block = raw.slice(3, end).trim();
+  const out = {};
+  for (const line of block.split(/\r?\n/)) {
+    const colon = line.indexOf(":");
+    if (colon < 0) continue;
+    const key = line.slice(0, colon).trim().toLowerCase();
+    let value = line.slice(colon + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (key === "name" || key === "description") out[key] = value;
+  }
+  return out;
+}
+
+function stripFrontmatter(raw) {
+  if (!raw.startsWith("---")) return raw;
+  const end = raw.indexOf("\n---", 3);
+  if (end < 0) return raw;
+  return raw.slice(end + 4).replace(/^\r?\n/, "");
+}
+
+function extractDescription(content) {
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith("#") || line.startsWith("---") || line.startsWith("```")) continue;
+    return line.length > 200 ? line.slice(0, 199) + "…" : line;
+  }
+  return "(no description)";
+}
+
+function jsString(s) {
+  return JSON.stringify(s);
+}
+
+function constName(name) {
+  return name.replace(/-/g, "_").toUpperCase();
+}
+
+const lines = [
   "/**",
-  " * Bundled skill markdowns. Embedded as TS string constants so they ship in the",
-  " * compiled package without depending on disk layout. Authored in",
-  " * src/skills/*.md — regenerate this file by running `node build-skills.mjs`",
-  " * from the package root if you edit the source markdowns.",
+  " * Bundled skill markdowns. Auto-generated from src/skills/*.md by",
+  " * scripts/build-skills.mjs — DO NOT EDIT BY HAND. Add a new skill by",
+  " * dropping a .md file in src/skills/ (with optional YAML frontmatter)",
+  " * and re-running `node scripts/build-skills.mjs`.",
   " *",
-  " * Skills are exposed through the read_skill tool; their descriptions live in",
-  " * the system prompt. Pattern follows the Anthropic skills convention:",
+  " * Skills are exposed through the read_skill tool; their descriptions live",
+  " * in the system prompt. Pattern follows the Anthropic skill convention:",
   " * description in the prompt, full content on demand.",
   " */",
   "",
@@ -40,62 +98,27 @@ const out = [
   "  content: string;",
   "}",
   "",
-  "const LONG_FORM_CONTENT_EDIT = `" + esc(long) + "`;",
-  "",
-  "const SHORT_FORM_CONTENT_EDIT = `" + esc(short) + "`;",
-  "",
-  "const CHAPTER_MARKERS = `" + esc(chapters) + "`;",
-  "",
-  "const KEYFRAMING_AND_TITLES = `" + esc(keyframing) + "`;",
-  "",
-  "const SKIN_TONE_MATCHING = `" + esc(skinTone) + "`;",
-  "",
-  "const FUSION_LOWER_THIRD = `" + esc(fusionLowerThird) + "`;",
-  "",
+];
 
-  "export const SKILLS: Record<string, BundledSkill> = {",
-  '  "long-form-content-edit": {',
-  '    name: "long-form-content-edit",',
-  "    description:",
-  '      "Recipe for podcasts, interviews, vlogs, courses, talking-head. Five-pass method: utterance segmentation → take detection → filler removal → incomplete-sentence trim → silence normalization. Wires our tools (transcribe, cluster_takes, detect_silence, write_edl, import_edl, write_srt, add_marker) into a single workflow.",',
-  "    content: LONG_FORM_CONTENT_EDIT,",
-  "  },",
-  '  "short-form-content-edit": {',
-  '    name: "short-form-content-edit",',
-  "    description:",
-  '      "Recipe for TikTok / Reels / Shorts. Find the moment → reformat 9:16 → hook the first 2 seconds → burn captions → render. Uses reformat_timeline, import_edl, set_clip_speed, write_srt, import_subtitles, open_page (Resolve).",',
-  "    content: SHORT_FORM_CONTENT_EDIT,",
-  "  },",
-  '  "chapter-markers": {',
-  '    name: "chapter-markers",',
-  "    description:",
-  '      "Recipe for YouTube/podcast chapter timestamps. Reads transcript in 90s windows, identifies topic shifts, drops purple markers, and emits a YouTube-formatted description block. Constraints: first chapter at 00:00, 5–15 chapters, ≥30s apart.",',
-  "    content: CHAPTER_MARKERS,",
-  "  },",
-  '  "keyframing-and-titles": {',
-  '    name: "keyframing-and-titles",',
-  "    description:",
-  '      "Recipes for the seven gaps neither Resolve nor Premiere expose via scripting: timeline reordering, multi-track / lane composition, lower-thirds and title cards (via ASS), keyframed opacity / position / volume ramps, audio mixing chains (EQ + comp + gate + de-esser + limiter), speed ramps, Ken-Burns on stills, and named transitions (smash-cut, whip-pan, dip-to-black). Wires reorder_timeline, compose_layered, write_lower_third, write_title_card, mix_audio, speed_ramp, ken_burns, transition_videos.",',
-  "    content: KEYFRAMING_AND_TITLES,",
-  "  },",
-  '  "skin-tone-matching": {',
-  '    name: "skin-tone-matching",',
-  "    description:",
-  '      "Recipe for matching faces across clips when host scripting can\'t reach power windows or qualifiers. Two paths: grade_skin_tones (file-only, every host \u2014 bakes a vision-derived colorbalance + selectivecolor + eq grade into a new mp4, pair with replace_clip) and match_clip_color (Resolve only \u2014 derives the same grade as a CDL and pipes it through set_primary_correction, non-baked). Both share one vision pass over a reference frame and a target frame; below confidence 0.4 the grade is unreliable.",',
-  "    content: SKIN_TONE_MATCHING,",
-  "  },",
-  '  "fusion-lower-third": {',
-  '    name: "fusion-lower-third",',
-  "    description:",
-  '      "Recipe for building a name/title chyron natively in DaVinci Resolve\'s Fusion page via fusion_comp. Walks the agent through Background + TextPlus + Merge node graph, wiring, text styling, lower-third positioning, and keyframed fade in/out via Merge.Blend. Resolve-only (Studio); for cross-host pixel-baked chyrons fall back to write_lower_third + burn_subtitles.",',
-  "    content: FUSION_LOWER_THIRD,",
-  "  },",
-  "};",
-  "",
-  "export const SKILL_NAMES = Object.keys(SKILLS);",
-  "",
-].join("\n");
+for (const s of skills) {
+  lines.push(`const ${constName(s.name)} = \`${esc(s.content)}\`;`);
+  lines.push("");
+}
 
+lines.push("export const SKILLS: Record<string, BundledSkill> = {");
+for (const s of skills) {
+  lines.push(`  ${jsString(s.name)}: {`);
+  lines.push(`    name: ${jsString(s.name)},`);
+  lines.push(`    description: ${jsString(s.description)},`);
+  lines.push(`    content: ${constName(s.name)},`);
+  lines.push("  },");
+}
+lines.push("};");
+lines.push("");
+lines.push("export const SKILL_NAMES = Object.keys(SKILLS);");
+lines.push("");
+
+const out = lines.join("\n");
 const target = resolve(pkgRoot, "src/skills.ts");
 writeFileSync(target, out);
-console.log("wrote", target, "\u2014", out.length, "bytes");
+console.log(`wrote ${target} — ${out.length} bytes (${skills.length} skills)`);

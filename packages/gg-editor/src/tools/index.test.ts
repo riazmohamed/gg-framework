@@ -22,6 +22,7 @@ const EXPECTED_TOOLS = [
   "set_clip_volume",
   "replace_clip",
   "insert_broll",
+  "suggest_broll",
   // Project / timeline / media-pool setup
   "create_timeline",
   "clone_timeline",
@@ -35,8 +36,10 @@ const EXPECTED_TOOLS = [
   "import_edl",
   "reformat_timeline",
   "render",
+  "render_multi_format",
   "list_render_presets",
   "smart_reframe",
+  "face_reframe",
   "pre_render_check",
   "reorder_timeline",
   "compose_layered",
@@ -72,6 +75,9 @@ const EXPECTED_TOOLS = [
   "generate_gif",
   "overlay_watermark",
   "compose_thumbnail",
+  "trim_dead_air",
+  "bleep_words",
+  "generate_outro",
   "speed_ramp",
   "ken_burns",
   "write_lower_third",
@@ -89,14 +95,29 @@ const EXPECTED_TOOLS = [
   "detect_speaker_changes",
   // Retention-tuning ops (the YouTube / TikTok / Reels pipeline)
   "cut_filler_words",
+  "text_based_cut",
   "punch_in",
   "analyze_hook",
+  "audit_first_frame",
+  "audit_retention_structure",
+  "rewrite_hook",
+  "verify_thumbnail_promise",
   "write_keyword_captions",
   "add_sfx_at_cuts",
+  "add_sfx_to_timeline",
+  "snap_cuts_to_beats",
+  "loop_match_short",
+  // LLM-driven creator helpers
+  "score_clip",
+  "find_viral_moments",
+  "generate_youtube_metadata",
+  "compose_thumbnail_variants",
   // Skills
   "read_skill",
   // Escape hatch (always registered; rejects with not_supported on host=none)
   "host_eval",
+  // Meta-tool — appended last so it sees the rest of the registry
+  "search_tools",
 ];
 
 describe("createEditorTools", () => {
@@ -134,6 +155,11 @@ describe("createEditorTools", () => {
       ctx as unknown as Parameters<typeof readSkill.execute>[1],
     );
     expect(typeof r).toBe("string");
-    expect((r as string).startsWith("# long-form-content-edit")).toBe(true);
+    // Skills now ship with YAML frontmatter (Anthropic skill spec); content
+    // starts with the frontmatter delimiter and contains the heading further
+    // down.
+    const text = r as string;
+    expect(text.startsWith("---")).toBe(true);
+    expect(text).toContain("# long-form-content-edit");
   });
 });

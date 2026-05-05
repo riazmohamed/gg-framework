@@ -3,6 +3,7 @@ import { dirname, resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { buildAss } from "../core/ass.js";
+import { injectEmojis } from "../core/emoji-captions.js";
 import { compact, err } from "../core/format.js";
 import { buildKeywordCaptions } from "../core/keyword-captions.js";
 import { safeOutputPath } from "../core/safe-paths.js";
@@ -76,6 +77,18 @@ const WriteKeywordCaptionsParams = z.object({
     ),
   playResX: z.number().int().positive().optional().describe("Canvas width. Default 1080."),
   playResY: z.number().int().positive().optional().describe("Canvas height. Default 1920."),
+  autoEmoji: z
+    .boolean()
+    .optional()
+    .describe(
+      "If true, the tool calls the LLM ONCE over all cues to suggest a fitting emoji per cue " +
+        "(or empty string). Submagic / CapCut signature look. Default false.",
+    ),
+  emojiDensity: z
+    .enum(["low", "med", "high"])
+    .optional()
+    .describe("low ≈ 1 in 4 cues, med ≈ 1 in 2, high = every cue. Default 'med'."),
+  emojiModel: z.string().optional().describe("LLM model. Default gpt-4o-mini."),
 });
 
 /**
@@ -145,12 +158,14 @@ export function createWriteKeywordCaptionsTool(
           );
         }
 
-        const { cues, styles } = buildKeywordCaptions(allWords, {
+        const built = buildKeywordCaptions(allWords, {
           groupSize: args.groupSize,
           gapSec: args.gapSec,
           maxKeywordsPerCue: args.maxKeywordsPerCue,
           minKeywordLen: args.minKeywordLen,
         });
+        let cues = built.cues;
+        const styles = built.styles;
 
         // Apply aesthetic overrides onto the returned styles.
         for (const s of styles) {
@@ -169,6 +184,19 @@ export function createWriteKeywordCaptionsTool(
           }
         }
 
+        // Optional emoji-injection pass (Submagic / CapCut look).
+        let emojiInjected = 0;
+        let emojiError: string | undefined;
+        if (args.autoEmoji) {
+          const r = await injectEmojis(cues, {
+            density: args.emojiDensity,
+            model: args.emojiModel,
+          });
+          cues = r.cues;
+          emojiInjected = r.injected;
+          emojiError = r.error;
+        }
+
         const ass = buildAss({
           styles,
           cues,
@@ -181,7 +209,12 @@ export function createWriteKeywordCaptionsTool(
         mkdirSync(dirname(outAbs), { recursive: true });
         writeFileSync(outAbs, ass, "utf8");
 
-        return compact({ path: outAbs, cues: cues.length });
+        return compact({
+          path: outAbs,
+          cues: cues.length,
+          ...(args.autoEmoji ? { emojiInjected } : {}),
+          ...(emojiError ? { emojiError } : {}),
+        });
       } catch (e) {
         return err((e as Error).message);
       }

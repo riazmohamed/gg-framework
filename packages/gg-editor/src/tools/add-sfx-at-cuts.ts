@@ -1,6 +1,7 @@
 import { resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
+import { bundledSfxDescriptionList, listBundledSfxNames, resolveSfx } from "../core/bundled-sfx.js";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, probeMedia, runFfmpeg } from "../core/media/ffmpeg.js";
 import { buildSfxOnCutsFilter } from "../core/sfx-on-cuts.js";
@@ -10,15 +11,21 @@ const AddSfxAtCutsParams = z.object({
   sfx: z
     .string()
     .describe(
-      "SFX file (whoosh, pop, swoosh, riser…). Stereo wav / mp3. 200ms-1s long is typical.",
+      `SFX. Pass a bundled name (synthesised on demand, cached at ~/.gg/sfx-cache/) OR a file path. ` +
+        `Bundled names: ${listBundledSfxNames().join(", ")}. ` +
+        `For a custom file: stereo wav / mp3, 200 ms–1 s long is typical.`,
     ),
   output: z.string().describe("Output file. Re-encoded; uses input video codec passthrough."),
   cutPoints: z
     .array(z.number().min(0))
     .min(1)
     .describe(
-      "Timestamps (seconds) where the SFX should fire. Same list you'd pass to punch_in. " +
-        "Closer-than-minSpacingSec hits are deduped automatically.",
+      "Timestamps (seconds) where the SFX should fire — RELATIVE TO THE INPUT FILE. ⚠️ If the " +
+        "input is a rendered cut (post-`cut_filler_words` / `text_based_cut`), pass the " +
+        "`timelineCutPoints` from that tool's result — NOT source-video transcript timestamps. " +
+        "Source-space points drift further out of sync after every cut (fine for the first " +
+        "~30 s, off by 20+ s by the end of a typical podcast). Closer-than-minSpacingSec hits " +
+        "are deduped automatically.",
     ),
   sfxGainDb: z
     .number()
@@ -66,20 +73,33 @@ export function createAddSfxAtCutsTool(cwd: string): AgentTool<typeof AddSfxAtCu
   return {
     name: "add_sfx_at_cuts",
     description:
-      "Drop a SFX (whoosh / pop / swoosh) at each cut point and mix it onto the existing " +
-      "audio. The standard sound-design polish on every retention-tuned vlog or short. " +
-      "Default gain -8dB sits below the voice; optional -3 to -6dB voice ducking. Video is " +
-      "copied through untouched. File-only — works in every host. Pair with cut_filler_words " +
-      "/ detect_silence for automatic cut-point feeds.",
+      `BAKE SFX into a rendered mp4 — file-only, final-delivery tool. ` +
+      `⚠️ When a host (Resolve / Premiere) is connected, prefer ` +
+      `\`add_sfx_to_timeline\` instead — it places real audio clips on track A3 so ` +
+      `the user hears them on playback and can tune levels in Fairlight. Use this tool ONLY ` +
+      `when host=none OR the user has explicitly asked for a final flat mp4. ` +
+      `Bundled SFX (synthesised on demand): ${bundledSfxDescriptionList()}. ` +
+      `Default gain -8 dB sits below voice; optional -3 to -6 dB voice ducking. Video is ` +
+      `copied through untouched.`,
     parameters: AddSfxAtCutsParams,
     async execute(args, ctx) {
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const inAbs = resolvePath(cwd, args.input);
-        const sfxAbs = resolvePath(cwd, args.sfx);
         const outAbs = resolvePath(cwd, args.output);
         if (inAbs === outAbs) {
           return err("output and input are identical", "use a different output path");
+        }
+
+        // Resolve bundled name OR file path. Synthesises on first cache miss.
+        let sfxAbs: string;
+        let sfxInfo: { bundled: boolean; name?: string };
+        try {
+          const r = await resolveSfx(args.sfx, cwd, ctx.signal);
+          sfxAbs = r.path;
+          sfxInfo = { bundled: r.bundled, name: r.name };
+        } catch (e) {
+          return err((e as Error).message, "use a bundled SFX name or supply a real file path");
         }
 
         const probe = probeMedia(inAbs);
@@ -127,7 +147,11 @@ export function createAddSfxAtCutsTool(cwd: string): AgentTool<typeof AddSfxAtCu
         if (r.code !== 0) {
           return err(`ffmpeg failed: ${tail(r.stderr)}`);
         }
-        return compact({ path: outAbs, hits });
+        return compact({
+          path: outAbs,
+          hits,
+          sfx: sfxInfo.bundled ? `bundled:${sfxInfo.name}` : sfxAbs,
+        });
       } catch (e) {
         return err((e as Error).message);
       }

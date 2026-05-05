@@ -65,6 +65,43 @@ importers:
         specifier: ^4.1.4
         version: 4.1.4(@types/node@25.6.0)(vite@7.3.1(@types/node@25.6.0))
 
+  packages/gg-boss:
+    dependencies:
+      '@kenkaiiii/gg-agent':
+        specifier: workspace:*
+        version: link:../gg-agent
+      '@kenkaiiii/gg-ai':
+        specifier: workspace:*
+        version: link:../gg-ai
+      '@kenkaiiii/ggcoder':
+        specifier: workspace:*
+        version: link:../ggcoder
+      chalk:
+        specifier: ^5.6.2
+        version: 5.6.2
+      ink:
+        specifier: ^6.8.0
+        version: 6.8.0(@types/react@19.2.14)(react@19.2.5)
+      react:
+        specifier: ^19.2.5
+        version: 19.2.5
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
+    devDependencies:
+      '@types/node':
+        specifier: ^25.6.0
+        version: 25.6.0
+      '@types/react':
+        specifier: ^19.2.14
+        version: 19.2.14
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.4
+        version: 4.1.4(@types/node@25.6.0)(vite@7.3.1(@types/node@25.6.0))
+
   packages/gg-editor:
     dependencies:
       '@abukhaled/gg-agent':

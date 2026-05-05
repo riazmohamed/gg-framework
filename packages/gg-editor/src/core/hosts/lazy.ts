@@ -28,6 +28,7 @@
  * gets fresh ground truth.
  */
 import type { HostName } from "../../types.js";
+import { logInfo } from "../logger.js";
 import { detectHost } from "./detect.js";
 import { NoneAdapter } from "./none/adapter.js";
 import { PremiereAdapter } from "./premiere/adapter.js";
@@ -95,6 +96,7 @@ export function createLazyHost(opts: LazyHostOptions = {}): LazyHost {
 
     const detected = detectHost().name;
     if (!current || current.name !== detected) {
+      logInfo("host", "change", { from: current?.name ?? "none", to: detected });
       shutdownAdapter(current);
       current = instantiate(detected);
     }

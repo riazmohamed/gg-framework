@@ -123,6 +123,12 @@ export interface VideoHost {
     recordFrame: number;
     sourceInFrame?: number;
     sourceOutFrame?: number;
+    /**
+     * Default "video" for back-compat. Pass "audio" to place a clip on an
+     * audio track instead — used by `add_sfx_to_timeline` to drop SFX wavs
+     * directly onto a free Fairlight/audio track without rendering.
+     */
+    mediaKind?: "video" | "audio";
   }): Promise<ClipInfo>;
 
   /**

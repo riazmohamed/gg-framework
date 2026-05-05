@@ -1,3 +1,8 @@
+---
+name: long-form-content-edit
+description: Recipe for podcasts, interviews, vlogs, courses, talking-head. Five-pass method: utterance segmentation → take detection → filler removal → incomplete-sentence trim → silence normalization. Wires transcribe, cluster_takes, detect_silence, write_edl, import_edl, write_srt, add_marker into a single workflow.
+---
+
 # long-form-content-edit
 
 **When to use:** podcasts, interviews, vlogs, courses, talking-head — anything

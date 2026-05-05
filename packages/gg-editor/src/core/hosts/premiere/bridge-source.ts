@@ -256,8 +256,11 @@ const METHODS: Record<string, string> = {
     var pi = _findClipBin(base);
     if (!pi) throw new Error("imported item not found: " + base);
     var trackIdx = (P.track || 2) - 1;
-    var track = seq.videoTracks[trackIdx];
-    if (!track) throw new Error("track " + P.track + " does not exist on active sequence.");
+    // mediaKind selects audio vs video track family. Default video for back-compat.
+    var kind = String(P.mediaKind || "video").toLowerCase();
+    var trackList = (kind === "audio") ? seq.audioTracks : seq.videoTracks;
+    var track = trackList[trackIdx];
+    if (!track) throw new Error(kind + " track " + P.track + " does not exist on active sequence.");
     var recordSec = P.recordFrame / fps;
     track.insertClip(pi, recordSec);
     var inserted = null;
@@ -269,7 +272,7 @@ const METHODS: Record<string, string> = {
     return {
       id: String(inserted.nodeId || inserted.name),
       track: P.track || 2,
-      trackKind: "video",
+      trackKind: kind,
       startFrame: _frames(inserted.start, seq),
       endFrame: _frames(inserted.end, seq),
       name: inserted.name
@@ -311,6 +314,52 @@ const METHODS: Record<string, string> = {
     var ok = app.project.importFiles([P.srtPath], true, app.project.rootItem, false);
     if (!ok) throw new Error("importFiles returned false for " + P.srtPath);
     return { imported: true, attached: false, note: "SRT imported to project; drag onto a captions track on the active sequence." };
+  `,
+
+  // Escape hatch: eval arbitrary ExtendScript with the Premiere DOM in scope.
+  // Pre-bound: app, project, sequence (active sequence or null), qe (Quality
+  // Engineering DOM, undocumented but available after enableQE()).
+  // Result resolution: caller may either assign to `result` or call setResult(value).
+  // print(...) is captured to a buffer and returned as `stdout`.
+  execute_code: String.raw`
+    if (typeof P.code !== "string" || !P.code.length) {
+      throw new Error("execute_code requires a non-empty 'code' string.");
+    }
+    var project = app.project || null;
+    var sequence = (project && project.activeSequence) ? project.activeSequence : null;
+    try { if (typeof app.enableQE === "function") app.enableQE(); } catch (eqe) {}
+    var qe = (typeof window !== "undefined" && window.qe) ? window.qe : (typeof $.global.qe !== "undefined" ? $.global.qe : null);
+    var __stdout = [];
+    var print = function () {
+      var parts = [];
+      for (var i = 0; i < arguments.length; i++) {
+        try { parts.push(typeof arguments[i] === "string" ? arguments[i] : JSON.stringify(arguments[i])); }
+        catch (e) { parts.push(String(arguments[i])); }
+      }
+      __stdout.push(parts.join(" "));
+    };
+    var __holder = { value: null, set: false };
+    var setResult = function (v) { __holder.value = v; __holder.set = true; };
+    var result = null;
+    try {
+      // ExtendScript eval inherits the current scope, so app/project/sequence/
+      // qe/print/setResult/result are all visible inside the snippet.
+      eval(P.code);
+    } catch (eEval) {
+      var stdout = __stdout.join("\n");
+      var tail = stdout ? ("\nstdout: " + stdout.substring(Math.max(0, stdout.length - 1500))) : "";
+      throw new Error((eEval && eEval.message ? eEval.message : String(eEval)) + tail);
+    }
+    var safe = function (v) {
+      try { JSON.stringify(v); return v; } catch (e) { return String(v); }
+    };
+    var out = { result: __holder.set ? safe(__holder.value) : (typeof result === "undefined" ? null : safe(result)) };
+    if (__stdout.length) {
+      var s = __stdout.join("\n");
+      if (s.length > 4000) s = s.substring(0, 2000) + "\n…[truncated]…\n" + s.substring(s.length - 1500);
+      out.stdout = s;
+    }
+    return out;
   `,
 };
 

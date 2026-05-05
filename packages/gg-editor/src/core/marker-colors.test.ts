@@ -115,3 +115,21 @@ describe("PremiereAdapter color snapping", () => {
     expect(snap(99)).toBe("blue"); // out-of-range index
   });
 });
+
+describe("PremiereAdapter transport → runtime mapping", () => {
+  // The adapter advertises `runtime` in HostCapabilities so the agent can warn
+  // users when they're on the CEP/ExtendScript sunset path (Sept 2026).
+  const map = PremiereAdapter._mapTransportToRuntimeForTest;
+
+  it("http-uxp → uxp (the only forward path)", () => {
+    expect(map("http-uxp")).toBe("uxp");
+  });
+
+  it("http-cep → cep (deprecated, EOL Sept 2026)", () => {
+    expect(map("http-cep")).toBe("cep");
+  });
+
+  it("osascript-cep → osascript (also EOL Sept 2026)", () => {
+    expect(map("osascript-cep")).toBe("osascript");
+  });
+});

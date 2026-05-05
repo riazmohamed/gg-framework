@@ -89,6 +89,23 @@ export class Agent {
     if (options.system) {
       this.messages.push({ role: "system", content: options.system });
     }
+    if (options.priorMessages && options.priorMessages.length > 0) {
+      this.messages.push(...options.priorMessages);
+    }
+  }
+
+  /** Snapshot of the current message history. Used for session persistence. */
+  getMessages(): Message[] {
+    return [...this.messages];
+  }
+
+  /**
+   * Swap the abort signal used for subsequent prompts. Call this after
+   * `controller.abort()` so the next prompt() call gets a fresh, unaborted
+   * signal — without losing message history.
+   */
+  setSignal(signal: AbortSignal | undefined): void {
+    this.options = { ...this.options, signal };
   }
 
   get running(): boolean {

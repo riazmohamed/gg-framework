@@ -16,6 +16,7 @@ let port: number;
 let lastBody: { method?: string; params?: unknown } | null = null;
 let nextResponse: { ok: boolean; result?: unknown; error?: string } = { ok: true, result: null };
 let healthOk = true;
+let healthKind: "cep" | "uxp" | undefined;
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -27,7 +28,14 @@ beforeAll(async () => {
         return;
       }
       res.writeHead(200);
-      res.end(JSON.stringify({ ok: true, product: "stub", port }));
+      res.end(
+        JSON.stringify({
+          ok: true,
+          product: "stub",
+          port,
+          ...(healthKind ? { kind: healthKind } : {}),
+        }),
+      );
       return;
     }
     if (req.method === "POST" && req.url === "/rpc") {
@@ -64,10 +72,30 @@ afterAll(async () => {
 describe("PremiereHttpBridge", () => {
   it("health() returns the panel payload when reachable", async () => {
     healthOk = true;
+    healthKind = undefined;
     const b = new PremiereHttpBridge({ port });
     const h = await b.health();
     expect(h?.ok).toBe(true);
     expect(h?.product).toBe("stub");
+  });
+
+  it("health() defaults panel kind to 'cep' when the panel doesn't advertise one", async () => {
+    healthOk = true;
+    healthKind = undefined;
+    const b = new PremiereHttpBridge({ port });
+    const h = await b.health();
+    // Older panels predate the UXP migration — they were CEP by definition,
+    // so absence of `kind` means CEP, not unknown.
+    expect(h?.kind).toBe("cep");
+  });
+
+  it("health() reads the panel-advertised kind when present", async () => {
+    healthOk = true;
+    healthKind = "uxp";
+    const b = new PremiereHttpBridge({ port });
+    const h = await b.health();
+    expect(h?.kind).toBe("uxp");
+    healthKind = undefined;
   });
 
   it("health() returns null on non-2xx", async () => {

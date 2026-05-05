@@ -1,3 +1,8 @@
+---
+name: short-form-content-edit
+description: Recipe for TikTok / Reels / Shorts. Find the moment → reformat 9:16 → hook the first 2 seconds → burn captions → render. Uses reformat_timeline, import_edl, set_clip_speed, write_srt, import_subtitles, open_page (Resolve).
+---
+
 # short-form-content-edit
 
 **When to use:** TikTok / Reels / Shorts / vertical clips. Source is usually

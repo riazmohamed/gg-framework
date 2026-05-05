@@ -119,7 +119,13 @@ export function buildMixFilter(chain: AudioChain): string {
     const f = chain.deess.freqHz ?? 6500;
     const t = chain.deess.thresholdDb ?? -25;
     parts.push(
-      `adynamicequalizer=dfrequency=${f}:dqfactor=2:tfrequency=${f}:tqfactor=2:threshold=${dbToLinear(t)}:ratio=4:mode=cut`,
+      // mode=cutabove → attenuate the target band when detection exceeds
+      // threshold. This is the canonical de-esser shape (sibilance pokes
+      // above threshold → shelf cuts it). Valid modes on ffmpeg ≥ 5 are:
+      // listen | cutbelow | cutabove | boostbelow | boostabove. The older
+      // `mode=cut` alias was never accepted — it errors with "Undefined
+      // constant or missing '('".
+      `adynamicequalizer=dfrequency=${f}:dqfactor=2:tfrequency=${f}:tqfactor=2:threshold=${dbToLinear(t)}:ratio=4:mode=cutabove:tftype=highshelf`,
     );
   }
 

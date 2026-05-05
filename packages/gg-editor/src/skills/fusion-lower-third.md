@@ -1,3 +1,8 @@
+---
+name: fusion-lower-third
+description: Build a name/title chyron natively in DaVinci Resolve's Fusion via fusion_comp — Background + TextPlus + Merge node graph, wiring, styling, lower-third positioning, keyframed fade in/out. Resolve Studio only; cross-host fallback is write_lower_third + burn_subtitles.
+---
+
 # fusion-lower-third
 
 **When to use:** the user asks for a name/title chyron that should be

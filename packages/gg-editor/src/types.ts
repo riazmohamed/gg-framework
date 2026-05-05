@@ -41,6 +41,18 @@ export interface TimelineState {
 
 // ── Host capabilities ───────────────────────────────────────
 
+/**
+ * Which scripting runtime an adapter is using to talk to the host. Useful for
+ * surfacing deprecation notices (Adobe CEP / ExtendScript end Sept 2026) and
+ * routing version-sensitive ops.
+ *
+ *   - 'uxp'        Adobe UXP plugin (Premiere 25.6+) — the only forward path.
+ *   - 'cep'        Adobe CEP / ExtendScript panel — deprecated, EOL Sept 2026.
+ *   - 'osascript'  macOS AppleScript → ExtendScript fallback. Same EOL.
+ *   - 'native'     Direct API (Resolve Python bridge) — not deprecated.
+ */
+export type HostRuntime = "uxp" | "cep" | "osascript" | "native";
+
 export interface HostCapabilities {
   /** Can clips be moved on the timeline (not only appended)? */
   canMoveClips: boolean;
@@ -56,6 +68,18 @@ export interface HostCapabilities {
   isAvailable: boolean;
   /** Why a host is unavailable, if relevant. */
   unavailableReason?: string;
+  /**
+   * Active scripting runtime. Resolved lazily — may be undefined before the
+   * first real bridge call (capabilities() probes reachability but doesn't
+   * always commit to a transport).
+   */
+  runtime?: HostRuntime;
+  /**
+   * Free-form deprecation note surfaced to the agent + UI. Set when the active
+   * runtime is on a known sunset path (currently Adobe CEP / ExtendScript,
+   * which Adobe is removing in September 2026).
+   */
+  deprecationNotice?: string;
 }
 
 // ── CLI config ──────────────────────────────────────────────

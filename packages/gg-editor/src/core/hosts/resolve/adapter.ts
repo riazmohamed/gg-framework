@@ -185,6 +185,7 @@ export class ResolveAdapter implements VideoHost {
     recordFrame: number;
     sourceInFrame?: number;
     sourceOutFrame?: number;
+    mediaKind?: "video" | "audio";
   }): Promise<ClipInfo> {
     return this.bridge.call<ClipInfo>("insert_clip_on_track", opts);
   }

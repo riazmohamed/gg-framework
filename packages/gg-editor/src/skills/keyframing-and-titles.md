@@ -1,3 +1,8 @@
+---
+name: keyframing-and-titles
+description: Recipes for the seven scripting gaps neither Resolve nor Premiere expose: timeline reorder, multi-track lanes, lower-thirds + title cards (ASS), keyframed opacity/position/volume ramps, audio mixing chains (EQ + comp + gate + de-esser + limiter), speed ramps, Ken-Burns, named transitions (smash-cut, whip-pan, dip-to-black).
+---
+
 # keyframing-and-titles
 
 **When to use:** the user asks to reorder clips, animate fades / pans /

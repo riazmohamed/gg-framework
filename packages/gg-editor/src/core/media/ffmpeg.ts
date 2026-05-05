@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { wireChildAbort } from "../child-abort.js";
 
 /**
  * Thin ffmpeg/ffprobe wrappers. The agent never invokes ffmpeg directly —
@@ -34,9 +35,19 @@ export function runFfmpeg(
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d.toString()));
     child.stderr.on("data", (d) => (stderr += d.toString()));
-    opts.signal?.addEventListener("abort", () => child.kill("SIGTERM"));
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    // Robust abort: SIGTERM → SIGKILL after 1.5s. ffmpeg respects SIGTERM
+    // quickly on its read loop; the SIGKILL backstop covers wedge cases.
+    // We resolve with a non-zero code on abort instead of rejecting because
+    // ffmpeg callers check `r.code !== 0` and surface a tailored error.
+    const cleanup = wireChildAbort(opts.signal, child);
+    child.on("error", (e) => {
+      cleanup();
+      reject(e);
+    });
+    child.on("close", (code) => {
+      cleanup();
+      resolve({ code: code ?? 1, stdout, stderr });
+    });
   });
 }
 

@@ -1,8 +1,13 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir, platform } from "node:os";
 import { join } from "node:path";
+import { logError, logInfo, logWarn } from "../../logger.js";
+import { findPython, type PythonCmd } from "../../python.js";
 import { BRIDGE_PY } from "./bridge-source.js";
+
+// Re-export so existing import sites keep compiling.
+export { findPython, type PythonCmd } from "../../python.js";
 
 /**
  * Cross-platform Resolve Python bridge.
@@ -89,6 +94,12 @@ export class ResolveBridge {
       this.bridgePath = scriptPath;
 
       const env = resolveEnv(py);
+      logInfo("bridge", "spawn", {
+        py: py.cmd + (py.args.length ? " " + py.args.join(" ") : ""),
+        api: env.RESOLVE_SCRIPT_API,
+        lib: env.RESOLVE_SCRIPT_LIB,
+        pyhome: env.PYTHONHOME,
+      });
       const child = spawn(py.cmd, [...py.args, scriptPath], {
         env,
         stdio: ["pipe", "pipe", "pipe"],
@@ -110,11 +121,17 @@ export class ResolveBridge {
 
       child.on("error", (err) => {
         // child.exitCode/signalCode will be set by the runtime; no extra flag needed.
+        logError("bridge", "spawn_fail", { error: err.message });
         reject(new Error(`Failed to spawn Python: ${err.message}`));
       });
 
       child.on("exit", (code, signal) => {
         const reason = signal ? `signal ${signal}` : `exit ${code}`;
+        logWarn("bridge", "exit", {
+          reason,
+          handshake: this.handshakeDone ? "done" : "pending",
+          stderr: stderrBuf ? stderrBuf.slice(-500) : undefined,
+        });
         const err = new Error(
           `Resolve bridge died (${reason}).${stderrBuf ? "\nstderr: " + stderrBuf.slice(-500) : ""}`,
         );
@@ -141,6 +158,9 @@ export class ResolveBridge {
       // to print _ready, time out.
       setTimeout(() => {
         if (!this.handshakeDone) {
+          logError("bridge", "handshake_timeout", {
+            stderr: stderrBuf ? stderrBuf.slice(-500) : undefined,
+          });
           reject(
             new Error(
               "Resolve bridge handshake timed out after 10s. Check Resolve is running, " +
@@ -169,11 +189,16 @@ export class ResolveBridge {
     // Bootstrap messages.
     if (msg.id === "_ready" && msg.ok) {
       this.handshakeDone = true;
+      logInfo("bridge", "ready");
       onReady();
       return;
     }
     if (msg.id === "_bootstrap" && msg.ok === false) {
       this.handshakeDone = true; // failed-but-resolved: prevent timeout double-reject
+      logError("bridge", "bootstrap_fail", {
+        error: msg.error ?? "unknown",
+        trace: msg.trace ? msg.trace.slice(-500) : undefined,
+      });
       onReadyFail(new Error(msg.error ?? "Bridge bootstrap failed."));
       this.kill();
       return;
@@ -214,6 +239,7 @@ export class ResolveBridge {
     }
     const id = String(this.nextId++);
     const payload = JSON.stringify({ id, method, params }) + "\n";
+    const startedAt = Date.now();
 
     return new Promise<T>((resolve, reject) => {
       const onAbort = () => {
@@ -233,10 +259,19 @@ export class ResolveBridge {
       this.pending.set(id, {
         resolve: (v) => {
           opts.signal?.removeEventListener("abort", onAbort);
+          logInfo("bridge.call", method, {
+            id,
+            ms: Date.now() - startedAt,
+          });
           resolve(v as T);
         },
         reject: (err) => {
           opts.signal?.removeEventListener("abort", onAbort);
+          logError("bridge.call", method, {
+            id,
+            ms: Date.now() - startedAt,
+            error: err.message,
+          });
           reject(err);
         },
       });
@@ -271,55 +306,6 @@ export class ResolveBridge {
 }
 
 // ── Helpers ─────────────────────────────────────────────────
-
-export interface PythonCmd {
-  cmd: string;
-  args: string[];
-  /**
-   * `sys.prefix` of the interpreter, when probing succeeded. Used on Windows
-   * to set PYTHONHOME — multi-Python systems need it set or Resolve 20.3 can
-   * crash on bridge startup (samuelgursky/davinci-resolve-mcp #26).
-   */
-  prefix?: string;
-}
-
-/**
- * Probe for a working Python 3 interpreter. Order matters:
- *   1. python3   — macOS/Linux standard
- *   2. python    — Windows default name; also macOS with pyenv
- *   3. py -3     — Windows launcher (when only the launcher is on PATH)
- *
- * We verify each candidate prints a 3.x version before accepting it.
- */
-export function findPython(): PythonCmd | undefined {
-  const candidates: PythonCmd[] = [
-    { cmd: "python3", args: [] },
-    { cmd: "python", args: [] },
-    { cmd: "py", args: ["-3"] },
-  ];
-
-  for (const c of candidates) {
-    const r = spawnSync(c.cmd, [...c.args, "--version"], {
-      encoding: "utf8",
-      windowsHide: true,
-    });
-    if (r.status === 0) {
-      const out = (r.stdout || r.stderr || "").trim();
-      if (/Python 3\./.test(out)) {
-        // Best-effort: probe sys.prefix for PYTHONHOME on Windows. We do this
-        // here (not in resolveEnv) so we pay the spawn cost exactly once.
-        const pr = spawnSync(c.cmd, [...c.args, "-c", "import sys;print(sys.prefix)"], {
-          encoding: "utf8",
-          windowsHide: true,
-        });
-        const prefix =
-          pr.status === 0 && typeof pr.stdout === "string" ? pr.stdout.trim() : undefined;
-        return prefix ? { ...c, prefix } : c;
-      }
-    }
-  }
-  return undefined;
-}
 
 /**
  * Build the env block the Python bridge needs. Sets RESOLVE_SCRIPT_API,

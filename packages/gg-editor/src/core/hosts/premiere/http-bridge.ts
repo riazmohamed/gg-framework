@@ -2,15 +2,39 @@
  * HTTP transport for the Premiere bridge.
  *
  * Used on Windows (where there's no osascript) and optionally on macOS when
- * the user has installed the gg-editor-premiere-panel CEP extension.
+ * the user has installed the gg-editor-premiere-panel extension.
  *
- * The panel runs a localhost HTTP server (default port 7437). We POST to
- * /rpc with {method, params} and parse the JSON response.
+ * Two panel runtimes are supported, both speaking the same wire protocol:
+ *
+ *   - **CEP** (legacy)   ExtendScript backend. Works on Premiere 22+. Adobe
+ *                        has confirmed CEP support ends September 2026.
+ *   - **UXP** (modern)   `require("premierepro")` backend. Required for
+ *                        Premiere Pro 25.6+; the only path that survives
+ *                        beyond Sept 2026.
+ *
+ * Both panel variants expose:
+ *   - GET  /health  → {ok, product, port, kind: "cep"|"uxp", version?}
+ *   - POST /rpc     → body {method, params}, response {ok, result|error}
+ *
+ * The bridge stays runtime-agnostic; we just record `kind` from health for
+ * surfacing in capability strings + error messages.
  */
 
 const DEFAULT_PORT = 7437;
 const DEFAULT_HOST = "127.0.0.1";
 const HEALTH_TIMEOUT_MS = 1500;
+
+export type PanelKind = "cep" | "uxp";
+
+export interface PanelHealth {
+  ok: boolean;
+  product: string;
+  port: number;
+  /** Panel runtime. Older panels may omit this; we default to "cep". */
+  kind?: PanelKind;
+  /** Optional version string the panel may advertise. */
+  version?: string;
+}
 
 export interface HttpBridgeOptions {
   port?: number;
@@ -31,13 +55,22 @@ export class PremiereHttpBridge {
   }
 
   /** Cheap reachability check. Returns the panel's health payload or null. */
-  async health(): Promise<{ ok: boolean; product: string; port: number } | null> {
+  async health(): Promise<PanelHealth | null> {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), HEALTH_TIMEOUT_MS);
     try {
       const r = await fetch(`http://${this.host}:${this.port}/health`, { signal: ctrl.signal });
       if (!r.ok) return null;
-      return (await r.json()) as { ok: boolean; product: string; port: number };
+      const data = (await r.json()) as Partial<PanelHealth>;
+      // Default kind to 'cep' for older panels that don't advertise it —
+      // they predate the UXP migration and were therefore CEP by definition.
+      return {
+        ok: !!data.ok,
+        product: data.product ?? "unknown",
+        port: data.port ?? this.port,
+        kind: data.kind ?? "cep",
+        ...(data.version ? { version: data.version } : {}),
+      };
     } catch {
       return null;
     } finally {

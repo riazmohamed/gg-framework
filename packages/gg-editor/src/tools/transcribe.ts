@@ -16,6 +16,15 @@ const TranscribeParams = z.object({
     .string()
     .optional()
     .describe("Path to whisper.cpp ggml model. Required for local backend."),
+  apiModel: z
+    .enum(["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "gpt-4o-transcribe-diarize"])
+    .optional()
+    .describe(
+      "OpenAI transcription model. Default 'whisper-1' — the only one with word/segment " +
+        "timestamps (needed for burn_subtitles). 'gpt-4o-transcribe' has higher accuracy but " +
+        "text-only (no segments). 'gpt-4o-transcribe-diarize' returns speaker-labelled " +
+        "segments without needing whisperx/HF_TOKEN — prefer this for speaker analysis.",
+    ),
   language: z.string().optional().describe("ISO-639-1 code (e.g. 'en'). Auto-detected if omitted."),
   wordTimestamps: z
     .boolean()
@@ -23,20 +32,29 @@ const TranscribeParams = z.object({
     .describe(
       "Request per-word timestamps (needed for word-by-word burned captions). " +
         "Local whisper.cpp uses -ml=1 mode; OpenAI uses timestamp_granularities=word. " +
-        "Costs slightly more time/tokens; only enable when you'll use them.",
+        "Only effective with whisper-1 backend (gpt-4o-* don't support word-level timing).",
     ),
   diarize: z
     .boolean()
     .optional()
     .describe(
-      "Run speaker diarization (whisperx + pyannote). Requires `whisperx` on PATH and " +
-        "HF_TOKEN env (free Hugging Face account). Output segments include `speaker`. " +
+      "Local diarization via whisperx + pyannote. Requires `whisperx` on PATH and " +
+        "HF_TOKEN env (free Hugging Face account). For server-side diarization with no " +
+        "local install, set apiModel='gpt-4o-transcribe-diarize' instead. " +
         "Use this BEFORE detect_speaker_changes — if diarization succeeds you don't need the heuristic.",
     ),
   whisperxModel: z
     .string()
     .optional()
     .describe("whisperx model size (tiny/base/small/medium/large-v3). Default 'base'."),
+  chunkingStrategy: z
+    .enum(["auto"])
+    .optional()
+    .describe(
+      "Server-side chunking for the gpt-4o-transcribe family. 'auto' lets OpenAI " +
+        "normalize loudness, run VAD, and process clips up to ~25 min within the 25MB cap. " +
+        "Auto-enabled for gpt-4o-transcribe-diarize on inputs >30s.",
+    ),
 });
 
 export function createTranscribeTool(cwd: string): AgentTool<typeof TranscribeParams> {
@@ -46,7 +64,9 @@ export function createTranscribeTool(cwd: string): AgentTool<typeof TranscribePa
       "Transcribe audio/video to text with timestamps. Writes full transcript JSON to `output`; " +
       "returns compact summary (lang, segment count, duration) plus head/tail samples. " +
       "Use read_transcript to query the file by time/text. " +
-      "Backends: 'local' (whisper.cpp) or 'api' (OpenAI). Auto-picks local if available.",
+      "Backends: 'local' (whisper.cpp), 'api' (OpenAI — see apiModel for model choice), " +
+      "or 'whisperx' (local diarization). For speaker labels without a local install, " +
+      "use backend='api' + apiModel='gpt-4o-transcribe-diarize'.",
     parameters: TranscribeParams,
     async execute(args, ctx) {
       const { input, output, backend, modelPath, language } = args;
@@ -68,10 +88,12 @@ export function createTranscribeTool(cwd: string): AgentTool<typeof TranscribePa
         const t = await transcribe(inAbs, {
           backend: want,
           modelPath,
+          apiModel: args.apiModel,
           language,
           wordTimestamps: args.wordTimestamps,
           diarize: args.diarize,
           whisperxModel: args.whisperxModel,
+          chunkingStrategy: args.chunkingStrategy,
           signal: ctx.signal,
         });
 
