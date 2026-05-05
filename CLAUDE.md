@@ -16,10 +16,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `packages/gg-pixel-server` | (private — Cloudflare Worker) | Ingest backend (Workers + D1) |
 | `packages/gg-editor` | `@kenkaiiii/gg-editor` | Video editing agent (DaVinci Resolve / Premiere) |
 | `packages/gg-editor-premiere-panel` | `@kenkaiiii/gg-editor-premiere-panel` | CEP panel bridge for Premiere |
+| `packages/gg-boss` | `@kenkaiiii/gg-boss` | Orchestrator (`ggboss` binary) — drives multiple ogcoder workers across projects from one chat |
 
 **Install**: `npm i -g @abukhaled/ogcoder`
 
-**Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`)
+**Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`). `gg-boss` consumes `gg-ai` + `gg-agent` + `ogcoder` to spawn worker sessions.
+
+> **Branch note (rebrand/abukhaled, 2026-05-05)**: The three core packages were renamed from `@kenkaiiii/{gg-ai,gg-agent,ggcoder}` to `@abukhaled/{gg-ai,gg-agent,ogcoder}` (binary renamed `ggcoder → ogcoder`). The auxiliary packages (`gg-editor`, `gg-boss`, `gg-pixel`) still publish under `@kenkaiiii/*` but their workspace deps and source imports were rewritten to point at `@abukhaled/*` so the monorepo builds. `gg-editor` currently has pre-existing typecheck errors on `main` (the auth-refactor commit calls a richer `renderLoginSelector` and `Footer` API that ggcoder hasn't shipped yet) — they merge through unchanged on this branch and are not regressions.
 
 ## Commands
 

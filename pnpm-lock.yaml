@@ -67,13 +67,13 @@ importers:
 
   packages/gg-boss:
     dependencies:
-      '@kenkaiiii/gg-agent':
+      '@abukhaled/gg-agent':
         specifier: workspace:*
         version: link:../gg-agent
-      '@kenkaiiii/gg-ai':
+      '@abukhaled/gg-ai':
         specifier: workspace:*
         version: link:../gg-ai
-      '@kenkaiiii/ggcoder':
+      '@abukhaled/ogcoder':
         specifier: workspace:*
         version: link:../ggcoder
       chalk:

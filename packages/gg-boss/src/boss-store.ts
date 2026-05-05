@@ -7,6 +7,7 @@ import type {
   TextContent,
   ToolCall,
   ToolResult,
+  UserMessage,
 } from "@abukhaled/gg-ai";
 import type { WorkerStatus, WorkerTurnSummary } from "./types.js";
 
@@ -21,12 +22,10 @@ function isToolCall(p: ContentPart): p is ToolCall {
   return p.type === "tool_call";
 }
 
-function userMessageText(
-  content: string | ({ type: "text"; text: string } | { type: "image" })[],
-): string {
+function userMessageText(content: UserMessage["content"]): string {
   if (typeof content === "string") return content;
   return content
-    .filter((c): c is { type: "text"; text: string } => c.type === "text")
+    .filter((c): c is TextContent => c.type === "text")
     .map((c) => c.text)
     .join("");
 }
