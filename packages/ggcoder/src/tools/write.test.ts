@@ -3,6 +3,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createWriteTool } from "./write.js";
+import { recordRead, type ReadTracker } from "./read-tracker.js";
+
+async function markRead(tracker: ReadTracker, filePath: string): Promise<void> {
+  const stat = await fs.stat(filePath);
+  const content = await fs.readFile(filePath, "utf-8");
+  recordRead(tracker, filePath, content, stat.mtimeMs);
+}
 
 function resultToString(result: unknown): string {
   if (typeof result === "string") return result;
@@ -76,7 +83,7 @@ describe("createWriteTool", () => {
   });
 
   it("blocks overwriting existing files that haven't been read", async () => {
-    const readFiles = new Set<string>();
+    const readFiles: ReadTracker = new Map();
     const tool = createWriteTool(tmpDir, readFiles);
 
     // Create an existing file
@@ -88,16 +95,15 @@ describe("createWriteTool", () => {
         { file_path: "existing.txt", content: "new content" },
         { signal: new AbortController().signal, toolCallId: "test-4" },
       ),
-    ).rejects.toThrow("File must be read first before overwriting");
+    ).rejects.toThrow("File must be read first");
   });
 
   it("allows overwriting files that have been read", async () => {
-    const readFiles = new Set<string>();
+    const readFiles: ReadTracker = new Map();
     const filePath = path.join(tmpDir, "existing.txt");
     await fs.writeFile(filePath, "original");
 
-    // Mark as read
-    readFiles.add(filePath);
+    await markRead(readFiles, filePath);
 
     const tool = createWriteTool(tmpDir, readFiles);
     const raw = await tool.execute(
@@ -111,8 +117,28 @@ describe("createWriteTool", () => {
     expect(written).toBe("new content");
   });
 
+  it("rejects overwriting when the file changed since it was read", async () => {
+    const readFiles: ReadTracker = new Map();
+    const filePath = path.join(tmpDir, "stale.txt");
+    await fs.writeFile(filePath, "original");
+    await markRead(readFiles, filePath);
+
+    // External rewrite + bumped mtime
+    await fs.writeFile(filePath, "external");
+    const future = new Date(Date.now() + 5_000);
+    await fs.utimes(filePath, future, future);
+
+    const tool = createWriteTool(tmpDir, readFiles);
+    await expect(
+      tool.execute(
+        { file_path: "stale.txt", content: "from agent" },
+        { signal: new AbortController().signal, toolCallId: "test-stale" },
+      ),
+    ).rejects.toThrow(/modified since/);
+  });
+
   it("allows writing new files without reading", async () => {
-    const readFiles = new Set<string>();
+    const readFiles: ReadTracker = new Map();
     const tool = createWriteTool(tmpDir, readFiles);
 
     const raw = await tool.execute(

@@ -104,6 +104,14 @@ export function formatUserError(err: unknown): string {
     return chalk.red(path ? `Permission denied: ${path}` : "Permission denied.");
   }
 
+  // Internal/unexpected JS errors (RangeError, TypeError, SyntaxError,
+  // ReferenceError) shouldn't be flattened to a one-liner — those are bugs in
+  // our code, and the stack is the only thing that points at the offending
+  // file. A bare "Maximum call stack size exceeded" tells the user nothing.
+  if (err instanceof Error && isInternalJsError(err) && err.stack) {
+    return chalk.red(err.stack);
+  }
+
   // Generic Error — show first line only, no stack
   if (message) {
     const firstLine = message.split("\n")[0];
@@ -111,6 +119,15 @@ export function formatUserError(err: unknown): string {
   }
 
   return chalk.red("An unexpected error occurred.");
+}
+
+function isInternalJsError(err: Error): boolean {
+  return (
+    err instanceof RangeError ||
+    err instanceof TypeError ||
+    err instanceof SyntaxError ||
+    err instanceof ReferenceError
+  );
 }
 
 // ── Helpers ──────────────────────────────────────────────────

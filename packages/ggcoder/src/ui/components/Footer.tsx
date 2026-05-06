@@ -13,6 +13,23 @@ interface FooterProps {
   thinkingEnabled?: boolean;
   planMode?: boolean;
   exitPending?: boolean;
+  /** Hide the plan-mode toggle entirely (for products that don't have plan mode). */
+  hidePlan?: boolean;
+  /** Optional left-side status string (e.g. "Connected · DaVinci Resolve"). */
+  statusLabel?: string;
+  /** Color for the status label. */
+  statusColor?: string;
+  /** Hide the cwd label (for products where the working directory isn't useful). */
+  hideCwd?: boolean;
+  /** Hide the git branch label. */
+  hideGitBranch?: boolean;
+  /**
+   * Render the status label on its own line BELOW the model + tokens row
+   * instead of inline on the left. Used by gg-editor where the host
+   * connection status ("Connected to DaVinci Resolve…") is more readable on
+   * a dedicated row.
+   */
+  statusBelow?: boolean;
 }
 
 // Model ID → short display name
@@ -53,6 +70,12 @@ export function Footer({
   thinkingEnabled,
   planMode,
   exitPending,
+  hidePlan,
+  statusLabel,
+  statusColor,
+  hideCwd,
+  hideGitBranch,
+  statusBelow,
 }: FooterProps) {
   const theme = useTheme();
   const { columns } = useTerminalSize();
@@ -98,6 +121,7 @@ export function Footer({
   // Plan/Thinking labels
   const planText = planMode ? "Plan on" : "Plan off";
   const thinkingText = thinkingEnabled ? "Thinking on" : "Thinking off";
+  const showPlan = !hidePlan;
 
   // Calculate whether everything fits on one line
   const leftLen = displayPath.length + 2 + (gitBranch ? gitBranch.length + 5 : 0);
@@ -108,8 +132,7 @@ export function Footer({
     1 +
     3 +
     modelName.length +
-    3 +
-    planText.length +
+    (showPlan ? 3 + planText.length : 0) +
     3 +
     thinkingText.length;
   const availableWidth = columns - 2;
@@ -130,8 +153,12 @@ export function Footer({
       <Text color={theme.primary} bold>
         {modelName}
       </Text>
-      {sep}
-      <Text color={planMode ? theme.planPrimary : theme.textDim}>{planText}</Text>
+      {showPlan ? (
+        <>
+          {sep}
+          <Text color={planMode ? theme.planPrimary : theme.textDim}>{planText}</Text>
+        </>
+      ) : null}
       {sep}
       <Text color={thinkingEnabled ? theme.accent : theme.textDim}>{thinkingText}</Text>
     </>
@@ -145,18 +172,51 @@ export function Footer({
     );
   }
 
-  if (fitsOnOneLine) {
+  const showCwd = !hideCwd;
+  const showGitBranch = !hideGitBranch && !!gitBranch;
+  // When statusBelow is set, the status renders on its own line under
+  // the right content — it's NOT part of the left-chunk layout.
+  const showStatusInLeft = !!statusLabel && !statusBelow;
+
+  // First-rendered left chunk: track if we've started the line with the cwd
+  // so we know when to insert separators.
+  const leftHasContent = showCwd || showGitBranch || showStatusInLeft;
+  // Sep helper that only renders if there's already content before it.
+  let leftStarted = false;
+  const renderLeftSep = (key: string): React.ReactElement | null => {
+    if (!leftStarted) {
+      leftStarted = true;
+      return null;
+    }
+    return <React.Fragment key={key}>{sep}</React.Fragment>;
+  };
+
+  // statusBelow forces the two-line layout (status sits on its own row
+  // under model + tokens). The left-chunk render still respects fits-on-one-
+  // line for whatever non-status content remains (cwd, git branch).
+  if (fitsOnOneLine && !statusBelow) {
     return (
       <Box paddingLeft={1} paddingRight={1} width={columns}>
         <Box flexGrow={1}>
-          <Text color={theme.textDim}>{truncPath}</Text>
-          {gitBranch && (
+          {showCwd && (
             <>
-              {sep}
+              {renderLeftSep("sep-cwd")}
+              <Text color={theme.textDim}>{truncPath}</Text>
+            </>
+          )}
+          {showGitBranch && (
+            <>
+              {renderLeftSep("sep-git")}
               <Text color={theme.secondary}>
                 {"\u2387 "}
                 {gitBranch}
               </Text>
+            </>
+          )}
+          {showStatusInLeft && (
+            <>
+              {renderLeftSep("sep-status")}
+              <Text color={statusColor ?? theme.text}>{statusLabel}</Text>
             </>
           )}
         </Box>
@@ -165,23 +225,68 @@ export function Footer({
     );
   }
 
+  // statusBelow layout: model + tokens row, then status row underneath.
+  // The left-chunk content (cwd / git) merges into the model row's left side
+  // when present; for gg-editor (hideCwd + hideGitBranch) only the status
+  // line is added.
+  if (statusBelow) {
+    return (
+      <Box flexDirection="column" paddingLeft={1} paddingRight={1} width={columns}>
+        <Box>
+          <Box flexGrow={1}>
+            {showCwd && <Text color={theme.textDim}>{truncPath}</Text>}
+            {showGitBranch && (
+              <>
+                {showCwd ? sep : null}
+                <Text color={theme.secondary}>
+                  {"\u2387 "}
+                  {gitBranch}
+                </Text>
+              </>
+            )}
+          </Box>
+          <Box flexShrink={0}>{rightContent}</Box>
+        </Box>
+        {statusLabel && (
+          <Box>
+            <Text color={statusColor ?? theme.text} wrap="truncate">
+              {statusLabel}
+            </Text>
+          </Box>
+        )}
+      </Box>
+    );
+  }
+
   // Two-line layout
   return (
     <Box flexDirection="column" paddingLeft={1} paddingRight={1} width={columns}>
-      <Box>
-        <Text color={theme.textDim} wrap="truncate">
-          {truncPath}
-        </Text>
-        {gitBranch && (
-          <>
-            {sep}
-            <Text color={theme.secondary} wrap="truncate">
-              {"\u2387 "}
-              {gitBranch}
+      {leftHasContent && (
+        <Box>
+          {showCwd && (
+            <Text color={theme.textDim} wrap="truncate">
+              {truncPath}
             </Text>
-          </>
-        )}
-      </Box>
+          )}
+          {showGitBranch && (
+            <>
+              {showCwd ? sep : null}
+              <Text color={theme.secondary} wrap="truncate">
+                {"\u2387 "}
+                {gitBranch}
+              </Text>
+            </>
+          )}
+          {statusLabel && (
+            <>
+              {showCwd || showGitBranch ? sep : null}
+              <Text color={statusColor ?? theme.text} wrap="truncate">
+                {statusLabel}
+              </Text>
+            </>
+          )}
+        </Box>
+      )}
       <Box>{rightContent}</Box>
     </Box>
   );

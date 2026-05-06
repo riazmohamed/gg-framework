@@ -440,6 +440,22 @@ function main(): void {
 
 // ── Ink TUI ───────────────────────────────────────────────
 
+/**
+ * Bail with a friendly message if stdin isn't a TTY. Ink's raw-mode crash is
+ * cryptic; this catches the common case (piped stdin, API shells, CI).
+ */
+function requireInteractiveTTY(): void {
+  if (process.stdin.isTTY) return;
+  process.stderr.write(
+    chalk.red("ggcoder needs an interactive terminal — your stdin isn't a TTY.\n") +
+      chalk.hex("#6b7280")(
+        "Run ggcoder directly in your terminal (not piped or through an API shell). " +
+          'For headless use try "ggcoder --json \'<prompt>\'" or "ggcoder --rpc".\n',
+      ),
+  );
+  process.exit(1);
+}
+
 async function runInkTUI(opts: {
   provider: Provider;
   model: string;
@@ -449,6 +465,8 @@ async function runInkTUI(opts: {
   resumeSessionPath?: string;
   theme?: "auto" | ThemeName;
 }): Promise<void> {
+  requireInteractiveTTY();
+
   const { provider, model, cwd } = opts;
 
   // Resolve auth first so we can pick an active provider the user has
@@ -761,6 +779,7 @@ async function runInkTUI(opts: {
 // ── Login ──────────────────────────────────────────────────
 
 async function runLogin(): Promise<void> {
+  requireInteractiveTTY();
   process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, { version: CLI_VERSION });
@@ -1138,6 +1157,7 @@ async function runLogout(): Promise<void> {
 // ── Sessions ──────────────────────────────────────────────
 
 async function runSessions(): Promise<void> {
+  requireInteractiveTTY();
   process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, { version: CLI_VERSION });
@@ -1711,27 +1731,67 @@ function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
         if (content) items.push({ kind: "assistant", text: content, id: `restore-${id++}` });
         continue;
       }
-      // Count block types for debugging
       for (const block of content) {
         blockTypeCounts[block.type] = (blockTypeCounts[block.type] ?? 0) + 1;
       }
-      // Process content blocks in order — text and tool calls
-      const text = extractText(content);
-      if (text) items.push({ kind: "assistant", text, id: `restore-${id++}` });
+      // Pair server_tool_result blocks with their server_tool_call by id
+      // (both live in the same assistant message for provider-side tools).
+      const serverResults = new Map<string, { resultType: string; data: unknown }>();
       for (const block of content) {
-        if (block.type === "tool_call") {
-          const result = toolResults.get(block.id);
-          items.push({
-            kind: "tool_done",
-            name: block.name,
-            args: block.args,
-            result: result?.content ?? "",
-            isError: result?.isError ?? false,
-            durationMs: 0,
-            id: `restore-${id++}`,
+        if (block.type === "server_tool_result") {
+          serverResults.set(block.toolUseId, {
+            resultType: block.resultType,
+            data: block.data,
           });
         }
       }
+      // Walk blocks in order. Buffer consecutive text blocks into a single
+      // assistant item (mirrors live rendering), and flush the buffer before
+      // each tool_call / server_tool_call so chronology is preserved.
+      let textBuf = "";
+      const flushText = () => {
+        if (textBuf) {
+          items.push({ kind: "assistant", text: textBuf, id: `restore-${id++}` });
+          textBuf = "";
+        }
+      };
+      for (const block of content) {
+        switch (block.type) {
+          case "text":
+            if (block.text) textBuf += (textBuf ? "\n" : "") + block.text;
+            break;
+          case "tool_call": {
+            flushText();
+            const result = toolResults.get(block.id);
+            items.push({
+              kind: "tool_done",
+              name: block.name,
+              args: block.args,
+              result: result?.content ?? "",
+              isError: result?.isError ?? false,
+              durationMs: 0,
+              id: `restore-${id++}`,
+            });
+            break;
+          }
+          case "server_tool_call": {
+            flushText();
+            const serverResult = serverResults.get(block.id);
+            items.push({
+              kind: "server_tool_done",
+              name: block.name,
+              input: block.input,
+              resultType: serverResult?.resultType ?? "",
+              data: serverResult?.data ?? null,
+              durationMs: 0,
+              id: `restore-${id++}`,
+            });
+            break;
+          }
+          // thinking, image, raw, server_tool_result: not surfaced in restored history
+        }
+      }
+      flushText();
     }
   }
 

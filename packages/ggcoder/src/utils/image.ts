@@ -2,7 +2,32 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
-import sharp from "sharp";
+import type SharpNamespace from "sharp";
+
+/**
+ * Lazy `sharp` resolver — sharp is a hefty native module (libvips). Loading
+ * it at module init pulls it into every consumer's bundle, which forces
+ * downstream packages that don't actually need image manipulation (gg-boss)
+ * to either ship it or break their bundlers. By gating the require behind
+ * a function called only by the image-handling helpers, we let unused code
+ * paths skip the import entirely — which lets gg-boss tsup-bundle cleanly
+ * without `sharp` in its dependency tree.
+ *
+ * Cached after first call so repeated image operations don't re-hit the
+ * dynamic import resolver.
+ */
+type SharpFn = typeof SharpNamespace;
+let sharpFn: SharpFn | null = null;
+async function loadSharp(): Promise<SharpFn> {
+  if (sharpFn) return sharpFn;
+  // Sharp publishes as CJS where `module.exports = sharpFunction`. Under
+  // ESM dynamic import, that lands on `.default` — but some tooling normalises
+  // it onto the namespace object directly. Try `.default` first, fall back
+  // to the namespace if not present.
+  const mod = (await import("sharp")) as unknown as { default?: SharpFn } & SharpFn;
+  sharpFn = mod.default ?? mod;
+  return sharpFn;
+}
 
 /** Anthropic's 5 MB limit applies to the base64 string, not the decoded binary.
  *  Raw buffer limit = floor(5 MB × 3/4) so the base64 stays under 5 MB. */
@@ -134,6 +159,15 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
+/** Map sharp's detected format string to an Anthropic-compatible media type. */
+const SHARP_FORMAT_TO_MEDIA: Record<string, string> = {
+  png: "image/png",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+};
+
 /**
  * Downscale an image buffer so it fits within both MAX_IMAGE_DIMENSION per side
  * (Anthropic's hard pixel cap for many-image requests) and MAX_IMAGE_BYTES.
@@ -143,10 +177,19 @@ export async function shrinkToFit(
   buffer: Buffer,
   mediaType: string,
 ): Promise<{ buffer: Buffer; mediaType: string }> {
+  const sharp = await loadSharp();
   const meta = await sharp(buffer).metadata();
   const origW = meta.width ?? 4096;
   const origH = meta.height ?? 4096;
   const exceedsDim = origW > MAX_IMAGE_DIMENSION || origH > MAX_IMAGE_DIMENSION;
+
+  // Trust the buffer over the caller-supplied mediaType: if a file was named
+  // foo.png but is actually a JPEG, sharp tells the truth and Anthropic
+  // rejects mismatched media types with a 400.
+  const detected = meta.format ? SHARP_FORMAT_TO_MEDIA[meta.format] : undefined;
+  if (detected && detected !== mediaType) {
+    mediaType = detected;
+  }
 
   // Short-circuit: within both limits — return as-is.
   if (!exceedsDim && buffer.length <= MAX_IMAGE_BYTES) {
@@ -154,7 +197,7 @@ export async function shrinkToFit(
   }
 
   // Determine output format from mediaType
-  const formatMap: Record<string, keyof sharp.FormatEnum> = {
+  const formatMap: Record<string, keyof SharpNamespace.FormatEnum> = {
     "image/png": "png",
     "image/jpeg": "jpeg",
     "image/gif": "gif",

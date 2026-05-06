@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createReadTool, BINARY_EXTENSIONS } from "./read.js";
+import type { ReadTracker } from "./read-tracker.js";
 
 describe("createReadTool", () => {
   let tmpDir: string;
@@ -102,16 +103,18 @@ describe("createReadTool", () => {
     expect(result).toBe(`Binary file: ${filePath} (.zip, 128 bytes)`);
   });
 
-  it("adds resolved path to readFiles set", async () => {
+  it("records the read in the tracker with mtime + hash", async () => {
     const filePath = path.join(tmpDir, "tracked.txt");
     await fs.writeFile(filePath, "content");
 
-    const readFiles = new Set<string>();
+    const readFiles: ReadTracker = new Map();
     const tool = createReadTool(tmpDir, readFiles);
     await tool.execute({ file_path: filePath }, ctx("test-7"));
 
-    expect(readFiles.has(filePath)).toBe(true);
-    expect(readFiles.size).toBe(1);
+    const entry = readFiles.get(filePath);
+    expect(entry).toBeDefined();
+    expect(typeof entry?.mtimeMs).toBe("number");
+    expect(entry?.hash).toMatch(/^[a-f0-9]{64}$/);
   });
 });
 
