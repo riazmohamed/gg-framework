@@ -531,6 +531,56 @@ export interface AppProps {
   skills?: Skill[];
   /** Deferred MCP tools — resolved after UI renders to avoid blocking startup. */
   pendingMCPTools?: Promise<AgentTool[]>;
+  /**
+   * Wired by `renderApp`. Tears down the current Ink instance and renders
+   * a fresh one. Patching Ink's internal frame tracking in place is
+   * unreliable (the live area drifts on subsequent streaming responses);
+   * a full unmount/remount is the only consistent reset.
+   *
+   * Used by every path that previously did a bare ANSI screen clear:
+   * `/clear`, plan accept/reject, overlay open/close, startTask.
+   *
+   * Runtime state (model, provider, thinking) survives via
+   * `onRuntimeStateChange`; conversation/session state survives via
+   * `sessionStore` (which App mirrors React state into).
+   */
+  resetUI?: (options?: {
+    messages?: Message[];
+    wipeSession?: boolean;
+    history?: CompletedItem[];
+    approvedPlanPath?: string;
+    planSteps?: PlanStep[];
+    sessionPath?: string;
+    pendingAction?: { prompt: string; infoText?: string };
+  }) => void;
+  /**
+   * Wired by `renderApp`. App calls this when the user changes
+   * model/provider/thinking at runtime so those choices survive the
+   * unmount/remount triggered by resetUI.
+   */
+  onRuntimeStateChange?: (updates: {
+    model?: string;
+    provider?: Provider;
+    thinking?: ThinkingLevel;
+  }) => void;
+  /**
+   * Wired by `renderApp`. App syncs its React state (messages, history,
+   * plan steps, session metadata) to this object via useEffects so a
+   * subsequent resetUI() can re-seed the conversation. Without this, every
+   * overlay close would lose the chat.
+   */
+  sessionStore?: {
+    messages: Message[];
+    history: CompletedItem[];
+    approvedPlanPath?: string;
+    planSteps: PlanStep[];
+    sessionPath?: string;
+    sessionTitle?: string;
+    sessionTitleGenerated: boolean;
+    overlay?: "model" | "tasks" | "skills" | "plan" | "theme" | "eyes" | null;
+    planAutoExpand?: boolean;
+    pendingAction?: { prompt: string; infoText?: string };
+  };
 }
 
 // ── App Component ──────────────────────────────────────────
@@ -551,28 +601,30 @@ export function App(props: AppProps) {
   // Terminal title — updated later after agentLoop is created
   // (hoisted here so the hook is always called in the same order)
   const [titleRunning, setTitleRunning] = useState(false);
-  const [sessionTitle, setSessionTitle] = useState<string | undefined>(undefined);
-  const sessionTitleGeneratedRef = useRef(false);
+  const [sessionTitle, setSessionTitle] = useState<string | undefined>(
+    () => props.sessionStore?.sessionTitle,
+  );
+  const sessionTitleGeneratedRef = useRef(props.sessionStore?.sessionTitleGenerated ?? false);
   useTerminalTitle({
     isRunning: titleRunning,
     sessionTitle,
   });
 
-  // Items scrolled into Static (history).  For restored sessions, skip the
-  // banner and add restored items via useEffect so Ink's <Static> treats them
-  // as incremental additions (large initial arrays can race with Static's
-  // internal useLayoutEffect and get dropped before being flushed).
-  const isRestoredSession = props.initialHistory && props.initialHistory.length > 0;
-  const [history, setHistory] = useState<CompletedItem[]>(
-    isRestoredSession ? [] : [{ kind: "banner", id: "banner" }],
-  );
-  const restoredRef = useRef(false);
-  useEffect(() => {
-    if (isRestoredSession && !restoredRef.current) {
-      restoredRef.current = true;
-      setHistory((prev) => compactHistory([...prev, ...trimFlushedItems(props.initialHistory!)]));
+  // Items scrolled into Static (history). For restored sessions, seed the
+  // initial array directly — matches how every other Ink chat agent passes
+  // messages to <Static> (cat-code, harness, p90-cli, openai-chatgpt, lms,
+  // gatsby). Ink's Static (build/components/Static.js) starts with index=0
+  // so slice(0) returns the full array regardless of length.
+  const [history, setHistory] = useState<CompletedItem[]>(() => {
+    // sessionStore wins (lives across remount). Falls back to initialHistory
+    // (loaded from a session file at startup), then a fresh banner-only list.
+    const stored = props.sessionStore?.history;
+    if (stored && stored.length > 0) return stored;
+    if (props.initialHistory && props.initialHistory.length > 0) {
+      return compactHistory(trimFlushedItems(props.initialHistory));
     }
-  }, [isRestoredSession, props.initialHistory]);
+    return [{ kind: "banner", id: "banner" }];
+  });
   // Deferred MCP tools — connect in the background so it doesn't block startup
   useEffect(() => {
     if (!props.pendingMCPTools) return;
@@ -589,9 +641,10 @@ export function App(props: AppProps) {
 
   // Items from the current/last turn — rendered in the live area so they stay visible
   const [liveItems, setLiveItems] = useState<CompletedItem[]>([]);
+  // overlay seeded from sessionStore (lives across remount), then null.
   const [overlay, setOverlay] = useState<
     "model" | "tasks" | "skills" | "plan" | "theme" | "eyes" | null
-  >(null);
+  >(props.sessionStore?.overlay ?? null);
   const [taskCount, setTaskCount] = useState(() => getTaskCount(props.cwd));
   const [eyesCount, setEyesCount] = useState<number | undefined>(() =>
     isEyesActive(props.cwd) ? journalCount({ status: "open" }, props.cwd) : undefined,
@@ -616,16 +669,16 @@ export function App(props: AppProps) {
   const [currentProvider, setCurrentProvider] = useState(props.provider);
   const [currentTools, setCurrentTools] = useState(props.tools);
   const [thinkingEnabled, setThinkingEnabled] = useState(!!props.thinking);
-  const messagesRef = useRef<Message[]>(props.messages);
-  const [planAutoExpand, setPlanAutoExpand] = useState(false);
-  const approvedPlanPathRef = useRef<string | undefined>(undefined);
-  const planStepsRef = useRef<PlanStep[]>([]);
-  const [planSteps, setPlanSteps] = useState<PlanStep[]>([]);
+  const messagesRef = useRef<Message[]>(props.sessionStore?.messages ?? props.messages);
+  const [planAutoExpand, setPlanAutoExpand] = useState(props.sessionStore?.planAutoExpand ?? false);
+  const approvedPlanPathRef = useRef<string | undefined>(props.sessionStore?.approvedPlanPath);
+  const planStepsRef = useRef<PlanStep[]>(props.sessionStore?.planSteps ?? []);
+  const [planSteps, setPlanSteps] = useState<PlanStep[]>(props.sessionStore?.planSteps ?? []);
   const nextIdRef = useRef(0);
   const sessionManagerRef = useRef(
     props.sessionsDir ? new SessionManager(props.sessionsDir) : null,
   );
-  const sessionPathRef = useRef(props.sessionPath);
+  const sessionPathRef = useRef(props.sessionStore?.sessionPath ?? props.sessionPath);
   const persistedIndexRef = useRef(messagesRef.current.length);
   /** Last actual API-reported input token count (from turn_end). */
   const lastActualTokensRef = useRef(0);
@@ -647,6 +700,43 @@ export function App(props: AppProps) {
     pendingFlushRef.current = [...pendingFlushRef.current, ...items];
     setFlushGeneration((g) => g + 1);
   }, []);
+
+  // Mirror runtime state choices (model/provider/thinking) into renderApp's
+  // closure so unmount/remount preserves them.
+  const onRuntimeStateChange = props.onRuntimeStateChange;
+  useEffect(() => {
+    onRuntimeStateChange?.({ model: currentModel });
+  }, [currentModel, onRuntimeStateChange]);
+  useEffect(() => {
+    onRuntimeStateChange?.({ provider: currentProvider });
+  }, [currentProvider, onRuntimeStateChange]);
+  useEffect(() => {
+    onRuntimeStateChange?.({
+      thinking: thinkingEnabled ? (props.thinking ?? "medium") : undefined,
+    });
+  }, [thinkingEnabled, props.thinking, onRuntimeStateChange]);
+
+  // Mirror session state into renderApp's closure so resetUI() can re-seed
+  // the conversation on remount. Each panel that previously did a bare ANSI
+  // screen clear (overlay open/close, plan accept/reject, /clear, startTask)
+  // now goes through resetUI; without these mirrors, the chat would vanish.
+  const sessionStore = props.sessionStore;
+  useEffect(() => {
+    if (sessionStore) sessionStore.history = history;
+  }, [history, sessionStore]);
+  useEffect(() => {
+    if (sessionStore) sessionStore.planSteps = planSteps;
+  }, [planSteps, sessionStore]);
+  useEffect(() => {
+    if (sessionStore) sessionStore.sessionTitle = sessionTitle;
+  }, [sessionTitle, sessionStore]);
+  useEffect(() => {
+    if (sessionStore) sessionStore.overlay = overlay;
+  }, [overlay, sessionStore]);
+
+  // pendingAction is consumed via a useEffect AFTER agentLoop is created
+  // — see below where useAgentLoop is set up.
+  const pendingActionConsumedRef = useRef(false);
 
   // Derive credentials for the current provider
   const currentCreds = props.credentialsByProvider?.[currentProvider];
@@ -731,6 +821,13 @@ export function App(props: AppProps) {
         // premature "done" status that fires when the agent loop finishes
         planOverlayPendingRef.current = true;
         setTimeout(() => {
+          // NOTE: this is the one open-overlay path that does NOT remount via
+          // resetUI. It runs while the agent is still mid-turn (after the
+          // exit_plan tool returned but before onDone fires), and unmounting
+          // here would kill the in-flight agent stream. Keep the bare ANSI
+          // clear; the drift bug is tolerable across just the agent's
+          // wrap-up turn, and onApprove/onReject both remount cleanly via
+          // resetUI when the user resolves the plan.
           stdout?.write("\x1b[2J\x1b[3J\x1b[H");
           setPlanAutoExpand(true);
           setOverlay("plan");
@@ -1595,6 +1692,31 @@ export function App(props: AppProps) {
     setTitleRunning(agentLoop.isRunning);
   }, [agentLoop.isRunning]);
 
+  // Consume sessionStore.pendingAction once on mount. Set by resetUI options
+  // for paths that remount AND immediately drive the agent (plan accept,
+  // plan reject, startTask, pixel fix). The action survives the unmount
+  // because it lives in renderApp's closure (sessionStore), not React state.
+  useEffect(() => {
+    if (pendingActionConsumedRef.current) return;
+    const action = sessionStore?.pendingAction;
+    if (!action) return;
+    pendingActionConsumedRef.current = true;
+    if (sessionStore) sessionStore.pendingAction = undefined;
+    if (action.infoText) {
+      setLiveItems((prev) => [
+        ...prev,
+        { kind: "info", text: action.infoText as string, id: getId() },
+      ]);
+    }
+    setDoneStatus(null);
+    void agentLoop.run(action.prompt).catch((err: unknown) => {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log("ERROR", "error", errMsg);
+      setLiveItems((prev) => [...prev, { kind: "error", message: errMsg, id: getId() }]);
+    });
+    // Intentional one-shot: run once on mount, never re-fire on re-render.
+  }, []);
+
   // Refresh eyes badge count when the agent settles (end of a turn) — a turn
   // may have logged new rough/wish/blocked signals. Also covers the case where
   // /eyes was run for the first time (manifest now exists).
@@ -1660,10 +1782,26 @@ export function App(props: AppProps) {
 
       // Handle /clear — reset session and clear terminal
       if (trimmed === "/clear") {
-        // Abort any in-flight agent work before clearing state
+        // Abort any in-flight agent work before tearing down the React tree
         if (agentLoop.isRunning) {
           agentLoop.clearQueue();
           agentLoop.abort();
+        }
+        if (props.resetUI) {
+          void (async () => {
+            const newPrompt = await buildSystemPrompt(
+              props.cwd,
+              props.skills,
+              planMode,
+              undefined,
+              props.provider,
+            );
+            props.resetUI?.({
+              wipeSession: true,
+              messages: [{ role: "system" as const, content: newPrompt }],
+            });
+          })();
+          return;
         }
         // Clear terminal screen + scrollback — needed because Ink's <Static>
         // writes directly to stdout and can't be removed by clearing React state
@@ -1790,9 +1928,15 @@ export function App(props: AppProps) {
 
       // Handle /plans — open plan pane
       if (trimmed === "/plans") {
-        stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-        setPlanAutoExpand(false);
-        setOverlay("plan");
+        if (props.resetUI && props.sessionStore) {
+          props.sessionStore.overlay = "plan";
+          props.sessionStore.planAutoExpand = false;
+          props.resetUI();
+        } else {
+          stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+          setPlanAutoExpand(false);
+          setOverlay("plan");
+        }
         return;
       }
 
@@ -2362,7 +2506,46 @@ export function App(props: AppProps) {
   const startTask = useCallback(
     (title: string, prompt: string, taskId: string) => {
       setTaskCount(getTaskCount(props.cwd));
-      // Reset to a fresh session before sending the task
+      const shortId = taskId.slice(0, 8);
+      const completionHint =
+        `\n\n---\nWhen you have fully completed this task, call the tasks tool to mark it done:\n` +
+        `tasks({ action: "done", id: "${shortId}" })`;
+      const fullPrompt = prompt + completionHint;
+
+      if (props.resetUI && props.sessionStore) {
+        // Preserve the current system prompt (may differ from the launch
+        // config — e.g. plan mode toggled or skills changed).
+        const sysMsg = messagesRef.current[0];
+        const newMessages: Message[] =
+          sysMsg && sysMsg.role === "system" ? [sysMsg] : messagesRef.current.slice(0, 1);
+
+        const taskItem: TaskItem = { kind: "task", title, id: String(nextIdRef.current++) };
+        const sm = sessionManagerRef.current;
+
+        void (async () => {
+          let newSessionPath: string | undefined;
+          if (sm) {
+            try {
+              const s = await sm.create(props.cwd, currentProvider, currentModel);
+              newSessionPath = s.path;
+              log("INFO", "tasks", "New session for task", { path: s.path });
+            } catch {
+              // session creation is best-effort
+            }
+          }
+          if (props.sessionStore) props.sessionStore.overlay = null;
+          props.resetUI?.({
+            wipeSession: true,
+            messages: newMessages,
+            history: [{ kind: "banner", id: "banner" }, taskItem],
+            sessionPath: newSessionPath,
+            pendingAction: { prompt: fullPrompt },
+          });
+        })();
+        return;
+      }
+
+      // Fallback path (resetUI not wired — tests).
       stdout?.write("\x1b[2J\x1b[3J\x1b[H");
       setHistory([{ kind: "banner", id: "banner" }]);
       setLiveItems([]);
@@ -2376,15 +2559,6 @@ export function App(props: AppProps) {
           log("INFO", "tasks", "New session for task", { path: s.path });
         });
       }
-
-      // Inject completion instruction so the agent marks the task done
-      const shortId = taskId.slice(0, 8);
-      const completionHint =
-        `\n\n---\nWhen you have fully completed this task, call the tasks tool to mark it done:\n` +
-        `tasks({ action: "done", id: "${shortId}" })`;
-      const fullPrompt = prompt + completionHint;
-
-      // Show the short title in the TUI, but send the full prompt to the agent
       const taskItem: TaskItem = { kind: "task", title, id: getId() };
       setLastUserMessage(title);
       setDoneStatus(null);
@@ -2402,12 +2576,19 @@ export function App(props: AppProps) {
               ? { kind: "info", text: "Request was stopped.", id: getId() }
               : { kind: "error", message: msg, id: getId() },
           ]);
-          // Stop run-all if a task errors
           setRunAllTasks(false);
         }
       })();
     },
-    [props.cwd, stdout, agentLoop, currentProvider, currentModel],
+    [
+      props.cwd,
+      props.resetUI,
+      props.sessionStore,
+      stdout,
+      agentLoop,
+      currentProvider,
+      currentModel,
+    ],
   );
 
   // Keep refs in sync for access from stale closures (onDone)
@@ -2442,10 +2623,15 @@ export function App(props: AppProps) {
           cwd={props.cwd}
           agentRunning={agentLoop.isRunning}
           onClose={() => {
-            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-            setTaskCount(getTaskCount(props.cwd));
-            setStaticKey((k) => k + 1);
-            setOverlay(null);
+            if (props.resetUI && props.sessionStore) {
+              props.sessionStore.overlay = null;
+              props.resetUI();
+            } else {
+              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+              setTaskCount(getTaskCount(props.cwd));
+              setStaticKey((k) => k + 1);
+              setOverlay(null);
+            }
           }}
           onWorkOnTask={(title, prompt, taskId) => {
             setOverlay(null);
@@ -2465,21 +2651,31 @@ export function App(props: AppProps) {
         <SkillsOverlay
           cwd={props.cwd}
           onClose={() => {
-            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-            setStaticKey((k) => k + 1);
-            setOverlay(null);
+            if (props.resetUI && props.sessionStore) {
+              props.sessionStore.overlay = null;
+              props.resetUI();
+            } else {
+              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+              setStaticKey((k) => k + 1);
+              setOverlay(null);
+            }
           }}
         />
       ) : isEyesView ? (
         <EyesOverlay
           cwd={props.cwd}
           onClose={() => {
-            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-            setEyesCount(
-              isEyesActive(props.cwd) ? journalCount({ status: "open" }, props.cwd) : undefined,
-            );
-            setStaticKey((k) => k + 1);
-            setOverlay(null);
+            if (props.resetUI && props.sessionStore) {
+              props.sessionStore.overlay = null;
+              props.resetUI();
+            } else {
+              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+              setEyesCount(
+                isEyesActive(props.cwd) ? journalCount({ status: "open" }, props.cwd) : undefined,
+              );
+              setStaticKey((k) => k + 1);
+              setOverlay(null);
+            }
           }}
           onQueueMessage={(msg) => {
             agentLoop.queueMessage(msg);
@@ -2491,40 +2687,33 @@ export function App(props: AppProps) {
           autoExpandNewest={planAutoExpand}
           onClose={() => {
             planOverlayPendingRef.current = false;
-            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-            setStaticKey((k) => k + 1);
-            setPlanAutoExpand(false);
-            setOverlay(null);
+            if (props.resetUI && props.sessionStore) {
+              props.sessionStore.overlay = null;
+              props.sessionStore.planAutoExpand = false;
+              props.resetUI();
+            } else {
+              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+              setStaticKey((k) => k + 1);
+              setPlanAutoExpand(false);
+              setOverlay(null);
+            }
           }}
           onApprove={(planPath) => {
             log("INFO", "plan", "Plan approved — transitioning to implementation", {
               planPath,
             });
-            // Plan overlay dismissed — allow future onDone to fire normally
             planOverlayPendingRef.current = false;
-            // Store approved plan path — will be injected into the new system prompt
-            approvedPlanPathRef.current = planPath;
 
-            // Extract plan steps for progress tracking
-            void import("node:fs/promises").then(({ readFile }) =>
-              readFile(planPath, "utf-8").then((content) => {
-                const steps = extractPlanSteps(content);
-                planStepsRef.current = steps;
-                setPlanSteps(steps);
-              }),
-            );
-
-            // Clear session for a fresh context focused on the plan
-            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-            setHistory([{ kind: "banner", id: "banner" }]);
-            setLiveItems([]);
-            setStaticKey((k) => k + 1);
-            setPlanAutoExpand(false);
-            setOverlay(null);
-
-            // Rebuild system prompt with the approved plan, then reset the session
             void (async () => {
               try {
+                // Read plan steps for progress tracking — handed to the new
+                // mount via sessionStore.planSteps below.
+                const planContent = await import("node:fs/promises").then(({ readFile }) =>
+                  readFile(planPath, "utf-8"),
+                );
+                const steps = extractPlanSteps(planContent);
+
+                // Build the new system prompt with the approved plan baked in.
                 const newPrompt = await buildSystemPrompt(
                   props.cwd,
                   props.skills,
@@ -2532,18 +2721,50 @@ export function App(props: AppProps) {
                   planPath,
                   props.provider,
                 );
-                messagesRef.current = [{ role: "system" as const, content: newPrompt }];
-                agentLoop.reset();
-                persistedIndexRef.current = messagesRef.current.length;
 
-                // Create a new session file
+                // Create a new session file BEFORE remount so the new tree
+                // picks it up via sessionStore.sessionPath.
+                let newSessionPath: string | undefined;
                 const sm = sessionManagerRef.current;
                 if (sm) {
                   const s = await sm.create(props.cwd, currentProvider, currentModel);
-                  sessionPathRef.current = s.path;
+                  newSessionPath = s.path;
                 }
 
-                // Start implementation with a clean context
+                if (props.resetUI && props.sessionStore) {
+                  // Clear the overlay so the new mount lands on the chat,
+                  // not back inside the plan pane.
+                  props.sessionStore.overlay = null;
+                  props.sessionStore.planAutoExpand = false;
+                  props.resetUI({
+                    wipeSession: true,
+                    messages: [{ role: "system" as const, content: newPrompt }],
+                    approvedPlanPath: planPath,
+                    planSteps: steps,
+                    sessionPath: newSessionPath,
+                    pendingAction: {
+                      prompt:
+                        "The plan has been approved. Implement it now, following each step in order.",
+                      infoText: "Plan approved — starting fresh session for implementation",
+                    },
+                  });
+                  return;
+                }
+
+                // Fallback path (resetUI not wired — tests). Mutate in place.
+                approvedPlanPathRef.current = planPath;
+                planStepsRef.current = steps;
+                setPlanSteps(steps);
+                stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+                setHistory([{ kind: "banner", id: "banner" }]);
+                setLiveItems([]);
+                setStaticKey((k) => k + 1);
+                setPlanAutoExpand(false);
+                setOverlay(null);
+                messagesRef.current = [{ role: "system" as const, content: newPrompt }];
+                agentLoop.reset();
+                persistedIndexRef.current = messagesRef.current.length;
+                if (newSessionPath) sessionPathRef.current = newSessionPath;
                 setLiveItems([
                   {
                     kind: "info",
@@ -2564,20 +2785,32 @@ export function App(props: AppProps) {
           }}
           onReject={(planPath, feedback) => {
             planOverlayPendingRef.current = false;
+            const rejectionMsg =
+              `The plan at ${planPath} was rejected.\n\nFeedback: ${feedback}\n\n` +
+              `Please revise the plan based on this feedback.`;
+            if (props.resetUI && props.sessionStore) {
+              props.sessionStore.overlay = null;
+              props.sessionStore.planAutoExpand = false;
+              // No wipeSession — keep history, messages, plan mode etc. The
+              // agent picks up the rejection mid-conversation.
+              props.resetUI({
+                pendingAction: {
+                  prompt: rejectionMsg,
+                  infoText: `Plan rejected — "${feedback}"`,
+                },
+              });
+              return;
+            }
             stdout?.write("\x1b[2J\x1b[3J\x1b[H");
             setStaticKey((k) => k + 1);
             setPlanAutoExpand(false);
             setOverlay(null);
             setDoneStatus(null);
-            // Send rejection + feedback to the agent
-            const msg =
-              `The plan at ${planPath} was rejected.\n\nFeedback: ${feedback}\n\n` +
-              `Please revise the plan based on this feedback.`;
             setLiveItems((prev) => [
               ...prev,
               { kind: "info", text: `Plan rejected — "${feedback}"`, id: getId() },
             ]);
-            void agentLoop.run(msg).catch((err: unknown) => {
+            void agentLoop.run(rejectionMsg).catch((err: unknown) => {
               const errMsg = err instanceof Error ? err.message : String(err);
               log("ERROR", "error", errMsg);
               setLiveItems((prev) => [...prev, { kind: "error", message: errMsg, id: getId() }]);
@@ -2672,12 +2905,22 @@ export function App(props: AppProps) {
             onDownAtEnd={handleFocusTaskBar}
             onShiftTab={handleToggleThinking}
             onToggleTasks={() => {
-              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-              setOverlay("tasks");
+              if (props.resetUI && props.sessionStore) {
+                props.sessionStore.overlay = "tasks";
+                props.resetUI();
+              } else {
+                stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+                setOverlay("tasks");
+              }
             }}
             onToggleSkills={() => {
-              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-              setOverlay("skills");
+              if (props.resetUI && props.sessionStore) {
+                props.sessionStore.overlay = "skills";
+                props.resetUI();
+              } else {
+                stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+                setOverlay("skills");
+              }
             }}
             onTogglePlanMode={() => {
               const next = !planMode;
