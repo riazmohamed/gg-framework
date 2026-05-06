@@ -7,7 +7,8 @@ const LOGO_LINES = [
   " \u2588  \u2588 \u2588 \u2580\u2588",
   " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
 ];
-const GRADIENT = [
+// Defaults — ggcoder branding. ggeditor passes its own palette.
+const DEFAULT_GRADIENT = [
   "#60a5fa",
   "#6da1f9",
   "#7a9df7",
@@ -21,13 +22,17 @@ const GRADIENT = [
   "#7a9df7",
   "#6da1f9",
 ];
+const DEFAULT_PRIMARY = "#60a5fa";
+const DEFAULT_ACCENT = "#a78bfa";
 const GAP = "   ";
-
-const PRIMARY = "#60a5fa";
 const TEXT = "#e2e8f0";
 const TEXT_DIM = "#64748b";
 
 let _version = "";
+let _brand = "OG Coder";
+let _gradient: string[] = DEFAULT_GRADIENT;
+let _primary = DEFAULT_PRIMARY;
+let _accent = DEFAULT_ACCENT;
 
 const PROVIDERS: { label: string; value: Provider; description: string }[] = [
   { label: "Anthropic", value: "anthropic", description: "Claude Opus 4.7, Sonnet 4.6, Haiku 4.5" },
@@ -48,7 +53,7 @@ function gradientLine(text: string): string {
     if (ch === " ") {
       result += ch;
     } else {
-      const color = GRADIENT[Math.min(colorIdx, GRADIENT.length - 1)];
+      const color = _gradient[Math.min(colorIdx, _gradient.length - 1)];
       result += chalk.hex(color)(ch);
       colorIdx++;
     }
@@ -62,12 +67,12 @@ function renderScreen(selectedIndex: number): string {
   lines.push(
     gradientLine(LOGO_LINES[0]!) +
       GAP +
-      chalk.hex(PRIMARY).bold("OG Coder") +
+      chalk.hex(_primary).bold("OG Coder") +
       (_version ? chalk.hex(TEXT_DIM)(` v${_version}`) : "") +
       chalk.hex(TEXT_DIM)(" · By ") +
       chalk.hex(TEXT).bold("Abu Khaled"),
   );
-  lines.push(gradientLine(LOGO_LINES[1]!) + GAP + chalk.hex("#a78bfa")("Login"));
+  lines.push(gradientLine(LOGO_LINES[1]!) + GAP + chalk.hex(_accent)("Login"));
   lines.push(gradientLine(LOGO_LINES[2]!) + GAP + chalk.hex(TEXT_DIM)("Select a provider"));
   lines.push("");
 
@@ -75,7 +80,7 @@ function renderScreen(selectedIndex: number): string {
     const item = PROVIDERS[i];
     const selected = i === selectedIndex;
     const marker = selected ? "❯ " : "  ";
-    const labelColor = selected ? PRIMARY : TEXT;
+    const labelColor = selected ? _primary : TEXT;
     lines.push(
       chalk.hex(labelColor)(marker + item.label) + chalk.hex(TEXT_DIM)(` — ${item.description}`),
     );
@@ -87,8 +92,30 @@ function renderScreen(selectedIndex: number): string {
   return lines.join("\n");
 }
 
-export function renderLoginSelector(version?: string): Promise<Provider | null> {
-  _version = version ?? "";
+export interface LoginSelectorOptions {
+  /** Brand name shown next to the logo (default: "OG Coder"). */
+  brand?: string;
+  /** Version shown after the brand. */
+  version?: string;
+  /** Logo gradient (12 colors recommended). Defaults to ggcoder blue/purple. */
+  gradient?: string[];
+  /** Primary color (brand text + selected provider). */
+  primary?: string;
+  /** Accent color (subtitle "Login"). */
+  accent?: string;
+}
+
+export function renderLoginSelector(
+  optsOrVersion?: LoginSelectorOptions | string,
+): Promise<Provider | null> {
+  // Backward compatible: prior signature was `renderLoginSelector(version?)`.
+  const opts: LoginSelectorOptions =
+    typeof optsOrVersion === "string" ? { version: optsOrVersion } : (optsOrVersion ?? {});
+  _version = opts.version ?? "";
+  _brand = opts.brand ?? "OG Coder";
+  _gradient = opts.gradient && opts.gradient.length > 0 ? opts.gradient : DEFAULT_GRADIENT;
+  _primary = opts.primary ?? DEFAULT_PRIMARY;
+  _accent = opts.accent ?? DEFAULT_ACCENT;
   return new Promise((resolve) => {
     let selectedIndex = 0;
 
@@ -154,7 +181,7 @@ function renderXiaomiRegionScreen(selectedIndex: number): string {
   lines.push(
     gradientLine(LOGO_LINES[0]!) +
       GAP +
-      chalk.hex(PRIMARY).bold("Xiaomi MiMo") +
+      chalk.hex(_primary).bold("Xiaomi MiMo") +
       chalk.hex(TEXT_DIM)(" · Select region"),
   );
   lines.push(
@@ -170,7 +197,7 @@ function renderXiaomiRegionScreen(selectedIndex: number): string {
     const info = XIAOMI_REGIONS[id];
     const selected = i === selectedIndex;
     const marker = selected ? "❯ " : "  ";
-    const labelColor = selected ? PRIMARY : TEXT;
+    const labelColor = selected ? _primary : TEXT;
     lines.push(
       chalk.hex(labelColor)(marker + info.label) + chalk.hex(TEXT_DIM)(` — ${info.baseUrl}`),
     );

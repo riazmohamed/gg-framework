@@ -55,8 +55,9 @@ export function isAbortError(err: unknown): boolean {
 
 /**
  * Detect context window overflow errors from LLM providers.
- * Anthropic: "prompt is too long: N tokens > M maximum"
- * OpenAI:    "context_length_exceeded" / "maximum context length"
+ *
+ * Patterns drawn from observed errors across Anthropic, OpenAI, OpenAI Codex,
+ * Bedrock, Ollama, and OpenAI-compatible Chinese providers (GLM, Kimi, MiniMax).
  */
 export function isContextOverflow(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
@@ -64,8 +65,17 @@ export function isContextOverflow(err: unknown): boolean {
   const msg = err.message.toLowerCase();
   return (
     msg.includes("prompt is too long") ||
+    msg.includes("prompt too long") ||
+    msg.includes("input is too long") ||
     msg.includes("context_length_exceeded") ||
+    msg.includes("context_window_exceeded") ||
     msg.includes("maximum context length") ||
+    msg.includes("exceeds model context window") ||
+    msg.includes("exceeds the context window") ||
+    msg.includes("content_too_large") ||
+    msg.includes("request_too_large") ||
+    msg.includes("reduce the length") ||
+    msg.includes("please shorten") ||
     (msg.includes("token") && msg.includes("exceed"))
   );
 }
@@ -182,6 +192,7 @@ export async function* agentLoop(
   let overloadRetries = 0;
   let emptyResponseRetries = 0;
   let stallRetries = 0;
+  let overflowCompactionAttempts = 0;
   // Non-streaming fallback mode. After repeated stream stalls, flip to a
   // plain non-streaming request/response -- often survives broken SSE
   // connections (transient CDN / proxy issues) that streaming retries cannot.
@@ -189,6 +200,7 @@ export async function* agentLoop(
   const MAX_OVERLOAD_RETRIES = 10;
   const MAX_EMPTY_RESPONSE_RETRIES = 2;
   const MAX_STALL_RETRIES = 5;
+  const MAX_OVERFLOW_COMPACTIONS = 2;
   // After this many streaming stalls in a row, switch to non-streaming mode
   // for the remaining stall retries. Keeps the first two retries fast (the
   // cheap "transient glitch" case) before paying for a full response round-trip.
@@ -538,11 +550,50 @@ export async function* agentLoop(
           provider: options.provider,
           model: options.model,
         });
-        // Context overflow: surface immediately as an error.
-        // The pre-turn transformContext check should prevent overflow proactively.
-        // Compacting mid-retry is unreliable (calls the same provider, may not
-        // reduce enough) and was removed along with stall-compaction.
+        // Context overflow: try a forced compaction before giving up.
+        // The pre-turn transformContext check uses estimated tokens, which can
+        // underestimate code-heavy content. When the API confirms overflow we
+        // compact unconditionally and retry the turn, capped at
+        // MAX_OVERFLOW_COMPACTIONS to avoid loops when compaction can't reduce
+        // enough (e.g. single huge user message).
         if (isContextOverflow(err)) {
+          if (options.transformContext && overflowCompactionAttempts < MAX_OVERFLOW_COMPACTIONS) {
+            overflowCompactionAttempts++;
+            diag("overflow_compact_start", {
+              attempt: overflowCompactionAttempts,
+              maxAttempts: MAX_OVERFLOW_COMPACTIONS,
+              messages: messages.length,
+            });
+            try {
+              const compacted = await options.transformContext(messages, { force: true });
+              if (compacted !== messages && compacted.length < messages.length) {
+                messages.length = 0;
+                messages.push(...compacted);
+                diag("overflow_compact_success", {
+                  attempt: overflowCompactionAttempts,
+                  messages: messages.length,
+                });
+                yield {
+                  type: "retry" as const,
+                  reason: "overflow_compact" as const,
+                  attempt: overflowCompactionAttempts,
+                  maxAttempts: MAX_OVERFLOW_COMPACTIONS,
+                  delayMs: 0,
+                };
+                turn--;
+                continue;
+              }
+              diag("overflow_compact_noop", {
+                attempt: overflowCompactionAttempts,
+                before: messages.length,
+                after: compacted.length,
+              });
+            } catch (compactErr) {
+              diag("overflow_compact_failed", {
+                error: compactErr instanceof Error ? compactErr.message : String(compactErr),
+              });
+            }
+          }
           yield { type: "error" as const, error: err instanceof Error ? err : new Error(errMsg) };
           throw err;
         }

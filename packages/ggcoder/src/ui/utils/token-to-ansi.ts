@@ -325,7 +325,7 @@ function inlineToAnsi(tokens: Token[], theme: Theme, _parentColor?: string): str
           return chalk.italic(inlineToAnsi((token as Tokens.Em).tokens ?? [], theme));
 
         case "codespan":
-          return chalk.hex("#e2b553")((token as Tokens.Codespan).text);
+          return chalk.hex(theme.code)((token as Tokens.Codespan).text);
 
         case "del":
           return chalk.strikethrough.hex(theme.textDim)((token as Tokens.Del).text);

@@ -87,6 +87,67 @@ export function countOccurrences(content: string, oldText: string): number {
   return count;
 }
 
+function tokenize(line: string): string[] {
+  return line
+    .split(/[^A-Za-z0-9_]+/)
+    .filter((t) => t.length >= 2)
+    .map((t) => t.toLowerCase());
+}
+
+/**
+ * When old_text isn't found, locate up to `maxResults` lines in `content` with
+ * the highest token-overlap to the first non-empty line of `oldText` and
+ * return ±contextLines around each as numbered snippets, joined by `---`.
+ * Returns null if there's no plausible match (no shared tokens at all).
+ * Cuts retry loops by showing the model what's actually in the file at the
+ * expected location(s) — multiple results help disambiguate when several
+ * regions look similar (e.g. repeated function bodies).
+ */
+export function findClosestSnippet(
+  content: string,
+  oldText: string,
+  contextLines = 3,
+  maxResults = 3,
+): string | null {
+  const oldFirstLine = oldText.split("\n").find((l) => l.trim().length > 0);
+  if (!oldFirstLine) return null;
+  const oldTokens = new Set(tokenize(oldFirstLine));
+  if (oldTokens.size === 0) return null;
+
+  const lines = content.split("\n");
+  const candidates: { line: number; score: number }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const lineTokens = tokenize(lines[i]);
+    if (lineTokens.length === 0) continue;
+    let overlap = 0;
+    for (const t of lineTokens) if (oldTokens.has(t)) overlap++;
+    if (overlap > 0) candidates.push({ line: i, score: overlap });
+  }
+
+  if (candidates.length === 0) return null;
+
+  candidates.sort((a, b) => b.score - a.score || a.line - b.line);
+  const bestScore = candidates[0].score;
+  // Drop candidates that are dramatically weaker than the best match —
+  // keeps the snippet focused instead of dumping the whole file.
+  const minScore = Math.max(1, Math.ceil(bestScore / 3));
+  const top = candidates.filter((c) => c.score >= minScore).slice(0, maxResults);
+
+  // Render in source order so line numbers ascend down the snippet.
+  top.sort((a, b) => a.line - b.line);
+
+  const renderRange = (centerLine: number): string => {
+    const start = Math.max(0, centerLine - contextLines);
+    const end = Math.min(lines.length, centerLine + contextLines + 1);
+    return lines
+      .slice(start, end)
+      .map((l, i) => `${String(start + i + 1).padStart(6, " ")}\t${l}`)
+      .join("\n");
+  };
+
+  return top.map((c) => renderRange(c.line)).join("\n---\n");
+}
+
 /**
  * Generate a unified diff string.
  */

@@ -169,7 +169,7 @@ describe("plan mode tool restrictions", () => {
   describe("edit", () => {
     it("blocks execution when plan mode is on", async () => {
       planModeRef.current = true;
-      const readFiles = new Set<string>();
+      const readFiles = new Map();
       const tool = createEditTool(tmpDir, readFiles, undefined, planModeRef);
 
       const result = resultToString(

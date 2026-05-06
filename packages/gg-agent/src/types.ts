@@ -96,7 +96,7 @@ export interface AgentDoneEvent {
 
 export interface AgentRetryEvent {
   type: "retry";
-  reason: "overloaded" | "rate_limit" | "empty_response" | "stream_stall";
+  reason: "overloaded" | "rate_limit" | "empty_response" | "stream_stall" | "overflow_compact";
   attempt: number;
   maxAttempts: number;
   delayMs: number;
@@ -170,6 +170,8 @@ export interface AgentOptions {
   provider: StreamOptions["provider"];
   model: string;
   system?: string;
+  /** Prior conversation messages (excluding system) to hydrate the Agent on construction. Used for session resume. */
+  priorMessages?: Message[];
   tools?: AgentTool[];
   serverTools?: ServerToolDefinition[];
   maxTurns?: number;

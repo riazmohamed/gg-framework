@@ -92,12 +92,17 @@ export function shouldCompact(
   }
   const estimated = actualTokens ?? estimateConversationTokens(messages);
   const percentageLimit = contextWindow * threshold;
-  // Only apply the fixed reserve when the context window is large enough
-  // that the reserve is meaningful (< 50% of the window).
-  const limit =
-    reserveTokens > 0 && reserveTokens < contextWindow * 0.5
-      ? Math.min(percentageLimit, contextWindow - reserveTokens)
+  // Honor the reserve when it leaves a sensible amount of context. Models
+  // with large output budgets (e.g. Codex Mini at 100K out / 200K ctx) will
+  // hit the API's context_length error if we only compact at the percentage
+  // threshold. When the reserve is pathological (≥ 75% of the window — e.g.
+  // tiny test fixtures or a model whose output budget eats most of the
+  // window), fall back to the percentage threshold alone.
+  const reserveLimit =
+    reserveTokens > 0 && reserveTokens < contextWindow * 0.75
+      ? contextWindow - reserveTokens
       : percentageLimit;
+  const limit = Math.min(percentageLimit, reserveLimit);
   const source = actualTokens != null ? "actual" : "estimated";
   log("INFO", "compaction", `Context check: ${estimated} ${source} tokens, threshold ${limit}`);
   return estimated > limit;

@@ -20,6 +20,23 @@ export class AuthStorage {
     this.filePath = filePath ?? getAppPaths().authFile;
   }
 
+  /** Path to the on-disk auth file. Useful for status output. */
+  get path(): string {
+    return this.filePath;
+  }
+
+  /** List provider keys with stored credentials. */
+  async listProviders(): Promise<string[]> {
+    await this.ensureLoaded();
+    return Object.keys(this.data);
+  }
+
+  /** True if credentials exist for `provider`. */
+  async hasCredentials(provider: string): Promise<boolean> {
+    await this.ensureLoaded();
+    return Boolean(this.data[provider]);
+  }
+
   async load(): Promise<void> {
     await withFileLock(this.filePath, async () => {
       try {

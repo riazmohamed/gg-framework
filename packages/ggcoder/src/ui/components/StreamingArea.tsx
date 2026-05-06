@@ -40,23 +40,25 @@ export const StreamingArea = memo(function StreamingArea({
   // height to Ink's live area.  When isRunning later flipped to false in a
   // separate render batch, the live area shrank and Ink's cursor math
   // miscalculated the rewrite offset — clipping the bottom of the content.
-  if (!streamingText && !streamingThinking) return null;
-  if (!isRunning && !streamingText) return null;
+  // Trim because a streaming turn whose entire content is "[DONE:N]" gets
+  // reduced to a single space by stripDoneMarkers — don't render a lone "⏺".
+  const trimmedDisplay = displayText.trim();
+  const hasThinking = showThinking && !!streamingThinking;
+  if (!trimmedDisplay && !hasThinking) return null;
+  if (!isRunning && !trimmedDisplay) return null;
 
   return (
     <Box flexDirection="column" marginTop={1}>
-      {showThinking && streamingThinking && (
-        <ThinkingBlock text={streamingThinking} streaming durationMs={thinkingMs} />
-      )}
+      {hasThinking && <ThinkingBlock text={streamingThinking} streaming durationMs={thinkingMs} />}
 
-      {displayText && (
+      {trimmedDisplay && (
         <Box flexDirection="row">
           <Box width={PREFIX_WIDTH} flexShrink={0}>
             <Text color={planMode ? theme.planPrimary : theme.primary}>{BLACK_CIRCLE + " "}</Text>
           </Box>
           <Box flexDirection="column" flexGrow={1} width={contentWidth}>
             {/* Stable/unstable split: only re-parses the tail block. */}
-            <StreamingMarkdown width={contentWidth}>{displayText.trimStart()}</StreamingMarkdown>
+            <StreamingMarkdown width={contentWidth}>{trimmedDisplay}</StreamingMarkdown>
           </Box>
         </Box>
       )}
