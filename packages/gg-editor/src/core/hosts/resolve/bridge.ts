@@ -256,8 +256,22 @@ export class ResolveBridge {
         }
       };
       opts.signal?.addEventListener("abort", onAbort, { once: true });
+      // Safety timeout: reject if no response arrives within 30 s.
+      const timeoutHandle = setTimeout(() => {
+        const entry = this.pending.get(id);
+        if (entry) {
+          this.pending.delete(id);
+          entry.reject(new Error(`bridge.call timed out after 30 s (method=${method}, id=${id})`));
+        }
+      }, 30_000);
+      // Unref so the timeout never keeps the process alive.
+      timeoutHandle.unref();
+
+      const clearTimeout_ = () => clearTimeout(timeoutHandle);
+
       this.pending.set(id, {
         resolve: (v) => {
+          clearTimeout_();
           opts.signal?.removeEventListener("abort", onAbort);
           logInfo("bridge.call", method, {
             id,
@@ -266,6 +280,7 @@ export class ResolveBridge {
           resolve(v as T);
         },
         reject: (err) => {
+          clearTimeout_();
           opts.signal?.removeEventListener("abort", onAbort);
           logError("bridge.call", method, {
             id,
@@ -275,13 +290,39 @@ export class ResolveBridge {
           reject(err);
         },
       });
-      this.child!.stdin.write(payload, (err) => {
-        if (err) {
+
+      // Write to stdin — if the child dies between ensureStarted() and here
+      // the write callback fires with an error (or "exit" fires first). Both
+      // paths look up the registered pending entry and reject through it so
+      // the abort listener and timeout are always cleaned up.
+      try {
+        this.child!.stdin.write(payload, (writeErr) => {
+          if (writeErr) {
+            const entry = this.pending.get(id);
+            if (entry) {
+              this.pending.delete(id);
+              entry.reject(
+                new Error(
+                  `bridge stdin write failed (method=${method}, id=${id}): ${writeErr.message}`,
+                ),
+              );
+            }
+          }
+        });
+      } catch (syncErr) {
+        // stdin.write can throw synchronously if the stream is already destroyed.
+        const entry = this.pending.get(id);
+        if (entry) {
           this.pending.delete(id);
-          opts.signal?.removeEventListener("abort", onAbort);
-          reject(err);
+          entry.reject(
+            new Error(
+              `bridge stdin write threw (method=${method}, id=${id}): ${
+                syncErr instanceof Error ? syncErr.message : String(syncErr)
+              }`,
+            ),
+          );
         }
-      });
+      }
     });
   }
 

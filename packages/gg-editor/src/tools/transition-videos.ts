@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, probeMedia, runFfmpeg } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 /**
  * Transition presets that wrap ffmpeg's `xfade` filter with content-creator
@@ -93,7 +94,7 @@ export function createTransitionVideosTool(cwd: string): AgentTool<typeof Transi
       try {
         const aAbs = resolvePath(cwd, inputA);
         const bAbs = resolvePath(cwd, inputB);
-        const outAbs = resolvePath(cwd, output);
+        const outAbs = safeOutputPath(cwd, output);
         if (aAbs === outAbs || bAbs === outAbs) {
           return err("output collides with an input");
         }

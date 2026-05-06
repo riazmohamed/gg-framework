@@ -145,8 +145,6 @@ function makeCallbacks() {
   };
 }
 
-
-
 export async function runLogout(provider?: SupportedAuthProvider): Promise<void> {
   const storage = new AuthStorage();
   await storage.load();

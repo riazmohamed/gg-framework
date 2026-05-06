@@ -24,9 +24,7 @@ const VerifyThumbnailPromiseParams = z.object({
     .min(1)
     .max(8)
     .optional()
-    .describe(
-      "Frames sampled within the window. Default 3 (taken at 0%, 50%, 100% of windowSec).",
-    ),
+    .describe("Frames sampled within the window. Default 3 (taken at 0%, 50%, 100% of windowSec)."),
   detail: z.enum(["low", "high"]).optional().describe("Vision detail. Default low."),
   model: z.string().optional().describe("OpenAI model. Default gpt-4o-mini."),
 });

@@ -3,7 +3,17 @@ import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "no
 import { platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BUNDLE_ID, CSXS_VERSIONS, installedPanelDir, userExtensionsDir } from "./paths.js";
+import {
+  BUNDLE_ID,
+  BUNDLE_ID_UXP,
+  CSXS_VERSIONS,
+  installedPanelDir,
+  installedUxpPluginDir,
+  userExtensionsDir,
+  userUxpPluginsDir,
+} from "./paths.js";
+
+// ── CEP panel ────────────────────────────────────────────────
 
 /**
  * Locate the panel/ directory that ships in this package. Works whether the
@@ -24,13 +34,32 @@ export function panelSourceDir(): string {
   throw new Error("Could not find panel/ directory in package. Searched: " + candidates.join(", "));
 }
 
+/**
+ * Locate the panel-uxp/ directory that ships in this package. Same dual-mode
+ * resolution as `panelSourceDir()` but anchored on the UXP `manifest.json`.
+ */
+export function uxpPluginSourceDir(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(here, "..", "..", "panel-uxp"),
+    resolve(here, "..", "panel-uxp"),
+    resolve(here, "panel-uxp"),
+  ];
+  for (const c of candidates) {
+    if (existsSync(join(c, "manifest.json"))) return c;
+  }
+  throw new Error(
+    "Could not find panel-uxp/ directory in package. Searched: " + candidates.join(", "),
+  );
+}
+
 export interface InstallResult {
   installedTo: string;
   copiedFiles: number;
 }
 
 /** Recursively copy panel/ into the user's CEP extensions directory. */
-export function installPanel(): InstallResult {
+export function installCepPanel(): InstallResult {
   const src = panelSourceDir();
   const dest = installedPanelDir();
   mkdirSync(userExtensionsDir(), { recursive: true });
@@ -43,18 +72,52 @@ export function installPanel(): InstallResult {
   return { installedTo: dest, copiedFiles: countFiles(dest) };
 }
 
-export function uninstallPanel(): { removed: boolean; path: string } {
+/** Back-compat alias for callers still on the v0.1 API. */
+export const installPanel = installCepPanel;
+
+export function uninstallCepPanel(): { removed: boolean; path: string } {
   const dest = installedPanelDir();
   if (!existsSync(dest)) return { removed: false, path: dest };
   rmSync(dest, { recursive: true, force: true });
   return { removed: true, path: dest };
 }
 
-export function isPanelInstalled(): boolean {
+export const uninstallPanel = uninstallCepPanel;
+
+export function isCepPanelInstalled(): boolean {
   return existsSync(join(installedPanelDir(), "CSXS", "manifest.xml"));
 }
 
-// ── Debug-mode toggle ────────────────────────────────────────
+export const isPanelInstalled = isCepPanelInstalled;
+
+// ── UXP plugin ───────────────────────────────────────────────
+
+/** Recursively copy panel-uxp/ into the user's UXP External plugins dir. */
+export function installUxpPlugin(): InstallResult {
+  const src = uxpPluginSourceDir();
+  const dest = installedUxpPluginDir();
+  mkdirSync(userUxpPluginsDir(), { recursive: true });
+
+  if (existsSync(dest)) {
+    rmSync(dest, { recursive: true, force: true });
+  }
+  cpSync(src, dest, { recursive: true });
+
+  return { installedTo: dest, copiedFiles: countFiles(dest) };
+}
+
+export function uninstallUxpPlugin(): { removed: boolean; path: string } {
+  const dest = installedUxpPluginDir();
+  if (!existsSync(dest)) return { removed: false, path: dest };
+  rmSync(dest, { recursive: true, force: true });
+  return { removed: true, path: dest };
+}
+
+export function isUxpPluginInstalled(): boolean {
+  return existsSync(join(installedUxpPluginDir(), "manifest.json"));
+}
+
+// ── Debug-mode toggle (CEP only) ─────────────────────────────
 
 /**
  * Unsigned CEP panels won't load unless PlayerDebugMode=1 is set per CSXS
@@ -62,6 +125,10 @@ export function isPanelInstalled(): boolean {
  *
  * macOS: `defaults write com.adobe.CSXS.<N> PlayerDebugMode 1`
  * Windows: registry key HKCU\Software\Adobe\CSXS.<N> → PlayerDebugMode = "1"
+ *
+ * UXP plugins do **not** use PlayerDebugMode; they require the user to
+ * toggle "Enable Developer Mode" inside Premiere → Plugins, which we can't
+ * do programmatically.
  */
 export interface DebugModeResult {
   ok: boolean;
@@ -147,4 +214,11 @@ function countFiles(dir: string): number {
   return n;
 }
 
-export { BUNDLE_ID, installedPanelDir, userExtensionsDir };
+export {
+  BUNDLE_ID,
+  BUNDLE_ID_UXP,
+  installedPanelDir,
+  installedUxpPluginDir,
+  userExtensionsDir,
+  userUxpPluginsDir,
+};

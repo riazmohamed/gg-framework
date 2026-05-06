@@ -6,7 +6,7 @@ import { clusterSegments } from "../core/clustering.js";
 import { compact, err, summarizeList } from "../core/format.js";
 import { extractAtTimes } from "../core/frames.js";
 import { checkFfmpeg } from "../core/media/ffmpeg.js";
-import type { Transcript } from "../core/whisper.js";
+import { parseTranscript } from "../core/whisper.js";
 import { scoreFrames } from "../core/vision.js";
 
 const PickBestTakesParams = z.object({
@@ -72,7 +72,7 @@ export function createPickBestTakesTool(cwd: string): AgentTool<typeof PickBestT
 
         // Load transcript
         const tAbs = resolvePath(cwd, transcriptPath);
-        const t = JSON.parse(readFileSync(tAbs, "utf8")) as Transcript;
+        const t = parseTranscript(readFileSync(tAbs, "utf8"));
         if (!t.segments || t.segments.length === 0) {
           return err("transcript has no segments");
         }

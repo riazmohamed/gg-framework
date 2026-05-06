@@ -1,9 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  combineClipScore,
-  parseClipScoreResponse,
-  scoreClipInternal,
-} from "./clip-scoring.js";
+import { combineClipScore, parseClipScoreResponse, scoreClipInternal } from "./clip-scoring.js";
 
 describe("parseClipScoreResponse", () => {
   it("parses a well-formed response", () => {
@@ -49,30 +45,25 @@ describe("parseClipScoreResponse", () => {
 
 describe("combineClipScore", () => {
   it("produces 100 for max scores with default weights", () => {
-    const r = combineClipScore(
-      { hook: 1, flow: 1, engagement: 1, trend: 1, why: "" },
-      30,
-    );
+    const r = combineClipScore({ hook: 1, flow: 1, engagement: 1, trend: 1, why: "" }, 30);
     expect(r.score).toBe(100);
     expect(r.durationSec).toBe(30);
   });
 
   it("produces 0 for min scores", () => {
-    const r = combineClipScore(
-      { hook: 0, flow: 0, engagement: 0, trend: 0, why: "" },
-      30,
-    );
+    const r = combineClipScore({ hook: 0, flow: 0, engagement: 0, trend: 0, why: "" }, 30);
     expect(r.score).toBe(0);
   });
 
   it("respects custom weights", () => {
     // hook=1, others=0; with weights {hook:100, flow:0, engagement:0, trend:0}
     // → 100. Default weights would put it at 30.
-    const r = combineClipScore(
-      { hook: 1, flow: 0, engagement: 0, trend: 0, why: "" },
-      30,
-      { hook: 100, flow: 0, engagement: 0, trend: 0 },
-    );
+    const r = combineClipScore({ hook: 1, flow: 0, engagement: 0, trend: 0, why: "" }, 30, {
+      hook: 100,
+      flow: 0,
+      engagement: 0,
+      trend: 0,
+    });
     expect(r.score).toBe(100);
   });
 });

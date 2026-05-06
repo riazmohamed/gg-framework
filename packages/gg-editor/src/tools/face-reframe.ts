@@ -1,11 +1,7 @@
 import { resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
-import {
-  analyzeReframe,
-  buildReframeFilter,
-  type Aspect,
-} from "../core/face-reframe.js";
+import { analyzeReframe, buildReframeFilter, type Aspect } from "../core/face-reframe.js";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, runFfmpeg } from "../core/media/ffmpeg.js";
 import { findPython } from "../core/python.js";
@@ -110,10 +106,7 @@ export function createFaceReframeTool(cwd: string): AgentTool<typeof FaceReframe
           );
         }
         if (!plan.sourceWidth || !plan.sourceHeight) {
-          return err(
-            "sidecar returned no source dimensions",
-            "input may not be a video file",
-          );
+          return err("sidecar returned no source dimensions", "input may not be a video file");
         }
 
         // 'static' strategy bypasses tracking — pin every shot's centre to (0.5, 0.5).
@@ -137,19 +130,7 @@ export function createFaceReframeTool(cwd: string): AgentTool<typeof FaceReframe
         const codec = args.videoCodec ?? "libx264";
         const crf = String(args.crf ?? 20);
         const r = await runFfmpeg(
-          [
-            "-i",
-            inAbs,
-            "-vf",
-            filter,
-            "-c:v",
-            codec,
-            "-crf",
-            crf,
-            "-c:a",
-            "copy",
-            outAbs,
-          ],
+          ["-i", inAbs, "-vf", filter, "-c:v", codec, "-crf", crf, "-c:a", "copy", outAbs],
           { signal: ctx.signal },
         );
         if (r.code !== 0) {

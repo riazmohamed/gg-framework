@@ -3,7 +3,7 @@ import { resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { compact, err, summarizeList } from "../core/format.js";
-import type { Transcript } from "../core/whisper.js";
+import { parseTranscript } from "../core/whisper.js";
 
 const ReadTranscriptParams = z.object({
   path: z.string().describe("Path to a transcript JSON file written by `transcribe`."),
@@ -41,7 +41,7 @@ export function createReadTranscriptTool(cwd: string): AgentTool<typeof ReadTran
     async execute({ path, startSec, endSec, contains, speaker, limit = 50, includeWords }) {
       try {
         const abs = resolvePath(cwd, path);
-        const t = JSON.parse(readFileSync(abs, "utf8")) as Transcript;
+        const t = parseTranscript(readFileSync(abs, "utf8"));
         const needle = contains?.toLowerCase();
 
         const wantSpeaker = speaker?.toLowerCase();

@@ -15,6 +15,7 @@ import {
 import { compact, err } from "../core/format.js";
 import { probeMedia } from "../core/media/ffmpeg.js";
 import { safeOutputPath } from "../core/safe-paths.js";
+import { parseTranscript } from "../core/whisper.js";
 import type { Transcript } from "../core/whisper.js";
 
 const CutFillerWordsParams = z.object({
@@ -42,9 +43,11 @@ const CutFillerWordsParams = z.object({
     .boolean()
     .optional()
     .describe(
-      "When false, skip ambiguous single-word fillers (like, so, actually, basically, " +
-        "literally, honestly, right) — useful when the speaker uses them substantively. " +
-        "Default true.",
+      "When true (tool default), include ambiguous single-word fillers (like, so, actually, " +
+        "basically, literally, honestly, right). When false, only the safe-list (um/uh/er/hmm/" +
+        "you know/i mean/kind of/sort of) is matched — useful when the speaker uses these " +
+        "words substantively. The underlying detectFillerRanges() library defaults to false; " +
+        "this tool preserves the historical aggressive=true behavior for the end user.",
     ),
   paddingStartMs: z
     .number()
@@ -132,12 +135,9 @@ export function createCutFillerWordsTool(cwd: string): AgentTool<typeof CutFille
 
         let transcript: Transcript;
         try {
-          transcript = JSON.parse(raw) as Transcript;
+          transcript = parseTranscript(raw);
         } catch (e) {
-          return err(
-            `transcript is not valid JSON: ${(e as Error).message}`,
-            "regenerate via transcribe(wordTimestamps=true)",
-          );
+          return err((e as Error).message, "regenerate via transcribe(wordTimestamps=true)");
         }
 
         const hasWords = transcript.segments.some(
@@ -152,7 +152,9 @@ export function createCutFillerWordsTool(cwd: string): AgentTool<typeof CutFille
 
         const fillers = detectFillerRanges(transcript, {
           fillers: args.fillers,
-          aggressiveSingleWords: args.aggressiveSingleWords,
+          // Tool default is true (aggressive) to preserve existing user behavior;
+          // the underlying library now defaults to false (conservative).
+          aggressiveSingleWords: args.aggressiveSingleWords ?? true,
           paddingStartMs: args.paddingStartMs,
           paddingEndMs: args.paddingEndMs,
           mergeGapMs: args.mergeGapMs,

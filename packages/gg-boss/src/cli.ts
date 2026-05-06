@@ -8,12 +8,19 @@ import { loadLinks } from "./links.js";
 import { runLinkCommand } from "./link-command.js";
 import { COLORS, clearScreen } from "./branding.js";
 import { renderBossApp } from "./orchestrator-app.js";
+import { loadSettings } from "./settings.js";
+import { showSplash } from "./splash.js";
+import { initLogger, log } from "./logger.js";
+import { VERSION } from "./branding.js";
+import { checkAndAutoUpdate } from "./auto-update.js";
+import { stopRadio } from "./radio.js";
 
 interface CliArgs {
-  bossProvider: Provider;
-  bossModel: string;
-  workerProvider: Provider;
-  workerModel: string;
+  /** Undefined when not passed on the CLI — settings file then defaults take over. */
+  bossProvider?: Provider;
+  bossModel?: string;
+  workerProvider?: Provider;
+  workerModel?: string;
   projects: ProjectSpec[];
   continueRecent?: boolean;
   resumeSessionId?: string;
@@ -32,10 +39,6 @@ function parseProjectSpec(raw: string): ProjectSpec {
 
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
-    bossProvider: "anthropic",
-    bossModel: "claude-opus-4-7",
-    workerProvider: "anthropic",
-    workerModel: "claude-sonnet-4-6",
     projects: [],
   };
 
@@ -131,25 +134,59 @@ async function runOrchestrator(args: CliArgs): Promise<void> {
   }
 
   clearScreen();
-  process.stdout.write(
-    chalk.hex(COLORS.textDim)("  Initializing ") +
-      chalk.hex(COLORS.primary)("GG Boss") +
-      chalk.hex(COLORS.textDim)(
-        `…\n  Spinning up ${args.projects.length} worker${args.projects.length === 1 ? "" : "s"}.\n`,
-      ),
-  );
+
+  // Splash — Ink-rendered ASCII logo with shimmering gradient, shown while
+  // the boss spins up its workers. dismiss() blocks until min-visible-time
+  // has elapsed AND Ink has flushed the unmount, so the chat UI never
+  // overlaps with the splash on screen.
+  const splash = showSplash({
+    caption: `Spinning up ${args.projects.length} worker${args.projects.length === 1 ? "" : "s"}…`,
+  });
+
+  // Resolve final boss/worker models: CLI flags > saved settings > defaults.
+  // Settings persist user choices made via /model boss / /model workers across
+  // restarts so the user doesn't have to re-pick every session.
+  const settings = await loadSettings();
+  const finalBossProvider = args.bossProvider ?? settings.bossProvider ?? "anthropic";
+  const finalBossModel = args.bossModel ?? settings.bossModel ?? "claude-opus-4-7";
+  const finalWorkerProvider = args.workerProvider ?? settings.workerProvider ?? "anthropic";
+  const finalWorkerModel = args.workerModel ?? settings.workerModel ?? "claude-sonnet-4-6";
+
+  // Open ~/.gg/boss/debug.log in append mode and stamp a startup line so
+  // future tail/grep diagnoses have the full session context up front.
+  initLogger({
+    version: VERSION,
+    bossProvider: finalBossProvider,
+    bossModel: finalBossModel,
+    bossThinking: settings.bossThinkingLevel,
+    workerProvider: finalWorkerProvider,
+    workerModel: finalWorkerModel,
+    projectCount: args.projects.length,
+  });
+  log("INFO", "cli", "linked projects", {
+    projects: args.projects.map((p) => p.name).join(","),
+  });
+
+  // Auto-update: instantly applies any pending install from the prior run
+  // (background spawn, takes effect next launch) and schedules a fresh
+  // registry check. Returns a one-liner if an install just kicked off so
+  // we can surface it before the splash takes over.
+  const updateMessage = checkAndAutoUpdate(VERSION);
+  if (updateMessage) log("INFO", "auto_update", updateMessage);
 
   const boss = new GGBoss({
-    bossProvider: args.bossProvider,
-    bossModel: args.bossModel,
-    workerProvider: args.workerProvider,
-    workerModel: args.workerModel,
+    bossProvider: finalBossProvider,
+    bossModel: finalBossModel,
+    bossThinkingLevel: settings.bossThinkingLevel,
+    workerProvider: finalWorkerProvider,
+    workerModel: finalWorkerModel,
     projects: args.projects,
     continueRecent: args.continueRecent,
     resumeSessionId: args.resumeSessionId,
   });
 
   await boss.initialize();
+  await splash.dismiss();
 
   clearScreen();
 
@@ -165,6 +202,9 @@ async function runOrchestrator(args: CliArgs): Promise<void> {
   const runPromise = boss.run();
   await ink.waitUntilExit();
   await boss.dispose();
+  // Kill any in-flight radio stream before exiting — otherwise the detached
+  // mpv/ffplay child keeps playing after the user closed gg-boss.
+  stopRadio();
   await runPromise.catch(() => {});
   process.exit(0);
 }
@@ -184,6 +224,28 @@ async function main(): Promise<void> {
   if (isContinue) args.continueRecent = true;
   await runOrchestrator(args);
 }
+
+// Process-level error guards. With ~6 workers sharing the same Node process,
+// any uncaught throw or unhandled rejection would otherwise take the whole
+// orchestrator down — losing every worker's in-flight task. We log the
+// failure to ~/.gg/boss/debug.log (already initialized by this point) and
+// keep running. Truly unrecoverable conditions (OOM, native segfault) still
+// kill the process; nothing JS-side can guard against those.
+process.on("uncaughtException", (err) => {
+  const message = err instanceof Error ? err.message : String(err);
+  const stack = err instanceof Error ? err.stack : undefined;
+  log("ERROR", "uncaught_exception", message, { stack });
+  // Don't exit. The boss orchestrator and Ink TUI keep running; any worker
+  // that got into a bad state will surface the issue via worker_error events
+  // on its next interaction. This is far less disruptive than dying outright.
+});
+
+process.on("unhandledRejection", (reason) => {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  const stack = reason instanceof Error ? reason.stack : undefined;
+  log("ERROR", "unhandled_rejection", message, { stack });
+  // Same rationale as uncaughtException — log and survive.
+});
 
 main().catch((err) => {
   const message = err instanceof Error ? err.message : String(err);

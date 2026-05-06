@@ -89,9 +89,7 @@ export async function analyzeReframe(
 
   const trimmed = stdout.trim();
   if (!trimmed) {
-    throw new Error(
-      `face-reframe sidecar returned empty stdout (exit ${code}): ${tail(stderr)}`,
-    );
+    throw new Error(`face-reframe sidecar returned empty stdout (exit ${code}): ${tail(stderr)}`);
   }
   let parsed: unknown;
   try {
@@ -105,11 +103,7 @@ export async function analyzeReframe(
     const err = parsed as { error?: string };
     throw new Error(err.error ?? "unknown face-reframe sidecar error");
   }
-  if (
-    !parsed ||
-    typeof parsed !== "object" ||
-    !Array.isArray((parsed as ReframePlan).shots)
-  ) {
+  if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as ReframePlan).shots)) {
     throw new Error(`face-reframe sidecar returned unexpected shape: ${trimmed.slice(-200)}`);
   }
   return parsed as ReframePlan;

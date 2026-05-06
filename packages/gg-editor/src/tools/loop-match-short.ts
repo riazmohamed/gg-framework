@@ -5,6 +5,7 @@ import type { AgentTool } from "@abukhaled/gg-agent";
 import { compact, err } from "../core/format.js";
 import { buildLoopMatchFilter } from "../core/loop-match.js";
 import { checkFfmpeg, probeMedia, runFfmpeg } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const LoopMatchShortParams = z.object({
   input: z.string().describe("Source Short (.mp4). Relative resolves to cwd."),
@@ -52,7 +53,7 @@ export function createLoopMatchShortTool(cwd: string): AgentTool<typeof LoopMatc
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const inAbs = resolvePath(cwd, args.input);
-        const outAbs = resolvePath(cwd, args.output);
+        const outAbs = safeOutputPath(cwd, args.output);
         if (inAbs === outAbs) {
           return err("output and input are identical", "use a different output path");
         }

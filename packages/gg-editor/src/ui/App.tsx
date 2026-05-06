@@ -395,9 +395,9 @@ export function App(props: AppProps) {
           `- \`/${c.name}\`${c.aliases.length ? " " + c.aliases.map((a) => `\`/${a}\``).join(" ") : ""} — ${c.description}`;
         const setup = EDITOR_PROMPT_COMMANDS.filter((c) => c.name === "setup-channel").map(fmt);
         const workflow = EDITOR_PROMPT_COMMANDS.filter((c) => c.name === "youtube").map(fmt);
-        const qa = EDITOR_PROMPT_COMMANDS.filter((c) =>
-          ["audit", "diagnose"].includes(c.name),
-        ).map(fmt);
+        const qa = EDITOR_PROMPT_COMMANDS.filter((c) => ["audit", "diagnose"].includes(c.name)).map(
+          fmt,
+        );
         setHistoryItems((items) => [
           ...items,
           {
@@ -644,6 +644,7 @@ export function App(props: AppProps) {
           exitPending={exitPending}
           statusLabel={composeStatusLabel(hostStatus, timelineGlance)}
           statusColor={composeStatusColor(hostStatus, theme)}
+          statusBelow
         />
       )}
     </Box>

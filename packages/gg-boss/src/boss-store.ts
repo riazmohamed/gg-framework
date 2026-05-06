@@ -5,6 +5,7 @@ import type {
   Message,
   Provider,
   TextContent,
+  ThinkingLevel,
   ToolCall,
   ToolResult,
   UserMessage,
@@ -94,13 +95,40 @@ export interface InfoItem {
   level?: "info" | "warning" | "error";
 }
 
+/**
+ * Task-dispatch announcement. Rendered when the user (or boss) fires a batch
+ * of tasks via `r` in the overlay or `dispatch_pending`. Structured (vs plain
+ * info text) so each project name can be drawn in its own projectColor() —
+ * matching the WorkerStatusBar / WorkerEventRow / scope pill conventions.
+ */
+export interface TaskDispatchItem {
+  kind: "task_dispatch";
+  id: string;
+  tasks: { project: string; title: string }[];
+  timestamp: number;
+}
+
+/**
+ * Auto-update notice ("Ken just shipped 4.3.x!"). Distinct from a plain
+ * info row so the renderer can wrap it in the success-bordered ✨ box that
+ * ggcoder uses — without this, the update message renders in flat default
+ * text and goes unnoticed amid worker chatter.
+ */
+export interface UpdateNoticeItem {
+  kind: "update_notice";
+  id: string;
+  text: string;
+}
+
 export type HistoryItem =
   | UserItem
   | AssistantItem
   | ToolItem
   | WorkerEventItem
   | WorkerErrorItem
-  | InfoItem;
+  | InfoItem
+  | TaskDispatchItem
+  | UpdateNoticeItem;
 
 // ── Streaming (current boss turn, rendered live above the input) ────
 
@@ -138,6 +166,10 @@ export interface WorkerView {
   name: string;
   cwd: string;
   status: WorkerStatus;
+  /** When the worker most recently transitioned to "working". Cleared when it
+   *  goes back to idle/error. Drives the elapsed-time readout in the worker
+   *  status bar so users can see "yaatuber working · 1:24" while waiting. */
+  workStartedAt: number | null;
   lastSummary?: WorkerTurnSummary;
 }
 
@@ -146,6 +178,8 @@ export interface WorkerView {
 export interface BossUiState {
   bossProvider: Provider;
   bossModel: string;
+  /** Boss extended-thinking level. undefined = off. Toggled via Shift+Tab. */
+  bossThinkingLevel?: ThinkingLevel;
   workerProvider: Provider;
   workerModel: string;
   /** Providers the user is logged in to — controls which models the picker offers. */
@@ -161,6 +195,9 @@ export interface BossUiState {
    */
   pendingFlush: HistoryItem[];
   flushGeneration: number;
+  /** Info rows queued by mid-turn tools, flushed when the boss's turn ends.
+   *  See queueEndOfTurnInfo / flushEndOfTurnInfos. */
+  pendingEndOfTurnInfos: { text: string; level: InfoItem["level"] }[];
   streaming: StreamingTurn | null;
   phase: "idle" | "working";
   /** Fine-grained phase used by ActivityIndicator. */
@@ -181,7 +218,17 @@ export interface BossUiState {
    * Cycled with Tab; gets injected into every prompt the user sends.
    */
   scope: string;
+  /**
+   * Active overlay (if any). Lives in the store rather than React state so
+   * it survives the unmount/remount that overlay open/close performs to
+   * escape Ink's live-area drift — same pattern ggcoder adopted across all
+   * its overlays. Without this mirror, opening an overlay would remount the
+   * tree and the new mount would have no overlay set, defeating the toggle.
+   */
+  overlay: BossOverlay | null;
 }
+
+export type BossOverlay = "model-boss" | "model-workers" | "tasks" | "radio";
 
 const initialState: BossUiState = {
   bossProvider: "anthropic",
@@ -192,6 +239,7 @@ const initialState: BossUiState = {
   history: [],
   pendingFlush: [],
   flushGeneration: 0,
+  pendingEndOfTurnInfos: [],
   streaming: null,
   phase: "idle",
   activityPhase: "idle",
@@ -203,6 +251,7 @@ const initialState: BossUiState = {
   pendingUserMessages: 0,
   exitPending: false,
   scope: "all",
+  overlay: null,
 };
 
 let state: BossUiState = initialState;
@@ -231,6 +280,7 @@ export const bossStore = {
   init(opts: {
     bossProvider: Provider;
     bossModel: string;
+    bossThinkingLevel?: ThinkingLevel;
     workerProvider: Provider;
     workerModel: string;
     loggedInProviders: Provider[];
@@ -240,11 +290,22 @@ export const bossStore = {
       ...initialState,
       bossProvider: opts.bossProvider,
       bossModel: opts.bossModel,
+      bossThinkingLevel: opts.bossThinkingLevel,
       workerProvider: opts.workerProvider,
       workerModel: opts.workerModel,
       loggedInProviders: opts.loggedInProviders,
-      workers: opts.workers.map((w) => ({ name: w.name, cwd: w.cwd, status: "idle" })),
+      workers: opts.workers.map((w) => ({
+        name: w.name,
+        cwd: w.cwd,
+        status: "idle" as WorkerStatus,
+        workStartedAt: null,
+      })),
     };
+    notify();
+  },
+
+  setBossThinking(level: ThinkingLevel | undefined): void {
+    state = { ...state, bossThinkingLevel: level };
     notify();
   },
 
@@ -271,10 +332,65 @@ export const bossStore = {
     notify();
   },
 
+  appendTaskDispatch(tasks: { project: string; title: string }[]): void {
+    if (tasks.length === 0) return;
+    state = {
+      ...state,
+      history: [
+        ...state.history,
+        { kind: "task_dispatch", id: id(), tasks, timestamp: Date.now() },
+      ],
+    };
+    notify();
+  },
+
   appendInfo(text: string, level: InfoItem["level"] = "info"): void {
     state = {
       ...state,
       history: [...state.history, { kind: "info", id: id(), text, level }],
+    };
+    notify();
+  },
+
+  /**
+   * Append the eye-catching update-available notice. Distinct kind so the
+   * renderer can give it the rounded green-bordered "✨ ..." box treatment
+   * that mirrors ggcoder's update notice — flat info text gets lost in
+   * worker chatter, this stands out.
+   */
+  appendUpdateNotice(text: string): void {
+    state = {
+      ...state,
+      history: [...state.history, { kind: "update_notice", id: id(), text }],
+    };
+    notify();
+  },
+
+  /**
+   * Queue an info message to be appended AFTER the boss's current turn ends.
+   * Used by tools (like add_task's keybind hint) that fire mid-turn and would
+   * otherwise interleave their announcement between the boss's tool calls,
+   * making it read like the boss issued the message itself.
+   */
+  queueEndOfTurnInfo(text: string, level: InfoItem["level"] = "info"): void {
+    state = { ...state, pendingEndOfTurnInfos: [...state.pendingEndOfTurnInfos, { text, level }] };
+    notify();
+  },
+
+  /** Flush any deferred infos as real history rows. Called from the boss's
+   *  turn_end event handler in the orchestrator. */
+  flushEndOfTurnInfos(): void {
+    if (state.pendingEndOfTurnInfos.length === 0) return;
+    const newRows: InfoItem[] = state.pendingEndOfTurnInfos.map(({ text, level }) => ({
+      kind: "info",
+      id: id(),
+      text,
+      level,
+    }));
+    state = {
+      ...state,
+      history: [...state.history, ...newRows],
+      pendingEndOfTurnInfos: [],
     };
     notify();
   },
@@ -596,7 +712,16 @@ export const bossStore = {
   setWorkerStatus(name: string, status: WorkerStatus): void {
     state = {
       ...state,
-      workers: state.workers.map((w) => (w.name === name ? { ...w, status } : w)),
+      workers: state.workers.map((w) => {
+        if (w.name !== name) return w;
+        const nowWorking = status === "working";
+        const wasWorking = w.status === "working";
+        return {
+          ...w,
+          status,
+          workStartedAt: nowWorking ? (wasWorking ? w.workStartedAt : Date.now()) : null,
+        };
+      }),
     };
     notify();
   },
@@ -618,7 +743,9 @@ export const bossStore = {
         },
       ],
       workers: state.workers.map((w) =>
-        w.name === summary.project ? { ...w, status: summary.status, lastSummary: summary } : w,
+        w.name === summary.project
+          ? { ...w, status: summary.status, workStartedAt: null, lastSummary: summary }
+          : w,
       ),
     };
     notify();
@@ -628,7 +755,9 @@ export const bossStore = {
     state = {
       ...state,
       history: [...state.history, { kind: "worker_error", id: id(), project, message, timestamp }],
-      workers: state.workers.map((w) => (w.name === project ? { ...w, status: "error" } : w)),
+      workers: state.workers.map((w) =>
+        w.name === project ? { ...w, status: "error", workStartedAt: null } : w,
+      ),
     };
     notify();
   },
@@ -646,6 +775,18 @@ export const bossStore = {
     const idx = names.indexOf(state.scope);
     const next = names[(idx + 1) % names.length] ?? "all";
     state = { ...state, scope: next };
+    notify();
+  },
+
+  /**
+   * Set or clear the active overlay. Lives in the store (not React state)
+   * because overlay open/close triggers an Ink unmount/remount to escape
+   * live-area drift — the new mount reads this back to know which overlay
+   * to render. Calling with the same value is a no-op.
+   */
+  setOverlay(next: BossOverlay | null): void {
+    if (state.overlay === next) return;
+    state = { ...state, overlay: next };
     notify();
   },
 
@@ -745,6 +886,9 @@ export const bossStore = {
       compaction: null,
       bossInputTokens: 0,
       runStartMs: null,
+      // Drop any active overlay so /clear lands on the chat, not back in
+      // the overlay it was invoked from.
+      overlay: null,
     };
     notify();
   },

@@ -5,6 +5,7 @@ import type { AgentTool } from "@abukhaled/gg-agent";
 import { applyMix, type AudioChain } from "../core/audio-mix.js";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const EqBandSchema = z.object({
   type: z.enum(["low", "high", "peak", "shelf-low", "shelf-high"]),
@@ -74,7 +75,7 @@ export function createMixAudioTool(cwd: string): AgentTool<typeof MixAudioParams
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const inAbs = resolvePath(cwd, input);
-        const outAbs = resolvePath(cwd, output);
+        const outAbs = safeOutputPath(cwd, output);
         if (inAbs === outAbs) {
           return err("input and output paths are identical", "use a different output path");
         }

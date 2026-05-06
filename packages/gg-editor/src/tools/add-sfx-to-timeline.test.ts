@@ -4,8 +4,10 @@ import type { VideoHost } from "../core/hosts/types.js";
 
 // Mock bundled-sfx so the tool tests don't try to spawn ffmpeg.
 vi.mock("../core/bundled-sfx.js", async () => {
+  /* eslint-disable @typescript-eslint/consistent-type-imports */
   const actual =
     await vi.importActual<typeof import("../core/bundled-sfx.js")>("../core/bundled-sfx.js");
+  /* eslint-enable @typescript-eslint/consistent-type-imports */
   return {
     ...actual,
     resolveSfx: vi.fn(async (name: string) => {
@@ -32,7 +34,11 @@ function mockHost(opts: {
   insert?: VideoHost["insertClipOnTrack"];
   getTimelineErr?: Error;
 }): VideoHost {
-  const defaultInsert: VideoHost["insertClipOnTrack"] = async ({ recordFrame, track, mediaKind }) => ({
+  const defaultInsert: VideoHost["insertClipOnTrack"] = async ({
+    recordFrame,
+    track,
+    mediaKind,
+  }) => ({
     id: `clip-${recordFrame}`,
     track: track ?? 3,
     trackKind: (mediaKind ?? "video") as "video" | "audio",
@@ -80,10 +86,7 @@ describe("add_sfx_to_timeline", () => {
     });
     const insertSpy = vi.fn(insert);
     const tool = createAddSfxToTimelineTool(mockHost({ fps: 30, insert: insertSpy }), "/cwd");
-    const r = await tool.execute(
-      { sfx: "whoosh", cutPoints: [1, 2, 5.5], track: 3 },
-      ctx,
-    );
+    const r = await tool.execute({ sfx: "whoosh", cutPoints: [1, 2, 5.5], track: 3 }, ctx);
     const out = JSON.parse(r as string) as {
       ok: boolean;
       inserted: number;
@@ -128,10 +131,7 @@ describe("add_sfx_to_timeline", () => {
       name: "w",
     }));
     const tool = createAddSfxToTimelineTool(mockHost({ fps: 30, insert }), "/cwd");
-    await tool.execute(
-      { sfx: "whoosh", cutPoints: [1, 1.05, 1.1, 5], minSpacingSec: 0.25 },
-      ctx,
-    );
+    await tool.execute({ sfx: "whoosh", cutPoints: [1, 1.05, 1.1, 5], minSpacingSec: 0.25 }, ctx);
     expect(insert).toHaveBeenCalledTimes(2); // 1.0 and 5.0 only
   });
 
@@ -146,9 +146,7 @@ describe("add_sfx_to_timeline", () => {
     }));
     const tool = createAddSfxToTimelineTool(mockHost({ fps: 30, insert }), "/cwd");
     await tool.execute({ sfx: "whoosh", cutPoints: [1] }, ctx);
-    expect(insert).toHaveBeenCalledWith(
-      expect.objectContaining({ track: 3, mediaKind: "audio" }),
-    );
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ track: 3, mediaKind: "audio" }));
   });
 
   it("fails clean with a host hint when the audio track doesn't exist", async () => {
@@ -176,10 +174,7 @@ describe("add_sfx_to_timeline", () => {
       };
     };
     const tool = createAddSfxToTimelineTool(mockHost({ fps: 30, insert }), "/cwd");
-    const r = await tool.execute(
-      { sfx: "whoosh", cutPoints: [1, 2, 3] },
-      ctx,
-    );
+    const r = await tool.execute({ sfx: "whoosh", cutPoints: [1, 2, 3] }, ctx);
     const out = JSON.parse(r as string) as { inserted: number; failed?: number };
     expect(out.inserted).toBe(2);
     expect(out.failed).toBe(1);
@@ -202,10 +197,7 @@ describe("add_sfx_to_timeline", () => {
 
   it("propagates unknown SFX name errors with the bundled list in the hint", async () => {
     const tool = createAddSfxToTimelineTool(mockHost({ fps: 30 }), "/cwd");
-    const r = await tool.execute(
-      { sfx: "notarealsfx", cutPoints: [1] },
-      ctx,
-    );
+    const r = await tool.execute({ sfx: "notarealsfx", cutPoints: [1] }, ctx);
     expect(r).toMatch(/error: unknown SFX name/);
     expect(r).toMatch(/bundled SFX name/);
   });

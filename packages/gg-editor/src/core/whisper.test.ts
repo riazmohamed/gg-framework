@@ -3,6 +3,7 @@ import {
   detectApiKey,
   detectLocalWhisper,
   openAIResponseToTranscript,
+  parseTranscript,
   planOpenAIRequest,
   regroupTokensIntoSegments,
   whisperxJsonToTranscript,
@@ -300,5 +301,145 @@ describe("regroupTokensIntoSegments", () => {
     expect(segs).toHaveLength(1);
     expect(segs[0].words).toHaveLength(2);
     expect(segs[0].text).toBe("hi there.");
+  });
+});
+
+describe("parseTranscript", () => {
+  const validRaw = JSON.stringify({
+    language: "en",
+    durationSec: 30,
+    segments: [
+      { start: 0, end: 5, text: "Hello world" },
+      { start: 5, end: 10, text: "How are you" },
+    ],
+  });
+
+  it("returns a valid Transcript for well-formed input", () => {
+    const t = parseTranscript(validRaw);
+    expect(t.language).toBe("en");
+    expect(t.durationSec).toBe(30);
+    expect(t.segments).toHaveLength(2);
+    expect(t.segments[0].text).toBe("Hello world");
+  });
+
+  it("accepts an empty segments array", () => {
+    const t = parseTranscript(JSON.stringify({ language: "en", durationSec: 0, segments: [] }));
+    expect(t.segments).toHaveLength(0);
+  });
+
+  it("passes through optional word-level timings", () => {
+    const raw = JSON.stringify({
+      language: "en",
+      durationSec: 5,
+      segments: [
+        {
+          start: 0,
+          end: 5,
+          text: "hello",
+          words: [{ start: 0, end: 0.5, text: "hello" }],
+        },
+      ],
+    });
+    const t = parseTranscript(raw);
+    expect(t.segments[0].words).toHaveLength(1);
+  });
+
+  it("throws on non-JSON input", () => {
+    expect(() => parseTranscript("not json")).toThrow(/Invalid transcript: not valid JSON/);
+  });
+
+  it("throws when root is an array, not an object", () => {
+    expect(() => parseTranscript("[]")).toThrow(/Invalid transcript: root value must be an object/);
+  });
+
+  it("throws when language is missing", () => {
+    const raw = JSON.stringify({ durationSec: 10, segments: [] });
+    expect(() => parseTranscript(raw)).toThrow(
+      /Invalid transcript: missing or non-string 'language'/,
+    );
+  });
+
+  it("throws when language is not a string", () => {
+    const raw = JSON.stringify({ language: 42, durationSec: 10, segments: [] });
+    expect(() => parseTranscript(raw)).toThrow(
+      /Invalid transcript: missing or non-string 'language'/,
+    );
+  });
+
+  it("throws when durationSec is missing", () => {
+    const raw = JSON.stringify({ language: "en", segments: [] });
+    expect(() => parseTranscript(raw)).toThrow(
+      /Invalid transcript: missing or invalid 'durationSec'/,
+    );
+  });
+
+  it("throws when durationSec is not a number", () => {
+    const raw = JSON.stringify({ language: "en", durationSec: "30s", segments: [] });
+    expect(() => parseTranscript(raw)).toThrow(
+      /Invalid transcript: missing or invalid 'durationSec'/,
+    );
+  });
+
+  it("throws when durationSec is negative", () => {
+    const raw = JSON.stringify({ language: "en", durationSec: -1, segments: [] });
+    expect(() => parseTranscript(raw)).toThrow(
+      /Invalid transcript: missing or invalid 'durationSec'/,
+    );
+  });
+
+  it("throws when durationSec is null", () => {
+    const raw = JSON.stringify({ language: "en", durationSec: null, segments: [] });
+    expect(() => parseTranscript(raw)).toThrow(
+      /Invalid transcript: missing or invalid 'durationSec'/,
+    );
+  });
+
+  it("throws when segments is missing", () => {
+    const raw = JSON.stringify({ language: "en", durationSec: 10 });
+    expect(() => parseTranscript(raw)).toThrow(/'segments' must be an array/);
+  });
+
+  it("throws when segments is not an array", () => {
+    const raw = JSON.stringify({ language: "en", durationSec: 10, segments: {} });
+    expect(() => parseTranscript(raw)).toThrow(/'segments' must be an array/);
+  });
+
+  it("throws when a segment is missing start", () => {
+    const raw = JSON.stringify({
+      language: "en",
+      durationSec: 10,
+      segments: [{ end: 5, text: "hi" }],
+    });
+    expect(() => parseTranscript(raw)).toThrow(/segments\[0\]\.start must be a number/);
+  });
+
+  it("throws when a segment is missing end", () => {
+    const raw = JSON.stringify({
+      language: "en",
+      durationSec: 10,
+      segments: [{ start: 0, text: "hi" }],
+    });
+    expect(() => parseTranscript(raw)).toThrow(/segments\[0\]\.end must be a number/);
+  });
+
+  it("throws when a segment text is not a string", () => {
+    const raw = JSON.stringify({
+      language: "en",
+      durationSec: 10,
+      segments: [{ start: 0, end: 5, text: null }],
+    });
+    expect(() => parseTranscript(raw)).toThrow(/segments\[0\]\.text must be a string/);
+  });
+
+  it("reports the correct index for a bad segment in a multi-segment array", () => {
+    const raw = JSON.stringify({
+      language: "en",
+      durationSec: 10,
+      segments: [
+        { start: 0, end: 2, text: "ok" },
+        { start: 2, end: 5 }, // missing text
+      ],
+    });
+    expect(() => parseTranscript(raw)).toThrow(/segments\[1\]\.text must be a string/);
   });
 });

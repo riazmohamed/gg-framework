@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Box, Text, useApp, useInput, render } from "ink";
 import chalk from "chalk";
-import { discoverProjects, type DiscoveredProject } from "./discover.js";
+import { discoverProjects, type DiscoveredProject, type ProjectSource } from "./discover.js";
 import { loadLinks, saveLinks, type LinkedProject } from "./links.js";
 import { BossBanner } from "./banner.js";
 import { COLORS, clearScreen } from "./branding.js";
@@ -13,6 +13,16 @@ interface LinkScreenProps {
 }
 
 const VISIBLE_ROWS = 12;
+
+function sourceBadge(sources: ProjectSource[]): { label: string; color: string } {
+  // Fixed-width 5-char badges so names stay aligned across rows.
+  if (sources.length > 1) return { label: "[mix]", color: COLORS.success };
+  const only = sources[0];
+  if (only === "ggcoder") return { label: "[gg ]", color: COLORS.accent };
+  if (only === "claude-code") return { label: "[cc ]", color: COLORS.warning };
+  if (only === "codex") return { label: "[cx ]", color: COLORS.primary };
+  return { label: "[?? ]", color: COLORS.textDim };
+}
 
 function LinkScreen({ projects, initialSelected, onDone }: LinkScreenProps): React.ReactElement {
   const [cursor, setCursor] = useState(0);
@@ -101,11 +111,14 @@ function LinkScreen({ projects, initialSelected, onDone }: LinkScreenProps): Rea
           const arrow = isCursor ? "❯" : " ";
           const nameColor = isCursor ? COLORS.primary : isSelected ? COLORS.success : COLORS.text;
           const checkboxColor = isSelected ? COLORS.success : COLORS.textDim;
+          const badge = sourceBadge(p.sources);
           return (
             <Box key={p.path}>
               <Text color={COLORS.primary}>{arrow}</Text>
               <Text> </Text>
               <Text color={checkboxColor}>{checkbox}</Text>
+              <Text> </Text>
+              <Text color={badge.color}>{badge.label}</Text>
               <Text> </Text>
               <Text color={nameColor} bold={isCursor}>
                 {p.name}

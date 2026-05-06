@@ -10,6 +10,7 @@ import {
   type LoudnessTarget,
 } from "../core/loudness.js";
 import { checkFfmpeg, probeMedia } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const PlatformEnum = z.enum([
   "youtube",
@@ -52,7 +53,7 @@ export function createNormalizeLoudnessTool(
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const inAbs = resolvePath(cwd, input);
-        const outAbs = resolvePath(cwd, output);
+        const outAbs = safeOutputPath(cwd, output);
         if (inAbs === outAbs) {
           return err("input and output paths are identical", "use a different output path");
         }

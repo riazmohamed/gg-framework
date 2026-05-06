@@ -606,6 +606,78 @@ export function openAIResponseToTranscript(
   };
 }
 
+// ── Transcript parsing + validation ──────────────────────────
+
+/**
+ * Parse and validate a transcript JSON string.
+ *
+ * Validates that the result has the shape written by `transcribe()`:
+ *   - `language`   — string
+ *   - `durationSec` — finite number ≥ 0
+ *   - `segments`   — array (may be empty; each element must have start/end/text)
+ *
+ * Throws a descriptive Error on any mismatch so callers can surface it
+ * as a tool error instead of a cryptic `Cannot read property of undefined`
+ * deep inside filler-word or caption logic.
+ *
+ * Does NOT validate optional `words` inside segments — the tools that
+ * need word-level timings do their own `hasWords` check after calling this.
+ */
+export function parseTranscript(raw: string): Transcript {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`Invalid transcript: not valid JSON — ${(e as Error).message}`, { cause: e });
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Invalid transcript: root value must be an object");
+  }
+
+  const obj = parsed as Record<string, unknown>;
+
+  if (typeof obj.language !== "string") {
+    throw new Error(
+      `Invalid transcript: missing or non-string 'language' (got ${JSON.stringify(obj.language)})`,
+    );
+  }
+
+  if (typeof obj.durationSec !== "number" || !isFinite(obj.durationSec) || obj.durationSec < 0) {
+    throw new Error(
+      `Invalid transcript: missing or invalid 'durationSec' (got ${JSON.stringify(obj.durationSec)}) — must be a finite number ≥ 0`,
+    );
+  }
+
+  if (!Array.isArray(obj.segments)) {
+    throw new Error(`Invalid transcript: 'segments' must be an array (got ${typeof obj.segments})`);
+  }
+
+  for (let i = 0; i < obj.segments.length; i++) {
+    const seg = obj.segments[i] as Record<string, unknown>;
+    if (seg === null || typeof seg !== "object" || Array.isArray(seg)) {
+      throw new Error(`Invalid transcript: segments[${i}] is not an object`);
+    }
+    if (typeof seg.start !== "number") {
+      throw new Error(
+        `Invalid transcript: segments[${i}].start must be a number (got ${JSON.stringify(seg.start)})`,
+      );
+    }
+    if (typeof seg.end !== "number") {
+      throw new Error(
+        `Invalid transcript: segments[${i}].end must be a number (got ${JSON.stringify(seg.end)})`,
+      );
+    }
+    if (typeof seg.text !== "string") {
+      throw new Error(
+        `Invalid transcript: segments[${i}].text must be a string (got ${JSON.stringify(seg.text)})`,
+      );
+    }
+  }
+
+  return parsed as Transcript;
+}
+
 function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];

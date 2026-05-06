@@ -6,6 +6,7 @@ import type { AgentTool } from "@abukhaled/gg-agent";
 import { resolveApiKey } from "../core/auth/api-keys.js";
 import { compact, err } from "../core/format.js";
 import { safeOutputPath } from "../core/safe-paths.js";
+import { parseTranscript } from "../core/whisper.js";
 import type { Transcript, TranscriptSegment } from "../core/whisper.js";
 
 /**
@@ -33,7 +34,9 @@ const SuggestBrollParams = z.object({
     .number()
     .min(0)
     .optional()
-    .describe("Window start (seconds). Default 0. The LLM only sees text inside [startSec, endSec)."),
+    .describe(
+      "Window start (seconds). Default 0. The LLM only sees text inside [startSec, endSec).",
+    ),
   endSec: z
     .number()
     .min(0)
@@ -73,9 +76,7 @@ const SuggestBrollParams = z.object({
   model: z
     .string()
     .optional()
-    .describe(
-      "OpenAI chat model used for the noun-phrase extraction step. Default 'gpt-4o-mini'.",
-    ),
+    .describe("OpenAI chat model used for the noun-phrase extraction step. Default 'gpt-4o-mini'."),
   download: z
     .boolean()
     .optional()
@@ -168,15 +169,9 @@ export function createSuggestBrollTool(cwd: string): AgentTool<typeof SuggestBro
 
         let transcript: Transcript;
         try {
-          transcript = JSON.parse(raw) as Transcript;
+          transcript = parseTranscript(raw);
         } catch (e) {
-          return err(
-            `transcript is not valid JSON: ${(e as Error).message}`,
-            "regenerate via transcribe()",
-          );
-        }
-        if (!Array.isArray(transcript.segments)) {
-          return err("transcript missing segments[]", "regenerate via transcribe()");
+          return err((e as Error).message, "regenerate via transcribe()");
         }
 
         const startSec = args.startSec ?? 0;
@@ -457,11 +452,7 @@ function pickBestFile(files: PexelsVideoFile[] | undefined): PexelsVideoFile | u
   if (!Array.isArray(files) || files.length === 0) return undefined;
   const mp4 = files.filter((f) => f.file_type === "video/mp4");
   const pool = mp4.length > 0 ? mp4 : files;
-  return (
-    pool.find((f) => f.quality === "hd") ??
-    pool.find((f) => f.quality === "sd") ??
-    pool[0]
-  );
+  return pool.find((f) => f.quality === "hd") ?? pool.find((f) => f.quality === "sd") ?? pool[0];
 }
 
 interface DownloadOpts {

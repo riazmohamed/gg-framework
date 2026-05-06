@@ -95,4 +95,22 @@ describe("safeResolveOutputPath", () => {
     expect(USER_OUTPUT_DIR_NAME).toBe("gg-editor-out");
     expect(userOutputDir().endsWith(USER_OUTPUT_DIR_NAME)).toBe(true);
   });
+
+  // Regression: absolute escape paths must be rejected even when given to
+  // the redirect-aware variant. Earlier versions returned `{ path: requested,
+  // redirected: false }` for any non-sandbox absolute path, bypassing the
+  // cwd-confinement guard. The current implementation falls through to
+  // safeOutputPath() for non-sandbox paths so escapes throw.
+  it("rejects an absolute path outside the allowlist (e.g. /etc/passwd)", () => {
+    expect(() => safeResolveOutputPath("/tmp/cwd", "/etc/passwd")).toThrow(/outside allowed roots/);
+  });
+
+  it("accepts an absolute path that resolves under cwd", () => {
+    // Use a non-sandbox cwd so the result isn't redirected. ~/sample-project
+    // is the suite-wide cwd; an absolute path inside it should round-trip.
+    const target = resolvePath(cwd, "output.mp4");
+    const r = safeResolveOutputPath(cwd, target);
+    expect(r.redirected).toBe(false);
+    expect(r.path).toBe(target);
+  });
 });

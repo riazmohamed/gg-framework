@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { scoreClipInternal } from "../core/clip-scoring.js";
 import { compact, err } from "../core/format.js";
+import { parseTranscript } from "../core/whisper.js";
 import type { Transcript } from "../core/whisper.js";
 
 const ScoreClipParams = z.object({
@@ -66,11 +67,11 @@ export function createScoreClipTool(cwd: string): AgentTool<typeof ScoreClipPara
         }
         let t: Transcript;
         try {
-          t = JSON.parse(raw) as Transcript;
+          t = parseTranscript(raw);
         } catch (e) {
-          return err(`transcript is not valid JSON: ${(e as Error).message}`);
+          return err((e as Error).message);
         }
-        if (!Array.isArray(t.segments) || t.segments.length === 0) {
+        if (t.segments.length === 0) {
           return err("transcript has no segments", "rerun transcribe(...)");
         }
 

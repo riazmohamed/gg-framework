@@ -4,6 +4,7 @@ import type { AgentTool } from "@abukhaled/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, probeMedia, runFfmpeg } from "../core/media/ffmpeg.js";
 import { buildPunchInFilter, punchInsAfterCuts, type PunchInRange } from "../core/punch-in.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const PunchRangeSchema = z.object({
   startSec: z.number().min(0),
@@ -80,7 +81,7 @@ export function createPunchInTool(cwd: string): AgentTool<typeof PunchInParams> 
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const inAbs = resolvePath(cwd, args.input);
-        const outAbs = resolvePath(cwd, args.output);
+        const outAbs = safeOutputPath(cwd, args.output);
         if (inAbs === outAbs) {
           return err("output and input are identical", "use a different output path");
         }

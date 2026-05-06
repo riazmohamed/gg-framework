@@ -5,6 +5,7 @@ import type { AgentTool } from "@abukhaled/gg-agent";
 import { compact, err } from "../core/format.js";
 import { applyCleanup } from "../core/audio-cleanup.js";
 import { checkFfmpeg } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const CleanAudioParams = z.object({
   input: z.string().describe("Source media file."),
@@ -37,7 +38,7 @@ export function createCleanAudioTool(cwd: string): AgentTool<typeof CleanAudioPa
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const inAbs = resolvePath(cwd, input);
-        const outAbs = resolvePath(cwd, output);
+        const outAbs = safeOutputPath(cwd, output);
         if (inAbs === outAbs) {
           return err("input and output paths are identical", "use a different output path");
         }

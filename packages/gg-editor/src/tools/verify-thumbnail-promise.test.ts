@@ -4,9 +4,7 @@ import { createVerifyThumbnailPromiseTool, sampleTimes } from "./verify-thumbnai
 const ctx = {
   signal: new AbortController().signal,
   toolCallId: "t1",
-} as unknown as Parameters<
-  ReturnType<typeof createVerifyThumbnailPromiseTool>["execute"]
->[1];
+} as unknown as Parameters<ReturnType<typeof createVerifyThumbnailPromiseTool>["execute"]>[1];
 
 describe("sampleTimes", () => {
   it("returns single sample at 0 when n=1", () => {
@@ -40,10 +38,7 @@ describe("verify_thumbnail_promise tool", () => {
   it("errors when OPENAI_API_KEY is missing", async () => {
     delete process.env.OPENAI_API_KEY;
     const tool = createVerifyThumbnailPromiseTool("/tmp");
-    const r = await tool.execute(
-      { thumbnail: "t.jpg", video: "v.mp4" },
-      ctx,
-    );
+    const r = await tool.execute({ thumbnail: "t.jpg", video: "v.mp4" }, ctx);
     expect(r as string).toMatch(/error/);
   });
 });

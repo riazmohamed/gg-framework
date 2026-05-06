@@ -34,8 +34,20 @@ export interface PythonCmd {
  *   3. py -3     — Windows launcher (when only the launcher is on PATH)
  *
  * We verify each candidate prints a 3.x version before accepting it.
+ *
+ * The first successful probe is cached for the lifetime of the process.
+ * Python-backed tools call this on every invocation (preflight + the actual
+ * sidecar spawn inside `runPython`), so without a cache a single agent turn
+ * could spawn 4+ synchronous subprocesses just to re-confirm the same
+ * interpreter. Negative results are NOT cached — if Python wasn't on PATH
+ * when the process started but the user installed it mid-session, the next
+ * call will probe again and pick it up.
  */
+let cached: PythonCmd | undefined;
+
 export function findPython(): PythonCmd | undefined {
+  if (cached) return cached;
+
   const candidates: PythonCmd[] = [
     { cmd: "python3", args: [] },
     { cmd: "python", args: [] },
@@ -57,11 +69,21 @@ export function findPython(): PythonCmd | undefined {
         });
         const prefix =
           pr.status === 0 && typeof pr.stdout === "string" ? pr.stdout.trim() : undefined;
-        return prefix ? { ...c, prefix } : c;
+        cached = prefix ? { ...c, prefix } : c;
+        return cached;
       }
     }
   }
   return undefined;
+}
+
+/**
+ * Test-only: clear the cached interpreter so subsequent calls re-probe.
+ * Production code never needs this — there's no path where Python
+ * disappears mid-process and we need to rediscover.
+ */
+export function __resetPythonCacheForTests(): void {
+  cached = undefined;
 }
 
 export interface RunPythonResult {

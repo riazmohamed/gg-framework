@@ -35,9 +35,9 @@ describe("buildSlidingWindows", () => {
   });
 
   it("returns [] for zero-duration transcripts", () => {
-    expect(
-      buildSlidingWindows({ language: "en", durationSec: 0, segments: [] }, 60, 0),
-    ).toEqual([]);
+    expect(buildSlidingWindows({ language: "en", durationSec: 0, segments: [] }, 60, 0)).toEqual(
+      [],
+    );
   });
 
   it("rejects invalid args", () => {

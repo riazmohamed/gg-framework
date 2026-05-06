@@ -53,9 +53,33 @@ async function loadPlan(): Promise<BossTask[]> {
   }
 }
 
+/**
+ * Serialize concurrent persist() calls. With N workers in parallel, multiple
+ * task updates can fire in the same tick — writeFile is NOT atomic and racing
+ * writes leave the file half-overwritten (old bytes past the new content's
+ * end), which then fails JSON.parse and silently returns []. We chain every
+ * persist on this promise so writes happen one at a time.
+ */
+let persistChain: Promise<void> = Promise.resolve();
+
 async function persist(tasks: BossTask[]): Promise<void> {
-  await ensureDir();
-  await fs.writeFile(getPlanPath(), JSON.stringify({ tasks }, null, 2) + "\n", "utf-8");
+  // Capture the current state at call time so each queued write persists the
+  // snapshot it was asked to, even if state mutates further before this
+  // write's turn in the chain.
+  const snapshot = JSON.stringify({ tasks }, null, 2) + "\n";
+  const next = persistChain.then(async () => {
+    await ensureDir();
+    // Atomic write: write to a sibling .tmp then rename. POSIX rename(2) is
+    // atomic on the same filesystem — the destination either has the old
+    // content or the new content, never a half-written mix. Suffix includes
+    // pid so two ggboss processes don't clobber each other's tmp files.
+    const finalPath = getPlanPath();
+    const tmpPath = `${finalPath}.${process.pid}.tmp`;
+    await fs.writeFile(tmpPath, snapshot, "utf-8");
+    await fs.rename(tmpPath, finalPath);
+  });
+  persistChain = next.catch(() => undefined); // keep chain alive on errors
+  await next;
 }
 
 // ── Reactive state ─────────────────────────────────────────
@@ -99,11 +123,42 @@ function now(): string {
 // ── Public API (used by tools, overlay, orchestrator) ──────
 
 export const tasksStore = {
-  /** Hydrate state from disk on startup. Idempotent. */
+  /**
+   * Hydrate state from disk on startup. Also prunes terminal tasks (done +
+   * skipped) so the overlay doesn't pile up months of completed history, and
+   * resets stale `in_progress` rows back to `pending` — those represent tasks
+   * that were running when ggboss exited, so the worker never finished them
+   * and we don't have a result. Re-runs them next time `r` (or auto-chain)
+   * fires. Persists the cleaned list back to disk if anything changed.
+   */
   async load(): Promise<void> {
-    const tasks = await loadPlan();
-    state = { tasks, version: state.version + 1 };
+    const raw = await loadPlan();
+    const before = raw.length;
+    // Backfill missing status — older bug let update_task wipe status to
+    // undefined. Treat any task with no status (or an unrecognised one) as
+    // pending so the user can still run them. Then prune terminals + reset
+    // stale in_progress.
+    const VALID_STATUSES: TaskStatus[] = ["pending", "in_progress", "done", "blocked", "skipped"];
+    const normalized = raw.map((t) => {
+      const status = VALID_STATUSES.includes(t.status as TaskStatus)
+        ? (t.status as TaskStatus)
+        : ("pending" as TaskStatus);
+      return status === t.status ? t : { ...t, status, updatedAt: now() };
+    });
+    const cleaned = normalized
+      .filter((t) => t.status !== "done" && t.status !== "skipped")
+      .map((t) =>
+        t.status === "in_progress"
+          ? { ...t, status: "pending" as TaskStatus, updatedAt: now() }
+          : t,
+      );
+    state = { tasks: cleaned, version: state.version + 1 };
     notify();
+    // Only write back if we actually changed anything to avoid pointless
+    // touches to the file on every startup.
+    const changed =
+      cleaned.length !== before || cleaned.some((t, i) => t.status !== raw[i]?.status);
+    if (changed) await persist(cleaned);
   },
 
   /** Synchronous read. Used by boss tools that need to inspect/list. */
@@ -173,6 +228,23 @@ export const tasksStore = {
     return state.tasks
       .filter((t) => t.project === project && t.status === "pending")
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+  },
+
+  /**
+   * Find the next dispatchable task — pending OR blocked — for a project.
+   * Used by overlay's "r" (run all) so blocked tasks get retried alongside
+   * pending ones. Pending is preferred (lower priority value); blocked falls
+   * through if there are no pending ones.
+   */
+  nextDispatchable(project: string): BossTask | undefined {
+    const candidates = state.tasks
+      .filter((t) => t.project === project && (t.status === "pending" || t.status === "blocked"))
+      .sort((a, b) => {
+        // Pending before blocked — fresh work first, then retry attempts.
+        if (a.status !== b.status) return a.status === "pending" ? -1 : 1;
+        return a.createdAt.localeCompare(b.createdAt);
+      });
+    return candidates[0];
   },
 
   /** Test/dev reset — wipes in-memory + disk. */

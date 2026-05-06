@@ -1,7 +1,32 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
-import sharp from "sharp";
+import type SharpNamespace from "sharp";
+
+/**
+ * Lazy `sharp` resolver — sharp is a hefty native module (libvips). Loading
+ * it at module init pulls it into every consumer's bundle, which forces
+ * downstream packages that don't actually need image manipulation (gg-boss)
+ * to either ship it or break their bundlers. By gating the require behind
+ * a function called only by the image-handling helpers, we let unused code
+ * paths skip the import entirely — which lets gg-boss tsup-bundle cleanly
+ * without `sharp` in its dependency tree.
+ *
+ * Cached after first call so repeated image operations don't re-hit the
+ * dynamic import resolver.
+ */
+type SharpFn = typeof SharpNamespace;
+let sharpFn: SharpFn | null = null;
+async function loadSharp(): Promise<SharpFn> {
+  if (sharpFn) return sharpFn;
+  // Sharp publishes as CJS where `module.exports = sharpFunction`. Under
+  // ESM dynamic import, that lands on `.default` — but some tooling normalises
+  // it onto the namespace object directly. Try `.default` first, fall back
+  // to the namespace if not present.
+  const mod = (await import("sharp")) as unknown as { default?: SharpFn } & SharpFn;
+  sharpFn = mod.default ?? mod;
+  return sharpFn;
+}
 
 /** Anthropic's maximum image size in bytes (5 MB). */
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -150,6 +175,7 @@ export async function shrinkToFit(
   buffer: Buffer,
   mediaType: string,
 ): Promise<{ buffer: Buffer; mediaType: string }> {
+  const sharp = await loadSharp();
   const meta = await sharp(buffer).metadata();
   const origW = meta.width ?? 4096;
   const origH = meta.height ?? 4096;
@@ -169,7 +195,7 @@ export async function shrinkToFit(
   }
 
   // Determine output format from mediaType
-  const formatMap: Record<string, keyof sharp.FormatEnum> = {
+  const formatMap: Record<string, keyof SharpNamespace.FormatEnum> = {
     "image/png": "png",
     "image/jpeg": "jpeg",
     "image/gif": "gif",

@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, runFfmpeg } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const KenBurnsParams = z.object({
   input: z.string().describe("Source still image (.jpg / .png). Animated input also works."),
@@ -34,7 +35,7 @@ export function createKenBurnsTool(cwd: string): AgentTool<typeof KenBurnsParams
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const inAbs = resolvePath(cwd, p.input);
-        const outAbs = resolvePath(cwd, p.output);
+        const outAbs = safeOutputPath(cwd, p.output);
         if (inAbs === outAbs) return err("input and output paths are identical");
         const fps = p.fps ?? 30;
         const w = p.width ?? 1920;

@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, probeMedia, runFfmpeg } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 // xfade transitions verified against ffmpeg's filter manual + the wubloader
 // fixture list. ALL of these are accepted by mainline ffmpeg.
@@ -75,7 +76,7 @@ export function createCrossfadeVideosTool(cwd: string): AgentTool<typeof Crossfa
       try {
         const aAbs = resolvePath(cwd, inputA);
         const bAbs = resolvePath(cwd, inputB);
-        const outAbs = resolvePath(cwd, output);
+        const outAbs = safeOutputPath(cwd, output);
         if (aAbs === outAbs || bAbs === outAbs) {
           return err("output collides with an input");
         }

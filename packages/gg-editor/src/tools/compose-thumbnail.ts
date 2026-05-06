@@ -6,11 +6,7 @@ import { loadBrandKit } from "../core/brand-kit.js";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg } from "../core/media/ffmpeg.js";
 import { safeResolveOutputPath } from "../core/safe-paths.js";
-import {
-  composeThumbnailFrame,
-  escapeDrawtextValue,
-  pickFont,
-} from "../core/thumbnail-compose.js";
+import { composeThumbnailFrame, escapeDrawtextValue, pickFont } from "../core/thumbnail-compose.js";
 
 const ComposeThumbnailParams = z.object({
   input: z.string().describe("Source video."),

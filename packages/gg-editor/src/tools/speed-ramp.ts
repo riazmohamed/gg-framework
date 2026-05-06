@@ -5,6 +5,7 @@ import type { AgentTool } from "@abukhaled/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, runFfmpeg } from "../core/media/ffmpeg.js";
 import { buildAtempo, buildSetpts } from "../core/speed-ramp.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const SpeedPointSchema = z.object({
   atSec: z.number().min(0).describe("Time in the input where this segment begins."),
@@ -41,7 +42,7 @@ export function createSpeedRampTool(cwd: string): AgentTool<typeof SpeedRampPara
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
       try {
         const inAbs = resolvePath(cwd, input);
-        const outAbs = resolvePath(cwd, output);
+        const outAbs = safeOutputPath(cwd, output);
         if (inAbs === outAbs) {
           return err("input and output paths are identical");
         }

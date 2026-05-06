@@ -30,30 +30,21 @@ describe("score_clip tool", () => {
   it("errors when OPENAI_API_KEY is missing", async () => {
     delete process.env.OPENAI_API_KEY;
     const tool = createScoreClipTool("/tmp");
-    const r = await tool.execute(
-      { transcript: "no.json", startSec: 0, endSec: 10 },
-      ctx,
-    );
+    const r = await tool.execute({ transcript: "no.json", startSec: 0, endSec: 10 }, ctx);
     expect(r as string).toMatch(/^error:.*OPENAI_API_KEY/);
   });
 
   it("errors when endSec <= startSec", async () => {
     process.env.OPENAI_API_KEY = "k";
     const tool = createScoreClipTool("/tmp");
-    const r = await tool.execute(
-      { transcript: "no.json", startSec: 5, endSec: 5 },
-      ctx,
-    );
+    const r = await tool.execute({ transcript: "no.json", startSec: 5, endSec: 5 }, ctx);
     expect(r as string).toMatch(/^error:.*startSec/);
   });
 
   it("errors when transcript file is missing", async () => {
     process.env.OPENAI_API_KEY = "k";
     const tool = createScoreClipTool("/tmp");
-    const r = await tool.execute(
-      { transcript: "no/such/file.json", startSec: 0, endSec: 10 },
-      ctx,
-    );
+    const r = await tool.execute({ transcript: "no/such/file.json", startSec: 0, endSec: 10 }, ctx);
     expect(r as string).toMatch(/^error:.*cannot read/);
   });
 
@@ -62,10 +53,7 @@ describe("score_clip tool", () => {
     const dir = mkdtempSync(join(tmpdir(), "gg-sc-"));
     writeTranscript(dir, { language: "en", durationSec: 10, segments: [] });
     const tool = createScoreClipTool(dir);
-    const r = await tool.execute(
-      { transcript: "t.json", startSec: 0, endSec: 5 },
-      ctx,
-    );
+    const r = await tool.execute({ transcript: "t.json", startSec: 0, endSec: 5 }, ctx);
     expect(r as string).toMatch(/^error:.*no segments/);
   });
 
@@ -104,10 +92,7 @@ describe("score_clip tool", () => {
       })) as unknown as typeof fetch,
     );
     const tool = createScoreClipTool(dir);
-    const r = await tool.execute(
-      { transcript: "t.json", startSec: 0, endSec: 60 },
-      ctx,
-    );
+    const r = await tool.execute({ transcript: "t.json", startSec: 0, endSec: 60 }, ctx);
     const parsed = JSON.parse(r as string);
     expect(parsed.score).toBeGreaterThan(0);
     expect(parsed.score).toBeLessThanOrEqual(100);

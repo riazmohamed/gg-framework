@@ -102,7 +102,17 @@
 
     if (req.method === "GET" && req.url === "/health") {
       res.writeHead(200);
-      res.end(JSON.stringify({ ok: true, product: "gg-editor-premiere-panel", port: port }));
+      // `kind` lets the gg-editor bridge tell CEP panels apart from a future
+      // UXP panel (both speak the same /rpc protocol). Useful for surfacing
+      // the Sept 2026 ExtendScript sunset to users still on CEP.
+      res.end(
+        JSON.stringify({
+          ok: true,
+          product: "gg-editor-premiere-panel",
+          port: port,
+          kind: "cep",
+        }),
+      );
       return;
     }
 

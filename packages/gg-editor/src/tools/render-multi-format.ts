@@ -53,7 +53,10 @@ const RenderMultiFormatParams = z.object({
     .describe(
       "x264/x265 quality (lower=better). Default 20. 18=visually lossless, 23=broadcast default.",
     ),
-  audioBitrate: z.string().optional().describe("AAC bitrate, e.g. '192k' (default), '128k', '256k'."),
+  audioBitrate: z
+    .string()
+    .optional()
+    .describe("AAC bitrate, e.g. '192k' (default), '128k', '256k'."),
   parallel: z
     .boolean()
     .optional()

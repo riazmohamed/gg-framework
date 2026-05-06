@@ -1,7 +1,17 @@
 import { Agent, type AgentTool } from "@abukhaled/gg-agent";
 import type { Usage } from "@abukhaled/gg-ai";
 import type { VideoHost } from "./hosts/types.js";
-import { createEditorTools } from "../tools/index.js";
+import {
+  createGetMarkersTool,
+  createGetTimelineTool,
+  createHostInfoTool,
+  createProbeMediaTool,
+  createReadSkillTool,
+  createReadTranscriptTool,
+  createScoreShotTool,
+} from "../tools/index.js";
+import { discoverSkills, type SkillSource } from "./skills-loader.js";
+import { SKILLS } from "../skills.js";
 
 /**
  * Self-critique pass over the timeline + transcripts.
@@ -13,17 +23,6 @@ import { createEditorTools } from "../tools/index.js";
  * Token cost: a sub-agent over many turns can burn context; we cap at
  * maxTurns=10 by default.
  */
-
-/** Tools the reviewer is allowed to call. Strictly read-only. */
-const READ_ONLY_TOOL_NAMES = new Set([
-  "host_info",
-  "get_timeline",
-  "get_markers",
-  "read_transcript",
-  "score_shot",
-  "probe_media",
-  "read_skill",
-]);
 
 export interface ReviewFlag {
   severity: "ok" | "warn" | "block";
@@ -80,12 +79,31 @@ severity:
 
 Be direct. Don't praise the work just to be nice. If it's good, say "ok". If it's not, say what's wrong.`;
 
+/**
+ * Build only the 6 read-only tools needed by the reviewer, without instantiating
+ * the full ~100-tool set. Exported so callers can compose a reviewer independently.
+ */
+export function createReadOnlyEditorTools(
+  host: VideoHost,
+  cwd: string,
+  skills?: SkillSource[],
+): AgentTool[] {
+  const resolvedSkills = skills ?? discoverSkills({ cwd, bundled: Object.values(SKILLS) });
+  return [
+    createHostInfoTool(host),
+    createGetTimelineTool(host),
+    createGetMarkersTool(host),
+    createReadTranscriptTool(cwd),
+    createScoreShotTool(cwd),
+    createProbeMediaTool(cwd),
+    createReadSkillTool(resolvedSkills),
+  ];
+}
+
 export async function runReview(opts: ReviewOptions): Promise<ReviewResult> {
   const { intent, focus, host, cwd, config, signal } = opts;
 
-  // Build the read-only tool subset by name-allowlist filter.
-  const allTools = createEditorTools({ host, cwd });
-  const tools: AgentTool[] = allTools.filter((t) => READ_ONLY_TOOL_NAMES.has(t.name));
+  const tools = createReadOnlyEditorTools(host, cwd);
 
   const userPrompt = [
     `INTENT: ${intent}`,

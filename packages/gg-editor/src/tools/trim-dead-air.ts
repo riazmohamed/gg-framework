@@ -82,15 +82,7 @@ export function createTrimDeadAirTool(cwd: string): AgentTool<typeof TrimDeadAir
 
         // Run silencedetect on the input.
         const detect = await runFfmpeg(
-          [
-            "-i",
-            inAbs,
-            "-af",
-            `silencedetect=noise=${threshDb}dB:d=${minSil}`,
-            "-f",
-            "null",
-            "-",
-          ],
+          ["-i", inAbs, "-af", `silencedetect=noise=${threshDb}dB:d=${minSil}`, "-f", "null", "-"],
           { signal: ctx.signal },
         );
         // silencedetect writes to stderr; non-zero exit on a normal run is unusual but tolerated.
@@ -104,7 +96,9 @@ export function createTrimDeadAirTool(cwd: string): AgentTool<typeof TrimDeadAir
             "loosen thresholdDb (e.g. -40) or shorten minSilenceSec",
           );
         }
-        const removedSec = +(totalSec - keeps.reduce((a, k) => a + (k.endSec - k.startSec), 0)).toFixed(3);
+        const removedSec = +(
+          totalSec - keeps.reduce((a, k) => a + (k.endSec - k.startSec), 0)
+        ).toFixed(3);
 
         mkdirSync(dirname(outAbs), { recursive: true });
 
@@ -136,7 +130,10 @@ export function createTrimDeadAirTool(cwd: string): AgentTool<typeof TrimDeadAir
         ];
         const r = await runFfmpeg(ffArgs, { signal: ctx.signal });
         if (r.code !== 0) {
-          return err(`ffmpeg exited ${r.code}`, "check that the input has both video and audio streams");
+          return err(
+            `ffmpeg exited ${r.code}`,
+            "check that the input has both video and audio streams",
+          );
         }
         return compact({
           ok: true,
@@ -145,7 +142,10 @@ export function createTrimDeadAirTool(cwd: string): AgentTool<typeof TrimDeadAir
           totalSec,
           removedSec,
           kept: keeps.length,
-          keeps: keeps.map((k) => ({ startSec: +k.startSec.toFixed(3), endSec: +k.endSec.toFixed(3) })),
+          keeps: keeps.map((k) => ({
+            startSec: +k.startSec.toFixed(3),
+            endSec: +k.endSec.toFixed(3),
+          })),
         });
       } catch (e) {
         return err((e as Error).message);
@@ -221,7 +221,8 @@ export function computeKeeps(
  * them into a single video+audio output labelled [v][a].
  */
 export function buildTrimConcatFilter(keeps: Array<{ startSec: number; endSec: number }>): string {
-  if (keeps.length === 0) throw new Error("buildTrimConcatFilter: at least one keep range required");
+  if (keeps.length === 0)
+    throw new Error("buildTrimConcatFilter: at least one keep range required");
   if (keeps.length === 1) {
     const k = keeps[0];
     return (

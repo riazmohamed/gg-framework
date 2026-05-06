@@ -203,7 +203,6 @@ export function formatGgEditorDetail(
     case "concat_videos":
     case "add_fades":
     case "crossfade_videos":
-    case "transition_videos":
     case "generate_gif":
     case "overlay_watermark":
     case "compose_thumbnail":
@@ -217,7 +216,7 @@ export function formatGgEditorDetail(
     case "generate_outro":
       return fileArg(args, "output");
     case "transition_videos":
-      return args.preset ? String(args.preset) : undefined;
+      return args.preset ? String(args.preset) : fileArg(args, "output");
 
     // Retention pipeline
     case "cut_filler_words":
@@ -289,7 +288,11 @@ export function formatGgEditorDetail(
     case "multicam_sync": {
       const inputs = Array.isArray(args.inputs) ? (args.inputs as string[]) : [];
       const method = args.method ? `, ${args.method}` : "";
-      return inputs.length ? `${inputs.length} sources${method}` : args.method ? String(args.method) : undefined;
+      return inputs.length
+        ? `${inputs.length} sources${method}`
+        : args.method
+          ? String(args.method)
+          : undefined;
     }
     case "detect_speaker_changes":
       return fileArg(args, "transcript");
@@ -416,7 +419,8 @@ export function formatGgEditorInline(
         // Result shape from get_timeline: {name, fps, durationFrames, total, head, tail, ...}
         const total = typeof obj.total === "number" ? obj.total : undefined;
         const fps = typeof obj.fps === "number" ? obj.fps : undefined;
-        const dur = typeof obj.durationFrames === "number" && fps ? obj.durationFrames / fps : undefined;
+        const dur =
+          typeof obj.durationFrames === "number" && fps ? obj.durationFrames / fps : undefined;
         const parts: string[] = [];
         if (total !== undefined) parts.push(`${total} clip${total === 1 ? "" : "s"}`);
         if (dur !== undefined) parts.push(sec(dur));
@@ -461,10 +465,6 @@ export function formatGgEditorInline(
         const host = obj.host;
         const ok = obj.available;
         return host ? `${host}${ok === false ? " (offline)" : ""}` : undefined;
-      }
-      case "get_markers": {
-        const total = obj.total ?? (Array.isArray(obj.head) ? obj.head.length : 0);
-        return total !== undefined ? `${total} marker${total === 1 ? "" : "s"}` : undefined;
       }
       default:
         // Generic compact() shape — surface the `path` if present.

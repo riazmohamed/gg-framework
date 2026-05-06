@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, probeMedia, runFfmpeg } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const AddFadesParams = z.object({
   input: z.string().describe("Source video file."),
@@ -37,7 +38,7 @@ export function createAddFadesTool(cwd: string): AgentTool<typeof AddFadesParams
       }
       try {
         const inAbs = resolvePath(cwd, input);
-        const outAbs = resolvePath(cwd, output);
+        const outAbs = safeOutputPath(cwd, output);
         if (inAbs === outAbs) {
           return err("input and output paths are identical", "pick a different output");
         }

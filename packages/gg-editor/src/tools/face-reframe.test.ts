@@ -149,7 +149,9 @@ describe("face_reframe tool", () => {
     vi.spyOn(ffmpegMod, "checkFfmpeg").mockReturnValue(true);
     vi.spyOn(pythonMod, "findPython").mockReturnValue({ cmd: "python3", args: [] });
     vi.spyOn(faceCore, "analyzeReframe").mockRejectedValue(
-      new Error("missing python dep: mediapipe; install: pip install opencv-python mediapipe scenedetect numpy"),
+      new Error(
+        "missing python dep: mediapipe; install: pip install opencv-python mediapipe scenedetect numpy",
+      ),
     );
     const tool = createFaceReframeTool("/tmp");
     const r = await tool.execute(

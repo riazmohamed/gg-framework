@@ -7,9 +7,7 @@ import { createGenerateYouTubeMetadataTool } from "./generate-youtube-metadata.j
 const ctx = {
   signal: new AbortController().signal,
   toolCallId: "t1",
-} as unknown as Parameters<
-  ReturnType<typeof createGenerateYouTubeMetadataTool>["execute"]
->[1];
+} as unknown as Parameters<ReturnType<typeof createGenerateYouTubeMetadataTool>["execute"]>[1];
 
 function writeTranscript(dir: string, payload: unknown): string {
   const p = join(dir, "t.json");

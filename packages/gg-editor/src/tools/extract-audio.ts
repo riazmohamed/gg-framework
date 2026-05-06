@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { clip, err } from "../core/format.js";
 import { checkFfmpeg, runFfmpeg } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const ExtractAudioParams = z.object({
   input: z.string(),
@@ -19,17 +20,21 @@ export function createExtractAudioTool(cwd: string): AgentTool<typeof ExtractAud
     parameters: ExtractAudioParams,
     async execute({ input, output, sampleRate = 16000 }, ctx) {
       if (!checkFfmpeg()) return err("ffmpeg not on PATH", "install ffmpeg");
-      const inAbs = resolvePath(cwd, input);
-      const outAbs = resolvePath(cwd, output);
-      const r = await runFfmpeg(
-        ["-i", inAbs, "-vn", "-ac", "1", "-ar", String(sampleRate), "-c:a", "pcm_s16le", outAbs],
-        { signal: ctx.signal },
-      );
-      if (r.code !== 0) {
-        const tail = r.stderr.split("\n").filter(Boolean).slice(-3).join(" | ");
-        return err(`ffmpeg exited ${r.code}: ${clip(tail, 200)}`);
+      try {
+        const inAbs = resolvePath(cwd, input);
+        const outAbs = safeOutputPath(cwd, output);
+        const r = await runFfmpeg(
+          ["-i", inAbs, "-vn", "-ac", "1", "-ar", String(sampleRate), "-c:a", "pcm_s16le", outAbs],
+          { signal: ctx.signal },
+        );
+        if (r.code !== 0) {
+          const tail = r.stderr.split("\n").filter(Boolean).slice(-3).join(" | ");
+          return err(`ffmpeg exited ${r.code}: ${clip(tail, 200)}`);
+        }
+        return `ok:${outAbs}`;
+      } catch (e) {
+        return err((e as Error).message);
       }
-      return `ok:${outAbs}`;
     },
   };
 }

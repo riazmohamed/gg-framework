@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, runFfmpeg } from "../core/media/ffmpeg.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const BurnSubtitlesParams = z.object({
   input: z.string().describe("Source video file."),
@@ -40,7 +41,7 @@ export function createBurnSubtitlesTool(cwd: string): AgentTool<typeof BurnSubti
       try {
         const inAbs = resolvePath(cwd, input);
         const subAbs = resolvePath(cwd, subtitles);
-        const outAbs = resolvePath(cwd, output);
+        const outAbs = safeOutputPath(cwd, output);
         if (inAbs === outAbs) {
           return err("input and output paths are identical", "use a different output path");
         }

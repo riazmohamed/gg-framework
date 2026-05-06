@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { useTheme } from "@abukhaled/ogcoder/ui/theme";
 import { useTasksState, tasksStore, type BossTask, type TaskStatus } from "./tasks-store.js";
+import { bossStore } from "./boss-store.js";
 import { projectColor } from "./colors.js";
 import { COLORS } from "./branding.js";
 import type { GGBoss } from "./orchestrator.js";
@@ -78,6 +79,22 @@ export function BossTasksOverlay({
 
   const selected = flatTasks[selectedIndex];
 
+  // Cap how many tasks render at once so the live-area height stays bounded.
+  // Ink's log-update mispositions the cursor when the live area is much
+  // larger than the next frame — going from a 30-line tasks pane back to a
+  // 5-line chat chrome was clipping the user's scrollback above on close.
+  // Mirrors ggcoder's `maxVisible = 15` cap. Selection stays visible by
+  // scrolling the window when the cursor reaches the bottom.
+  const MAX_VISIBLE = 12;
+  const startIdx = Math.max(
+    0,
+    Math.min(flatTasks.length - MAX_VISIBLE, selectedIndex - MAX_VISIBLE + 1, selectedIndex),
+  );
+  const endIdx = Math.min(flatTasks.length, startIdx + MAX_VISIBLE);
+  const visibleIdSet = new Set(flatTasks.slice(startIdx, endIdx).map((t) => t.id));
+  const showingTop = startIdx > 0;
+  const showingBottom = endIdx < flatTasks.length;
+
   useInput((input, key) => {
     if (key.escape) {
       onClose();
@@ -96,19 +113,31 @@ export function BossTasksOverlay({
       return;
     }
     if (input === "r") {
-      let dispatched = 0;
+      // Close immediately so the user lands back in the chat view and can
+      // watch worker activity stream in. Dispatch fires in the background;
+      // worker_turn_complete events flow into history as normal.
+      onClose();
       void (async (): Promise<void> => {
+        const dispatched: { project: string; title: string }[] = [];
         for (const w of workers) {
-          const next = tasksStore.nextPending(w.name);
+          // nextDispatchable picks pending OR blocked — so blocked tasks get
+          // retried alongside fresh pending ones. Pending is preferred.
+          const next = tasksStore.nextDispatchable(w.name);
           if (!next) continue;
+          // Reset blocked → pending so the dispatch path's in_progress flip
+          // lands on a clean state and not "blocked → in_progress" (which
+          // looks like a status going backwards in the overlay).
+          if (next.status === "blocked") {
+            await tasksStore.update(next.id, { status: "pending", notes: undefined });
+          }
           const res = await boss.dispatchTaskById(next.id);
-          if (res.ok) dispatched++;
+          if (res.ok) dispatched.push({ project: w.name, title: next.title });
         }
-        showStatus(
-          dispatched > 0
-            ? `Dispatched ${dispatched} pending task${dispatched === 1 ? "" : "s"}`
-            : "Nothing to run",
-        );
+        if (dispatched.length === 0) {
+          bossStore.appendInfo("No pending or blocked tasks to run.", "info");
+        } else {
+          bossStore.appendTaskDispatch(dispatched);
+        }
       })();
       return;
     }
@@ -120,16 +149,15 @@ export function BossTasksOverlay({
   const blockedCount = tasks.filter((t) => t.status === "blocked").length;
 
   return (
-    <Box flexDirection="column" marginTop={1}>
-      {/* Section title — no banner; the main GG Boss banner above (in Static)
-          handles branding. Keeps banners from duplicating. */}
+    <Box flexDirection="column" marginTop={1} paddingX={1}>
+      {/* Single header line — the main GG Boss banner sits in scrollback
+          above (from <Static>), so we just announce the pane state here.
+          Inner BossBanner caused visible duplicates on toggle round-trips. */}
       <Box>
         <Text color={COLORS.primary} bold>
           Tasks
         </Text>
-        <Text color={theme.textDim}>{`  ·  ${tasks.length} total`}</Text>
-      </Box>
-      <Box>
+        <Text color={theme.textDim}>{`  ·  ${tasks.length} total  ·  `}</Text>
         <CountsRow
           theme={theme}
           done={doneCount}
@@ -149,10 +177,15 @@ export function BossTasksOverlay({
         </Box>
       )}
 
-      {/* Per-project sections */}
+      {showingTop && <Text color={theme.textDim}>{`  ↑ ${startIdx} more above`}</Text>}
+
+      {/* Per-project sections — only tasks in the visible window are rendered.
+          Sections with no visible tasks are hidden entirely so the layout
+          stays compact across scroll. */}
       {groupedTasks.map((group, gIdx) => {
         const startInFlat = groupedTasks.slice(0, gIdx).reduce((acc, g) => acc + g.tasks.length, 0);
-        if (group.tasks.length === 0) return null;
+        const visibleInSection = group.tasks.filter((t) => visibleIdSet.has(t.id));
+        if (visibleInSection.length === 0) return null;
         return (
           <Box key={group.project} flexDirection="column" marginTop={1}>
             <Text>
@@ -161,8 +194,8 @@ export function BossTasksOverlay({
               </Text>
               <Text color={theme.textDim}>{` · ${group.tasks.length}`}</Text>
             </Text>
-            {group.tasks.map((task, ti) => {
-              const realIdx = startInFlat + ti;
+            {visibleInSection.map((task) => {
+              const realIdx = startInFlat + group.tasks.indexOf(task);
               const isSelected = realIdx === selectedIndex;
               const prefix = isSelected ? "❯ " : "  ";
               const glyph = statusGlyph(task.status);
@@ -184,6 +217,10 @@ export function BossTasksOverlay({
           </Box>
         );
       })}
+
+      {showingBottom && (
+        <Text color={theme.textDim}>{`  ↓ ${flatTasks.length - endIdx} more below`}</Text>
+      )}
 
       {status && (
         <Box marginTop={1}>

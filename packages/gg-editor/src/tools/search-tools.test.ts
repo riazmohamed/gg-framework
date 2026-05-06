@@ -6,7 +6,10 @@ const FAKE_TOOLS: SearchableTool[] = [
   { name: "trim_dead_air", description: "Trim leading/trailing or all silence in one call" },
   { name: "write_srt", description: "SubRip caption writer (sentence + word-level)" },
   { name: "burn_subtitles", description: "Hardcode .srt or .ass into a video" },
-  { name: "generate_youtube_metadata", description: "Title, description, tags, chapters from a transcript" },
+  {
+    name: "generate_youtube_metadata",
+    description: "Title, description, tags, chapters from a transcript",
+  },
 ];
 
 const ctx = {

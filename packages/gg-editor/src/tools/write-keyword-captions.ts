@@ -7,6 +7,7 @@ import { injectEmojis } from "../core/emoji-captions.js";
 import { compact, err } from "../core/format.js";
 import { buildKeywordCaptions } from "../core/keyword-captions.js";
 import { safeOutputPath } from "../core/safe-paths.js";
+import { parseTranscript } from "../core/whisper.js";
 import type { Transcript } from "../core/whisper.js";
 
 const WriteKeywordCaptionsParams = z.object({
@@ -128,9 +129,9 @@ export function createWriteKeywordCaptionsTool(
         }
         let t: Transcript;
         try {
-          t = JSON.parse(raw) as Transcript;
+          t = parseTranscript(raw);
         } catch (e) {
-          return err(`transcript is not valid JSON: ${(e as Error).message}`);
+          return err((e as Error).message);
         }
 
         const lo = args.startSec ?? 0;

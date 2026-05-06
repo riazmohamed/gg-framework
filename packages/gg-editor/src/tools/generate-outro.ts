@@ -58,7 +58,9 @@ const GenerateOutroParams = z.object({
   logo: z
     .string()
     .optional()
-    .describe("Path to logo PNG. Defaults to brand.json logo. Optional — outro still renders without."),
+    .describe(
+      "Path to logo PNG. Defaults to brand.json logo. Optional — outro still renders without.",
+    ),
   width: z.number().int().positive().optional().describe("Output width. Default 1920."),
   height: z.number().int().positive().optional().describe("Output height. Default 1080."),
   fps: z.number().positive().optional().describe("Default 30."),
@@ -184,7 +186,8 @@ export function createGenerateOutroTool(cwd: string): AgentTool<typeof GenerateO
         );
 
         const r = await runFfmpeg(ffArgs, { signal: ctx.signal });
-        if (r.code !== 0) return err(`ffmpeg exited ${r.code}`, "check that the font and logo paths are readable");
+        if (r.code !== 0)
+          return err(`ffmpeg exited ${r.code}`, "check that the font and logo paths are readable");
         return compact({
           ok: true,
           path: outAbs,

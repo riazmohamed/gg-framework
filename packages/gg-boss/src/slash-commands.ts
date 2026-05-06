@@ -12,10 +12,8 @@ export const BOSS_SLASH_COMMANDS: SlashCommandInfo[] = [
   { name: "model-boss", aliases: [], description: "Switch the orchestrator's model" },
   { name: "model-workers", aliases: [], description: "Switch every worker's model" },
   { name: "compact", aliases: [], description: "Compact the boss's context now" },
-  { name: "tasks", aliases: ["t"], description: "Open the Tasks overlay (Ctrl+T)" },
-  { name: "new", aliases: ["n"], description: "Start a fresh boss session" },
-  { name: "clear", aliases: [], description: "Clear chat history (workers untouched)" },
-  { name: "workers", aliases: ["w"], description: "List linked workers and their status" },
+  { name: "clear", aliases: [], description: "Clear chat history and terminal" },
+  { name: "radio", aliases: [], description: "Stream a free internet radio station" },
   { name: "quit", aliases: ["q", "exit"], description: "Exit gg-boss" },
 ];
 
@@ -54,8 +52,31 @@ export function buildHelpText(): string {
     lines.push(`- \`/${cmd.name}\`${aliases} — ${cmd.description}`);
   }
   lines.push("");
-  lines.push("**Keys**");
+  lines.push("**Global keybindings**");
+  lines.push("- `Ctrl+T` — open the Tasks pane");
+  lines.push("- `Tab` — switch project scope (All / per-project pill in the input)");
+  lines.push("- `Shift+Tab` — toggle the boss's extended thinking on/off");
   lines.push("- `Esc` — interrupt the boss while it's running");
   lines.push("- `Ctrl+C` (twice) — exit");
+  lines.push("");
+  lines.push("**Inside the Tasks pane (Ctrl+T)**");
+  lines.push("- `↑` / `↓` (or `k` / `j`) — navigate tasks");
+  lines.push("- `r` — run all pending and blocked tasks across idle workers");
+  lines.push("- `d` — delete the selected task");
+  lines.push("- `Esc` — close the Tasks pane");
+  lines.push("");
+  lines.push("**Inside model pickers (`/model-boss`, `/model-workers`)**");
+  lines.push("- `↑` / `↓` — navigate models");
+  lines.push("- `Enter` — select");
+  lines.push("- `Esc` — cancel");
+  lines.push("");
+  lines.push("**Radio** (`/radio`)");
+  lines.push("- Pick a station to stream while you work, or select `Off` to stop.");
+  lines.push("- Requires `mpv` (recommended), `ffplay`, `mpg123`, or `vlc/cvlc` installed.");
+  lines.push("");
+  lines.push("**Input area**");
+  lines.push("- `↑` / `↓` — recall previous prompts (when input is empty)");
+  lines.push("- `Enter` — send  ·  `Shift+Enter` — newline");
+  lines.push("- `/` — open the slash-command menu (Tab / arrows to pick, Enter to insert)");
   return lines.join("\n");
 }

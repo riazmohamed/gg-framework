@@ -5,6 +5,7 @@ import type { AgentTool } from "@abukhaled/gg-agent";
 import { compact, err } from "../core/format.js";
 import { checkFfmpeg, runFfmpeg } from "../core/media/ffmpeg.js";
 import { safeOutputPath } from "../core/safe-paths.js";
+import { parseTranscript } from "../core/whisper.js";
 import type { Transcript } from "../core/whisper.js";
 
 /**
@@ -39,13 +40,17 @@ const BleepWordsParams = z.object({
   mode: z
     .enum(["mute", "bleep"])
     .optional()
-    .describe("mute = silence the range. bleep = silence and amix a tone over it. Default 'bleep'."),
+    .describe(
+      "mute = silence the range. bleep = silence and amix a tone over it. Default 'bleep'.",
+    ),
   toneFreqHz: z.number().positive().optional().describe("Bleep tone frequency. Default 1000."),
   paddingMs: z
     .number()
     .min(0)
     .optional()
-    .describe("Pad each match outward by this much (ms) so the censor catches the full syllable. Default 50."),
+    .describe(
+      "Pad each match outward by this much (ms) so the censor catches the full syllable. Default 50.",
+    ),
 });
 
 interface MatchRange {
@@ -72,14 +77,16 @@ export function createBleepWordsTool(cwd: string): AgentTool<typeof BleepWordsPa
 
         let transcript: Transcript;
         try {
-          transcript = JSON.parse(readFileSync(transcriptAbs, "utf8")) as Transcript;
+          transcript = parseTranscript(readFileSync(transcriptAbs, "utf8"));
         } catch (e) {
           return err(
             `cannot read/parse transcript: ${(e as Error).message}`,
             "verify the JSON exists and was written by transcribe()",
           );
         }
-        const hasWords = transcript.segments.some((s) => Array.isArray(s.words) && s.words.length > 0);
+        const hasWords = transcript.segments.some(
+          (s) => Array.isArray(s.words) && s.words.length > 0,
+        );
         if (!hasWords) {
           return err(
             "transcript has no word-level timings",
@@ -123,7 +130,10 @@ export function createBleepWordsTool(cwd: string): AgentTool<typeof BleepWordsPa
           path: outAbs,
           mode,
           matched: ranges.length,
-          ranges: merged.map((m) => ({ startSec: +m.startSec.toFixed(3), endSec: +m.endSec.toFixed(3) })),
+          ranges: merged.map((m) => ({
+            startSec: +m.startSec.toFixed(3),
+            endSec: +m.endSec.toFixed(3),
+          })),
         });
       } catch (e) {
         return err((e as Error).message);
@@ -212,7 +222,9 @@ export function buildBleepFilter(
 ): string {
   if (ranges.length === 0) throw new Error("buildBleepFilter: no ranges");
   // Step 1: mute every range on the original audio.
-  const muteOps = ranges.map((r) => `volume=enable='between(t,${r.startSec},${r.endSec})':volume=0`);
+  const muteOps = ranges.map(
+    (r) => `volume=enable='between(t,${r.startSec},${r.endSec})':volume=0`,
+  );
   const mutedExpr = `[0:a]${muteOps.join(",")}[muted]`;
 
   if (mode === "mute") {

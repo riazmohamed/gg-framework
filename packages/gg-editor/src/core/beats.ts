@@ -48,9 +48,7 @@ export async function detectBeats(
   // structured JSON on stdout (with exit 1) so we can surface them cleanly.
   const trimmed = stdout.trim();
   if (!trimmed) {
-    throw new Error(
-      `beat sidecar returned empty stdout (exit ${code}): ${tail(stderr)}`,
-    );
+    throw new Error(`beat sidecar returned empty stdout (exit ${code}): ${tail(stderr)}`);
   }
   let parsed: unknown;
   try {
@@ -107,11 +105,7 @@ export interface SnapResult {
  *
  * Pure function — no I/O. Beats list need not be sorted; we sort defensively.
  */
-export function snapCuts(
-  cutPoints: number[],
-  beats: number[],
-  toleranceSec: number,
-): SnapResult {
+export function snapCuts(cutPoints: number[], beats: number[], toleranceSec: number): SnapResult {
   const snapped: SnappedCut[] = [];
   const unchanged: UnchangedCut[] = [];
   if (!Array.isArray(cutPoints) || cutPoints.length === 0) {

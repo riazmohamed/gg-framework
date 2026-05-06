@@ -12,6 +12,7 @@ import {
   type ScoredCandidate,
   type ViralCandidate,
 } from "../core/viral-moments.js";
+import { parseTranscript } from "../core/whisper.js";
 import type { Transcript } from "../core/whisper.js";
 
 const FindViralMomentsParams = z.object({
@@ -51,9 +52,7 @@ const FindViralMomentsParams = z.object({
  *   4. Dedup overlaps (>50% → keep higher score).
  *   5. Sort desc, take top maxClips.
  */
-export function createFindViralMomentsTool(
-  cwd: string,
-): AgentTool<typeof FindViralMomentsParams> {
+export function createFindViralMomentsTool(cwd: string): AgentTool<typeof FindViralMomentsParams> {
   return {
     name: "find_viral_moments",
     description:
@@ -82,11 +81,11 @@ export function createFindViralMomentsTool(
         }
         let t: Transcript;
         try {
-          t = JSON.parse(raw) as Transcript;
+          t = parseTranscript(raw);
         } catch (e) {
-          return err(`transcript is not valid JSON: ${(e as Error).message}`);
+          return err((e as Error).message);
         }
-        if (!Array.isArray(t.segments) || t.segments.length === 0) {
+        if (t.segments.length === 0) {
           return err("transcript has no segments", "rerun transcribe(...)");
         }
 

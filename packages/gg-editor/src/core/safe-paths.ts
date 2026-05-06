@@ -18,7 +18,7 @@
  */
 
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, resolve as resolvePath } from "node:path";
+import { basename, resolve as resolvePath } from "node:path";
 
 /** Default user-visible output directory for sandbox-redirected files. */
 export const USER_OUTPUT_DIR_NAME = "gg-editor-out";
@@ -111,20 +111,36 @@ export interface SafeResolveResult {
  * user-visible output dir so that NLE host processes (which run outside Node's
  * sandbox) can read the result back. Use for stills / thumbnails / GIFs that
  * the host might import.
+ *
+ * Order matters here: we check the sandbox-redirect FIRST. Sandbox roots
+ * (`/tmp`, `/var/folders/…`, `/private/var/…`) are trusted OS-managed temp
+ * locations — we always want to remap them into the user-visible output dir,
+ * even when they don't happen to match the runner's `tmpdir()` allow-root
+ * (e.g. `/tmp/foo.jpg` when `tmpdir()` is `/var/folders/…`). After redirect,
+ * the resulting path is under `userOutputDir()` and is implicitly safe.
+ *
+ * Non-sandbox paths fall through to the regular `safeOutputPath()` traversal
+ * check, so escapes like `../../etc/passwd` or absolute `/etc/hosts` are still
+ * rejected exactly as before.
  */
 export function safeResolveOutputPath(
   cwd: string,
   requested: string,
   opts?: SafeOutputOptions,
 ): SafeResolveResult {
-  const abs = isAbsolute(requested) ? resolvePath(requested) : safeOutputPath(cwd, requested, opts);
-  if (!isSandboxPath(abs)) {
-    return { path: abs, redirected: false };
+  if (!requested || typeof requested !== "string") {
+    throw new Error("output path is empty");
   }
-  const out = resolvePath(userOutputDir(), basename(abs));
-  return {
-    path: out,
-    redirected: true,
-    reason: `original path '${abs}' is in a sandboxed temp directory and would be invisible to the host process`,
-  };
+  const abs = resolvePath(cwd, requested);
+  if (isSandboxPath(abs)) {
+    const out = resolvePath(userOutputDir(), basename(abs));
+    return {
+      path: out,
+      redirected: true,
+      reason: `original path '${abs}' is in a sandboxed temp directory and would be invisible to the host process`,
+    };
+  }
+  // Non-sandbox path: enforce the traversal allow-list.
+  const safe = safeOutputPath(cwd, requested, opts);
+  return { path: safe, redirected: false };
 }

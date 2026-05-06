@@ -83,18 +83,25 @@ describe("detectFillerRanges", () => {
 
   it("respects custom vocabulary", () => {
     const t = makeTranscript("hello banana world");
-    const fillers = detectFillerRanges(t, { fillers: ["banana"] });
+    // aggressiveSingleWords=true so custom non-safe-list words are not filtered out.
+    const fillers = detectFillerRanges(t, { fillers: ["banana"], aggressiveSingleWords: true });
     expect(fillers).toHaveLength(1);
     expect(fillers[0].text).toBe("banana");
   });
 
-  it("aggressiveSingleWords=false skips 'like' / 'so' / 'actually'", () => {
+  it("aggressiveSingleWords=false (default) skips 'like' / 'so' / 'actually'", () => {
     const t = makeTranscript("i like the so called actually working idea");
-    // Default: aggressive=true → these match.
-    expect(detectFillerRanges(t).length).toBeGreaterThan(0);
-    // Off: only the safe-list filler vocabulary applies.
-    const safe = detectFillerRanges(t, { aggressiveSingleWords: false });
-    expect(safe).toHaveLength(0);
+    // Default (false): only the safe-list filler vocabulary applies.
+    expect(detectFillerRanges(t)).toHaveLength(0);
+    // Explicit false: same result.
+    expect(detectFillerRanges(t, { aggressiveSingleWords: false })).toHaveLength(0);
+  });
+
+  it("aggressiveSingleWords=true includes 'like' / 'so' / 'actually'", () => {
+    const t = makeTranscript("i like the so called actually working idea");
+    // Explicit true: aggressive words match.
+    const aggressive = detectFillerRanges(t, { aggressiveSingleWords: true });
+    expect(aggressive.length).toBeGreaterThan(0);
   });
 
   it("returns empty when transcript has no word timings", () => {

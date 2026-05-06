@@ -94,9 +94,17 @@ export interface DetectFillersOptions {
    * Aggressive single words like "like" / "so" / "actually" / "right" /
    * "honestly" / "literally" / "basically" are filler ONLY when they
    * appear as standalone disfluencies. When `aggressiveSingleWords` is
-   * false (default true), these are excluded from matching even if
-   * present in `fillers`. Toggle on for ruthless cuts; off when the
-   * speaker uses them substantively (a chef saying "literally" = real).
+   * true, these are included; when false (the default), only the safe-list
+   * (um/uh/er/hmm/you know/i mean/kind of/sort of) is applied.
+   *
+   * Default is **false** — the conservative path — because the tool
+   * permanently removes audio and words like "like"/"so" are frequently
+   * substantive. Pass `true` for ruthless cuts on monologue-style content
+   * where the speaker's verbal tics are clearly fillers.
+   *
+   * Changed from `true` default (May 2026): the old default caused
+   * unintended removal of substantive speech for callers who didn't
+   * explicitly configure this option.
    */
   aggressiveSingleWords?: boolean;
 }
@@ -133,7 +141,7 @@ export function detectFillerRanges(
   const padStart = (opts.paddingStartMs ?? 0) / 1000;
   const padEnd = (opts.paddingEndMs ?? 0) / 1000;
   const mergeGap = (opts.mergeGapMs ?? 150) / 1000;
-  const aggressive = opts.aggressiveSingleWords ?? true;
+  const aggressive = opts.aggressiveSingleWords ?? false;
 
   const vocab = (opts.fillers ?? DEFAULT_FILLERS)
     .map((f) => f.trim().toLowerCase())
@@ -169,8 +177,7 @@ export function detectFillerRanges(
       const rawEnd = endWord.end - padEnd;
       // Clamp: padding can't make the filler range negative-duration; if
       // it would, keep the original word boundaries unpadded.
-      const startSec =
-        rawEnd > rawStart ? Math.max(0, rawStart) : Math.max(0, startWord.start);
+      const startSec = rawEnd > rawStart ? Math.max(0, rawStart) : Math.max(0, startWord.start);
       const endSec = rawEnd > rawStart ? rawEnd : endWord.end;
       out.push({
         startSec,

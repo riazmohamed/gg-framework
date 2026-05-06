@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -53,20 +53,26 @@ export function createConcatVideosTool(cwd: string): AgentTool<typeof ConcatVide
 
         if (lossless) {
           // concat demuxer: build a list file `file 'path'\n` and feed it.
+          // The list file is a temp scratch artifact — clean it up no matter
+          // how this branch exits (success, ffmpeg non-zero, or thrown error).
           const listPath = join(tmpdir(), `gg-concat-${Date.now()}.txt`);
           const body = buildConcatListBody(absInputs);
           writeFileSync(listPath, body, "utf8");
-          const r = await runFfmpeg(
-            ["-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outAbs],
-            { signal: ctx.signal },
-          );
-          if (r.code !== 0) {
-            return err(
-              `ffmpeg concat-demuxer exited ${r.code}`,
-              "sources may differ in codec/res/fps; retry with lossless=false",
+          try {
+            const r = await runFfmpeg(
+              ["-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outAbs],
+              { signal: ctx.signal },
             );
+            if (r.code !== 0) {
+              return err(
+                `ffmpeg concat-demuxer exited ${r.code}`,
+                "sources may differ in codec/res/fps; retry with lossless=false",
+              );
+            }
+            return compact({ ok: true, path: outAbs, mode: "lossless" });
+          } finally {
+            rmSync(listPath, { force: true });
           }
-          return compact({ ok: true, path: outAbs, mode: "lossless" });
         }
 
         // Filter-based concat (re-encode).

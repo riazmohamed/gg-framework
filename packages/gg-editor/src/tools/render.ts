@@ -1,8 +1,8 @@
-import { resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { err } from "../core/format.js";
 import type { VideoHost } from "../core/hosts/types.js";
+import { safeOutputPath } from "../core/safe-paths.js";
 
 const RenderParams = z.object({
   preset: z.string().describe("Host-specific preset name."),
@@ -18,7 +18,7 @@ export function createRenderTool(host: VideoHost, cwd: string): AgentTool<typeof
     parameters: RenderParams,
     async execute({ preset, output }) {
       try {
-        const abs = resolvePath(cwd, output);
+        const abs = safeOutputPath(cwd, output);
         await host.render({ preset, output: abs });
         return `ok:${abs}`;
       } catch (e) {

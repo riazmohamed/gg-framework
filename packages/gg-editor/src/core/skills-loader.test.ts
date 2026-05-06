@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { BundledSkill } from "../skills.js";
-import { discoverSkills, extractDescription, parseFrontmatter, stripFrontmatter } from "./skills-loader.js";
+import {
+  discoverSkills,
+  extractDescription,
+  parseFrontmatter,
+  stripFrontmatter,
+} from "./skills-loader.js";
 
 const BUNDLED: BundledSkill[] = [
   { name: "alpha", description: "bundled alpha", content: "# alpha\nbundled body" },
@@ -77,7 +82,8 @@ describe("discoverSkills", () => {
     const cwd = tmp("gg-skills-cwd-");
     const home = tmp("gg-skills-home-");
     mkdirSync(join(cwd, ".gg/editor-skills"), { recursive: true });
-    const md = '---\nname: my-skill\ndescription: "Use when X happens."\n---\n\n# My Skill\n\nBody.\n';
+    const md =
+      '---\nname: my-skill\ndescription: "Use when X happens."\n---\n\n# My Skill\n\nBody.\n';
     writeFileSync(join(cwd, ".gg/editor-skills/anything.md"), md);
     const r = discoverSkills({ cwd, homeDir: home, bundled: BUNDLED });
     const s = r.find((s) => s.name === "my-skill");
@@ -92,7 +98,10 @@ describe("discoverSkills", () => {
     const cwd = tmp("gg-skills-cwd-");
     const home = tmp("gg-skills-home-");
     mkdirSync(join(cwd, ".gg/editor-skills"), { recursive: true });
-    writeFileSync(join(cwd, ".gg/editor-skills/foo.md"), "---\nother: stuff\n---\n\nA body line.\n");
+    writeFileSync(
+      join(cwd, ".gg/editor-skills/foo.md"),
+      "---\nother: stuff\n---\n\nA body line.\n",
+    );
     const r = discoverSkills({ cwd, homeDir: home, bundled: BUNDLED });
     const s = r.find((s) => s.name === "foo");
     expect(s?.description).toBe("A body line.");
@@ -136,7 +145,7 @@ describe("parseFrontmatter / stripFrontmatter", () => {
   });
 
   it("strips quotes around values", () => {
-    const fm = parseFrontmatter('---\nname: "with: colon"\ndescription: \'single\'\n---\n');
+    const fm = parseFrontmatter("---\nname: \"with: colon\"\ndescription: 'single'\n---\n");
     expect(fm.name).toBe("with: colon");
     expect(fm.description).toBe("single");
   });

@@ -7,9 +7,7 @@ import { createAuditRetentionStructureTool } from "./audit-retention-structure.j
 const ctx = {
   signal: new AbortController().signal,
   toolCallId: "t1",
-} as unknown as Parameters<
-  ReturnType<typeof createAuditRetentionStructureTool>["execute"]
->[1];
+} as unknown as Parameters<ReturnType<typeof createAuditRetentionStructureTool>["execute"]>[1];
 
 function writeTranscript(dir: string, payload: unknown): string {
   const p = join(dir, "t.json");

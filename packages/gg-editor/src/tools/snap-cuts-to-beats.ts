@@ -49,9 +49,7 @@ const SnapCutsToBeatsParams = z.object({
  * beat-aligned cut points. The agent then feeds the result to cut_at /
  * add_sfx_at_cuts / punch_in for the actual edit.
  */
-export function createSnapCutsToBeatsTool(
-  cwd: string,
-): AgentTool<typeof SnapCutsToBeatsParams> {
+export function createSnapCutsToBeatsTool(cwd: string): AgentTool<typeof SnapCutsToBeatsParams> {
   return {
     name: "snap_cuts_to_beats",
     description:

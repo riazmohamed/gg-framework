@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { clip, compact, err, summarizeList } from "../core/format.js";
 import { clusterSegments } from "../core/clustering.js";
-import type { Transcript } from "../core/whisper.js";
+import { parseTranscript } from "../core/whisper.js";
 
 const ClusterTakesParams = z.object({
   path: z.string().describe("Transcript JSON file written by `transcribe`."),
@@ -40,7 +40,7 @@ export function createClusterTakesTool(cwd: string): AgentTool<typeof ClusterTak
     async execute({ path, threshold, window, minTokens }) {
       try {
         const abs = resolvePath(cwd, path);
-        const t = JSON.parse(readFileSync(abs, "utf8")) as Transcript;
+        const t = parseTranscript(readFileSync(abs, "utf8"));
         if (!t.segments || t.segments.length === 0) {
           return err("transcript has no segments", "verify the file is from `transcribe`");
         }

@@ -1,14 +1,17 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { buildEdl } from "../core/edl.js";
-import { keepRangesFromFillers, keepRangesToFrameRanges, type FillerRange } from "../core/filler-words.js";
+import {
+  keepRangesFromFillers,
+  keepRangesToFrameRanges,
+  type FillerRange,
+} from "../core/filler-words.js";
 import { compact, err } from "../core/format.js";
 import { probeMedia } from "../core/media/ffmpeg.js";
 import { safeOutputPath } from "../core/safe-paths.js";
-import type { Transcript } from "../core/whisper.js";
 
 /**
  * text_based_cut — Descript's flagship feature, generalised. Given an
@@ -84,7 +87,10 @@ export function createTextBasedCutTool(cwd: string): AgentTool<typeof TextBasedC
         const probe = probeMedia(sourceAbs);
         const totalSec = probe?.durationSec;
         if (!totalSec || totalSec <= 0) {
-          return err(`probe failed for ${sourceAbs}`, "verify the source file exists and is readable");
+          return err(
+            `probe failed for ${sourceAbs}`,
+            "verify the source file exists and is readable",
+          );
         }
         const fps = args.frameRate ?? probe?.frameRate ?? 30;
         const padSec = (args.paddingMs ?? 20) / 1000;
@@ -145,7 +151,10 @@ export function createTextBasedCutTool(cwd: string): AgentTool<typeof TextBasedC
         }
 
         const reelName =
-          args.reel ?? basename(sourceAbs, extname(sourceAbs)).replace(/[^A-Za-z0-9_]/g, "_").slice(0, 8);
+          args.reel ??
+          basename(sourceAbs, extname(sourceAbs))
+            .replace(/[^A-Za-z0-9_]/g, "_")
+            .slice(0, 8);
         const edl = buildEdl({
           title: `${basename(sourceAbs)} (text-based cut)`,
           frameRate: fps,

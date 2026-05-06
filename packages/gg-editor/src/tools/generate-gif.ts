@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { z } from "zod";
@@ -62,50 +62,56 @@ export function createGenerateGifTool(cwd: string): AgentTool<typeof GenerateGif
         const palettePath = join(tmpdir(), `gg-gif-palette-${Date.now()}.png`);
         const filterChain = `fps=${fps},scale=${width}:-1:flags=lanczos`;
 
-        // Pass 1: palettegen
-        const p1 = await runFfmpeg(
-          [
-            "-ss",
-            String(start),
-            "-t",
-            String(dur),
-            "-i",
-            inAbs,
-            "-vf",
-            `${filterChain},palettegen=stats_mode=diff`,
-            palettePath,
-          ],
-          { signal: ctx.signal },
-        );
-        if (p1.code !== 0) return err(`palettegen exited ${p1.code}`);
+        // The palette PNG is a temp scratch artifact between the two ffmpeg
+        // passes — always clean it up, including on early-return / thrown errors.
+        try {
+          // Pass 1: palettegen
+          const p1 = await runFfmpeg(
+            [
+              "-ss",
+              String(start),
+              "-t",
+              String(dur),
+              "-i",
+              inAbs,
+              "-vf",
+              `${filterChain},palettegen=stats_mode=diff`,
+              palettePath,
+            ],
+            { signal: ctx.signal },
+          );
+          if (p1.code !== 0) return err(`palettegen exited ${p1.code}`);
 
-        // Pass 2: paletteuse
-        const p2 = await runFfmpeg(
-          [
-            "-ss",
-            String(start),
-            "-t",
-            String(dur),
-            "-i",
-            inAbs,
-            "-i",
-            palettePath,
-            "-lavfi",
-            `${filterChain} [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle`,
-            outAbs,
-          ],
-          { signal: ctx.signal },
-        );
-        if (p2.code !== 0) return err(`paletteuse exited ${p2.code}`);
-        return compact({
-          ok: true,
-          path: outAbs,
-          startSec: start,
-          durationSec: dur,
-          fps,
-          width,
-          ...(resolved.redirected ? { redirected: true, reason: resolved.reason } : {}),
-        });
+          // Pass 2: paletteuse
+          const p2 = await runFfmpeg(
+            [
+              "-ss",
+              String(start),
+              "-t",
+              String(dur),
+              "-i",
+              inAbs,
+              "-i",
+              palettePath,
+              "-lavfi",
+              `${filterChain} [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle`,
+              outAbs,
+            ],
+            { signal: ctx.signal },
+          );
+          if (p2.code !== 0) return err(`paletteuse exited ${p2.code}`);
+          return compact({
+            ok: true,
+            path: outAbs,
+            startSec: start,
+            durationSec: dur,
+            fps,
+            width,
+            ...(resolved.redirected ? { redirected: true, reason: resolved.reason } : {}),
+          });
+        } finally {
+          rmSync(palettePath, { force: true });
+        }
       } catch (e) {
         return err((e as Error).message);
       }

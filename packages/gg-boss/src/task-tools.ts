@@ -1,7 +1,15 @@
 import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { tasksStore, type BossTask, type TaskStatus } from "./tasks-store.js";
+import { bossStore } from "./boss-store.js";
 import type { Worker } from "./worker.js";
+
+/**
+ * Once-per-process flag so we surface the Ctrl+T / r hint a single time per
+ * ggboss session. Repeating it on every add_task would bury the chat in
+ * advice the user already absorbed.
+ */
+let tasksHintShown = false;
 
 export interface TaskToolDeps {
   workers: Map<string, Worker>;
@@ -75,12 +83,33 @@ export function createTaskTools(deps: TaskToolDeps): AgentTool[] {
     parameters: addTaskParams,
     async execute(args) {
       if (!workers.has(args.project)) return `Unknown project: ${args.project}`;
+      // Deterministic dedup — case-insensitive title match within the same
+      // project blocks duplicates regardless of whether the boss remembered to
+      // list_tasks first. Any existing entry (pending/in_progress/blocked/done)
+      // counts as a hit; the boss should reuse it rather than fork a copy.
+      const titleNorm = args.title.trim().toLowerCase();
+      const existing = tasksStore
+        .list({ project: args.project })
+        .find((t) => t.title.trim().toLowerCase() === titleNorm);
+      if (existing) {
+        return `Task already exists: [${existing.id}] ${existing.project} · ${existing.title} (status: ${existing.status}). Reuse this id with prompt_worker / update_task / dispatch_pending instead of creating a duplicate.`;
+      }
       const t = await tasksStore.add({
         project: args.project,
         title: args.title,
         description: args.description,
         fresh: args.fresh,
       });
+      // First add_task per session — defer the keybind hint until the boss's
+      // current turn ends so it doesn't get interleaved between the boss's
+      // tool calls (which read like the boss is making the announcement).
+      // Subsequent add_tasks stay silent.
+      if (!tasksHintShown) {
+        tasksHintShown = true;
+        bossStore.queueEndOfTurnInfo(
+          "Press Ctrl+T to open the Tasks pane, then `r` to run all pending tasks.",
+        );
+      }
       return `Added [${t.id}] ${t.project} · ${t.title}`;
     },
   };
@@ -106,10 +135,14 @@ export function createTaskTools(deps: TaskToolDeps): AgentTool[] {
       "Update a task's status and/or notes. Use this after a worker_turn_complete to mark the task DONE / BLOCKED / SKIPPED. The notes field is for boss commentary or blocker reasons.",
     parameters: updateTaskParams,
     async execute(args) {
-      const updated = await tasksStore.update(args.id, {
-        status: args.status as TaskStatus | undefined,
-        notes: args.notes,
-      });
+      // Build the partial WITHOUT undefined keys so that calling update_task
+      // with only `notes` doesn't accidentally wipe out the existing status.
+      // Previously a `{ status: undefined, notes: "…" }` spread was overwriting
+      // status to undefined and blowing up nextDispatchable's filter.
+      const fields: Partial<Pick<BossTask, "status" | "notes">> = {};
+      if (args.status !== undefined) fields.status = args.status as TaskStatus;
+      if (args.notes !== undefined) fields.notes = args.notes;
+      const updated = await tasksStore.update(args.id, fields);
       if (!updated) return `Unknown task id: ${args.id}`;
       return `Updated ${formatTask(updated)}`;
     },

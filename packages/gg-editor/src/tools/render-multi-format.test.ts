@@ -201,13 +201,7 @@ describe("render_multi_format — parallelism", () => {
         input: "in.mp4",
         outputDir: "out",
         // 5 formats — must split into 3+2.
-        formats: [
-          "youtube-1080p",
-          "shorts-9x16",
-          "reels-9x16",
-          "tiktok-9x16",
-          "square-1x1",
-        ],
+        formats: ["youtube-1080p", "shorts-9x16", "reels-9x16", "tiktok-9x16", "square-1x1"],
         parallel: true,
       },
       makeCtx(),

@@ -18,11 +18,18 @@ describe("formatGgEditorDetail", () => {
 
   it("falls back across the default file-key list (so transcript-based tools still work)", () => {
     expect(
-      formatGgEditorDetail("score_clip", { transcript: "/x/y/transcript.json", startSec: 0, endSec: 30 }),
+      formatGgEditorDetail("score_clip", {
+        transcript: "/x/y/transcript.json",
+        startSec: 0,
+        endSec: 30,
+      }),
     ).toContain("0.0s");
     // pick_best_takes uses transcriptPath
     expect(
-      formatGgEditorDetail("pick_best_takes", { transcriptPath: "/x/y/t.json", videoPath: "/x/y/v.mp4" }),
+      formatGgEditorDetail("pick_best_takes", {
+        transcriptPath: "/x/y/t.json",
+        videoPath: "/x/y/v.mp4",
+      }),
     ).toBe("t.json");
     // multicam_sync uses inputs[]
     expect(
@@ -78,7 +85,10 @@ describe("formatGgEditorDetail", () => {
   it("formats text_based_cut by cut count", () => {
     expect(
       formatGgEditorDetail("text_based_cut", {
-        cuts: [{ startSec: 1, endSec: 2 }, { startSec: 3, endSec: 4 }],
+        cuts: [
+          { startSec: 1, endSec: 2 },
+          { startSec: 3, endSec: 4 },
+        ],
       }),
     ).toBe("2 cuts");
   });
@@ -105,9 +115,9 @@ describe("formatGgEditorDetail", () => {
 
 describe("formatGgEditorInline", () => {
   it("strips 'error:' prefix on errors and truncates", () => {
-    expect(formatGgEditorInline("transcribe", "error: ffmpeg not on PATH; fix: install", true)).toBe(
-      "ffmpeg not on PATH",
-    );
+    expect(
+      formatGgEditorInline("transcribe", "error: ffmpeg not on PATH; fix: install", true),
+    ).toBe("ffmpeg not on PATH");
   });
 
   it("returns undefined for bare 'ok'", () => {
@@ -179,7 +189,11 @@ describe("formatGgEditorInline", () => {
 
   it("formats probe_media duration + fps", () => {
     expect(
-      formatGgEditorInline("probe_media", JSON.stringify({ durationSec: 372, frameRate: 30 }), false),
+      formatGgEditorInline(
+        "probe_media",
+        JSON.stringify({ durationSec: 372, frameRate: 30 }),
+        false,
+      ),
     ).toBe("6:12 @ 30fps");
   });
 

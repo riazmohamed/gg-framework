@@ -12,6 +12,9 @@ import { EventQueue } from "./event-queue.js";
 import { createBossTools, WORKER_PROMPT_BRIEF } from "./tools.js";
 import { createTaskTools } from "./task-tools.js";
 import { tasksStore } from "./tasks-store.js";
+import { saveSettings } from "./settings.js";
+import { playDoneAudio, playReadyAudio } from "./audio.js";
+import { log } from "./logger.js";
 import { buildBossSystemPrompt } from "./boss-system-prompt.js";
 import { bossStore } from "./boss-store.js";
 import {
@@ -26,6 +29,8 @@ import type { BossEvent, ProjectSpec, WorkerTurnSummary } from "./types.js";
 export interface GGBossOptions {
   bossProvider: Provider;
   bossModel: string;
+  /** Boss extended-thinking level. Toggled via Shift+Tab in the TUI. */
+  bossThinkingLevel?: ThinkingLevel;
   workerProvider: Provider;
   workerModel: string;
   workerThinkingLevel?: ThinkingLevel;
@@ -62,6 +67,25 @@ export class GGBoss {
   /** project → task id currently dispatched to that worker. Used to mark
    *  the right task done/blocked when the worker_turn_complete event arrives. */
   private inFlightTaskByProject = new Map<string, string>();
+  /**
+   * Auto-chain notices waiting to be delivered to the boss. When the
+   * orchestrator deterministically dispatches the next pending task for a
+   * project (because the boss didn't), the boss has no other way to know it
+   * happened — it'd see "X(working)" in the next event's other_workers
+   * trailer and dismiss it as stale because it remembers receiving X's prior
+   * completion event. We attach an explicit note to the next event so the
+   * boss's mental model stays in sync with reality.
+   */
+  private pendingAutoChainNotices: { project: string; title: string }[] = [];
+  /**
+   * "Had any worker activity since the last all-clear chime?" Set true when
+   * a worker_turn_complete or worker_error event arrives, cleared when we
+   * detect the orchestrator has fully wound down (all workers idle, queue
+   * empty, boss turn finished). Drives playReadyAudio so the chime fires
+   * once per workflow instead of every time the boss replies to a chat
+   * message that didn't dispatch any workers.
+   */
+  private hadWorkerActivitySinceReady = false;
 
   constructor(opts: GGBossOptions) {
     this.opts = opts;
@@ -75,6 +99,7 @@ export class GGBoss {
     bossStore.init({
       bossProvider: this.opts.bossProvider,
       bossModel: this.opts.bossModel,
+      bossThinkingLevel: this.opts.bossThinkingLevel,
       workerProvider: this.opts.workerProvider,
       workerModel: this.opts.workerModel,
       loggedInProviders,
@@ -135,6 +160,7 @@ export class GGBoss {
       accountId: creds.accountId,
       signal: this.ac.signal,
       cacheRetention: "short",
+      thinking: this.opts.bossThinkingLevel,
       priorMessages,
     });
     // Mark every loaded message as already persisted so we only append NEW
@@ -220,10 +246,17 @@ export class GGBoss {
     taskId: string,
   ): Promise<{ ok: true } | { ok: false; reason: string }> {
     const w = this.workers.get(project);
-    if (!w) return { ok: false, reason: `unknown project: ${project}` };
-    if (w.getStatus() === "working") return { ok: false, reason: "worker is busy" };
+    if (!w) {
+      log("WARN", "dispatch", "unknown project", { project, taskId });
+      return { ok: false, reason: `unknown project: ${project}` };
+    }
+    if (w.getStatus() === "working") {
+      log("WARN", "dispatch", "worker busy", { project, taskId });
+      return { ok: false, reason: "worker is busy" };
+    }
     if (fresh) await w.newSession();
     this.inFlightTaskByProject.set(project, taskId);
+    log("INFO", "dispatch", "task dispatched", { project, taskId, fresh });
     await w.prompt(WORKER_PROMPT_BRIEF + description);
     return { ok: true };
   }
@@ -250,10 +283,12 @@ export class GGBoss {
       accountId: creds.accountId,
       signal: this.ac.signal,
       cacheRetention: "short",
+      thinking: this.opts.bossThinkingLevel,
       priorMessages: oldMessages,
     });
 
     bossStore.setBossModel(provider, model);
+    await saveSettings({ bossProvider: provider, bossModel: model });
   }
 
   /** Swap every worker's model. Workers keep their per-project sessions. */
@@ -262,6 +297,7 @@ export class GGBoss {
     this.opts.workerProvider = provider;
     this.opts.workerModel = model;
     bossStore.setWorkerModel(provider, model);
+    await saveSettings({ workerProvider: provider, workerModel: model });
   }
 
   /**
@@ -324,6 +360,33 @@ export class GGBoss {
     }
   }
 
+  /**
+   * Toggle the boss's extended-thinking level. Recreates bossAgent with the
+   * new setting (Anthropic SDK reads `thinking` once on construction). Mirrors
+   * ggcoder's Shift+Tab UX. Persists to settings.json so the choice sticks
+   * across restarts.
+   */
+  async setBossThinking(level: ThinkingLevel | undefined): Promise<void> {
+    this.opts.bossThinkingLevel = level;
+    const tools = this.buildToolSet();
+    const creds = await this.authStorage.resolveCredentials(this.opts.bossProvider);
+    const oldMessages = this.bossAgent.getMessages().filter((m) => m.role !== "system");
+    this.bossAgent = new Agent({
+      provider: this.opts.bossProvider,
+      model: this.opts.bossModel,
+      system: buildBossSystemPrompt(this.opts.projects),
+      tools,
+      apiKey: creds.accessToken,
+      accountId: creds.accountId,
+      signal: this.ac.signal,
+      cacheRetention: "short",
+      thinking: level,
+      priorMessages: oldMessages,
+    });
+    bossStore.setBossThinking(level);
+    await saveSettings({ bossThinkingLevel: level });
+  }
+
   /** Recreate bossAgent with a new message history (used by compact + /clear). */
   private async replaceBossMessages(newMessages: Message[]): Promise<void> {
     const tools = this.buildToolSet();
@@ -339,6 +402,7 @@ export class GGBoss {
       accountId: creds.accountId,
       signal: this.ac.signal,
       cacheRetention: "short",
+      thinking: this.opts.bossThinkingLevel,
       priorMessages,
     });
   }
@@ -367,122 +431,252 @@ export class GGBoss {
   async run(): Promise<void> {
     this.running = true;
     while (this.running) {
-      const event = await this.queue.next();
-      if (!this.running) break;
-
-      if (event.kind === "user_message") {
-        this.pendingUserMessages = Math.max(0, this.pendingUserMessages - 1);
-        bossStore.setPendingMessages(this.pendingUserMessages);
-      }
-      if (event.kind === "worker_turn_complete") {
-        this.lastSummaries.set(event.summary.project, event.summary);
-        // Resolve any in-flight task for this project to its final status.
-        // Boss can still override via update_task — this just gives it a sane
-        // default so the user's overlay-driven dispatches close out cleanly.
-        const taskId = this.inFlightTaskByProject.get(event.summary.project);
-        if (taskId) {
-          this.inFlightTaskByProject.delete(event.summary.project);
-          const task = tasksStore.byId(taskId);
-          if (task && task.status === "in_progress") {
-            const failed = event.summary.toolsUsed.some((t) => !t.ok);
-            await tasksStore.update(taskId, {
-              status: failed ? "blocked" : "done",
-              resultSummary: event.summary.finalText,
-            });
-          }
+      try {
+        await this.runIteration();
+      } catch (err) {
+        // Safety net: any thrown error in a single iteration must NOT kill
+        // the run loop. The loop drives every worker through the boss; if it
+        // dies, no worker can ever complete another task in this session.
+        // Log + surface a friendly notice + keep looping. Truly fatal
+        // conditions (process kill, OOM) still terminate the process; this
+        // catch only handles JS-level errors that escaped the inner try.
+        const message = err instanceof Error ? err.message : String(err);
+        log("ERROR", "run_loop", "iteration threw", { message });
+        try {
+          bossStore.appendInfo(`Boss loop error (recovered): ${message}`, "error");
+        } catch {
+          // Even the recovery path can throw (e.g. bossStore tearing down)
+          // — swallow rather than crash the loop.
         }
       }
-      if (event.kind === "worker_error") {
-        const taskId = this.inFlightTaskByProject.get(event.project);
-        if (taskId) {
-          this.inFlightTaskByProject.delete(event.project);
+    }
+  }
+
+  private async runIteration(): Promise<void> {
+    const event = await this.queue.next();
+    if (!this.running) return;
+
+    if (event.kind === "user_message") {
+      this.pendingUserMessages = Math.max(0, this.pendingUserMessages - 1);
+      bossStore.setPendingMessages(this.pendingUserMessages);
+    }
+    // Captured so the post-turn auto-chain can tell whether THIS event was
+    // a dispatched task (chain on) vs an ad-hoc prompt_worker like recon
+    // (chain off). Lives outside the `if` so it stays in scope down below.
+    let finishedTaskId: string | null = null;
+    if (event.kind === "worker_turn_complete") {
+      // Play the completion chime — fire-and-forget. Multiple workers
+      // finishing in quick succession will layer their sounds, which is
+      // fine: it's a chime, not a long jingle.
+      void playDoneAudio();
+      this.hadWorkerActivitySinceReady = true;
+      this.lastSummaries.set(event.summary.project, event.summary);
+      log("INFO", "worker_turn_complete", "worker finished", {
+        project: event.summary.project,
+        turn: event.summary.turnIndex,
+        tools: event.summary.toolsUsed.length,
+        failed: event.summary.toolsUsed.filter((t) => !t.ok).length,
+      });
+      // Resolve any in-flight task for this project to its final status.
+      // Boss can still override via update_task — this just gives it a sane
+      // default so the user's overlay-driven dispatches close out cleanly.
+      const taskId = this.inFlightTaskByProject.get(event.summary.project);
+      finishedTaskId = taskId ?? null;
+      if (taskId) {
+        this.inFlightTaskByProject.delete(event.summary.project);
+        const task = tasksStore.byId(taskId);
+        if (task && task.status === "in_progress") {
+          // Use the worker's SELF-REPORTED status from the trailer ("Status:
+          // DONE | UNVERIFIED | PARTIAL | BLOCKED | INFO"). The previous
+          // heuristic "any tool failed → blocked" was way too aggressive —
+          // workers commonly have an incidental bash non-zero (grep with no
+          // match, cd to wrong path) during exploration even when the task
+          // itself was completed cleanly. Self-report is what the boss reads
+          // anyway, so we should mark off the same signal.
+          const reported = parseReportedStatus(event.summary.finalText);
+          const newStatus = reportedToTaskStatus(
+            reported,
+            event.summary.toolsUsed.some((t) => !t.ok),
+          );
           await tasksStore.update(taskId, {
-            status: "blocked",
-            notes: `Worker error: ${event.message}`,
+            status: newStatus,
+            resultSummary: event.summary.finalText,
           });
         }
       }
-
-      // Auto-compact when over 80% of context — mirrors AgentSession.runLoop.
-      // Workers handle their own compaction independently (via AgentSession).
-      await this.runCompaction(false);
-
-      const text = formatEventForBoss(event);
-      bossStore.startStreaming();
-
-      // Fresh AbortController for this turn so ESC can cancel just this call.
-      this.turnAc = new AbortController();
-      this.bossAgent.setSignal(this.turnAc.signal);
-
-      try {
-        const stream = this.bossAgent.prompt(text);
-        for await (const e of stream) {
-          switch (e.type) {
-            case "text_delta":
-              bossStore.appendStreamText(e.text);
-              break;
-            case "thinking_delta":
-              bossStore.appendStreamThinking(e.text);
-              break;
-            case "tool_call_start":
-              // Flush any preceding text so chronological order is preserved
-              // in scrollback (text → tool → text → tool, not text-block then tool-block).
-              bossStore.flushPendingText();
-              bossStore.startTool(e.toolCallId, e.name, e.args);
-              bossStore.setActivityPhase("tools");
-              break;
-            case "tool_call_end":
-              bossStore.endTool(e.toolCallId, e.isError, e.durationMs, e.result, e.details);
-              break;
-            case "turn_end":
-              // Mirror ggcoder/useAgentLoop: total context = uncached input +
-              // cache reads + cache writes (Anthropic separates input/output,
-              // others share the window so include output too). Without adding
-              // cache, prompt-cached calls report a tiny inputTokens delta and
-              // the footer bar appears stuck at 0%.
-              if (e.usage) {
-                bossStore.setBossInputTokens(computeContextUsed(e.usage, this.opts.bossProvider));
-              }
-              // Flush trailing text from this turn. Subsequent turns may add more.
-              bossStore.flushPendingText();
-              break;
-            case "retry":
-              if (!e.silent) {
-                bossStore.setRetryInfo({
-                  reason: e.reason,
-                  attempt: e.attempt,
-                  maxAttempts: e.maxAttempts,
-                  delayMs: e.delayMs,
-                });
-              }
-              break;
-            case "error":
-              bossStore.appendInfo(formatProviderError(e.error.message), "error");
-              break;
-            default:
-              break;
-          }
-        }
-      } catch (err) {
-        if (isAbortError(err)) {
-          // Mirror ggcoder's onAborted: convert any in-flight tools to
-          // "Stopped." entries so the user sees the same visual feedback.
-          bossStore.interruptStreaming();
-          if (!this.running) {
-            bossStore.finishStreaming();
-            return;
-          }
-          bossStore.appendInfo("Interrupted by user.", "warning");
-          bossStore.finishStreaming();
-          await this.persistNewMessages();
-          continue;
-        }
-        const message = err instanceof Error ? err.message : String(err);
-        bossStore.appendInfo(formatProviderError(message), "error");
-      }
-      bossStore.finishStreaming();
-      await this.persistNewMessages();
     }
+    if (event.kind === "worker_error") {
+      this.hadWorkerActivitySinceReady = true;
+      log("ERROR", "worker_error", event.message, { project: event.project });
+      const taskId = this.inFlightTaskByProject.get(event.project);
+      if (taskId) {
+        this.inFlightTaskByProject.delete(event.project);
+        await tasksStore.update(taskId, {
+          status: "blocked",
+          notes: `Worker error: ${event.message}`,
+        });
+      }
+    }
+
+    // Auto-compact when over 80% of context — mirrors AgentSession.runLoop.
+    // Workers handle their own compaction independently (via AgentSession).
+    await this.runCompaction(false);
+
+    // Snapshot every worker's status at the moment the event arrives so the
+    // boss reasons from live state, not from its memory of past dispatches.
+    // Without this the boss can hallucinate "all idle" mid-batch — by event
+    // 3 of 5 it has heard 3 completions and may assume the run is over even
+    // though workers 4 and 5 are still active.
+    const workerSnapshot = [...this.workers.entries()].map(([name, w]) => ({
+      name,
+      status: w.getStatus(),
+    }));
+    // Drain any auto-chain notices accumulated since the last event so the
+    // boss is told explicitly which projects we re-dispatched on its behalf.
+    const notices = this.pendingAutoChainNotices.splice(0);
+    const text = formatEventForBoss(event, workerSnapshot, notices);
+    bossStore.startStreaming();
+
+    // Fresh AbortController for this turn so ESC can cancel just this call.
+    this.turnAc = new AbortController();
+    this.bossAgent.setSignal(this.turnAc.signal);
+
+    try {
+      const stream = this.bossAgent.prompt(text);
+      for await (const e of stream) {
+        switch (e.type) {
+          case "text_delta":
+            bossStore.appendStreamText(e.text);
+            break;
+          case "thinking_delta":
+            bossStore.appendStreamThinking(e.text);
+            break;
+          case "tool_call_start":
+            // Flush any preceding text so chronological order is preserved
+            // in scrollback (text → tool → text → tool, not text-block then tool-block).
+            bossStore.flushPendingText();
+            bossStore.startTool(e.toolCallId, e.name, e.args);
+            bossStore.setActivityPhase("tools");
+            break;
+          case "tool_call_end":
+            bossStore.endTool(e.toolCallId, e.isError, e.durationMs, e.result, e.details);
+            break;
+          case "turn_end":
+            // Mirror ggcoder/useAgentLoop: total context = uncached input +
+            // cache reads + cache writes (Anthropic separates input/output,
+            // others share the window so include output too). Without adding
+            // cache, prompt-cached calls report a tiny inputTokens delta and
+            // the footer bar appears stuck at 0%.
+            if (e.usage) {
+              bossStore.setBossInputTokens(computeContextUsed(e.usage, this.opts.bossProvider));
+            }
+            // Flush trailing text from this turn. Subsequent turns may add more.
+            bossStore.flushPendingText();
+            // Flush any tool-queued end-of-turn infos (e.g. add_task's
+            // Ctrl+T hint) so they land AFTER the boss's tool calls, not
+            // interleaved with them.
+            bossStore.flushEndOfTurnInfos();
+            break;
+          case "retry":
+            if (!e.silent) {
+              bossStore.setRetryInfo({
+                reason: e.reason,
+                attempt: e.attempt,
+                maxAttempts: e.maxAttempts,
+                delayMs: e.delayMs,
+              });
+            }
+            break;
+          case "error":
+            bossStore.appendInfo(formatProviderError(e.error.message), "error");
+            break;
+          default:
+            break;
+        }
+      }
+    } catch (err) {
+      if (isAbortError(err)) {
+        // Mirror ggcoder's onAborted: convert any in-flight tools to
+        // "Stopped." entries so the user sees the same visual feedback.
+        bossStore.interruptStreaming();
+        if (!this.running) {
+          bossStore.finishStreaming();
+          return;
+        }
+        bossStore.appendInfo("Interrupted by user.", "warning");
+        bossStore.finishStreaming();
+        await this.persistNewMessages();
+        // Was `continue` to skip post-stream cleanup. Now we're inside
+        // runIteration() — `return` ends this iteration; the run() loop
+        // picks up the next event on its own.
+        return;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      log("ERROR", "boss_turn", message);
+      bossStore.appendInfo(formatProviderError(message), "error");
+    }
+    bossStore.finishStreaming();
+    await this.persistNewMessages();
+
+    // Auto-chain: after the boss finishes processing a worker_turn_complete,
+    // if it didn't dispatch anything for that project (worker is still idle)
+    // AND there are more pending tasks for that project, fire the next one
+    // automatically. The idle check arbitrates with the boss — if the boss
+    // DID prompt_worker / dispatch_pending / re-prompt during its turn, the
+    // worker is now "working", we skip. So this only kicks in when the boss
+    // implicitly leaves the project parked.
+    // Auto-chain ONLY fires when the just-finished event was itself a
+    // dispatched task (had a taskId tracked in inFlightTaskByProject above).
+    // Otherwise we'd hijack ad-hoc prompt_worker calls — e.g. recon prompts
+    // — by dispatching pending backlog tasks the user never asked to run.
+    if (event.kind === "worker_turn_complete" && finishedTaskId) {
+      await this.maybeAutoChain(event.summary.project);
+    }
+
+    // All-clear chime — fires when the orchestrator winds down after a
+    // burst of activity. Conditions: at least one worker event happened
+    // since the last chime, every worker is now idle, and the queue is
+    // drained (no more events queued for the boss). Resets the flag so
+    // the next workflow gets its own chime.
+    const allWorkersIdle = [...this.workers.values()].every((w) => w.getStatus() === "idle");
+    if (this.hadWorkerActivitySinceReady && allWorkersIdle && this.queue.size() === 0) {
+      this.hadWorkerActivitySinceReady = false;
+      log("INFO", "all_clear", "all workers idle, queue empty");
+      void playReadyAudio();
+    }
+  }
+
+  private async maybeAutoChain(project: string): Promise<void> {
+    const worker = this.workers.get(project);
+    if (!worker || worker.getStatus() !== "idle") {
+      log("DEBUG", "auto_chain", "skip — worker not idle", { project });
+      return;
+    }
+    if (this.inFlightTaskByProject.has(project)) {
+      log("DEBUG", "auto_chain", "skip — task already in flight", { project });
+      return;
+    }
+    // Pull pending OR blocked — auto-chain retries blocked tasks too so a
+    // single bad turn doesn't park the whole project. Pending is preferred.
+    const next = tasksStore.nextDispatchable(project);
+    if (!next) {
+      log("DEBUG", "auto_chain", "skip — no dispatchable tasks", { project });
+      return;
+    }
+    if (next.status === "blocked") {
+      await tasksStore.update(next.id, { status: "pending", notes: undefined });
+    }
+    log("INFO", "auto_chain", "dispatching next task", {
+      project,
+      taskId: next.id,
+      title: next.title,
+      previousStatus: next.status,
+    });
+    await this.dispatchTaskByDescription(project, next.description, next.fresh === true, next.id);
+    // Queue a note for the boss so it knows this project is on a fresh task.
+    // Without this the boss sees "X(working)" in the next event's trailer and
+    // dismisses it as stale.
+    this.pendingAutoChainNotices.push({ project, title: next.title });
   }
 
   async dispose(): Promise<void> {
@@ -498,10 +692,70 @@ export class GGBoss {
   }
 }
 
-function formatEventForBoss(event: BossEvent): string {
+type ReportedStatus = "DONE" | "UNVERIFIED" | "PARTIAL" | "BLOCKED" | "INFO" | null;
+
+/**
+ * Pull the worker's self-reported "Status: X" line out of its final text. The
+ * trailer is appended by every prompt via WORKER_PROMPT_BRIEF, so it should
+ * always be there for task-style runs. Returns null if missing or unrecognised.
+ */
+export function parseReportedStatus(finalText: string): ReportedStatus {
+  // Match the LAST "Status: X" line — workers occasionally mention statuses
+  // mid-text and we want the trailer's value, not an example sentence.
+  const matches = [
+    ...finalText.matchAll(/^\s*Status:\s*(DONE|UNVERIFIED|PARTIAL|BLOCKED|INFO)\b/gim),
+  ];
+  const last = matches[matches.length - 1];
+  if (!last) return null;
+  return last[1]!.toUpperCase() as ReportedStatus;
+}
+
+/**
+ * Map worker self-report to the task plan's status enum. Falls back to the
+ * tool-failure heuristic ONLY when the trailer is missing — that's the only
+ * way to recover useful state for non-compliant workers.
+ */
+export function reportedToTaskStatus(
+  reported: ReportedStatus,
+  anyToolFailed: boolean,
+): "done" | "blocked" | "in_progress" | "skipped" {
+  if (reported === "DONE") return "done";
+  if (reported === "INFO") return "done"; // question answered, nothing to retry
+  if (reported === "BLOCKED") return "blocked";
+  // UNVERIFIED / PARTIAL: keep the task as "in_progress" so the boss's next
+  // re-prompt picks it up. Tasks-overlay shows it as the active row.
+  if (reported === "UNVERIFIED" || reported === "PARTIAL") return "in_progress";
+  // No trailer — last-resort heuristic.
+  return anyToolFailed ? "blocked" : "done";
+}
+
+function formatEventForBoss(
+  event: BossEvent,
+  workerSnapshot: { name: string; status: string }[],
+  autoChainNotices: { project: string; title: string }[],
+): string {
   if (event.kind === "user_message") {
     return event.text;
   }
+  // Live worker statuses, formatted as a single trailing line so the boss
+  // always sees who's still running. Excludes the worker the event is FROM
+  // (the boss can read that worker's outcome from the event body itself).
+  const renderOthers = (excludeName: string): string => {
+    const others = workerSnapshot
+      .filter((w) => w.name !== excludeName)
+      .map((w) => `${w.name}(${w.status})`)
+      .join(" ");
+    return others.length > 0 ? `\nother_workers: ${others}` : "";
+  };
+
+  // Auto-chain trailer — explicit per-project list so the boss can't dismiss
+  // the trailer's "(working)" entries as stale.
+  const renderAutoChain = (): string => {
+    if (autoChainNotices.length === 0) return "";
+    const lines = autoChainNotices.map((n) => `  - ${n.project}: "${n.title}"`);
+    return `\nauto_dispatched_since_last_event:\n${lines.join("\n")}`;
+  };
+
   if (event.kind === "worker_turn_complete") {
     const s = event.summary;
     const tools =
@@ -511,10 +765,10 @@ function formatEventForBoss(event: BossEvent): string {
     return `[event:worker_turn_complete] project="${s.project}" turn=${s.turnIndex} timestamp=${s.timestamp}
 tools_used: ${tools}
 final_text:
-${s.finalText || "(empty)"}`;
+${s.finalText || "(empty)"}${renderOthers(s.project)}${renderAutoChain()}`;
   }
   return `[event:worker_error] project="${event.project}" timestamp=${event.timestamp}
-${event.message}`;
+${event.message}${renderOthers(event.project)}${renderAutoChain()}`;
 }
 
 /**

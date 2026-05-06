@@ -172,9 +172,7 @@ export function msToSrtTime(ms: number): string {
   const ss = totalSec % 60;
   const mm = Math.floor(totalSec / 60) % 60;
   const hh = Math.floor(totalSec / 3600);
-  return (
-    pad2(hh) + ":" + pad2(mm) + ":" + pad2(ss) + "," + String(milli).padStart(3, "0")
-  );
+  return pad2(hh) + ":" + pad2(mm) + ":" + pad2(ss) + "," + String(milli).padStart(3, "0");
 }
 
 /**

@@ -13,6 +13,7 @@ import {
 // runFfmpeg via vi.mock at module scope.
 
 vi.mock("./media/ffmpeg.js", async () => {
+  // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   const real = await vi.importActual<typeof import("./media/ffmpeg.js")>("./media/ffmpeg.js");
   return {
     ...real,
@@ -30,7 +31,7 @@ describe("BUNDLED_SFX registry", () => {
   });
 
   it("every recipe has stereo + non-empty args + no embedded output path", () => {
-    for (const [name, recipe] of Object.entries(BUNDLED_SFX)) {
+    for (const [_name, recipe] of Object.entries(BUNDLED_SFX)) {
       expect(recipe.description.length).toBeGreaterThan(10);
       expect(recipe.args).toContain("-ac");
       const acIdx = recipe.args.indexOf("-ac");

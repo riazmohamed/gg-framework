@@ -79,6 +79,49 @@ export function stripDoneMarkers(text: string): string {
 }
 
 /**
+ * Segment of an assistant turn's text after [DONE:N] markers are split
+ * out for inline rendering. Used by the chat to render "✓ Step N: <desc>"
+ * markers in the same temporal order the agent emitted them, instead of
+ * stripping markers to invisible whitespace.
+ */
+export type DisplaySegment =
+  | { kind: "text"; text: string }
+  | { kind: "done"; stepNum: number; description: string };
+
+/**
+ * Split text on [DONE:N] markers, returning an array of segments. Empty/
+ * whitespace-only text segments are dropped. Step description is looked
+ * up in `steps` (falls back to "" so the renderer can show just the step
+ * number when the plan is no longer in scope, e.g. after onComplete
+ * cleared planSteps).
+ */
+export function segmentDisplayText(text: string, steps: PlanStep[]): DisplaySegment[] {
+  const segments: DisplaySegment[] = [];
+  const pattern = /\[DONE:(\d+)\]/gi;
+  let lastIdx = 0;
+  for (const match of text.matchAll(pattern)) {
+    const matchIdx = match.index ?? 0;
+    const before = text.slice(lastIdx, matchIdx);
+    if (before.trim()) {
+      segments.push({ kind: "text", text: before });
+    }
+    const stepNum = parseInt(match[1], 10);
+    const step = steps.find((s) => s.step === stepNum);
+    segments.push({
+      kind: "done",
+      stepNum,
+      description: step?.text ?? "",
+    });
+    lastIdx = matchIdx + match[0].length;
+  }
+  const after = text.slice(lastIdx);
+  if (after.trim()) {
+    segments.push({ kind: "text", text: after });
+  }
+  return segments;
+}
+
+/**
  * Scan text for [DONE:n] markers and return the set of completed step numbers.
  */
 export function findCompletedMarkers(text: string): Set<number> {

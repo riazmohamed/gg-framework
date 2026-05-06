@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { compact, err, summarizeList } from "../core/format.js";
 import { detectSpeakerChanges } from "../core/speaker-changes.js";
-import type { Transcript } from "../core/whisper.js";
+import { parseTranscript } from "../core/whisper.js";
 
 const DetectSpeakerChangesParams = z.object({
   path: z.string().describe("Transcript JSON file (output of `transcribe`)."),
@@ -31,7 +31,7 @@ export function createDetectSpeakerChangesTool(
     async execute({ path, minGapSec }) {
       try {
         const abs = resolvePath(cwd, path);
-        const t = JSON.parse(readFileSync(abs, "utf8")) as Transcript;
+        const t = parseTranscript(readFileSync(abs, "utf8"));
         const candidates = detectSpeakerChanges(t, { minGapSec });
         const s = summarizeList(candidates, 30);
         return compact({

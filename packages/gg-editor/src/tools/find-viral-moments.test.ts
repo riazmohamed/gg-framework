@@ -51,10 +51,7 @@ describe("find_viral_moments tool", () => {
       segments: [{ start: 0, end: 60, text: "hello" }],
     });
     const tool = createFindViralMomentsTool(dir);
-    const r = await tool.execute(
-      { transcript: "t.json", durationRange: [60, 20] },
-      ctx,
-    );
+    const r = await tool.execute({ transcript: "t.json", durationRange: [60, 20] }, ctx);
     expect(r as string).toMatch(/^error:.*durationRange/);
   });
 
@@ -165,10 +162,7 @@ describe("find_viral_moments tool", () => {
     );
 
     const tool = createFindViralMomentsTool(dir);
-    const r = await tool.execute(
-      { transcript: "t.json", scoreThreshold: 90 },
-      ctx,
-    );
+    const r = await tool.execute({ transcript: "t.json", scoreThreshold: 90 }, ctx);
     const parsed = JSON.parse(r as string);
     expect(parsed.candidates).toEqual([]);
     expect(parsed.totalScored).toBeGreaterThan(0);

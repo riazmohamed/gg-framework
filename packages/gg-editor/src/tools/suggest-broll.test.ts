@@ -98,6 +98,7 @@ describe("suggest_broll", () => {
     delete process.env.PEXELS_API_KEY;
     // Make sure the stored-key fallback returns nothing either.
     vi.doMock("../core/auth/api-keys.js", async (orig) => {
+      // eslint-disable-next-line @typescript-eslint/consistent-type-imports
       const mod = await orig<typeof import("../core/auth/api-keys.js")>();
       return {
         ...mod,
@@ -127,7 +128,7 @@ describe("suggest_broll", () => {
     writeFileSync(join(dir, "t.json"), "{not json", "utf8");
     const tool = createSuggestBrollTool(dir);
     const r = (await tool.execute({ transcript: "t.json" }, ctx)) as string;
-    expect(r).toMatch(/^error: transcript is not valid JSON/);
+    expect(r).toMatch(/^error: Invalid transcript: not valid JSON/);
   });
 
   it("returns formatted items when LLM + Pexels both succeed (download=false)", async () => {
@@ -172,9 +173,7 @@ describe("suggest_broll", () => {
   it("returns user-friendly error on Pexels 401", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(
-        llmResponse([{ atSec: 1, query: "morning coffee", why: "x" }]),
-      )
+      .mockResolvedValueOnce(llmResponse([{ atSec: 1, query: "morning coffee", why: "x" }]))
       .mockResolvedValueOnce(new Response("unauthorized", { status: 401 }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -224,9 +223,7 @@ describe("suggest_broll", () => {
 
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(
-        llmResponse([{ atSec: 2, query: "coffee shop morning", why: "x" }]),
-      )
+      .mockResolvedValueOnce(llmResponse([{ atSec: 2, query: "coffee shop morning", why: "x" }]))
       .mockResolvedValueOnce(jsonResponse({ videos: [pexelsVideo({ id: 3001 })] }))
       .mockResolvedValueOnce(
         new Response(fakeBytes, { status: 200, headers: { "Content-Type": "video/mp4" } }),
@@ -258,9 +255,7 @@ describe("suggest_broll", () => {
   it("output is valid JSON with {count, items} shape", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(
-        llmResponse([{ atSec: 1, query: "city skyline", why: "x" }]),
-      )
+      .mockResolvedValueOnce(llmResponse([{ atSec: 1, query: "city skyline", why: "x" }]))
       .mockResolvedValueOnce(jsonResponse({ videos: [pexelsVideo({ id: 9 })] }));
     vi.stubGlobal("fetch", fetchMock);
 

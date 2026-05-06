@@ -18,11 +18,23 @@ describe("parsePromiseResponse", () => {
 
   it("clamps matches to [0,1]", () => {
     const r = parsePromiseResponse(
-      JSON.stringify({ matches: 5, thumbnailPromise: "", openingShows: "", missing: [], suggestion: "" }),
+      JSON.stringify({
+        matches: 5,
+        thumbnailPromise: "",
+        openingShows: "",
+        missing: [],
+        suggestion: "",
+      }),
     );
     expect(r.matches).toBe(1);
     const r2 = parsePromiseResponse(
-      JSON.stringify({ matches: -0.5, thumbnailPromise: "", openingShows: "", missing: [], suggestion: "" }),
+      JSON.stringify({
+        matches: -0.5,
+        thumbnailPromise: "",
+        openingShows: "",
+        missing: [],
+        suggestion: "",
+      }),
     );
     expect(r2.matches).toBe(0);
   });

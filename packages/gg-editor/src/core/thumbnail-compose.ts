@@ -69,8 +69,7 @@ export async function composeThumbnailFrame(
   const fontColor = opts.fontColor ?? "white";
   const outlineColor = opts.outlineColor === "" ? "" : (opts.outlineColor ?? "black");
   const pos = opts.position ?? "bottom";
-  const yExpr =
-    pos === "top" ? "h*0.08" : pos === "center" ? "(h-text_h)/2" : "h-text_h-h*0.08";
+  const yExpr = pos === "top" ? "h*0.08" : pos === "center" ? "(h-text_h)/2" : "h-text_h-h*0.08";
   const safeText = escapeDrawtextValue(opts.text);
   const drawText =
     `drawtext=fontfile=${escapeFilterPath(fontFile)}:` +

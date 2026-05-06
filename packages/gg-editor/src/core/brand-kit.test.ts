@@ -83,7 +83,11 @@ describe("validateBrandKit", () => {
   });
 
   it("accepts six-char hex colors (no leading #)", () => {
-    const v = validateBrandKit({ colors: { primary: "FFFFFF", accent: "00aaff" } }, "/tmp", noExist);
+    const v = validateBrandKit(
+      { colors: { primary: "FFFFFF", accent: "00aaff" } },
+      "/tmp",
+      noExist,
+    );
     expect(v.ok).toBe(true);
   });
 });

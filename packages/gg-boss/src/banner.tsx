@@ -47,6 +47,9 @@ export function BossBanner({ subtitle, hint, showShortcuts }: BossBannerProps): 
             <Text color={COLORS.primary}>Tab</Text>
             <Text color={COLORS.textDim}> scope</Text>
             <Text color={COLORS.textDim}>{"  "}</Text>
+            <Text color={COLORS.primary}>⇧Tab</Text>
+            <Text color={COLORS.textDim}> thinking</Text>
+            <Text color={COLORS.textDim}>{"  "}</Text>
             <Text color={COLORS.primary}>ESC</Text>
             <Text color={COLORS.textDim}> interrupt</Text>
           </Text>

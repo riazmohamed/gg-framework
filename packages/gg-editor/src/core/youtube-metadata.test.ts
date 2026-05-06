@@ -101,10 +101,7 @@ describe("enforceMetadataConstraints", () => {
   });
 
   it("caps tags at 15 and dedupes", () => {
-    const r = enforceMetadataConstraints(
-      { ...base, tags: ["a", "A", "b", ...base.tags] },
-      200,
-    );
+    const r = enforceMetadataConstraints({ ...base, tags: ["a", "A", "b", ...base.tags] }, 200);
     expect(r.tags.length).toBeLessThanOrEqual(15);
     // case-insensitive dedupe
     expect(r.tags.filter((t) => t.toLowerCase() === "a")).toHaveLength(1);
