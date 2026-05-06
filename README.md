@@ -11,7 +11,7 @@
   <a href="https://skool.com/abukhaled"><img src="https://img.shields.io/badge/Skool-Community-7C3AED?style=for-the-badge" alt="Skool"></a>
 </p>
 
-Four packages. Each one works on its own. Stack them together and you get a full coding agent — or an orchestrator that drives many of them at once.
+Three packages. Each one works on its own. Stack them together and you get a full coding agent.
 
 | Package | What it does | README |
 |---|---|---|
@@ -74,7 +74,7 @@ MIT
 ---
 
 <p align="center">
-  <strong>Less bloat. More coding. Four providers. Four packages. One framework.</strong>
+  <strong>Less bloat. More coding. Four providers. Three packages. One framework.</strong>
 </p>
 
 <p align="center">
