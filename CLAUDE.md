@@ -15,7 +15,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (uses `ggcoder-eyes` for perception)
 
-Current published version: **4.3.56** (last app-update sync: 2026-04-25).
+Current published version: **4.3.153** (last app-update sync: 2026-05-06).
+
+This windows fork is a slimmer subset of the upstream `kenkaiiii/gg-framework`: it keeps only `gg-ai`, `gg-agent`, `ggcoder` (binary `ogcoder`), and `ggcoder-eyes`. Upstream packages introduced after the previous sync (`gg-boss`, `gg-pixel`, `gg-pixel-server`, `gg-editor`, `gg-editor-premiere-panel`) and the in-app Pixel error-tracking flow (`pixel.ts`, `pixel-fix.ts`, `PixelOverlay.tsx`, `core/auth/index.ts`, `utils/open-browser.ts`) are intentionally excluded. When merging from main, drop those packages/files and rewrite any `@kenkaiiii/*` workspace imports to `@abukhaled/*`.
 
 ## Commands
 
