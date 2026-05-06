@@ -22,7 +22,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`). `gg-boss` consumes `gg-ai` + `gg-agent` + `ogcoder` to spawn worker sessions.
 
-> **Branch note (rebrand/abukhaled, 2026-05-05)**: The three core packages were renamed from `@kenkaiiii/{gg-ai,gg-agent,ggcoder}` to `@abukhaled/{gg-ai,gg-agent,ogcoder}` (binary renamed `ggcoder → ogcoder`). The auxiliary packages (`gg-editor`, `gg-boss`, `gg-pixel`) still publish under `@kenkaiiii/*` but their workspace deps and source imports were rewritten to point at `@abukhaled/*` so the monorepo builds. `gg-editor` currently has pre-existing typecheck errors on `main` (the auth-refactor commit calls a richer `renderLoginSelector` and `Footer` API that ggcoder hasn't shipped yet) — they merge through unchanged on this branch and are not regressions.
+> **Branch note (rebrand/abukhaled, last sync 2026-05-06)**: The three core packages were renamed from `@kenkaiiii/{gg-ai,gg-agent,ggcoder}` to `@abukhaled/{gg-ai,gg-agent,ogcoder}` (binary renamed `ggcoder → ogcoder`). All three are pinned to version `4.3.153` after the latest sync from `main`. The auxiliary packages (`gg-editor`, `gg-boss`, `gg-pixel`) still publish under `@kenkaiiii/*` but their workspace deps and source imports point at `@abukhaled/*` so the monorepo builds end-to-end (`pnpm check && pnpm lint && pnpm format:check` all clean).
+>
+> **Latest merge (2026-05-06) brought in**:
+> - `gg-boss` audio system (`audio.ts`, `radio.ts`, `radio-picker.tsx`, ready/done/splash MP3s under `assets/`)
+> - `gg-boss` auto-update worker (`auto-update.ts`) and `settings.ts`/`logger.ts` modules
+> - `gg-boss` splash screen (`splash.tsx`) and richer footer (auto-update banner, radio station indicator, priority-drop layout)
+> - `gg-boss` build moved to `tsup` (`tsup.config.ts`) — bundle is now self-contained, so `@abukhaled/{gg-ai,gg-agent,ogcoder}` were moved into `devDependencies`
+> - `.github/workflows/ci.yml` — new CI pipeline running `pnpm check && pnpm lint && pnpm format:check && pnpm test`
+> - `gg-editor` new tests: `concat-videos.test.ts`, `generate-gif.test.ts`, `path-traversal.test.ts`, `python.test.ts`, plus `whisper.test.ts` and resolve-bridge tests
+> - `ggcoder` Plan-mode polish: `extractPlanSteps` + `planSteps` flow through `props.resetUI`/`sessionStore`; `/clear` now uses `resetUI` when wired (with abort-on-clear behaviour from this branch preserved as the front of that path)
+> - `ggcoder` UI: new `screenshots/ggcoder.png`, removed `useTerminalProgress.ts`, login screen now uses dynamic `_brand`/`_primary` (default brand set to `"OG Coder"`)
 
 ## Commands
 
