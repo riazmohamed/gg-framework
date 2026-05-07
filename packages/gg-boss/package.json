@@ -1,5 +1,5 @@
 {
-  "name": "@kenkaiiii/gg-boss",
+  "name": "@abukhaled/og-boss",
   "version": "4.3.154",
   "type": "module",
   "description": "Orchestrator agent that drives multiple ogcoder sessions across projects from a single chat",
@@ -10,7 +10,7 @@
     "directory": "packages/gg-boss"
   },
   "bin": {
-    "ggboss": "./dist/cli.js"
+    "ogboss": "./dist/cli.js"
   },
   "exports": {
     ".": {

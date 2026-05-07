@@ -109,7 +109,7 @@ function BossAppInner({ boss, resetUI }: BossAppProps): React.ReactElement {
   // Seeded from the radio module's module-level state — usually null on
   // launch but resilient to a hot-restart of the React tree.
   const [currentRadio, setCurrentRadio] = useState<string | null>(() => getCurrentStation());
-  // Auto-update indicator: true when a newer version of @kenkaiiii/gg-boss
+  // Auto-update indicator: true when a newer version of @abukhaled/og-boss
   // is on disk waiting for the next restart. Seeded synchronously from the
   // state file (so we show the indicator immediately if a previous session
   // queued one) and bumped to true by the periodic check below if a fresh

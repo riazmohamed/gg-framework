@@ -38,7 +38,7 @@ interface BossFooterProps {
   exitPending: boolean;
   /** Boss extended-thinking level. Falsy when thinking is off. */
   bossThinkingLevel?: string;
-  /** Auto-updater has installed a newer @kenkaiiii/gg-boss in the background.
+  /** Auto-updater has installed a newer @abukhaled/og-boss in the background.
    *  Show a "restart to apply" hint at the end of the footer row. */
   updatePending?: boolean;
   /** id of the currently-playing radio station (from RADIO_STATIONS), or null

@@ -11,7 +11,7 @@ import { defineConfig } from "tsup";
  * loudly even though the vulnerable code path is unreachable in a TUI.
  *
  * Bundling means the published `dependencies` field is empty, so a fresh
- * `npm i -g @kenkaiiii/gg-boss` ends up with zero transitive deps and a
+ * `npm i -g @abukhaled/og-boss` ends up with zero transitive deps and a
  * clean audit. Users never see panic-inducing warnings on install.
  *
  * Reachability requirements (already satisfied):

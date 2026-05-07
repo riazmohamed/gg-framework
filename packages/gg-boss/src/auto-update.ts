@@ -4,13 +4,13 @@ import path from "node:path";
 import os from "node:os";
 
 /**
- * gg-boss auto-update — mirrors ggcoder's pattern (packages/ggcoder/src/core/
- * auto-update.ts) but pinned to @kenkaiiii/gg-boss and with its own state
+ * og-boss auto-update — mirrors ggcoder's pattern (packages/ggcoder/src/core/
+ * auto-update.ts) but pinned to @abukhaled/og-boss and with its own state
  * file under ~/.gg/boss/ so it can't fight with ggcoder's checker.
  *
  * Two-phase strategy:
  *  - Phase 1 (instant, blocking): if a previous run found a newer version,
- *    spawn `npm i -g @kenkaiiii/gg-boss@latest` (or pnpm/yarn equivalent)
+ *    spawn `npm i -g @abukhaled/og-boss@latest` (or pnpm/yarn equivalent)
  *    in a detached child. Takes effect on the user's NEXT launch.
  *  - Phase 2 (async, non-blocking): hit the npm registry to compare versions
  *    so the next startup knows if there's anything to install. Throttled to
@@ -20,7 +20,7 @@ import os from "node:os";
  * notified when a new version drops.
  */
 
-const PACKAGE_NAME = "@kenkaiiii/gg-boss";
+const PACKAGE_NAME = "@abukhaled/og-boss";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const FETCH_TIMEOUT_MS = 10_000;
@@ -232,7 +232,7 @@ export function startPeriodicUpdateCheck(
           updatePending: true,
         });
         onUpdate(
-          `Ken just pushed a fresh update — ${currentVersion} → ${latestVersion}! Restart ggboss to grab it (or run ${info.updateCommand} if you can't wait).`,
+          `Ken just pushed a fresh update — ${currentVersion} → ${latestVersion}! Restart ogboss to grab it (or run ${info.updateCommand} if you can't wait).`,
         );
         stopPeriodicUpdateCheck();
       })

@@ -78,22 +78,22 @@ function printHelpAndExit(): never {
       c(COLORS.textDim, " — orchestrator that drives multiple ggcoder workers from one chat.\n\n") +
       c(COLORS.text, "Usage\n") +
       "  " +
-      c(COLORS.accent, "ggboss") +
+      c(COLORS.accent, "ogboss") +
       c(
         COLORS.textDim,
         "                              start orchestrator using linked projects\n",
       ) +
       "  " +
-      c(COLORS.accent, "ggboss link") +
+      c(COLORS.accent, "ogboss link") +
       c(COLORS.textDim, "                         pick which projects to link (interactive)\n") +
       "  " +
-      c(COLORS.accent, "ggboss continue") +
+      c(COLORS.accent, "ogboss continue") +
       c(COLORS.textDim, "                     resume the most recent boss session\n") +
       "  " +
-      c(COLORS.accent, "ggboss --resume <id>") +
+      c(COLORS.accent, "ogboss --resume <id>") +
       c(COLORS.textDim, "                resume a specific boss session\n") +
       "  " +
-      c(COLORS.accent, "ggboss --project <spec> [...]") +
+      c(COLORS.accent, "ogboss --project <spec> [...]") +
       c(COLORS.textDim, "       override links with explicit project(s)\n\n") +
       c(COLORS.text, "Options\n") +
       "  " +
@@ -123,7 +123,7 @@ async function runOrchestrator(args: CliArgs): Promise<void> {
         "\n" +
           chalk.hex(COLORS.warning)("No linked projects.") +
           chalk.hex(COLORS.textDim)(" Run ") +
-          chalk.hex(COLORS.accent)("ggboss link") +
+          chalk.hex(COLORS.accent)("ogboss link") +
           chalk.hex(COLORS.textDim)(" to choose, or pass ") +
           chalk.hex(COLORS.accent)("--project") +
           chalk.hex(COLORS.textDim)(".\n\n"),
@@ -217,7 +217,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // `ggboss continue` is a subcommand alias for "resume the most recent session".
+  // `ogboss continue` is a subcommand alias for "resume the most recent session".
   // Accept any flags after `continue` as normal flag args.
   const isContinue = argv[0] === "continue";
   const args = parseArgs(isContinue ? argv.slice(1) : argv);
