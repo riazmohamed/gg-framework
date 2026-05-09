@@ -589,6 +589,7 @@ export interface AppProps {
     sessionTitleGenerated: boolean;
     overlay?: "model" | "tasks" | "skills" | "plan" | "theme" | "eyes" | "pixel" | null;
     planAutoExpand?: boolean;
+    runAllTasks?: boolean;
     pendingAction?: { prompt: string; infoText?: string };
   };
 }
@@ -652,7 +653,7 @@ export function App(props: AppProps) {
   const [updatePending, setUpdatePending] = useState<boolean>(
     () => getPendingUpdate(props.version) !== null,
   );
-  const [runAllTasks, setRunAllTasks] = useState(false);
+  const [runAllTasks, setRunAllTasks] = useState(props.sessionStore?.runAllTasks ?? false);
   const runAllTasksRef = useRef(false);
   const startTaskRef = useRef<(title: string, prompt: string, taskId: string) => void>(() => {});
   const runAllPixelRef = useRef(false);
@@ -737,6 +738,9 @@ export function App(props: AppProps) {
   useEffect(() => {
     if (sessionStore) sessionStore.overlay = overlay;
   }, [overlay, sessionStore]);
+  useEffect(() => {
+    if (sessionStore) sessionStore.runAllTasks = runAllTasks;
+  }, [runAllTasks, sessionStore]);
 
   // pendingAction is consumed via a useEffect AFTER agentLoop is created
   // — see below where useAgentLoop is set up.
