@@ -2495,7 +2495,7 @@ export function App(props: AppProps) {
       case "error": {
         const providerHint = getProviderErrorHint(item.message);
         return (
-          <Box key={item.id} marginTop={1} flexDirection="column" flexShrink={1}>
+          <Box key={item.id} marginTop={1} flexDirection="column">
             <Text color={theme.error} wrap="wrap">
               {"✗ "}
               {item.message}
@@ -2511,7 +2511,7 @@ export function App(props: AppProps) {
       }
       case "info":
         return (
-          <Box key={item.id} marginTop={1} flexShrink={1}>
+          <Box key={item.id} marginTop={1}>
             <Text color={theme.textDim} wrap="wrap">
               {item.text}
             </Text>
@@ -2522,7 +2522,6 @@ export function App(props: AppProps) {
           <Box
             key={item.id}
             marginTop={1}
-            flexShrink={1}
             borderStyle="round"
             borderColor={theme.success}
             paddingX={1}
@@ -2535,7 +2534,7 @@ export function App(props: AppProps) {
         );
       case "plan_transition":
         return (
-          <Box key={item.id} marginTop={1} flexShrink={1}>
+          <Box key={item.id} marginTop={1}>
             <Text color={theme.planPrimary} bold wrap="wrap">
               {item.active ? "● " : "● "}
               {item.text}
@@ -2544,7 +2543,7 @@ export function App(props: AppProps) {
         );
       case "step_done":
         return (
-          <Box key={item.id} marginTop={1} flexShrink={1}>
+          <Box key={item.id} marginTop={1}>
             <Text wrap="wrap">
               <Text color={theme.success} bold>
                 {"✓ "}
