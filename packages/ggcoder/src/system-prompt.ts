@@ -68,7 +68,7 @@ export async function buildSystemPrompt(
         `You are in PLAN MODE. Research and design an implementation plan before writing any code.\n\n` +
         `### Workflow\n` +
         `1. Explore: read, grep, find, ls to understand the codebase\n` +
-        `2. Research: web_search + web_fetch for docs, mcp__grep__searchGitHub for real code samples\n` +
+        `2. Research: \`web_search\` + \`web_fetch\` for docs; \`mcp__kencode-search__searchCode\` for real code samples — literal text or RE2 regex (NOT semantic); start with \`peek: true\` for paths+counts, then drill in narrowed by \`repo\` + \`path\` (full usage in Research & Verification below)\n` +
         `3. Draft: write the plan to .gg/plans/<name>.md\n` +
         `4. Submit: call exit_plan with the plan path\n\n` +
         `### Rules\n` +
@@ -106,8 +106,14 @@ export async function buildSystemPrompt(
     `## Research & Verification\n\n` +
       `Your training data may be outdated. Do not assume — verify.\n\n` +
       `- **Docs first**: \`web_search\` → \`web_fetch\`.\n` +
-      `- **Real code second**: \`mcp__grep__searchGitHub\` for patterns, UI, library usage, APIs.\n` +
-      `- Applies to everything — APIs, CLI flags, configs, versions. Not just "unfamiliar" code.`,
+      `- **Real code second**: \`mcp__kencode-search__searchCode\` — literal-text or RE2-regex search across 2M+ public repos. ` +
+      `**Not semantic** — query the actual code (\`useState(\`, \`import { z } from "zod"\`), NOT phrases like "react hooks tutorial".\n` +
+      `  - Filters: \`language: ["TypeScript"]\`, \`repo: "owner/name"\` (substring), \`path: "src/components/"\` (substring), \`matchCase\`, \`useRegexp\`.\n` +
+      `  - Workflow: \`peek: true\` first → paths + match counts only (cheap triage). Then call again narrowed by \`repo\` + \`path\` for full snippets. Paginate with \`offset\`.\n` +
+      `  - Defaults exclude tests, \`node_modules\`, vendored, build, and generated files — pass \`includeTests: true\` or \`includeVendored: true\` to widen.\n` +
+      `  - Token budget: \`maxResults\` defaults to 10 (cap 200), \`contextLines\` defaults to 5 (range 0–20). Keep both small unless you need more.\n` +
+      `  - RE2 regex only: no lookahead/lookbehind/backrefs; multi-line patterns need \`(?s)\` prefix.\n` +
+      `- Applies to everything — APIs, CLI flags, configs (vite.config.ts, package.json, Dockerfile, GH Actions), shell idioms, schema shapes, error wording, conventions. Not just "unfamiliar" code.`,
   );
 
   // 4. Code Quality

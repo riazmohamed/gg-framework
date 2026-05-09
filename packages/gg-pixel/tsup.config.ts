@@ -7,6 +7,10 @@ export default defineConfig([
     dts: true,
     clean: true,
     sourcemap: true,
+    // Inject `import.meta.url` shim into CJS output — local-sqlite.ts and
+    // install.ts both call `createRequire(import.meta.url)`, which is empty
+    // under CJS without this.
+    shims: true,
   },
   {
     entry: ["src/cli.ts"],

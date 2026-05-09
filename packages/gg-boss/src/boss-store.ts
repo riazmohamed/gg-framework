@@ -15,6 +15,71 @@ import type { WorkerStatus, WorkerTurnSummary } from "./types.js";
 let nextId = 1;
 const id = (): string => `i${nextId++}`;
 
+// ── History memory cap ─────────────────────────────────────
+//
+// `state.history` is push-only — every assistant turn, tool result, and
+// worker event lives there forever. In `ggboss serve` (24/7 Telegram
+// bridge) this fills V8's default 4 GB heap in ~a day. Trimming the array
+// from the front would break Ink's <Static> commit counter, so instead we
+// keep the array intact and release the *contents* of items that have aged
+// out of a sliding window. Already-rendered items remain in terminal
+// scrollback; the only visible regression is on a Static remount (e.g.
+// resize), where aged items render with a "(trimmed)" placeholder.
+const HISTORY_FULL_ITEMS = 1000;
+const HISTORY_TRIM_MARKER = "…(trimmed)…";
+let historyTrimmedUpTo = 0;
+
+function trimItemFields(item: HistoryItem): void {
+  switch (item.kind) {
+    case "tool":
+      if (item.result.length > 200) item.result = HISTORY_TRIM_MARKER;
+      // args and details can be large (full prompt_worker prompts, nested
+      // objects) — release them entirely.
+      item.args = {};
+      item.details = undefined;
+      break;
+    case "worker_event":
+      if (item.finalText.length > 200) {
+        item.finalText = item.finalText.slice(0, 200) + " " + HISTORY_TRIM_MARKER;
+      }
+      break;
+    case "assistant":
+      if (item.text.length > 200) item.text = item.text.slice(0, 200) + " " + HISTORY_TRIM_MARKER;
+      if (item.thinking && item.thinking.length > 100) item.thinking = HISTORY_TRIM_MARKER;
+      break;
+    case "worker_error":
+      if (item.message.length > 200) {
+        item.message = item.message.slice(0, 200) + " " + HISTORY_TRIM_MARKER;
+      }
+      break;
+    case "info":
+    case "update_notice":
+      if (item.text.length > 400) item.text = item.text.slice(0, 400) + " " + HISTORY_TRIM_MARKER;
+      break;
+    case "user":
+    case "task_dispatch":
+      // Already small — text is one user message or a short title list.
+      break;
+  }
+}
+
+/**
+ * Mutate fields of any items that have aged out of the [length-N, length)
+ * window. Amortized O(1) per call: tracks the high-water mark of trimmed
+ * indices so we never re-walk old items. Mutating already-pushed items is
+ * safe — observers (Ink Static, serve-mode flusher) only consume each item
+ * once, on the notify pass that pushed it.
+ */
+function trimAgedHistory(): void {
+  const cutoff = state.history.length - HISTORY_FULL_ITEMS;
+  if (cutoff <= historyTrimmedUpTo) return;
+  for (let i = historyTrimmedUpTo; i < cutoff; i++) {
+    const item = state.history[i];
+    if (item) trimItemFields(item);
+  }
+  historyTrimmedUpTo = cutoff;
+}
+
 function isText(p: ContentPart): p is TextContent {
   return p.type === "text";
 }
@@ -274,6 +339,16 @@ export function useBossState(): BossUiState {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
+/** Non-React subscription for serve mode (Telegram bridge, etc.). */
+export function subscribeToBossStore(fn: () => void): () => void {
+  return subscribe(fn);
+}
+
+/** Read the current state outside of React. */
+export function getBossState(): BossUiState {
+  return getSnapshot();
+}
+
 // ── Mutations (called by orchestrator/worker) ──────────────
 
 export const bossStore = {
@@ -301,6 +376,7 @@ export const bossStore = {
         workStartedAt: null,
       })),
     };
+    historyTrimmedUpTo = 0;
     notify();
   },
 
@@ -329,6 +405,7 @@ export const bossStore = {
       ...state,
       history: [...state.history, { kind: "user", id: id(), text, timestamp: Date.now() }],
     };
+    trimAgedHistory();
     notify();
   },
 
@@ -341,6 +418,7 @@ export const bossStore = {
         { kind: "task_dispatch", id: id(), tasks, timestamp: Date.now() },
       ],
     };
+    trimAgedHistory();
     notify();
   },
 
@@ -349,6 +427,7 @@ export const bossStore = {
       ...state,
       history: [...state.history, { kind: "info", id: id(), text, level }],
     };
+    trimAgedHistory();
     notify();
   },
 
@@ -363,6 +442,7 @@ export const bossStore = {
       ...state,
       history: [...state.history, { kind: "update_notice", id: id(), text }],
     };
+    trimAgedHistory();
     notify();
   },
 
@@ -392,6 +472,7 @@ export const bossStore = {
       history: [...state.history, ...newRows],
       pendingEndOfTurnInfos: [],
     };
+    trimAgedHistory();
     notify();
   },
 
@@ -618,6 +699,7 @@ export const bossStore = {
       history: [...state.history, ...state.pendingFlush],
       pendingFlush: [],
     };
+    trimAgedHistory();
     notify();
   },
 
@@ -748,6 +830,7 @@ export const bossStore = {
           : w,
       ),
     };
+    trimAgedHistory();
     notify();
   },
 
@@ -759,6 +842,7 @@ export const bossStore = {
         w.name === project ? { ...w, status: "error", workStartedAt: null } : w,
       ),
     };
+    trimAgedHistory();
     notify();
   },
 
@@ -798,6 +882,7 @@ export const bossStore = {
 
   reset(): void {
     state = initialState;
+    historyTrimmedUpTo = 0;
     notify();
   },
 
@@ -869,6 +954,7 @@ export const bossStore = {
     }
 
     state = { ...state, history: [...state.history, ...items] };
+    trimAgedHistory();
     notify();
   },
 
@@ -890,6 +976,7 @@ export const bossStore = {
       // the overlay it was invoked from.
       overlay: null,
     };
+    historyTrimmedUpTo = 0;
     notify();
   },
 };

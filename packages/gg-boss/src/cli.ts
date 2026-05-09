@@ -6,6 +6,8 @@ import { GGBoss } from "./orchestrator.js";
 import type { ProjectSpec } from "./types.js";
 import { loadLinks } from "./links.js";
 import { runLinkCommand } from "./link-command.js";
+import { runBossServeMode, loadBossTelegramConfig } from "./serve-mode.js";
+import { runBossTelegramSetup } from "./telegram-setup.js";
 import { COLORS, clearScreen } from "./branding.js";
 import { renderBossApp } from "./orchestrator-app.js";
 import { loadSettings } from "./settings.js";
@@ -87,8 +89,14 @@ function printHelpAndExit(): never {
       c(COLORS.accent, "ogboss link") +
       c(COLORS.textDim, "                         pick which projects to link (interactive)\n") +
       "  " +
+      c(COLORS.accent, "ogboss telegram") +
+      c(COLORS.textDim, "                   configure Telegram bot integration\n") +
+      "  " +
+      c(COLORS.accent, "ogboss serve") +
+      c(COLORS.textDim, "                      run the boss over Telegram (no TUI)\n") +
+      "  " +
       c(COLORS.accent, "ogboss continue") +
-      c(COLORS.textDim, "                     resume the most recent boss session\n") +
+      c(COLORS.textDim, "                   resume the most recent boss session\n") +
       "  " +
       c(COLORS.accent, "ogboss --resume <id>") +
       c(COLORS.textDim, "                resume a specific boss session\n") +
@@ -113,6 +121,72 @@ function printHelpAndExit(): never {
       c(COLORS.textDim, " twice to exit.\n\n"),
   );
   process.exit(0);
+}
+
+// ── `ggboss serve` ────────────────────────────────────────────
+//
+// Runs the orchestrator headless and bridges it to Telegram. Resolves the bot
+// token + user ID from CLI flags > env > saved config (`ggboss telegram`).
+// Boss/worker provider+model resolution mirrors interactive mode so the user
+// doesn't have to repeat themselves between `ggboss` and `ggboss serve`.
+async function runServeSubcommand(argv: string[]): Promise<void> {
+  let cliBotToken: string | undefined;
+  let cliUserId: string | undefined;
+  let cliBossModel: string | undefined;
+  let cliWorkerModel: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--bot-token") cliBotToken = argv[++i];
+    else if (a === "--user-id") cliUserId = argv[++i];
+    else if (a === "--boss-model") cliBossModel = argv[++i];
+    else if (a === "--worker-model") cliWorkerModel = argv[++i];
+    else if (a === "--help" || a === "-h") {
+      process.stdout.write(
+        "\nggboss serve — drive the boss from Telegram\n\n" +
+          "Options\n" +
+          "  --bot-token <token>   Telegram bot token (or env GG_BOSS_TELEGRAM_BOT_TOKEN)\n" +
+          "  --user-id <id>        Allowed Telegram user ID (or env GG_BOSS_TELEGRAM_USER_ID)\n" +
+          "  --boss-model <id>     Override boss model\n" +
+          "  --worker-model <id>   Override worker model\n\n" +
+          "Run `ggboss telegram` first to save credentials interactively.\n\n",
+      );
+      process.exit(0);
+    } else {
+      throw new Error(`Unknown argument: ${a}`);
+    }
+  }
+
+  const saved = await loadBossTelegramConfig();
+  const botToken = cliBotToken ?? process.env.GG_BOSS_TELEGRAM_BOT_TOKEN ?? saved?.botToken;
+  const userIdStr = cliUserId ?? process.env.GG_BOSS_TELEGRAM_USER_ID;
+  const userId = userIdStr ? parseInt(userIdStr, 10) : saved?.userId;
+
+  if (!botToken || !userId || isNaN(userId)) {
+    process.stderr.write(
+      chalk.hex(COLORS.error)("Telegram not configured.\n\n") +
+        "Run " +
+        chalk.hex(COLORS.primary).bold("ggboss telegram") +
+        " to set up your bot token and user ID.\n\n" +
+        chalk.hex(COLORS.textDim)("Or provide manually:\n") +
+        chalk.hex(COLORS.textDim)("  ggboss serve --bot-token TOKEN --user-id ID\n"),
+    );
+    process.exit(1);
+  }
+
+  const settings = await loadSettings();
+  const bossProvider = settings.bossProvider ?? "anthropic";
+  const bossModel = cliBossModel ?? settings.bossModel ?? "claude-opus-4-7";
+  const workerProvider = settings.workerProvider ?? "anthropic";
+  const workerModel = cliWorkerModel ?? settings.workerModel ?? "claude-sonnet-4-6";
+
+  await runBossServeMode({
+    bossProvider,
+    bossModel,
+    bossThinkingLevel: settings.bossThinkingLevel,
+    workerProvider,
+    workerModel,
+    telegram: { botToken, userId },
+  });
 }
 
 async function runOrchestrator(args: CliArgs): Promise<void> {
@@ -215,6 +289,16 @@ async function main(): Promise<void> {
   if (argv[0] === "link") {
     await runLinkCommand();
     process.exit(0);
+  }
+
+  if (argv[0] === "telegram") {
+    await runBossTelegramSetup();
+    process.exit(0);
+  }
+
+  if (argv[0] === "serve") {
+    await runServeSubcommand(argv.slice(1));
+    return;
   }
 
   // `ogboss continue` is a subcommand alias for "resume the most recent session".

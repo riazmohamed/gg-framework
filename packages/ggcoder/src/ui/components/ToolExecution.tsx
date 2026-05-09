@@ -428,7 +428,7 @@ function getToolHeaderParts(
 
 function toolDisplayName(name: string): string {
   if (name.startsWith("mcp__")) {
-    // mcp__grep__searchGitHub → "searchGitHub"
+    // mcp__kencode-search__searchCode → "searchCode"
     // mcp__zai_vision__analyze_image → "analyze_image"
     const parts = name.split("__");
     const toolFn = parts[2] ?? parts[1] ?? "mcp";

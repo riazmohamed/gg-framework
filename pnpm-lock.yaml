@@ -104,6 +104,13 @@ importers:
       zod:
         specifier: ^4.4.3
         version: 4.4.3
+    optionalDependencies:
+      '@huggingface/transformers':
+        specifier: ^3.6.0
+        version: 3.8.1
+      ogg-opus-decoder:
+        specifier: ^1.6.13
+        version: 1.7.3
 
   packages/gg-editor:
     dependencies:

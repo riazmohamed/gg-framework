@@ -1,6 +1,6 @@
 {
   "name": "@abukhaled/og-boss",
-  "version": "4.3.154",
+  "version": "4.3.156",
   "type": "module",
   "description": "Orchestrator agent that drives multiple ogcoder sessions across projects from a single chat",
   "license": "MIT",
@@ -39,6 +39,10 @@
     "typescript": "^6.0.3",
     "vitest": "^4.1.4",
     "zod": "^4.4.3"
+  },
+  "optionalDependencies": {
+    "@huggingface/transformers": "^3.6.0",
+    "ogg-opus-decoder": "^1.6.13"
   },
   "publishConfig": {
     "access": "public"

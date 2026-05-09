@@ -20,8 +20,8 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "Manage the Ctrl+T task pane (add/list/done/remove). Only when the user explicitly asks. Do NOT auto-run.",
   subagent: "Delegate focused, isolated subtasks (research, parallel exploration).",
   skill: "Invoke a named skill for specialized instructions.",
-  mcp__grep__searchGitHub:
-    "Search real-world code in 1M+ GitHub repos. Single literal pattern per call. Sequential only (rate-limited).",
+  "mcp__kencode-search__searchCode":
+    'Literal-text or RE2-regex search across 2M+ public repos. NOT semantic — query the actual code (`useState(`), not "react hooks". Filters: `language: ["TypeScript"]`, `repo: "owner/name"`, `path` (substring). Workflow: `peek: true` → paths+counts for cheap triage; call again narrowed by `repo` + `path` for full snippets. Defaults exclude tests/vendored/generated — set `includeTests` or `includeVendored` to widen. RE2: no lookahead/lookbehind/backrefs; multi-line needs `(?s)`.',
   enter_plan: "Enter plan mode for read-only research + planning on complex multi-file tasks.",
   exit_plan: "Submit your plan for user review and exit plan mode.",
 };
@@ -41,7 +41,7 @@ export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "tasks",
   "subagent",
   "skill",
-  "mcp__grep__searchGitHub",
+  "mcp__kencode-search__searchCode",
   "enter_plan",
   "exit_plan",
 ];
