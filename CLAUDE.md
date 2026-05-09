@@ -22,21 +22,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`). `gg-boss` consumes `gg-ai` + `gg-agent` + `ogcoder` to spawn worker sessions.
 
-> **Branch note (rebrand/abukhaled, last sync 2026-05-07)**: The three core packages were renamed from `@kenkaiiii/{gg-ai,gg-agent,ggcoder}` to `@abukhaled/{gg-ai,gg-agent,ogcoder}` (binary renamed `ggcoder → ogcoder`). All three are pinned to version `4.3.153` after the latest sync from `main`. The auxiliary packages (`gg-editor`, `gg-boss`, `gg-pixel`) still publish under `@kenkaiiii/*` but their workspace deps and source imports point at `@abukhaled/*` so the monorepo builds end-to-end (`pnpm check && pnpm lint && pnpm format:check` all clean).
+> **Branch note (rebrand/abukhaled, last sync 2026-05-09)**: The three core packages were renamed from `@kenkaiiii/{gg-ai,gg-agent,ggcoder}` to `@abukhaled/{gg-ai,gg-agent,ogcoder}` (binary renamed `ggcoder → ogcoder`). All three are now at version `4.3.155` (ogcoder `4.3.157`). The auxiliary packages (`gg-editor`, `gg-boss`, `gg-pixel`) still publish under `@kenkaiiii/*` but their workspace deps and source imports point at `@abukhaled/*` so the monorepo builds end-to-end (`pnpm check && pnpm lint && pnpm format:check` all clean).
 >
 > **Latest merges brought in**:
-> - (2026-05-06) `gg-boss` audio system (`audio.ts`, `radio.ts`, `radio-picker.tsx`, ready/done/splash MP3s under `assets/`)
-> - (2026-05-06) `gg-boss` auto-update worker (`auto-update.ts`) and `settings.ts`/`logger.ts` modules
-> - (2026-05-06) `gg-boss` splash screen (`splash.tsx`) and richer footer (auto-update banner, radio station indicator, priority-drop layout)
-> - (2026-05-06) `gg-boss` build moved to `tsup` (`tsup.config.ts`) — bundle is now self-contained, so `@abukhaled/{gg-ai,gg-agent,ogcoder}` were moved into `devDependencies`
+> - (2026-05-06–05-07) `gg-boss` audio system, auto-update, splash screen, orchestrator expansions, event queue, worker coordination
 > - (2026-05-06) `.github/workflows/ci.yml` — new CI pipeline running `pnpm check && pnpm lint && pnpm format:check && pnpm test`
-> - (2026-05-06) `gg-editor` new tests: `concat-videos.test.ts`, `generate-gif.test.ts`, `path-traversal.test.ts`, `python.test.ts`, plus `whisper.test.ts` and resolve-bridge tests
-> - (2026-05-06) `ggcoder` Plan-mode polish: `extractPlanSteps` + `planSteps` flow through `props.resetUI`/`sessionStore`; `/clear` now uses `resetUI` when wired (with abort-on-clear behaviour from this branch preserved as the front of that path)
-> - (2026-05-06) `ggcoder` UI: new `screenshots/ggcoder.png`, removed `useTerminalProgress.ts`, login screen now uses dynamic `_brand`/`_primary` (default brand set to `"OG Coder"`)
-> - (2026-05-07) `gg-boss` orchestrator & worker expansions: tool execution flow, event queue system (`event-queue.ts`), multi-worker task coordination
-> - (2026-05-07) `gg-boss` system prompt updates (`boss-system-prompt.ts`)
-> - (2026-05-07) `gg-boss` test coverage: `event-queue.test.ts`, `worker.test.ts`, expanded `orchestrator.test.ts`
-> - (2026-05-07) Merged into rebrand/abukhaled with rebranded package scopes preserved (@abukhaled/* for core 3)
+> - (2026-05-06) `gg-editor` new tests: concat-videos, generate-gif, path-traversal, python, whisper, resolve-bridge
+> - (2026-05-06) `ggcoder` Plan-mode polish + UI updates (dynamic `_brand`/`_primary`, login screen revamp)
+> - (2026-05-09) `gg-boss` Telegram integration: `serve-mode.ts`, `telegram.ts`, `telegram-setup.ts`, `voice-transcriber.ts` (Whisper-based)
+> - (2026-05-09) `gg-boss` and `ggcoder` version bumps: gg-ai/gg-agent 4.3.155, ogcoder 4.3.157, og-boss 4.3.156
+> - (2026-05-09) `ggcoder` MCP client: stderr capture and improved error reporting for stdio transports
+> - (2026-05-09) Merged into rebrand/abukhaled with rebranded package scopes and imports preserved (@abukhaled/* for core 3)
 
 ## Commands
 
