@@ -33,6 +33,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - (2026-05-09) `gg-boss` and `ggcoder` version bumps: gg-ai/gg-agent 4.3.155, ogcoder 4.3.157, og-boss 4.3.156
 > - (2026-05-09) `ggcoder` MCP client: stderr capture and improved error reporting for stdio transports
 > - (2026-05-09) Merged into rebrand/abukhaled with rebranded package scopes and imports preserved (@abukhaled/* for core 3)
+> - (2026-05-11) Sync with main: version bumps (gg-ai/gg-agent 4.3.163, ogcoder 4.3.163, og-boss 4.3.157), language detector, style packs, verify commands, App.tsx updates with language-aware prompts
 
 ## Commands
 
