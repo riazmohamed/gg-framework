@@ -4,16 +4,15 @@ import type { Provider } from "@abukhaled/gg-ai";
 import { isEyesActive, readJournal } from "@abukhaled/ggcoder-eyes";
 import { formatSkillsForPrompt, type Skill } from "./core/skills.js";
 import { TOOL_PROMPT_HINTS, DEFAULT_TOOL_NAMES } from "./tools/prompt-hints.js";
+import type { LanguageId } from "./core/language-detector.js";
+import { renderStylePacksSection } from "./core/style-packs/index.js";
+import { detectVerifyCommands, renderVerifySection } from "./core/verify-commands.js";
 
 const CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", ".cursorrules", "CONVENTIONS.md"];
 
 /**
  * Build the system prompt dynamically based on cwd and context.
  * For Ollama (local LLM without prompt caching), skip heavy context files to reduce reprocessing overhead.
- *
- * @param toolNames — if provided, the Tools section only lists these tools.
- *   Pass `tools.map(t => t.name)` from the session so the prompt reflects
- *   exactly what the model can call. Defaults to the full built-in set.
  */
 export async function buildSystemPrompt(
   cwd: string,
@@ -21,7 +20,7 @@ export async function buildSystemPrompt(
   planMode?: boolean,
   approvedPlanPath?: string,
   provider?: Provider,
-  toolNames?: readonly string[],
+  activeLanguages?: Set<LanguageId>,
 ): Promise<string> {
   const sections: string[] = [];
 
@@ -56,7 +55,8 @@ export async function buildSystemPrompt(
       `- **Just do it.** Routine follow-up (build, migrate, seed, re-run) is yours — don't ask.\n` +
       `- **Ask first for destructive actions**: deleting files, force-push, dropping data, killing processes, \`rm -rf\`, \`--hard\`, \`--force\`.\n` +
       `- **Investigate unexpected state** (unfamiliar files, branches, locks) — may be the user's in-progress work.\n` +
-      `- **Honor CLAUDE.md / AGENTS.md** — they override defaults.\n` +
+      `- **Precedence when rules conflict** (highest first): CLAUDE.md / AGENTS.md → existing patterns in the file/module being edited → Language Style Packs → defaults in this prompt. Apply pack conventions to new code; mirror existing patterns when extending old code. Library names in packs are illustrative — use what the project already imports.\n` +
+      `- **Verify after meaningful edits.** When a Verification section is present, run the relevant commands for the language(s) you touched. Fix failures before reporting completion.\n` +
       `- **Untracked files → \`.gitignore\`**: artifacts, configs, secrets, logs, scratch, \`.env\`, caches.\n` +
       `- **Never fake verification.** If you didn't run the check or it failed, say so. Don't invent results.`,
   );
@@ -106,8 +106,13 @@ export async function buildSystemPrompt(
     `## Research & Verification\n\n` +
       `Your training data may be outdated. Do not assume — verify.\n\n` +
       `- **Docs first**: \`web_search\` → \`web_fetch\`.\n` +
-      `- **Real code second**: \`mcp__kencode-search__searchCode\` — literal-text or RE2-regex search across 2M+ public repos. ` +
-      `**Not semantic** — query the actual code (\`useState(\`, \`import { z } from "zod"\`), NOT phrases like "react hooks tutorial".\n` +
+      `- **Real code second**: \`mcp__kencode-search__searchCode\` — literal-text or RE2-regex search across 2M+ public repos. **Not semantic.**\n` +
+      `  - **Concept → query recipe.** If you only have a concept ("karaoke captions", "spring animation"), DO NOT search the concept. Anchor on a literal token a matching file would contain:\n` +
+      `    1. A library import — \`from "remotion"\`, \`import { spring }\`, \`from "@remotion/captions"\`\n` +
+      `    2. A known identifier/prop/hook — \`useVideoConfig\`, \`interpolate(\`, \`<Sequence\`, \`SubtitlePage\`\n` +
+      `    3. A unique config key — \`"defaultExport":\`, \`assetsInclude:\`\n` +
+      `    Bad: \`karaoke word animation subtitle\` → zero hits, every time. Good: \`from "@remotion/captions"\` + \`peek: true\` → real files; then narrow with \`repo\` + \`path\` and read them.\n` +
+      `  - **Filename + topic ≠ query.** \`Page.tsx tiktok\` won't match. Use \`path: "Page.tsx"\` + \`repo: "remotion-dev"\` + a literal token in \`query\`.\n` +
       `  - Filters: \`language: ["TypeScript"]\`, \`repo: "owner/name"\` (substring), \`path: "src/components/"\` (substring), \`matchCase\`, \`useRegexp\`.\n` +
       `  - Workflow: \`peek: true\` first → paths + match counts only (cheap triage). Then call again narrowed by \`repo\` + \`path\` for full snippets. Paginate with \`offset\`.\n` +
       `  - Defaults exclude tests, \`node_modules\`, vendored, build, and generated files — pass \`includeTests: true\` or \`includeVendored: true\` to widen.\n` +
@@ -125,8 +130,8 @@ export async function buildSystemPrompt(
       `- Prefer existing dependencies. Don't refactor or reorganize unprompted.`,
   );
 
-  // 5. Tools — filtered by active tool set
-  const activeTools = toolNames ?? DEFAULT_TOOL_NAMES;
+  // 5. Tools — always show full set of available tools
+  const activeTools = DEFAULT_TOOL_NAMES;
   const toolLines: string[] = [];
   for (const name of activeTools) {
     // In plan mode, hide enter_plan (already entered); outside plan mode, hide exit_plan.
@@ -183,7 +188,28 @@ export async function buildSystemPrompt(
     }
 
     if (contextParts.length > 0) {
-      sections.push(`## Project Context\n\n${contextParts.join("\n\n")}`);
+      sections.push(
+        `## Project Context\n\n` +
+          `**Highest precedence** — the files below override anything stated earlier ` +
+          `in this prompt (How to Talk / How to Work / Code Quality / Style Packs).\n\n` +
+          contextParts.join("\n\n"),
+      );
+    }
+
+    // 6b. Language Style Packs — injected when the language detector has
+    // identified the project's active languages. See `core/language-detector.ts`
+    // and the swap logic in `ui/App.tsx`.
+    if (activeLanguages && activeLanguages.size > 0) {
+      const stylePacks = renderStylePacksSection(activeLanguages, cwd);
+      if (stylePacks) sections.push(stylePacks);
+
+      // 6c. Verification — detected commands for the active languages, so the
+      // agent can close the feedback loop after pack-influenced edits. Without
+      // this anchor, packs are advisory; with it, the model has concrete
+      // commands to run and verify against.
+      const verifyCmds = detectVerifyCommands(cwd, activeLanguages);
+      const verifySection = renderVerifySection(verifyCmds);
+      if (verifySection) sections.push(verifySection);
     }
   }
 

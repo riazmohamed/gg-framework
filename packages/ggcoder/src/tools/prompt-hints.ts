@@ -21,7 +21,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
   subagent: "Delegate focused, isolated subtasks (research, parallel exploration).",
   skill: "Invoke a named skill for specialized instructions.",
   "mcp__kencode-search__searchCode":
-    'Literal-text or RE2-regex search across 2M+ public repos. NOT semantic — query the actual code (`useState(`), not "react hooks". Filters: `language: ["TypeScript"]`, `repo: "owner/name"`, `path` (substring). Workflow: `peek: true` → paths+counts for cheap triage; call again narrowed by `repo` + `path` for full snippets. Defaults exclude tests/vendored/generated — set `includeTests` or `includeVendored` to widen. RE2: no lookahead/lookbehind/backrefs; multi-line needs `(?s)`.',
+    'Literal-text or RE2-regex search across 2M+ public repos. NOT semantic. Have only a concept? Anchor on a literal token a matching file would contain — a library import (`from "remotion"`), a known identifier/hook/prop (`useVideoConfig`, `<Sequence`), or a config key. Filename + topic in `query` does NOT work — put filenames in `path`, topics in `repo`. Filters: `language: ["TypeScript"]`, `repo: "owner/name"`, `path: "src/components/"`. Workflow: `peek: true` → paths+counts; then narrow with `repo` + `path` for full snippets. Defaults exclude tests/vendored/generated — set `includeTests` or `includeVendored` to widen. RE2: no lookahead/lookbehind/backrefs; multi-line needs `(?s)`.',
   enter_plan: "Enter plan mode for read-only research + planning on complex multi-file tasks.",
   exit_plan: "Submit your plan for user review and exit plan mode.",
 };

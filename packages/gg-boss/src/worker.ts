@@ -1,5 +1,5 @@
 import { AgentSession } from "@abukhaled/ogcoder";
-import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
+import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { EventQueue } from "./event-queue.js";
 import type { ToolUseSummary, WorkerStatus, WorkerTurnSummary } from "./types.js";
 import { bossStore } from "./boss-store.js";
@@ -353,6 +353,16 @@ export class Worker {
 
   async switchModel(provider: Provider, model: string): Promise<void> {
     await this.session.switchModel(provider, model);
+  }
+
+  /**
+   * Live ref to this worker's message array (NOT a copy). Used by the
+   * orchestrator's post-turn truncation pass to mutate oversized tool
+   * results in place — long-running workers accumulate huge `read` /
+   * `bash` outputs in their history and that's the dominant heap consumer.
+   */
+  getMessagesRef(): Message[] {
+    return this.session.getMessages();
   }
 
   /**

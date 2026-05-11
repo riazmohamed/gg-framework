@@ -67,6 +67,11 @@ export default defineConfig({
   banner: {
     js: 'import { createRequire as __createRequire } from "node:module"; const require = __createRequire(import.meta.url);',
   },
-  // src/cli.ts already starts with `#!/usr/bin/env node` — tsup detects and
-  // preserves shebangs from source files, so we don't add another one.
+  // src/cli.ts starts with a shebang that bumps --max-old-space-size and
+  // exposes GC. tsup detects and preserves shebangs from source files, so
+  // we don't add another one.
+  //
+  // env -S is required to pass flags through /usr/bin/env to node — supported
+  // on macOS 10.13+ (FreeBSD-derived) and Linux coreutils 8.30+. Both ship in
+  // every platform we target.
 });

@@ -57,7 +57,6 @@ import {
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { getGitBranch } from "../utils/git.js";
 import { getModel, getContextWindow } from "../core/model-registry.js";
-import { createModelRouter } from "../core/model-router.js";
 import { SessionManager, type MessageEntry } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
 import {
@@ -70,8 +69,20 @@ import { SettingsManager, type Settings } from "../core/settings-manager.js";
 import { shouldCompact, compact } from "../core/compaction/compactor.js";
 import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
 import { PROMPT_COMMANDS, getPromptCommand } from "../core/prompt-commands.js";
+import {
+  isFirstTimeSetup,
+  markSetupAudited,
+  getAnnouncedLanguages,
+  markLanguagesAnnounced,
+} from "../core/setup-history.js";
 import { loadCustomCommands, type CustomCommand } from "../core/custom-commands.js";
 import { buildSystemPrompt } from "../system-prompt.js";
+import {
+  detectLanguages,
+  LANGUAGE_DISPLAY_NAMES,
+  type LanguageId,
+} from "../core/language-detector.js";
+import { detectVerifyCommands } from "../core/verify-commands.js";
 import type { Skill } from "../core/skills.js";
 import {
   extractPlanSteps,
@@ -116,7 +127,7 @@ function getProviderErrorHint(message: string): string | null {
     return "You've hit the provider's rate limit. Wait a moment before retrying.";
   }
   if (lower.includes("502") || lower.includes("bad gateway")) {
-    return "The provider returned a server error. This is not an OG Coder issue — try again shortly.";
+    return "The provider returned a server error. This is not a ggcoder issue — try again shortly.";
   }
   if (lower.includes("503") || lower.includes("service unavailable")) {
     return "The provider's service is temporarily unavailable. Try again in a moment.";
@@ -125,7 +136,7 @@ function getProviderErrorHint(message: string): string | null {
     return "The request to the provider timed out. Their servers may be slow — try again.";
   }
   if (lower.includes("500") && lower.includes("internal server error")) {
-    return "The provider experienced an internal error. This is not an OG Coder issue.";
+    return "The provider experienced an internal error. This is not a ggcoder issue.";
   }
   if (
     lower.includes("does not recognize the requested model") ||
@@ -192,6 +203,25 @@ interface ErrorItem {
 interface InfoItem {
   kind: "info";
   text: string;
+  id: string;
+}
+
+interface StylePackItem {
+  kind: "style_pack";
+  /** Newly-added language ids in this injection. Rendered via LANGUAGE_DISPLAY_NAMES. */
+  added: readonly LanguageId[];
+  /** Show the one-time /setup hint. Only true for the first badge in a session. */
+  showSetupHint: boolean;
+  id: string;
+}
+
+/**
+ * Shown once per session when initial language detection finds no packs —
+ * keeps `/setup` discoverable in dirs that don't look like a project root
+ * (parent folders, scratch dirs, etc.).
+ */
+interface SetupHintItem {
+  kind: "setup_hint";
   id: string;
 }
 
@@ -308,6 +338,8 @@ export type CompletedItem =
   | ServerToolDoneItem
   | ErrorItem
   | InfoItem
+  | StylePackItem
+  | SetupHintItem
   | UpdateNoticeItem
   | QueuedItem
   | CompactingItem
@@ -589,7 +621,6 @@ export interface AppProps {
     sessionTitleGenerated: boolean;
     overlay?: "model" | "tasks" | "skills" | "plan" | "theme" | "eyes" | "pixel" | null;
     planAutoExpand?: boolean;
-    runAllTasks?: boolean;
     pendingAction?: { prompt: string; infoText?: string };
   };
 }
@@ -653,7 +684,7 @@ export function App(props: AppProps) {
   const [updatePending, setUpdatePending] = useState<boolean>(
     () => getPendingUpdate(props.version) !== null,
   );
-  const [runAllTasks, setRunAllTasks] = useState(props.sessionStore?.runAllTasks ?? false);
+  const [runAllTasks, setRunAllTasks] = useState(false);
   const runAllTasksRef = useRef(false);
   const startTaskRef = useRef<(title: string, prompt: string, taskId: string) => void>(() => {});
   const runAllPixelRef = useRef(false);
@@ -691,6 +722,26 @@ export function App(props: AppProps) {
   const lastActualTokensTimestampRef = useRef(0);
   /** Timestamp of last compaction — used for time-based cooldown and staleness detection. */
   const lastCompactionTimeRef = useRef(0);
+  /**
+   * Languages whose style packs are currently injected into the system prompt.
+   * Grown by `maybeInjectLanguagePacks` after `write`/`bash` tool results when
+   * the language detector sees new marker files. Reset on `chdir` (pixel-fix).
+   * Only grows within a session; we never strip packs once injected (cheaper
+   * than invalidating prompt caching, and stale guidance is harmless).
+   */
+  const injectedLanguagesRef = useRef<Set<LanguageId>>(new Set());
+  /**
+   * True until the first style-pack badge is pushed. Used to gate the
+   * one-time "/setup" hint so users learn the slash command without being
+   * spammed on every subsequent pack swap.
+   */
+  const setupHintShownRef = useRef(false);
+  /**
+   * Callback that fires `/setup` programmatically. Assigned later in the
+   * component once `agentLoop` is in scope. Called from the initial
+   * language-detection path when this cwd has never been audited before.
+   */
+  const triggerAutoSetupRef = useRef<() => Promise<void>>(async () => {});
 
   const getId = () => String(nextIdRef.current++);
 
@@ -738,9 +789,6 @@ export function App(props: AppProps) {
   useEffect(() => {
     if (sessionStore) sessionStore.overlay = overlay;
   }, [overlay, sessionStore]);
-  useEffect(() => {
-    if (sessionStore) sessionStore.runAllTasks = runAllTasks;
-  }, [runAllTasks, sessionStore]);
 
   // pendingAction is consumed via a useEffect AFTER agentLoop is created
   // — see below where useAgentLoop is set up.
@@ -784,6 +832,104 @@ export function App(props: AppProps) {
     }
   }, [planMode, props.planModeRef]);
 
+  /**
+   * Unified "apply detection result" pipeline. Called from three sites:
+   *   1. Initial mount (existing project at startup).
+   *   2. After every `write`/`bash` tool result (reactive to new manifests).
+   *   3. Before every user submit (catches external changes between turns,
+   *      and ensures non-writing prompts still surface the badge).
+   *
+   * No-op when no new languages were added vs `injectedLanguagesRef.current`.
+   * The set-growth gate keeps this safe to call from every hot path.
+   */
+  const applyLanguageDetectionRef = useRef<(source: "initial" | "tool" | "input") => Promise<void>>(
+    async () => {},
+  );
+  applyLanguageDetectionRef.current = async (source) => {
+    const cwd = cwdRef.current;
+    const detected = detectLanguages(cwd);
+    const added: LanguageId[] = [];
+    for (const id of detected) {
+      if (!injectedLanguagesRef.current.has(id)) added.push(id);
+    }
+    if (added.length === 0) {
+      // No new packs to inject. The empty-detection hint + auto-run are
+      // first-time-per-cwd only — once the user has been shown the box and
+      // /setup has had a chance to run, re-showing on every session is noise.
+      // The with-packs path below is gated the same way via
+      // getAnnouncedLanguages / markLanguagesAnnounced: badge fires once per
+      // (cwd, language) and stays silent on subsequent sessions / /clear.
+      if (
+        source === "initial" &&
+        !setupHintShownRef.current &&
+        injectedLanguagesRef.current.size === 0 &&
+        isFirstTimeSetup(cwd)
+      ) {
+        setupHintShownRef.current = true;
+        markSetupAudited(cwd);
+        log("INFO", "language", `No style packs detected for ${cwd}`, { source });
+        setLiveItems((prev) => [...prev, { kind: "setup_hint", id: getId() }]);
+        // /setup handles the empty / parent-folder / scratch-dir case via
+        // its brand-new-empty-project branch in the prompt template.
+        void triggerAutoSetupRef.current();
+      }
+      return;
+    }
+    injectedLanguagesRef.current = detected;
+    try {
+      const newPrompt = await buildSystemPrompt(
+        cwd,
+        props.skills,
+        planMode,
+        approvedPlanPathRef.current,
+        undefined,
+        detected,
+      );
+      if (messagesRef.current[0]?.role === "system") {
+        messagesRef.current[0] = { role: "system" as const, content: newPrompt };
+      }
+      const verifyCmds = detectVerifyCommands(cwd, detected);
+      const tag = source === "initial" ? "Initial style packs" : "Style pack(s) loaded";
+      log("INFO", "language", `${tag}: ${added.join(", ")}`, {
+        source,
+        active: [...detected].join(","),
+        verify_count: String(verifyCmds.length),
+        verify: verifyCmds.map((c) => `${c.language}:${c.label}=${c.command}`).join(" | "),
+      });
+      // The badge is purely user-facing notification ("hey, this pack just
+      // turned on"). The system prompt is already updated above — that's the
+      // load-bearing part. We persist the announced set per-cwd so /clear,
+      // restart, and new sessions stay quiet for packs the user has seen.
+      const alreadyAnnounced = new Set(getAnnouncedLanguages(cwd));
+      const toAnnounce = added.filter((id) => !alreadyAnnounced.has(id));
+      if (toAnnounce.length > 0) {
+        markLanguagesAnnounced(cwd, toAnnounce);
+        const showSetupHint = !setupHintShownRef.current;
+        setupHintShownRef.current = true;
+        setLiveItems((prev) => [
+          ...prev,
+          { kind: "style_pack", added: toAnnounce, showSetupHint, id: getId() },
+        ]);
+      }
+      // First-time-per-project auto-run. Fires only on the initial mount
+      // detection path — not on tool/input triggers — so we don't surprise
+      // users mid-session. Persisted across sessions via setup-history.json.
+      if (source === "initial" && isFirstTimeSetup(cwd)) {
+        markSetupAudited(cwd);
+        void triggerAutoSetupRef.current();
+      }
+    } catch (err) {
+      log("WARN", "language", `Detection apply failed (${source}): ${(err as Error).message}`);
+    }
+  };
+
+  // Initial language detection — runs once on mount so existing projects with
+  // marker files (package.json, Cargo.toml, etc.) get their style packs from
+  // turn 1, with a visible badge.
+  useEffect(() => {
+    void applyLanguageDetectionRef.current("initial");
+  }, []);
+
   // Rebuild system prompt when plan mode changes
   useEffect(() => {
     void (async () => {
@@ -792,7 +938,8 @@ export function App(props: AppProps) {
         props.skills,
         planMode,
         approvedPlanPathRef.current,
-        props.provider,
+        undefined,
+        injectedLanguagesRef.current,
       );
       if (messagesRef.current[0]?.role === "system") {
         messagesRef.current[0] = {
@@ -875,6 +1022,30 @@ export function App(props: AppProps) {
     }
     persistedIndexRef.current = allMsgs.length;
   }, []);
+
+  /**
+   * Run the language detector against the current cwd. If the detected set is a
+   * strict superset of what's already injected, rebuild the system prompt with
+   * the expanded set and swap `messagesRef.current[0]`.
+   *
+   * Called from `onToolEnd` after `write`/`bash` succeeds — these are the only
+   * tools that can introduce new marker files (package.json, Cargo.toml, etc.).
+   * Other tool kinds skip detection entirely to avoid wasted filesystem stats.
+   *
+   * No restart required: the system prompt is mutated in place, same mechanism
+   * already used for plan mode + pixel-fix chdir.
+   *
+   * Stored in a ref so `onToolEnd` (whose useCallback dep array is intentionally
+   * empty to keep agent-loop options stable) can call the freshest version.
+   */
+  const maybeInjectLanguagePacksRef = useRef<(toolName: string, isError: boolean) => Promise<void>>(
+    async () => {},
+  );
+  maybeInjectLanguagePacksRef.current = async (toolName, isError) => {
+    if (isError) return;
+    if (toolName !== "write" && toolName !== "bash") return;
+    await applyLanguageDetectionRef.current("tool");
+  };
 
   // ── Compaction ─────────────────────────────────────────
 
@@ -1047,47 +1218,14 @@ export function App(props: AppProps) {
   // Falls back to the static props when authStorage is not available.
   const resolveCredentials = useCallback(
     async (opts?: { forceRefresh?: boolean }) => {
-      // Ollama runs locally — no credentials needed
-      if (currentProvider === "ollama") {
-        return { apiKey: "", accountId: undefined };
-      }
       if (props.authStorage) {
-        try {
-          const creds = await props.authStorage.resolveCredentials(currentProvider, opts);
-          return { apiKey: creds.accessToken, accountId: creds.accountId };
-        } catch {
-          // Provider not authenticated — use static props as fallback
-        }
+        const creds = await props.authStorage.resolveCredentials(currentProvider, opts);
+        return { apiKey: creds.accessToken, accountId: creds.accountId };
       }
       return { apiKey: activeApiKey!, accountId: activeAccountId };
     },
     [props.authStorage, currentProvider, activeApiKey, activeAccountId],
   );
-
-  // Build model router for auto-switching (e.g. vision model on image input).
-  // Pass the logged-in providers and their credentials so the router can fall
-  // back to another provider's vision model (e.g. MiniMax → Claude/GLM-4.6V)
-  // for a single turn and snap back afterward.
-  const modelRouter = useMemo(() => {
-    const providerCredentials: Partial<
-      Record<Provider, { apiKey: string; baseUrl?: string; accountId?: string }>
-    > = {};
-    const loggedIn = props.loggedInProviders ?? [];
-    for (const p of loggedIn) {
-      const creds = props.credentialsByProvider?.[p];
-      if (creds?.accessToken) {
-        providerCredentials[p] = {
-          apiKey: creds.accessToken,
-          baseUrl: creds.baseUrl,
-          accountId: creds.accountId,
-        };
-      }
-    }
-    return createModelRouter("vision", currentProvider, currentModel, {
-      loggedInProviders: loggedIn,
-      providerCredentials,
-    });
-  }, [currentProvider, currentModel, props.loggedInProviders, props.credentialsByProvider]);
 
   const agentLoop = useAgentLoop(
     messagesRef,
@@ -1103,7 +1241,6 @@ export function App(props: AppProps) {
       accountId: activeAccountId,
       resolveCredentials,
       transformContext,
-      modelRouter,
     },
     {
       onComplete: useCallback(() => {
@@ -1121,7 +1258,8 @@ export function App(props: AppProps) {
               props.skills,
               planMode,
               undefined,
-              props.provider,
+              undefined,
+              injectedLanguagesRef.current,
             );
             if (messagesRef.current[0]?.role === "system") {
               messagesRef.current[0] = { role: "system" as const, content: newPrompt };
@@ -1386,6 +1524,10 @@ export function App(props: AppProps) {
           durationMs: number,
           details?: unknown,
         ) => {
+          // Language-pack detection — gated on `write`/`bash` inside the
+          // helper; cheap to call unconditionally. Fire-and-forget; the next
+          // LLM turn picks up the swapped system prompt automatically.
+          void maybeInjectLanguagePacksRef.current(name, isError);
           const level = isError ? "ERROR" : "INFO";
           log(level as "INFO" | "ERROR", "tool", `Tool call ended: ${name}`, {
             id: toolCallId,
@@ -1496,17 +1638,6 @@ export function App(props: AppProps) {
         },
         [],
       ),
-      onModelSwitch: useCallback((fromModel: string, toModel: string, reason: string) => {
-        log("INFO", "router", `Model switch: ${fromModel} -> ${toModel}`, { reason });
-        setLiveItems((prev) => [
-          ...prev,
-          {
-            kind: "info" as const,
-            text: `\u27F3 Switching to ${toModel} \u2014 ${reason}`,
-            id: getId(),
-          },
-        ]);
-      }, []),
       onServerToolCall: useCallback((id: string, name: string, input: unknown) => {
         log("INFO", "server_tool", `Server tool call: ${name}`, { id });
         // Flush completed items (including assistant text) to Static before
@@ -1760,6 +1891,45 @@ export function App(props: AppProps) {
     },
   );
 
+  // First-time-per-project auto-run of /setup. Bound after `agentLoop` is in
+  // scope so the ref closure can dispatch to it. Called from the initial
+  // language-detection path when `isFirstTimeSetup(cwd)` is true. Pushes a
+  // notice item explaining what's happening, then runs the audit prompt.
+  triggerAutoSetupRef.current = async () => {
+    const setupCmd = getPromptCommand("setup");
+    if (!setupCmd) {
+      log("WARN", "setup", "Auto-setup skipped — /setup command not found in registry.");
+      return;
+    }
+    log("INFO", "setup", `Auto-running /setup (first session for ${cwdRef.current})`);
+    setLiveItems((prev) => [
+      ...prev,
+      {
+        kind: "info",
+        text:
+          "First time in this project — auto-running /setup to audit hygiene, tooling, and style-pack alignment. " +
+          "Press Esc to cancel.",
+        id: getId(),
+      },
+      { kind: "user", text: "/setup", id: getId() },
+    ]);
+    setLastUserMessage("/setup");
+    setDoneStatus(null);
+    try {
+      await agentLoop.run(setupCmd.prompt);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isAbort = msg.includes("aborted") || msg.includes("abort");
+      log(isAbort ? "INFO" : "ERROR", "setup", `Auto-setup ended: ${msg}`);
+      setLiveItems((prev) => [
+        ...prev,
+        isAbort
+          ? { kind: "info", text: "Auto-setup cancelled.", id: getId() }
+          : { kind: "error", message: msg, id: getId() },
+      ]);
+    }
+  };
+
   // Phase 2 of the two-phase flush: after onDone clears liveItems (phase 1)
   // and Ink renders the smaller live area (updating its internal line
   // counter), this effect pushes the stashed items into Static history.
@@ -1837,6 +2007,11 @@ export function App(props: AppProps) {
           "input",
           `User input: ${truncated}${inputImages.length > 0 ? ` (+${inputImages.length} image${inputImages.length > 1 ? "s" : ""})` : ""}`,
         );
+        // Re-detect on every user submit — cheap (fs stats only). Catches
+        // external changes between turns and ensures non-writing prompts still
+        // surface the badge when packs are newly applicable. No-op if the set
+        // has not grown.
+        void applyLanguageDetectionRef.current("input");
       }
 
       // Handle /model directly — open inline selector
@@ -1847,11 +2022,6 @@ export function App(props: AppProps) {
 
       // Handle /compact — compact conversation
       if (trimmed === "/compact" || trimmed === "/c") {
-        // Abort any in-flight agent work before mutating messages
-        if (agentLoop.isRunning) {
-          agentLoop.clearQueue();
-          agentLoop.abort();
-        }
         const compacted = await compactConversation(messagesRef.current);
         if (compacted !== messagesRef.current) {
           messagesRef.current = compacted;
@@ -1875,14 +2045,16 @@ export function App(props: AppProps) {
       // thinking) survives via renderApp's closure-held `runtimeState`,
       // mirrored from React state via the useEffects above.
       if (trimmed === "/clear") {
-        // Abort any in-flight agent work before clearing state
-        if (agentLoop.isRunning) {
-          agentLoop.clearQueue();
-          agentLoop.abort();
-        }
         if (props.resetUI) {
           void (async () => {
-            const newPrompt = await buildSystemPrompt(props.cwd, props.skills, planMode, undefined);
+            const newPrompt = await buildSystemPrompt(
+              props.cwd,
+              props.skills,
+              planMode,
+              undefined,
+              undefined,
+              injectedLanguagesRef.current,
+            );
             props.resetUI?.({
               wipeSession: true,
               messages: [{ role: "system" as const, content: newPrompt }],
@@ -1891,12 +2063,11 @@ export function App(props: AppProps) {
           return;
         }
         // Fallback path (resetUI not wired — e.g. tests). Best-effort: clear
-        // React state in place. Clear terminal screen + scrollback — needed
-        // because Ink's <Static> writes directly to stdout and can't be
-        // removed by clearing React state.
+        // React state in place. The Ink-internal drift bug remains here.
         stdout?.write("\x1b[2J\x1b[3J\x1b[H");
         pendingFlushRef.current = [];
         setHistory([{ kind: "banner", id: "banner" }]);
+        setLiveItems([]);
         setDoneStatus(null);
         approvedPlanPathRef.current = undefined;
         planStepsRef.current = [];
@@ -1907,7 +2078,8 @@ export function App(props: AppProps) {
             props.skills,
             planMode,
             undefined,
-            props.provider,
+            undefined,
+            injectedLanguagesRef.current,
           );
           messagesRef.current = [{ role: "system" as const, content: newPrompt }];
           persistedIndexRef.current = messagesRef.current.length;
@@ -1980,7 +2152,8 @@ export function App(props: AppProps) {
             props.skills,
             planMode,
             undefined,
-            props.provider,
+            undefined,
+            injectedLanguagesRef.current,
           );
           if (messagesRef.current[0]?.role === "system") {
             messagesRef.current[0] = { role: "system" as const, content: newPrompt };
@@ -2034,12 +2207,6 @@ export function App(props: AppProps) {
         const promptText = builtinCmd?.prompt ?? customCmd?.prompt;
 
         if (promptText) {
-          // Abort any in-flight agent work before starting a new prompt command
-          if (agentLoop.isRunning) {
-            agentLoop.clearQueue();
-            agentLoop.abort();
-          }
-
           log(
             "INFO",
             "command",
@@ -2085,11 +2252,6 @@ export function App(props: AppProps) {
 
       // Check slash commands
       if (props.onSlashCommand && input.startsWith("/")) {
-        // Abort any in-flight agent work before executing session-level commands
-        if (agentLoop.isRunning) {
-          agentLoop.clearQueue();
-          agentLoop.abort();
-        }
         const result = await props.onSlashCommand(input);
         if (result !== null) {
           setLiveItems((prev) => [...prev, { kind: "info", text: result, id: getId() }]);
@@ -2099,6 +2261,8 @@ export function App(props: AppProps) {
 
       // ── Build user content (shared by normal + queued paths) ──
       const hasImages = inputImages.length > 0;
+      const modelInfo = getModel(currentModel);
+      const modelSupportsImages = modelInfo?.supportsImages ?? true;
       let userContent: string | (TextContent | ImageContent)[];
       if (hasImages) {
         const parts: (TextContent | ImageContent)[] = [];
@@ -2111,10 +2275,24 @@ export function App(props: AppProps) {
               type: "text",
               text: `<file name="${img.fileName}">\n${img.data}\n</file>`,
             });
-          } else {
-            // Send native ImageContent — the model router will auto-switch
-            // to a vision-capable model if the current one doesn't support images.
+          } else if (modelSupportsImages) {
             parts.push({ type: "image", mediaType: img.mediaType, data: img.data });
+          } else {
+            // GLM models: save image to temp file and instruct model to use vision MCP tool
+            const ext = img.mediaType.split("/")[1] ?? "png";
+            const tmpPath = `/tmp/ggcoder-img-${Date.now()}.${ext}`;
+            try {
+              writeFileSync(tmpPath, Buffer.from(img.data, "base64"));
+              parts.push({
+                type: "text",
+                text: `[User attached an image saved at: ${tmpPath} — use the image_analysis tool to view and analyze it]`,
+              });
+            } catch {
+              parts.push({
+                type: "text",
+                text: `[User attached an image but it could not be saved for analysis]`,
+              });
+            }
           }
         }
         // If only text parts remain after stripping images, simplify to plain string
@@ -2295,9 +2473,6 @@ export function App(props: AppProps) {
       });
 
       setCurrentModel(newModelId);
-      // Clear terminal + re-render Static so the Banner header shows the new model
-      stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-      setStaticKey((k) => k + 1);
       const modelInfo = getModel(newModelId);
       const displayName = modelInfo?.name ?? newModelId;
       setLiveItems((prev) => [
@@ -2325,7 +2500,7 @@ export function App(props: AppProps) {
         });
       }
     },
-    [props.settingsFile, props.mcpManager, props.credentialsByProvider, props.authStorage, stdout],
+    [props.settingsFile, props.mcpManager, props.credentialsByProvider, props.authStorage],
   );
 
   const handleThemeSelect = useCallback(
@@ -2386,11 +2561,6 @@ export function App(props: AppProps) {
       { name: "model", aliases: ["m"], description: "Switch model" },
       { name: "compact", aliases: ["c"], description: "Compact conversation" },
       { name: "clear", aliases: [], description: "Clear session and terminal" },
-      {
-        name: "teach-me",
-        aliases: ["teach"],
-        description: "Open the comprehensive guide on building this LLM agent framework",
-      },
       { name: "theme", aliases: ["t"], description: "Switch theme" },
       { name: "plans", aliases: [], description: "Open plans pane" },
       ...orderedPromptCommands,
@@ -2438,6 +2608,81 @@ export function App(props: AppProps) {
               <Text color={theme.textDim}>{"Task: "}</Text>
               <Text color={theme.success}>{item.title}</Text>
             </Text>
+          </Box>
+        );
+      case "style_pack": {
+        const names = item.added.map((id) => LANGUAGE_DISPLAY_NAMES[id]);
+        const headerLabel = item.added.length > 1 ? "STYLE PACKS ACTIVE" : "STYLE PACK ACTIVE";
+        return (
+          <Box
+            key={item.id}
+            marginTop={1}
+            flexShrink={1}
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={theme.language}
+            paddingX={1}
+          >
+            <Text wrap="wrap">
+              <Text color={theme.language} bold>
+                {"◆ "}
+              </Text>
+              <Text color={theme.language} bold>
+                {headerLabel}
+              </Text>
+            </Text>
+            <Text color={theme.text} bold wrap="wrap">
+              {names.join(", ")}
+            </Text>
+            {item.showSetupHint && (
+              <Box marginTop={1}>
+                <Text wrap="wrap">
+                  <Text color={theme.textMuted}>{"Tip: run "}</Text>
+                  <Text color={theme.language} bold>
+                    {"/setup"}
+                  </Text>
+                  <Text color={theme.textMuted}>
+                    {" to audit this project against the active pack(s)"}
+                  </Text>
+                </Text>
+              </Box>
+            )}
+          </Box>
+        );
+      }
+      case "setup_hint":
+        return (
+          <Box
+            key={item.id}
+            marginTop={1}
+            flexShrink={1}
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={theme.language}
+            paddingX={1}
+          >
+            <Text wrap="wrap">
+              <Text color={theme.language} bold>
+                {"◆ "}
+              </Text>
+              <Text color={theme.language} bold>
+                {"NO STYLE PACKS DETECTED"}
+              </Text>
+            </Text>
+            <Text color={theme.textMuted} wrap="wrap">
+              {"This directory has no recognized language manifest at its root."}
+            </Text>
+            <Box marginTop={1}>
+              <Text wrap="wrap">
+                <Text color={theme.textMuted}>{"Tip: run "}</Text>
+                <Text color={theme.language} bold>
+                  {"/setup"}
+                </Text>
+                <Text color={theme.textMuted}>
+                  {" to audit project hygiene or bootstrap a new project from scratch"}
+                </Text>
+              </Text>
+            </Box>
           </Box>
         );
       case "assistant":
@@ -2499,7 +2744,7 @@ export function App(props: AppProps) {
       case "error": {
         const providerHint = getProviderErrorHint(item.message);
         return (
-          <Box key={item.id} marginTop={1} flexDirection="column">
+          <Box key={item.id} marginTop={1} flexDirection="column" flexShrink={1}>
             <Text color={theme.error} wrap="wrap">
               {"✗ "}
               {item.message}
@@ -2515,7 +2760,7 @@ export function App(props: AppProps) {
       }
       case "info":
         return (
-          <Box key={item.id} marginTop={1}>
+          <Box key={item.id} marginTop={1} flexShrink={1}>
             <Text color={theme.textDim} wrap="wrap">
               {item.text}
             </Text>
@@ -2526,6 +2771,7 @@ export function App(props: AppProps) {
           <Box
             key={item.id}
             marginTop={1}
+            flexShrink={1}
             borderStyle="round"
             borderColor={theme.success}
             paddingX={1}
@@ -2538,7 +2784,7 @@ export function App(props: AppProps) {
         );
       case "plan_transition":
         return (
-          <Box key={item.id} marginTop={1}>
+          <Box key={item.id} marginTop={1} flexShrink={1}>
             <Text color={theme.planPrimary} bold wrap="wrap">
               {item.active ? "● " : "● "}
               {item.text}
@@ -2547,7 +2793,7 @@ export function App(props: AppProps) {
         );
       case "step_done":
         return (
-          <Box key={item.id} marginTop={1}>
+          <Box key={item.id} marginTop={1} flexShrink={1}>
             <Text wrap="wrap">
               <Text color={theme.success} bold>
                 {"✓ "}
@@ -2722,11 +2968,21 @@ export function App(props: AppProps) {
           if (props.rebuildToolsForCwd) {
             setCurrentTools(props.rebuildToolsForCwd(prep.projectPath));
           }
+          // Pixel-fix swaps the project root — reset injected packs so the
+          // new project re-detects from scratch on the next tool call. Also
+          // reset the setup-hint flag so the new project's first badge re-
+          // surfaces the tip (different project, may need the reminder).
+          injectedLanguagesRef.current = new Set();
+          setupHintShownRef.current = false;
+          const detectedForPixelFix = detectLanguages(prep.projectPath);
+          injectedLanguagesRef.current = detectedForPixelFix;
           const newSystemPrompt = await buildSystemPrompt(
             prep.projectPath,
             props.skills,
             false,
             undefined,
+            undefined,
+            detectedForPixelFix,
           );
 
           // Now that the cwd swap is committed, reset chat. Doing this BEFORE
@@ -2928,7 +3184,8 @@ export function App(props: AppProps) {
                   props.skills,
                   false,
                   planPath,
-                  props.provider,
+                  undefined,
+                  injectedLanguagesRef.current,
                 );
 
                 // Create a new session file BEFORE remount so the new tree
@@ -3207,7 +3464,7 @@ export function App(props: AppProps) {
               {eyesCount !== undefined && eyesCount > 0 && (
                 <Box paddingLeft={bgTasks.length > 0 ? 2 : 1} paddingRight={1}>
                   <Text color={theme.accent} bold>
-                    {`${eyesCount} eyes signal${eyesCount === 1 ? "" : "s"} · Run /eyes-improve to enhance OG Coder`}
+                    {`${eyesCount} eyes signal${eyesCount === 1 ? "" : "s"} · Run /eyes-improve to enhance GG Coder`}
                   </Text>
                 </Box>
               )}

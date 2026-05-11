@@ -1,4 +1,9 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --max-old-space-size=8192 --expose-gc
+// Heap default (~1.5–4GB) fatal-OOMs on long boss sessions: 6 workers, large
+// tool results in message history, and Whisper/Ink tensors all live in the
+// same V8 heap. 8GB gives headroom; --expose-gc lets us nudge GC after
+// post-turn truncation. Users can override via NODE_OPTIONS — Node merges
+// shebang flags with the env var.
 import path from "node:path";
 import chalk from "chalk";
 import type { Provider } from "@abukhaled/gg-ai";

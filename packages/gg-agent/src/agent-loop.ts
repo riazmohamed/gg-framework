@@ -122,17 +122,32 @@ export function isToolPairingError(err: unknown): boolean {
   );
 }
 
-export function isOverloaded(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  if (isBillingError(err)) return false;
+/**
+ * Distinguish rate-limit (HTTP 429) from server-side overload (HTTP 529).
+ * Returns null for errors that should not enter the overload-retry bucket.
+ * Both kinds use the same backoff schedule, but the UI shows different copy
+ * and the log line records the true cause.
+ */
+export function classifyOverload(err: unknown): "rate_limit" | "overloaded" | null {
+  if (!(err instanceof Error)) return null;
+  if (isBillingError(err)) return null;
   const msg = err.message.toLowerCase();
-  return (
-    msg.includes("overloaded") ||
+  if (
+    msg.includes("rate_limit") ||
     msg.includes("rate limit") ||
     msg.includes("too many requests") ||
-    msg.includes("429") ||
-    msg.includes("529")
-  );
+    msg.includes("429")
+  ) {
+    return "rate_limit";
+  }
+  if (msg.includes("overloaded") || msg.includes("529")) {
+    return "overloaded";
+  }
+  return null;
+}
+
+export function isOverloaded(err: unknown): boolean {
+  return classifyOverload(err) !== null;
 }
 
 /**
@@ -598,21 +613,22 @@ export async function* agentLoop(
           throw err;
         }
         // Overloaded / rate-limited: exponential backoff, retry up to 10 times
-        if (overloadRetries < MAX_OVERLOAD_RETRIES && isOverloaded(err)) {
+        const overloadKind = classifyOverload(err);
+        if (overloadRetries < MAX_OVERLOAD_RETRIES && overloadKind) {
           overloadRetries++;
           const delayMs = Math.min(
             OVERLOAD_BASE_DELAY_MS * 2 ** (overloadRetries - 1),
             OVERLOAD_MAX_DELAY_MS,
           );
           diag("retry", {
-            reason: "overloaded",
+            reason: overloadKind,
             attempt: overloadRetries,
             maxAttempts: MAX_OVERLOAD_RETRIES,
             delayMs,
           });
           yield {
             type: "retry" as const,
-            reason: "overloaded" as const,
+            reason: overloadKind,
             attempt: overloadRetries,
             maxAttempts: MAX_OVERLOAD_RETRIES,
             delayMs,

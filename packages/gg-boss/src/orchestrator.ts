@@ -17,6 +17,7 @@ import { playDoneAudio, playReadyAudio } from "./audio.js";
 import { log } from "./logger.js";
 import { buildBossSystemPrompt } from "./boss-system-prompt.js";
 import { bossStore } from "./boss-store.js";
+import { truncateOversizedToolResults } from "./truncate-tool-results.js";
 import {
   appendMessages,
   createSession,
@@ -372,6 +373,38 @@ export class GGBoss {
    * Append any boss messages that haven't been written yet to the session log.
    * Skips the system message (regenerated each session from current project list).
    */
+  /**
+   * Walk boss + every worker message array and truncate oversized
+   * tool_result content. In-place mutation — propagates back through
+   * `Agent.getMessages()` shared references. Called once per boss
+   * iteration after the turn finalizes.
+   */
+  private runPostTurnTruncation(): void {
+    try {
+      const bossTrimmed = truncateOversizedToolResults(this.bossAgent.getMessages());
+      let workerTrimmed = 0;
+      for (const w of this.workers.values()) {
+        workerTrimmed += truncateOversizedToolResults(w.getMessagesRef());
+      }
+      if (bossTrimmed > 0 || workerTrimmed > 0) {
+        log("INFO", "truncate_tool_results", "trimmed oversized results", {
+          boss: bossTrimmed,
+          workers: workerTrimmed,
+        });
+        // Hint the GC to actually reclaim the freed strings now — V8 won't
+        // run a major GC purely from heap fragmentation, and we're explicitly
+        // about to release megabytes of dead string data. Only available when
+        // launched with --expose-gc (our shebang sets it).
+        if (typeof globalThis.gc === "function") globalThis.gc();
+      }
+    } catch (err) {
+      // Truncation must never break the run loop — if it throws, we just
+      // skip this pass and try again next turn.
+      const message = err instanceof Error ? err.message : String(err);
+      log("ERROR", "truncate_tool_results", message);
+    }
+  }
+
   private async persistNewMessages(): Promise<void> {
     if (!this.sessionPath) return;
     const all = this.bossAgent.getMessages();
@@ -654,6 +687,12 @@ export class GGBoss {
       bossStore.appendInfo(formatProviderError(message), "error");
     }
     bossStore.finishStreaming();
+    // Post-turn heap-pressure relief: truncate oversized tool_result blocks
+    // in the boss's and every worker's message array BEFORE persisting, so
+    // resumed sessions also start lean. Tail messages stay intact so the
+    // model can reason over the most recent tool output. See
+    // truncate-tool-results.ts for rationale.
+    this.runPostTurnTruncation();
     await this.persistNewMessages();
 
     // Auto-chain: after the boss finishes processing a worker_turn_complete,
