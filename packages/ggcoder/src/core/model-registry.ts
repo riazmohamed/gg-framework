@@ -188,6 +188,7 @@ export const MODELS: ModelInfo[] = [
     supportsVideo: true,
     supportsDocuments: true,
     costTier: "high",
+    maxThinkingLevel: "high",
   },
   {
     id: "glm-5v-turbo",
@@ -200,6 +201,7 @@ export const MODELS: ModelInfo[] = [
     supportsVideo: true,
     supportsDocuments: true,
     costTier: "medium",
+    maxThinkingLevel: "high",
   },
   {
     id: "glm-4.6v-flashx",
@@ -210,6 +212,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     costTier: "low",
+    maxThinkingLevel: "high",
   },
   {
     id: "glm-4.6v-flash",
@@ -220,6 +223,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: false,
     supportsImages: true,
     costTier: "low",
+    maxThinkingLevel: "high",
   },
   // ── MiniMax ───────────────────────────────────────────────
   // Note: MiniMax's Anthropic-compatible endpoint does NOT support image
@@ -312,6 +316,7 @@ export const MODELS: ModelInfo[] = [
     supportsVideo: false,
     supportsDocuments: false,
     costTier: "high",
+    maxThinkingLevel: "high",
   },
   {
     id: "mimo-v2-omni",
@@ -324,6 +329,7 @@ export const MODELS: ModelInfo[] = [
     supportsVideo: true,
     supportsDocuments: true,
     costTier: "high",
+    maxThinkingLevel: "high",
   },
   {
     id: "mimo-v2-flash",
@@ -336,6 +342,7 @@ export const MODELS: ModelInfo[] = [
     supportsVideo: true,
     supportsDocuments: true,
     costTier: "low",
+    maxThinkingLevel: "high",
   },
 ];
 
