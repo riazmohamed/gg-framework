@@ -143,7 +143,26 @@ export class AuthStorage {
       }
 
       const refreshFn = provider === "anthropic" ? refreshAnthropicToken : refreshOpenAIToken;
-      const refreshed = await refreshFn(creds.refreshToken);
+      let refreshed: OAuthCredentials;
+      try {
+        refreshed = await refreshFn(creds.refreshToken);
+      } catch (err) {
+        // Refresh token revoked / expired / invalid → the stored creds are
+        // unusable. Wipe them so the next launch surfaces a clean
+        // NotLoggedInError instead of hitting the same dead refresh path
+        // every time. The user must re-login.
+        const msg = err instanceof Error ? err.message : String(err);
+        const isAuthFailure =
+          /\((401|400)\)/.test(msg) ||
+          /invalid_grant|invalid_token|invalid.*refresh/i.test(msg) ||
+          /unauthorized/i.test(msg);
+        if (isAuthFailure) {
+          delete this.data[provider];
+          await atomicWriteFile(this.filePath, JSON.stringify(this.data, null, 2));
+          throw new NotLoggedInError(provider);
+        }
+        throw err;
+      }
       if (!refreshed.accountId && creds.accountId) {
         refreshed.accountId = creds.accountId;
       }

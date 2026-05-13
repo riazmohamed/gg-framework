@@ -56,7 +56,7 @@ import {
 } from "./components/AnimationContext.js";
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { getGitBranch } from "../utils/git.js";
-import { getModel, getContextWindow } from "../core/model-registry.js";
+import { getModel, getContextWindow, getMaxThinkingLevel } from "../core/model-registry.js";
 import { SessionManager, type MessageEntry } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
 import {
@@ -101,7 +101,6 @@ import {
   flushOnTurnEnd,
   flushOverflow,
 } from "./live-item-flush.js";
-import { Buddy } from "./buddy/Buddy.js";
 
 // ── Provider Error Hints ──────────────────────────────────
 
@@ -298,6 +297,38 @@ interface PlanTransitionItem {
   id: string;
 }
 
+interface ThinkingTransitionItem {
+  kind: "thinking_transition";
+  active: boolean;
+  id: string;
+}
+
+interface ModelTransitionItem {
+  kind: "model_transition";
+  modelName: string;
+  id: string;
+}
+
+interface ThemeTransitionItem {
+  kind: "theme_transition";
+  themeName: string;
+  id: string;
+}
+
+interface PlanEventItem {
+  kind: "plan_event";
+  event: "approved" | "rejected" | "dismissed";
+  /** Free-form detail (reject feedback, etc.) — quoted in the rendered row. */
+  detail?: string;
+  id: string;
+}
+
+interface StoppedItem {
+  kind: "stopped";
+  text: string;
+  id: string;
+}
+
 interface TombstoneItem {
   kind: "tombstone";
   id: string;
@@ -349,6 +380,11 @@ export type CompletedItem =
   | SubAgentGroupItem
   | ToolGroupItem
   | PlanTransitionItem
+  | ThinkingTransitionItem
+  | ModelTransitionItem
+  | ThemeTransitionItem
+  | PlanEventItem
+  | StoppedItem
   | TombstoneItem
   | StepDoneItem;
 
@@ -593,7 +629,11 @@ export interface AppProps {
     approvedPlanPath?: string;
     planSteps?: PlanStep[];
     sessionPath?: string;
-    pendingAction?: { prompt: string; infoText?: string };
+    pendingAction?: {
+      prompt: string;
+      infoText?: string;
+      planEvent?: { event: "approved" | "rejected" | "dismissed"; detail?: string };
+    };
   }) => void;
   /**
    * Wired by `renderApp`. App calls this when the user changes
@@ -621,7 +661,15 @@ export interface AppProps {
     sessionTitleGenerated: boolean;
     overlay?: "model" | "tasks" | "skills" | "plan" | "theme" | "eyes" | "pixel" | null;
     planAutoExpand?: boolean;
-    pendingAction?: { prompt: string; infoText?: string };
+    pendingAction?: {
+      prompt: string;
+      infoText?: string;
+      planEvent?: { event: "approved" | "rejected" | "dismissed"; detail?: string };
+    };
+    isAgentRunning?: boolean;
+    pendingResetUI?: boolean;
+    runAllTasks?: boolean;
+    runAllPixel?: boolean;
   };
 }
 
@@ -684,10 +732,12 @@ export function App(props: AppProps) {
   const [updatePending, setUpdatePending] = useState<boolean>(
     () => getPendingUpdate(props.version) !== null,
   );
-  const [runAllTasks, setRunAllTasks] = useState(false);
-  const runAllTasksRef = useRef(false);
+  // Seed from sessionStore so "Run All" chaining survives the resetUI()
+  // remount that startTask() triggers between tasks.
+  const [runAllTasks, setRunAllTasks] = useState(props.sessionStore?.runAllTasks ?? false);
+  const runAllTasksRef = useRef(props.sessionStore?.runAllTasks ?? false);
   const startTaskRef = useRef<(title: string, prompt: string, taskId: string) => void>(() => {});
-  const runAllPixelRef = useRef(false);
+  const runAllPixelRef = useRef(props.sessionStore?.runAllPixel ?? false);
   const currentPixelFixRef = useRef<PreparedPixelFix | null>(null);
   const startPixelFixRef = useRef<(errorId: string) => void>(() => {});
   const cwdRef = useRef(props.cwd);
@@ -710,7 +760,23 @@ export function App(props: AppProps) {
   const approvedPlanPathRef = useRef<string | undefined>(props.sessionStore?.approvedPlanPath);
   const planStepsRef = useRef<PlanStep[]>(props.sessionStore?.planSteps ?? []);
   const [planSteps, setPlanSteps] = useState<PlanStep[]>(props.sessionStore?.planSteps ?? []);
-  const nextIdRef = useRef(0);
+  // Seed the per-item ID counter so it doesn't collide with IDs already in
+  // sessionStore.history (which survives remount). Without this, a remount
+  // (resize, overlay toggle, etc.) starts the counter at 0 and new items
+  // generate ids "0", "1", "2"… that collide with the same ids from the
+  // previous mount, triggering React's duplicate-key warning and causing
+  // duplicate/omitted renders.
+  const nextIdRef = useRef(
+    (() => {
+      const hist = props.sessionStore?.history ?? props.initialHistory ?? [];
+      let max = -1;
+      for (const item of hist) {
+        const n = Number(item.id);
+        if (Number.isFinite(n) && n > max) max = n;
+      }
+      return max + 1;
+    })(),
+  );
   const sessionManagerRef = useRef(
     props.sessionsDir ? new SessionManager(props.sessionsDir) : null,
   );
@@ -768,9 +834,9 @@ export function App(props: AppProps) {
   }, [currentProvider, onRuntimeStateChange]);
   useEffect(() => {
     onRuntimeStateChange?.({
-      thinking: thinkingEnabled ? (props.thinking ?? "medium") : undefined,
+      thinking: thinkingEnabled ? getMaxThinkingLevel(currentModel) : undefined,
     });
-  }, [thinkingEnabled, props.thinking, onRuntimeStateChange]);
+  }, [thinkingEnabled, currentModel, onRuntimeStateChange]);
 
   // Mirror session state into renderApp's closure so resetUI() can re-seed
   // the conversation on remount. Each panel that previously did a bare ANSI
@@ -1049,15 +1115,13 @@ export function App(props: AppProps) {
 
   // ── Compaction ─────────────────────────────────────────
 
-  // Load settings for auto-compaction + buddy
+  // Load settings for auto-compaction
   const settingsRef = useRef<SettingsManager | null>(null);
-  const [buddyEnabled, setBuddyEnabled] = useState(false);
   useEffect(() => {
     if (props.settingsFile) {
       const sm = new SettingsManager(props.settingsFile);
       sm.load().then(() => {
         settingsRef.current = sm;
-        setBuddyEnabled(sm.get("buddyEnabled") ?? false);
       });
     }
   }, [props.settingsFile]);
@@ -1235,7 +1299,7 @@ export function App(props: AppProps) {
       tools: currentTools,
       webSearch: props.webSearch,
       maxTokens: props.maxTokens,
-      thinking: thinkingEnabled ? (props.thinking ?? "medium") : undefined,
+      thinking: thinkingEnabled ? getMaxThinkingLevel(currentModel) : undefined,
       apiKey: activeApiKey,
       baseUrl: activeBaseUrl,
       accountId: activeAccountId,
@@ -1857,7 +1921,7 @@ export function App(props: AppProps) {
             }
             return item;
           });
-          return [...next, { kind: "info", text: "Request was stopped.", id: getId() }];
+          return [...next, { kind: "stopped", text: "Request was stopped.", id: getId() }];
         });
       }, []),
       onQueuedStart: useCallback((content: UserContent) => {
@@ -1924,7 +1988,7 @@ export function App(props: AppProps) {
       setLiveItems((prev) => [
         ...prev,
         isAbort
-          ? { kind: "info", text: "Auto-setup cancelled.", id: getId() }
+          ? { kind: "stopped", text: "Auto-setup cancelled.", id: getId() }
           : { kind: "error", message: msg, id: getId() },
       ]);
     }
@@ -1950,6 +2014,28 @@ export function App(props: AppProps) {
     setTitleRunning(agentLoop.isRunning);
   }, [agentLoop.isRunning]);
 
+  // Mirror agent running state into sessionStore so renderApp's resize
+  // handler and overlay toggles can skip their unmount/remount while the
+  // agent is in flight (unmounting fires useAgentLoop's cleanup which
+  // aborts the in-flight request). On the running→idle transition,
+  // consume any pendingResetUI flag set during the run by scheduling a
+  // deferred resetUI to clean up accumulated log-update drift. The 100ms
+  // setTimeout lets onDone's two-phase flush commit to sessionStore.history
+  // first, so the chat isn't lost. The cleanup also bails if the user
+  // started a new run before the timer fires, to avoid aborting it.
+  useEffect(() => {
+    if (!sessionStore) return;
+    sessionStore.isAgentRunning = agentLoop.isRunning;
+    if (!agentLoop.isRunning && sessionStore.pendingResetUI) {
+      sessionStore.pendingResetUI = false;
+      const timer = setTimeout(() => {
+        if (sessionStore.isAgentRunning) return;
+        props.resetUI?.();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [agentLoop.isRunning, sessionStore, props.resetUI]);
+
   // Consume sessionStore.pendingAction once on mount. Set by resetUI options
   // for paths that remount AND immediately drive the agent (plan accept,
   // plan reject, startTask, pixel fix). The action survives the unmount
@@ -1960,7 +2046,13 @@ export function App(props: AppProps) {
     if (!action) return;
     pendingActionConsumedRef.current = true;
     if (sessionStore) sessionStore.pendingAction = undefined;
-    if (action.infoText) {
+    if (action.planEvent) {
+      const ev = action.planEvent;
+      setLiveItems((prev) => [
+        ...prev,
+        { kind: "plan_event", event: ev.event, detail: ev.detail, id: getId() },
+      ]);
+    } else if (action.infoText) {
       setLiveItems((prev) => [
         ...prev,
         { kind: "info", text: action.infoText as string, id: getId() },
@@ -2159,38 +2251,22 @@ export function App(props: AppProps) {
             messagesRef.current[0] = { role: "system" as const, content: newPrompt };
           }
         })();
-        setLiveItems([{ kind: "info", text: "Approved plan dismissed.", id: getId() }]);
-        return;
-      }
-
-      // Handle /buddy — toggle companion
-      if (trimmed === "/buddy") {
-        const next = !buddyEnabled;
-        setBuddyEnabled(next);
-        if (settingsRef.current) {
-          settingsRef.current.set("buddyEnabled", next);
-        }
-        setLiveItems((items) => [
-          ...items,
-          {
-            kind: "info" as const,
-            text: next
-              ? "Buddy enabled! Your companion will appear near the prompt."
-              : "Buddy disabled.",
-            id: getId(),
-          },
-        ]);
+        setLiveItems([{ kind: "plan_event", event: "dismissed", id: getId() }]);
         return;
       }
 
       // Handle /plans — open plan pane
       if (trimmed === "/plans") {
-        if (props.resetUI && props.sessionStore) {
+        if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
           props.sessionStore.overlay = "plan";
           props.sessionStore.planAutoExpand = false;
           props.resetUI();
         } else {
-          stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+          if (props.sessionStore) {
+            props.sessionStore.overlay = "plan";
+            props.sessionStore.planAutoExpand = false;
+            if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+          }
           setPlanAutoExpand(false);
           setOverlay("plan");
         }
@@ -2240,7 +2316,7 @@ export function App(props: AppProps) {
             setLiveItems((prev) => [
               ...prev,
               isAbort
-                ? { kind: "info", text: "Request was stopped.", id: getId() }
+                ? { kind: "stopped", text: "Request was stopped.", id: getId() }
                 : { kind: "error", message: msg, id: getId() },
             ]);
           }
@@ -2369,7 +2445,7 @@ export function App(props: AppProps) {
         setLiveItems((prev) => [
           ...prev,
           isAbort
-            ? { kind: "info", text: "Request was stopped.", id: getId() }
+            ? { kind: "stopped", text: "Request was stopped.", id: getId() }
             : { kind: "error", message: msg, id: getId() },
         ]);
       }
@@ -2394,7 +2470,7 @@ export function App(props: AppProps) {
       log("INFO", "thinking", `Thinking ${next ? "enabled" : "disabled"}`);
       setLiveItems((items) => [
         ...items,
-        { kind: "info", text: `Thinking ${next ? "on" : "off"}`, id: getId() },
+        { kind: "thinking_transition", active: next, id: getId() },
       ]);
       if (props.settingsFile) {
         const sm = new SettingsManager(props.settingsFile);
@@ -2477,7 +2553,7 @@ export function App(props: AppProps) {
       const displayName = modelInfo?.name ?? newModelId;
       setLiveItems((prev) => [
         ...prev,
-        { kind: "info", text: `Switched to ${displayName}`, id: getId() },
+        { kind: "model_transition", modelName: displayName, id: getId() },
       ]);
 
       // Persist model selection for next CLI launch
@@ -2514,10 +2590,7 @@ export function App(props: AppProps) {
         const sm = new SettingsManager(props.settingsFile);
         sm.load().then(() => sm.set("theme", name as Settings["theme"]));
       }
-      setLiveItems((prev) => [
-        ...prev,
-        { kind: "info", text: `Theme switched to: ${name}`, id: getId() },
-      ]);
+      setLiveItems((prev) => [...prev, { kind: "theme_transition", themeName: name, id: getId() }]);
     },
     [switchTheme, props.settingsFile],
   );
@@ -2791,6 +2864,94 @@ export function App(props: AppProps) {
             </Text>
           </Box>
         );
+      case "thinking_transition": {
+        // Borderless. While in liveItems the glyph color cycles through the
+        // shared TRANSITION_COLORS gradient (~500ms per color). Once the item
+        // flushes to <Static>, its last-rendered color sticks — re-renders
+        // don't propagate into scrollback. Cheap: the animation timer is
+        // already running for the activity indicator.
+        const glyphFrame = item.active
+          ? deriveFrame(animTick, 500, THINKING_BORDER_COLORS.length)
+          : 0;
+        const glyphColor = item.active ? THINKING_BORDER_COLORS[glyphFrame] : theme.textDim;
+        return (
+          <Box key={item.id} marginTop={1} flexShrink={1}>
+            <Text color={glyphColor} bold>
+              {"✻ "}
+            </Text>
+            <Text color={item.active ? theme.accent : theme.textDim} bold>
+              {item.active ? "Thinking ON" : "Thinking OFF"}
+            </Text>
+          </Box>
+        );
+      }
+      case "model_transition": {
+        // Same animated-gradient pattern as thinking_transition, distinct
+        // glyph (▸) and primary-blue model name so the two transitions read
+        // as related but different.
+        const glyphFrame = deriveFrame(animTick, 500, THINKING_BORDER_COLORS.length);
+        const glyphColor = THINKING_BORDER_COLORS[glyphFrame];
+        return (
+          <Box key={item.id} marginTop={1} flexShrink={1}>
+            <Text color={glyphColor} bold>
+              {"▸ "}
+            </Text>
+            <Text color={theme.textDim}>{"Switched to "}</Text>
+            <Text color={theme.primary} bold>
+              {item.modelName}
+            </Text>
+          </Box>
+        );
+      }
+      case "theme_transition": {
+        // Same family as model/thinking transitions. The ◐ glyph (half-filled
+        // circle) reads as the light/dark dichotomy.
+        const glyphFrame = deriveFrame(animTick, 500, THINKING_BORDER_COLORS.length);
+        const glyphColor = THINKING_BORDER_COLORS[glyphFrame];
+        return (
+          <Box key={item.id} marginTop={1} flexShrink={1}>
+            <Text color={glyphColor} bold>
+              {"◐ "}
+            </Text>
+            <Text color={theme.textDim}>{"Theme switched to "}</Text>
+            <Text color={theme.primary} bold>
+              {item.themeName}
+            </Text>
+          </Box>
+        );
+      }
+      case "plan_event": {
+        // Plan-domain status changes (approve / reject / dismiss). Uses
+        // theme.planPrimary to match the existing plan_transition family,
+        // distinct from the model/thinking gradient.
+        const label =
+          item.event === "approved"
+            ? "Plan approved"
+            : item.event === "rejected"
+              ? "Plan rejected"
+              : "Plan dismissed";
+        return (
+          <Box key={item.id} marginTop={1} flexShrink={1}>
+            <Text color={theme.planPrimary} bold>
+              {"○ "}
+              {label}
+            </Text>
+            {item.detail ? <Text color={theme.textDim}>{` — "${item.detail}"`}</Text> : null}
+          </Box>
+        );
+      }
+      case "stopped":
+        // Cancellation / abort acknowledgement (ESC, auto-setup cancel, etc.).
+        // Muted dim treatment — this is an ack, not a state change worth a
+        // gradient. Glyph `⊘` reads as "stop" without being alarming.
+        return (
+          <Box key={item.id} marginTop={1} flexShrink={1}>
+            <Text color={theme.textDim} bold>
+              {"⊘ "}
+              {item.text}
+            </Text>
+          </Box>
+        );
       case "step_done":
         return (
           <Box key={item.id} marginTop={1} flexShrink={1}>
@@ -2918,7 +3079,7 @@ export function App(props: AppProps) {
           setLiveItems((prev) => [
             ...prev,
             isAbort
-              ? { kind: "info", text: "Request was stopped.", id: getId() }
+              ? { kind: "stopped", text: "Request was stopped.", id: getId() }
               : { kind: "error", message: msg, id: getId() },
           ]);
           setRunAllTasks(false);
@@ -2940,7 +3101,8 @@ export function App(props: AppProps) {
   startTaskRef.current = startTask;
   useEffect(() => {
     runAllTasksRef.current = runAllTasks;
-  }, [runAllTasks]);
+    if (props.sessionStore) props.sessionStore.runAllTasks = runAllTasks;
+  }, [runAllTasks, props.sessionStore]);
 
   const startPixelFix = useCallback(
     (errorId: string) => {
@@ -3030,10 +3192,13 @@ export function App(props: AppProps) {
   );
   startPixelFixRef.current = startPixelFix;
 
-  const [runAllPixel, setRunAllPixel] = useState(false);
+  // Seed from sessionStore so "Fix All" chaining survives a deferred
+  // resetUI() if it fires between pixel fixes (e.g. user toggled a pane).
+  const [runAllPixel, setRunAllPixel] = useState(props.sessionStore?.runAllPixel ?? false);
   useEffect(() => {
     runAllPixelRef.current = runAllPixel;
-  }, [runAllPixel]);
+    if (props.sessionStore) props.sessionStore.runAllPixel = runAllPixel;
+  }, [runAllPixel, props.sessionStore]);
 
   const isTaskView = overlay === "tasks";
   const isSkillsView = overlay === "skills";
@@ -3047,7 +3212,7 @@ export function App(props: AppProps) {
       {/* History — scrolled up, managed by Ink Static. */}
       <Static
         key={`${resizeKey}-${staticKey}`}
-        items={isOverlayView ? [] : history}
+        items={isOverlayView && !agentLoop.isRunning ? [] : history}
         style={{ width: "100%" }}
       >
         {(item) => (
@@ -3062,13 +3227,15 @@ export function App(props: AppProps) {
           cwd={props.cwd}
           agentRunning={agentLoop.isRunning}
           onClose={() => {
-            if (props.resetUI && props.sessionStore) {
+            if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
               props.sessionStore.overlay = null;
               props.resetUI();
             } else {
-              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+              if (props.sessionStore) {
+                props.sessionStore.overlay = null;
+                if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+              }
               setTaskCount(getTaskCount(props.cwd));
-              setStaticKey((k) => k + 1);
               setOverlay(null);
             }
           }}
@@ -3091,12 +3258,14 @@ export function App(props: AppProps) {
           version={props.version}
           agentRunning={agentLoop.isRunning}
           onClose={() => {
-            if (props.resetUI && props.sessionStore) {
+            if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
               props.sessionStore.overlay = null;
               props.resetUI();
             } else {
-              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-              setStaticKey((k) => k + 1);
+              if (props.sessionStore) {
+                props.sessionStore.overlay = null;
+                if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+              }
               setOverlay(null);
             }
           }}
@@ -3116,12 +3285,14 @@ export function App(props: AppProps) {
         <SkillsOverlay
           cwd={props.cwd}
           onClose={() => {
-            if (props.resetUI && props.sessionStore) {
+            if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
               props.sessionStore.overlay = null;
               props.resetUI();
             } else {
-              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-              setStaticKey((k) => k + 1);
+              if (props.sessionStore) {
+                props.sessionStore.overlay = null;
+                if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+              }
               setOverlay(null);
             }
           }}
@@ -3130,15 +3301,17 @@ export function App(props: AppProps) {
         <EyesOverlay
           cwd={props.cwd}
           onClose={() => {
-            if (props.resetUI && props.sessionStore) {
+            if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
               props.sessionStore.overlay = null;
               props.resetUI();
             } else {
-              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+              if (props.sessionStore) {
+                props.sessionStore.overlay = null;
+                if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+              }
               setEyesCount(
                 isEyesActive(props.cwd) ? journalCount({ status: "open" }, props.cwd) : undefined,
               );
-              setStaticKey((k) => k + 1);
               setOverlay(null);
             }
           }}
@@ -3152,13 +3325,16 @@ export function App(props: AppProps) {
           autoExpandNewest={planAutoExpand}
           onClose={() => {
             planOverlayPendingRef.current = false;
-            if (props.resetUI && props.sessionStore) {
+            if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
               props.sessionStore.overlay = null;
               props.sessionStore.planAutoExpand = false;
               props.resetUI();
             } else {
-              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-              setStaticKey((k) => k + 1);
+              if (props.sessionStore) {
+                props.sessionStore.overlay = null;
+                props.sessionStore.planAutoExpand = false;
+                if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+              }
               setPlanAutoExpand(false);
               setOverlay(null);
             }
@@ -3211,7 +3387,7 @@ export function App(props: AppProps) {
                     pendingAction: {
                       prompt:
                         "The plan has been approved. Implement it now, following each step in order.",
-                      infoText: "Plan approved — starting fresh session for implementation",
+                      planEvent: { event: "approved" },
                     },
                   });
                   return;
@@ -3262,7 +3438,7 @@ export function App(props: AppProps) {
               props.resetUI({
                 pendingAction: {
                   prompt: rejectionMsg,
-                  infoText: `Plan rejected — "${feedback}"`,
+                  planEvent: { event: "rejected", detail: feedback },
                 },
               });
               return;
@@ -3371,29 +3547,44 @@ export function App(props: AppProps) {
             onDownAtEnd={handleFocusTaskBar}
             onShiftTab={handleToggleThinking}
             onToggleTasks={() => {
-              if (props.resetUI && props.sessionStore) {
+              // While the agent is running, skip the screen-clear + staticKey
+              // bump that would otherwise wipe the chat history from scrollback.
+              // Just flip the overlay state — Ink's log-update handles the
+              // live-area transition (chat input → TaskOverlay) natively, and
+              // the chat history above stays in scrollback. When the overlay
+              // closes, the history is still there (banner included).
+              if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
                 props.sessionStore.overlay = "tasks";
                 props.resetUI();
               } else {
-                stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+                if (props.sessionStore) {
+                  props.sessionStore.overlay = "tasks";
+                  if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+                }
                 setOverlay("tasks");
               }
             }}
             onToggleSkills={() => {
-              if (props.resetUI && props.sessionStore) {
+              if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
                 props.sessionStore.overlay = "skills";
                 props.resetUI();
               } else {
-                stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+                if (props.sessionStore) {
+                  props.sessionStore.overlay = "skills";
+                  if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+                }
                 setOverlay("skills");
               }
             }}
             onTogglePixel={() => {
-              if (props.resetUI && props.sessionStore) {
+              if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
                 props.sessionStore.overlay = "pixel";
                 props.resetUI();
               } else {
-                stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+                if (props.sessionStore) {
+                  props.sessionStore.overlay = "pixel";
+                  if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+                }
                 setOverlay("pixel");
               }
             }}
@@ -3435,13 +3626,11 @@ export function App(props: AppProps) {
               tokensIn={agentLoop.contextUsed}
               cwd={displayedCwd}
               gitBranch={gitBranch}
-              thinkingEnabled={thinkingEnabled}
+              thinkingLevel={thinkingEnabled ? getMaxThinkingLevel(currentModel) : undefined}
               planMode={planMode}
               exitPending={exitPending}
             />
           )}
-          {/* Buddy companion */}
-          {buddyEnabled && <Buddy phase={agentLoop.activityPhase} />}
           {/* Status row — background tasks, eyes call-to-action, and the
               update-ready indicator all share a single line. Order is
               intentional: active work (bg tasks) first, actionable signals

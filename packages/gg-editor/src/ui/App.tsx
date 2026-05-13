@@ -17,6 +17,7 @@ import { useAgentLoop } from "@abukhaled/ogcoder/ui/hooks/agent-loop";
 import { useDoublePress } from "@abukhaled/ogcoder/ui/hooks/double-press";
 import { useTheme } from "@abukhaled/ogcoder/ui/theme";
 import type { Message, Provider } from "@abukhaled/gg-ai";
+import { getMaxThinkingLevel } from "@abukhaled/ogcoder/models";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { Banner } from "./components/Banner.js";
 import type { LazyHost } from "../core/hosts/lazy.js";
@@ -308,7 +309,7 @@ export function App(props: AppProps) {
       maxTokens: 16384,
       apiKey: props.apiKey,
       accountId: props.accountId,
-      thinking: thinkingEnabled ? "medium" : undefined,
+      thinking: thinkingEnabled ? getMaxThinkingLevel(currentModel) : undefined,
       // Pull fresh creds before each turn so OAuth refresh + provider swaps
       // via /model both flow through. Without this, an 8h Anthropic token
       // that expires mid-session takes the whole CLI down.
@@ -637,7 +638,7 @@ export function App(props: AppProps) {
           model={currentModel}
           tokensIn={agentLoop.contextUsed}
           cwd={props.cwd}
-          thinkingEnabled={thinkingEnabled}
+          thinkingLevel={thinkingEnabled ? getMaxThinkingLevel(currentModel) : undefined}
           hidePlan
           hideCwd
           hideGitBranch

@@ -24,7 +24,21 @@ const TerminalSizeContext = createContext<TerminalSizeValue | null>(null);
  * or App.tsx) to avoid the MaxListenersExceededWarning that occurs when
  * every component independently listens for resize events.
  */
-export function TerminalSizeProvider({ children }: { children: React.ReactNode }) {
+export function TerminalSizeProvider({
+  children,
+  isAgentRunning,
+}: React.PropsWithChildren<{
+  /**
+   * Optional getter — when it returns true, the resize debounce skips its
+   * screen clear and resizeKey bump. The screen clear + remount would force
+   * <Static> to re-print every history item, which (combined with Ink's
+   * stale log-update line count) collides with the live area's erase step
+   * and produces duplicate/missing items. During an agent run, the deferred
+   * resetUI() in App.tsx cleans up reflow drift the moment the agent goes
+   * idle, so the visual cost of skipping here is minimal.
+   */
+  isAgentRunning?: () => boolean;
+}>) {
   const { stdout } = useStdout();
   const [size, setSize] = useState({
     columns: Math.max(MIN_COLUMNS, stdout?.columns ?? 80),
@@ -32,6 +46,8 @@ export function TerminalSizeProvider({ children }: { children: React.ReactNode }
   });
   const [resizeKey, setResizeKey] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isAgentRunningRef = useRef(isAgentRunning);
+  isAgentRunningRef.current = isAgentRunning;
 
   const onResize = useCallback(() => {
     if (!stdout) return;
@@ -44,6 +60,19 @@ export function TerminalSizeProvider({ children }: { children: React.ReactNode }
     // we update once after the user finishes dragging.
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
+      const running = isAgentRunningRef.current?.() ?? false;
+      if (running) {
+        // Update dimensions only — skip the screen clear + resizeKey bump.
+        // Re-printing <Static> here collides with the live area's stale
+        // erase step and produces the duplicate/wiped items the user saw.
+        // render.ts flags pendingResetUI; App.tsx fires a clean resetUI()
+        // the moment the agent goes idle, fixing any reflow drift then.
+        setSize({
+          columns: Math.max(MIN_COLUMNS, stdout.columns ?? 80),
+          rows: Math.max(MIN_ROWS, stdout.rows ?? 24),
+        });
+        return;
+      }
       // Clear visible screen + scrollback to remove deformed ghost renders
       // left behind by Ink re-rendering at different terminal widths during
       // a resize drag.

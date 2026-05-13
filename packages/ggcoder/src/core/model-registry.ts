@@ -1,4 +1,4 @@
-import type { Provider } from "@abukhaled/gg-ai";
+import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 
 export interface ModelInfo {
   id: string;
@@ -11,6 +11,18 @@ export interface ModelInfo {
   supportsVideo?: boolean;
   supportsDocuments?: boolean;
   costTier: "low" | "medium" | "high";
+  /**
+   * The top reasoning tier this model genuinely uses. Used when thinking is
+   * enabled to pick the strongest setting per model:
+   *   - OpenAI GPT-5.5-era: `xhigh`
+   *   - OpenAI Pro/Codex/old: clamped to what the model accepts
+   *   - Claude Opus 4.7: `xhigh` (mapped to Anthropic's `max` for Opus)
+   *   - Claude Sonnet 4.6 / Haiku 4.5: `high` (no `max` tier)
+   *   - GLM / Moonshot / Xiaomi / MiniMax / Qwen: `high` — binary-thinking
+   *     providers ignore the level on the wire, so the value is cosmetic
+   *   - DeepSeek V4: `xhigh` (DeepSeek maps `xhigh` → its internal `max`)
+   */
+  maxThinkingLevel: ThinkingLevel;
 }
 
 // Provider display order — mirrors `PROVIDERS` in ui/login.tsx so the
@@ -26,6 +38,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     costTier: "high",
+    maxThinkingLevel: "xhigh",
   },
   {
     id: "claude-sonnet-4-6",
@@ -36,6 +49,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     costTier: "medium",
+    maxThinkingLevel: "high",
   },
   {
     id: "claude-haiku-4-5-20251001",
@@ -46,6 +60,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     costTier: "low",
+    maxThinkingLevel: "high",
   },
   // ── OpenAI (Codex) ─────────────────────────────────────
   {
@@ -57,6 +72,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     costTier: "high",
+    maxThinkingLevel: "xhigh",
   },
   {
     id: "gpt-5.5-pro",
@@ -67,6 +83,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     costTier: "high",
+    maxThinkingLevel: "xhigh",
   },
   {
     id: "gpt-5.4",
@@ -77,6 +94,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     costTier: "high",
+    maxThinkingLevel: "xhigh",
   },
   {
     id: "gpt-5.4-mini",
@@ -87,6 +105,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     costTier: "medium",
+    maxThinkingLevel: "xhigh",
   },
   {
     id: "gpt-5.3-codex",
@@ -97,6 +116,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     costTier: "high",
+    maxThinkingLevel: "xhigh",
   },
   {
     id: "codex-mini-latest",
@@ -107,6 +127,8 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     costTier: "low",
+    // Codex Mini snapshots historically cap at medium reasoning effort.
+    maxThinkingLevel: "medium",
   },
   // ── Moonshot (Kimi) ────────────────────────────────────
   {
@@ -118,6 +140,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: true,
     costTier: "medium",
+    maxThinkingLevel: "high",
   },
   // ── Z.AI (GLM) ─────────────────────────────────────────
   {
@@ -128,7 +151,8 @@ export const MODELS: ModelInfo[] = [
     maxOutputTokens: 16_384,
     supportsThinking: true,
     supportsImages: false,
-    costTier: "high",
+    costTier: "medium",
+    maxThinkingLevel: "high",
   },
   {
     id: "glm-4.7",
@@ -139,6 +163,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: false,
     costTier: "low",
+    maxThinkingLevel: "high",
   },
   {
     id: "glm-4.7-flash",
@@ -149,6 +174,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: false,
     costTier: "low",
+    maxThinkingLevel: "high",
   },
   // ── GLM (Z.AI) — Vision ───────────────────────────────────
   {
@@ -209,6 +235,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: false,
     costTier: "medium",
+    maxThinkingLevel: "high",
   },
   {
     id: "MiniMax-M2.7-highspeed",
@@ -219,6 +246,19 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: false,
     costTier: "medium",
+    maxThinkingLevel: "high",
+  },
+  // ── Xiaomi (MiMo) ──────────────────────────────────────
+  {
+    id: "mimo-v2-pro",
+    name: "MiMo-V2-Pro",
+    provider: "xiaomi",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 131_072,
+    supportsThinking: true,
+    supportsImages: false,
+    costTier: "medium",
+    maxThinkingLevel: "high",
   },
   // ── DeepSeek ───────────────────────────────────────────
   {
@@ -230,6 +270,8 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: false,
     costTier: "high",
+    // DeepSeek V4 maps `xhigh` → its internal `max` tier.
+    maxThinkingLevel: "xhigh",
   },
   {
     id: "deepseek-v4-flash",
@@ -240,6 +282,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: false,
     costTier: "low",
+    maxThinkingLevel: "xhigh",
   },
   // ── OpenRouter ─────────────────────────────────────────
   {
@@ -251,6 +294,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: true,
     supportsImages: false,
     costTier: "medium",
+    maxThinkingLevel: "high",
   },
   // ── Xiaomi MiMo ────────────────────────────────────────
   // Note: MiMo V2 Pro is text-only in practice — even though Xiaomi markets
@@ -375,6 +419,14 @@ export function getExecutorModel(provider: Provider, currentModelId: string): Mo
     models.find((m) => m.costTier === "low") ??
     getDefaultModel(provider)
   );
+}
+
+/**
+ * The strongest thinking level the given model genuinely uses. Falls back to
+ * `"high"` for unknown models since every provider we ship accepts it.
+ */
+export function getMaxThinkingLevel(modelId: string): ThinkingLevel {
+  return getModel(modelId)?.maxThinkingLevel ?? "high";
 }
 
 /**

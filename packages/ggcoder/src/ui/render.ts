@@ -96,7 +96,43 @@ export interface SessionStore {
    * startTask, etc. The new App reads this on mount, fires the agent,
    * and clears the field.
    */
-  pendingAction?: { prompt: string; infoText?: string };
+  pendingAction?: {
+    prompt: string;
+    infoText?: string;
+    /** Structured event for the post-resetUI banner — renders as a styled
+     *  plan_event item instead of the bland info row. */
+    planEvent?: { event: "approved" | "rejected" | "dismissed"; detail?: string };
+  };
+  /**
+   * True while the agent loop is running. Mirrored by App.tsx so renderApp's
+   * resize handler can skip the unmount/remount that would abort the agent
+   * (useAgentLoop's unmount cleanup calls abortRef.abort()).
+   */
+  isAgentRunning?: boolean;
+  /**
+   * Set whenever a path that would normally `resetUI()` had to fall back to
+   * an in-place update because the agent was running (resize, overlay open/
+   * close). Consumed by App.tsx when the agent goes idle: a deferred
+   * resetUI() runs to clean up any log-update drift that accumulated during
+   * the run. The setTimeout delay lets onDone's two-phase flush commit to
+   * sessionStore.history before the unmount, so the chat isn't lost.
+   */
+  pendingResetUI?: boolean;
+  /**
+   * "Run All" task chaining flag. startTask() calls resetUI() between tasks
+   * (wipeSession + new pendingAction), which unmounts App. Without
+   * mirroring this through sessionStore, the new mount loses the flag and
+   * the onDone callback's auto-chain check (`if (runAllTasksRef.current)`)
+   * is always false on the second task onward.
+   */
+  runAllTasks?: boolean;
+  /**
+   * Same pattern as `runAllTasks` — pixel fix auto-chaining flag. Survives
+   * the deferred resetUI() that may fire when the agent goes idle (e.g.
+   * after a pane was toggled mid-fix). Without this, the second fix
+   * onward loses the chaining intent.
+   */
+  runAllPixel?: boolean;
 }
 
 export interface ResetUIOptions {
@@ -113,7 +149,13 @@ export interface ResetUIOptions {
   /** Override session path (e.g. plan accept creates a new session file). */
   sessionPath?: string;
   /** Action to fire on the new mount (info banner + agent prompt). */
-  pendingAction?: { prompt: string; infoText?: string };
+  pendingAction?: {
+    prompt: string;
+    infoText?: string;
+    /** Structured event for the post-resetUI banner — renders as a styled
+     *  plan_event item instead of the bland info row. */
+    planEvent?: { event: "approved" | "rejected" | "dismissed"; detail?: string };
+  };
 }
 
 /** Stateful theme provider — enables runtime theme switching via useSetTheme(). */
@@ -192,7 +234,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       { initial: resolvedTheme },
       React.createElement(
         TerminalSizeProvider,
-        null,
+        { isAgentRunning: () => !!sessionStore.isAgentRunning },
         React.createElement(
           AnimationProvider,
           null,
@@ -287,6 +329,17 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       resizeTimer = null;
+      // While the agent is running, the full unmount/remount would fire
+      // useAgentLoop's cleanup and abort the in-flight request — so the
+      // agent dies on maximize. Skip the unmount in that case;
+      // useTerminalSize already clears the screen and bumps resizeKey so
+      // <Static> remounts and re-prints the full history. Flag
+      // pendingResetUI so App.tsx fires a deferred resetUI the moment the
+      // agent goes idle, fixing any log-update drift that accumulated.
+      if (sessionStore.isAgentRunning) {
+        sessionStore.pendingResetUI = true;
+        return;
+      }
       resetUI();
     }, 250);
   };

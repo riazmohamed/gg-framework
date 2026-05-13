@@ -16,7 +16,7 @@ export type Provider =
 
 // ── Thinking ───────────────────────────────────────────────
 
-export type ThinkingLevel = "low" | "medium" | "high" | "max";
+export type ThinkingLevel = "low" | "medium" | "high" | "xhigh";
 
 // ── Cache ─────────────────────────────────────────────────
 

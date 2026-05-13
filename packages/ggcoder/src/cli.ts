@@ -72,7 +72,7 @@ import { isEyesActive, journalCount } from "@abukhaled/ggcoder-eyes";
 import { createTools } from "./tools/index.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import { setEstimatorModel } from "./core/compaction/token-estimator.js";
-import { getContextWindow, getDefaultModel } from "./core/model-registry.js";
+import { getContextWindow, getDefaultModel, getMaxThinkingLevel } from "./core/model-registry.js";
 import { MCPClientManager, getMCPServers } from "./core/mcp/index.js";
 import { discoverAgents } from "./core/agents.js";
 import { discoverSkills } from "./core/skills.js";
@@ -433,7 +433,9 @@ function main(): void {
   }
 
   const model: string = saved.model ?? getHardcodedDefault(provider);
-  const thinkingLevel: ThinkingLevel | undefined = saved.thinkingEnabled ? "medium" : undefined;
+  const thinkingLevel: ThinkingLevel | undefined = saved.thinkingEnabled
+    ? getMaxThinkingLevel(model)
+    : undefined;
 
   // Interactive mode (Ink TUI)
   const cwd = process.cwd();
@@ -499,17 +501,21 @@ async function runInkTUI(opts: {
   const authStorage = new AuthStorage(paths.authFile);
   await authStorage.load();
 
-  const { provider, model, loggedInProviders } = await resolveActiveProvider(
-    authStorage,
-    opts.provider,
-    opts.model,
-  );
+  const {
+    provider: preferredProvider,
+    model: preferredModel,
+    loggedInProviders,
+  } = await resolveActiveProvider(authStorage, opts.provider, opts.model);
 
   // Preload every logged-in provider's credentials for the model switcher.
+  // Resolve each one BEFORE picking the active provider, so a dead OAuth
+  // refresh token (preferredProvider expired) doesn't crash startup — we
+  // fall back to whichever other provider actually resolved.
   const credentialsByProvider: Record<
     string,
     { accessToken: string; accountId?: string; baseUrl?: string }
   > = {};
+  const expiredProviders: Provider[] = [];
   for (const p of loggedInProviders) {
     try {
       const resolved = await authStorage.resolveCredentials(p);
@@ -519,8 +525,40 @@ async function runInkTUI(opts: {
         baseUrl: resolved.baseUrl,
       };
     } catch {
-      // Token refresh failed — still leave them in loggedInProviders
+      // Refresh failed (resolveCredentials wipes the bad creds when the
+      // refresh token is dead). Track so we can warn the user, and fall
+      // back to another working provider below.
+      expiredProviders.push(p);
     }
+  }
+
+  // Fall back if the preferred provider didn't resolve. The settings file
+  // is NOT updated — user might re-login to the preferred one later and
+  // expect to come back. This is a per-launch override.
+  let provider = preferredProvider;
+  let model = preferredModel;
+  if (!credentialsByProvider[provider]) {
+    const fallback = loggedInProviders.find((p) => credentialsByProvider[p]);
+    if (!fallback) {
+      throw new Error(
+        'All logged-in providers expired or failed to authenticate. Run "ggcoder login" to re-authenticate.',
+      );
+    }
+    console.warn(
+      chalk.yellow(
+        `⚠ ${displayName(preferredProvider)} session expired — switched to ${displayName(fallback)} for this launch.\n` +
+          `  Run "ggcoder login" to re-authenticate ${displayName(preferredProvider)}.`,
+      ),
+    );
+    provider = fallback;
+    model = getDefaultModel(fallback).id;
+  } else if (expiredProviders.length > 0) {
+    console.warn(
+      chalk.yellow(
+        `⚠ Sessions expired: ${expiredProviders.map(displayName).join(", ")}. ` +
+          `Run "ggcoder login" to re-authenticate.`,
+      ),
+    );
   }
 
   // Set model for token estimation accuracy (after provider is finalized)
@@ -533,7 +571,15 @@ async function runInkTUI(opts: {
     thinking: opts.thinkingLevel,
   });
 
-  const creds = await authStorage.resolveCredentials(provider);
+  // Use the already-resolved credentials from the preload loop — no need
+  // to re-resolve and risk hitting the same dead refresh path again.
+  const cached = credentialsByProvider[provider]!;
+  const creds = {
+    accessToken: cached.accessToken,
+    accountId: cached.accountId,
+    refreshToken: "", // not needed downstream; SDK only uses accessToken
+    expiresAt: Number.POSITIVE_INFINITY,
+  };
 
   // Ensure project-local .gg directories exist
   const localGGDir = path.join(cwd, ".gg");
@@ -1121,7 +1167,9 @@ async function runSessions(): Promise<void> {
   }
 
   const model = saved2.model ?? getDefault(provider);
-  const thinkingLevel: ThinkingLevel | undefined = saved2.thinkingEnabled ? "medium" : undefined;
+  const thinkingLevel: ThinkingLevel | undefined = saved2.thinkingEnabled
+    ? getMaxThinkingLevel(model)
+    : undefined;
 
   closeLogger();
 
@@ -1351,7 +1399,6 @@ async function runServe(): Promise<void> {
   }
 
   const saved3 = loadSavedSettings();
-  const thinkingLevel: ThinkingLevel | undefined = saved3.thinkingEnabled ? "medium" : undefined;
 
   const paths = await ensureAppDirs();
   const authStorage = new AuthStorage(paths.authFile);
@@ -1364,6 +1411,10 @@ async function runServe(): Promise<void> {
     preferredProvider,
     serveValues.model ?? saved3.model,
   );
+
+  const thinkingLevel: ThinkingLevel | undefined = saved3.thinkingEnabled
+    ? getMaxThinkingLevel(model)
+    : undefined;
 
   initLogger(paths.logFile, {
     version: CLI_VERSION,
@@ -1527,7 +1578,6 @@ async function runAgentHome(): Promise<void> {
   }
 
   const saved4 = loadSavedSettings();
-  const thinkingLevel: ThinkingLevel | undefined = saved4.thinkingEnabled ? "medium" : undefined;
 
   const paths = await ensureAppDirs();
   const authStorage = new AuthStorage(paths.authFile);
@@ -1540,6 +1590,10 @@ async function runAgentHome(): Promise<void> {
     preferredProvider,
     ahValues.model ?? saved4.model,
   );
+
+  const thinkingLevel: ThinkingLevel | undefined = saved4.thinkingEnabled
+    ? getMaxThinkingLevel(model)
+    : undefined;
 
   initLogger(paths.logFile, {
     version: CLI_VERSION,
