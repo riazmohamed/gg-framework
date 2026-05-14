@@ -35,6 +35,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - (2026-05-09) Merged into rebrand/abukhaled with rebranded package scopes and imports preserved (@abukhaled/* for core 3)
 > - (2026-05-11) Sync with main: version bumps (gg-ai/gg-agent 4.3.163, ogcoder 4.3.163, og-boss 4.3.157), language detector, style packs, verify commands, App.tsx updates with language-aware prompts
 > - (2026-05-13) Synced with main: version bumps to 4.3.165, removed buddy system, added GLM/Xiaomi ThinkingLevel support, improved model registry with detailed Xiaomi MiMo block (Pro/Omni/Flash variants)
+> - (2026-05-14) Synced rebrand/abukhaled with main: version bumps to 4.3.174 (gg-ai/gg-agent/ogcoder), 4.3.158 (og-boss), added `formatError` export from gg-ai, `ModelRouterResult` type, diagnostic logging in useAgentLoop (first_thinking_committed, first_text_committed), and `getClaudeCliUserAgent` imports for tracking Claude Code versions
 
 ## Commands
 
