@@ -194,6 +194,7 @@ export class Worker {
       cwd: opts.cwd,
       thinkingLevel: opts.thinkingLevel,
       signal: opts.signal,
+      promptCacheKeyPrefix: `ggboss-worker:${opts.name}`,
     });
   }
 

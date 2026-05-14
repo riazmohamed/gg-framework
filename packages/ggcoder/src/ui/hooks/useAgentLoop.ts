@@ -7,6 +7,8 @@ import {
 } from "@abukhaled/gg-agent";
 import { ProviderError } from "@abukhaled/gg-ai";
 import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from "@abukhaled/gg-ai";
+import { getClaudeCliUserAgent } from "../../core/claude-code-version.js";
+import { log } from "../../core/logger.js";
 
 /** Rough token estimate from message content (~4 chars per token). */
 function estimateTokens(msgs: Message[]): number {
@@ -218,7 +220,40 @@ export function useAgentLoop(
   const realTokensAccumRef = useRef(0);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const doneCalledRef = useRef(false);
+<<<<<<< HEAD
   const lastRoutedModelRef = useRef<string | undefined>(undefined);
+=======
+  // Diagnostic: log when streamingThinking first becomes non-empty for a run,
+  // so we can measure the React → Ink commit time on top of the flush throttle.
+  const thinkingCommitLoggedRef = useRef(false);
+  const textCommitLoggedRef = useRef(false);
+
+  useEffect(() => {
+    if (!thinkingCommitLoggedRef.current && streamingThinking) {
+      thinkingCommitLoggedRef.current = true;
+      log("INFO", "ui", "first_thinking_committed", {
+        sinceRunStartMs: String(Date.now() - runStartRef.current),
+        chars: String(streamingThinking.length),
+      });
+    }
+    if (!streamingThinking) {
+      thinkingCommitLoggedRef.current = false;
+    }
+  }, [streamingThinking]);
+
+  useEffect(() => {
+    if (!textCommitLoggedRef.current && streamingText) {
+      textCommitLoggedRef.current = true;
+      log("INFO", "ui", "first_text_committed", {
+        sinceRunStartMs: String(Date.now() - runStartRef.current),
+        chars: String(streamingText.length),
+      });
+    }
+    if (!streamingText) {
+      textCommitLoggedRef.current = false;
+    }
+  }, [streamingText]);
+>>>>>>> main
 
   const abort = useCallback(() => {
     abortRef.current?.abort();
@@ -271,14 +306,39 @@ export function useAgentLoop(
         let streamThinkingDirty = false;
         const STREAM_FLUSH_MS = 16; // ~1 frame at 60fps
 
+        // ── Diagnostic timing markers (perceived-TTFB investigation) ──
+        // Track the four points along the path: run start → first thinking
+        // delta at the hook → first flush (state set) → first visible state.
+        let firstThinkingArrivedMs = -1;
+        let firstThinkingFlushedMs = -1;
+        let firstTextArrivedMs = -1;
+        let firstTextFlushedMs = -1;
+
         const flushStreamState = () => {
           streamFlushTimer = null;
           if (streamTextDirty) {
             setStreamingText(textVisibleRef.current);
+            if (firstTextFlushedMs < 0 && firstTextArrivedMs >= 0) {
+              firstTextFlushedMs = Date.now() - runStartRef.current;
+              log("INFO", "ui", "first_text_flush", {
+                arrivedMs: String(firstTextArrivedMs),
+                flushedMs: String(firstTextFlushedMs),
+                lagMs: String(firstTextFlushedMs - firstTextArrivedMs),
+              });
+            }
             streamTextDirty = false;
           }
           if (streamThinkingDirty) {
             setStreamingThinking(thinkingVisibleRef.current);
+            if (firstThinkingFlushedMs < 0 && firstThinkingArrivedMs >= 0) {
+              firstThinkingFlushedMs = Date.now() - runStartRef.current;
+              log("INFO", "ui", "first_thinking_flush", {
+                arrivedMs: String(firstThinkingArrivedMs),
+                flushedMs: String(firstThinkingFlushedMs),
+                lagMs: String(firstThinkingFlushedMs - firstThinkingArrivedMs),
+                chars: String(thinkingVisibleRef.current.length),
+              });
+            }
             streamThinkingDirty = false;
           }
         };
@@ -295,6 +355,12 @@ export function useAgentLoop(
         thinkingBufferRef.current = "";
         thinkingVisibleRef.current = "";
         runStartRef.current = Date.now();
+        log("INFO", "ui", "run_start", {
+          provider: options.provider,
+          model: options.model,
+          thinking: options.thinking ? "on" : "off",
+          messages: String(messages.current.length),
+        });
         toolsUsedRef.current = new Set();
         charCountRef.current = 0;
         realTokensAccumRef.current = 0;
@@ -358,12 +424,31 @@ export function useAgentLoop(
           // Resolve fresh credentials (handles OAuth token refresh)
           let apiKey = options.apiKey;
           let accountId = options.accountId;
+          const credsStart = Date.now();
           if (options.resolveCredentials) {
             const creds = await options.resolveCredentials(credentialOpts);
             apiKey = creds.apiKey;
             accountId = creds.accountId;
           }
+          log("INFO", "ui", "creds_resolved", {
+            ms: String(Date.now() - credsStart),
+            sinceRunStartMs: String(Date.now() - runStartRef.current),
+            resolved: options.resolveCredentials ? "yes" : "no",
+          });
 
+          const uaStart = Date.now();
+          const userAgent =
+            options.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined;
+          if (options.provider === "anthropic") {
+            log("INFO", "ui", "useragent_resolved", {
+              ms: String(Date.now() - uaStart),
+              sinceRunStartMs: String(Date.now() - runStartRef.current),
+            });
+          }
+
+          log("INFO", "ui", "agent_loop_invoke", {
+            sinceRunStartMs: String(Date.now() - runStartRef.current),
+          });
           const generator = agentLoop(messages.current, {
             provider: options.provider,
             model: options.model,
@@ -375,6 +460,7 @@ export function useAgentLoop(
             baseUrl: options.baseUrl,
             accountId,
             signal: ac.signal,
+            userAgent,
             transformContext: options.transformContext,
             // Drain queued messages as steering — injected between tool calls
             // and before the agent would stop, so the LLM sees user guidance
@@ -393,16 +479,17 @@ export function useAgentLoop(
             modelRouter: options.modelRouter,
           });
 
+          log("INFO", "ui", "iter_start", {
+            sinceRunStartMs: String(Date.now() - runStartRef.current),
+          });
           for await (const event of generator as AsyncIterable<AgentEvent>) {
             switch (event.type) {
               case "text_delta":
-                // First text_delta in a turn — flush any buffered thinking to
-                // the visible display.  This ensures ThinkingBlock only appears
-                // when the model actually produces text output, not on
-                // tool-call-only turns where reasoning models think silently.
-                if (!textVisibleRef.current && thinkingBufferRef.current) {
-                  thinkingVisibleRef.current = thinkingBufferRef.current;
-                  streamThinkingDirty = true;
+                if (firstTextArrivedMs < 0) {
+                  firstTextArrivedMs = Date.now() - runStartRef.current;
+                  log("INFO", "ui", "first_text_arrived", {
+                    sinceRunStartMs: String(firstTextArrivedMs),
+                  });
                 }
                 textVisibleRef.current += event.text;
                 charCountRef.current += event.text.length;
@@ -417,12 +504,21 @@ export function useAgentLoop(
                 break;
 
               case "thinking_delta":
+                if (!options.thinking) break;
+
+                if (firstThinkingArrivedMs < 0) {
+                  firstThinkingArrivedMs = Date.now() - runStartRef.current;
+                  log("INFO", "ui", "first_thinking_arrived", {
+                    sinceRunStartMs: String(firstThinkingArrivedMs),
+                  });
+                }
                 thinkingBufferRef.current += event.text;
-                // Don't push to thinkingVisibleRef yet — defer display until
-                // we know text output follows.  Reasoning models (MiMo) think
-                // on every turn including tool-call-only turns, which causes a
-                // persistent "Thinking" block in the UI.  The visible ref is
-                // flushed when the first text_delta arrives (see below).
+                // Stream live to the visible ref so the user sees reasoning as
+                // it generates instead of waiting until text or tool calls
+                // arrive. Buffer is kept separately for persistence at turn_end.
+                thinkingVisibleRef.current += event.text;
+                streamThinkingDirty = true;
+                scheduleStreamFlush();
                 charCountRef.current += event.text.length;
                 if (phaseRef.current !== "thinking") {
                   thinkingStartRef.current = Date.now();
@@ -619,7 +715,10 @@ export function useAgentLoop(
                 realTokensAccumRef.current += event.usage.outputTokens;
                 charCountRef.current = 0;
                 setStreamedTokenEstimate(realTokensAccumRef.current);
-                // Reset phase for next turn
+                // Reset phase for next turn — the first thinking_delta from
+                // the next turn (including the empty-text "reasoning started"
+                // signal we forward from response.output_item.added) flips
+                // us back to "thinking" on a real provider signal.
                 phaseRef.current = "waiting";
                 setActivityPhase("waiting");
                 if (textVisibleRef.current) {

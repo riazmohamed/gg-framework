@@ -10,6 +10,7 @@ import { PROMPT_COMMANDS, getPromptCommand } from "./prompt-commands.js";
 import { loadCustomCommands } from "./custom-commands.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage } from "./auth-storage.js";
+import { getClaudeCliUserAgent } from "./claude-code-version.js";
 import { SessionManager, type MessageEntry, type BranchInfo } from "./session-manager.js";
 import { ExtensionLoader } from "./extensions/loader.js";
 import type { ExtensionContext } from "./extensions/types.js";
@@ -47,6 +48,8 @@ export interface AgentSessionOptions {
   maxTokens?: number;
   thinkingLevel?: ThinkingLevel;
   signal?: AbortSignal;
+  /** Prefix used for provider prompt-cache routing keys. */
+  promptCacheKeyPrefix?: string;
 }
 
 // ── State ──────────────────────────────────────────────────
@@ -307,6 +310,8 @@ export class AgentSession {
     // revoked the token server-side before the stored expiry (e.g. after a restart).
     let creds = await this.authStorage.resolveCredentials(this.provider);
 
+    const userAgent = this.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined;
+
     const runAgentLoop = async (apiKey: string, accountId?: string) => {
       const modelRouter = createModelRouter(this.routerMode, this.provider, this.model);
       const modelInfo = getModel(this.model);
@@ -322,7 +327,9 @@ export class AgentSession {
         signal: this.opts.signal,
         accountId,
         cacheRetention: "short",
+        promptCacheKey: this.getPromptCacheKey(),
         supportsImages: modelInfo?.supportsImages,
+        userAgent,
         // clearToolUses disabled — causes model to output unsolicited context summaries
         // Single tool result shouldn't exceed 30% of context window (in chars)
         maxToolResultChars: Math.floor(getContextWindow(this.model) * 3.5 * 0.3),
@@ -550,6 +557,11 @@ export class AgentSession {
   /** Replace the abort signal (e.g. after cancellation). */
   setSignal(signal: AbortSignal): void {
     this.opts = { ...this.opts, signal };
+  }
+
+  private getPromptCacheKey(): string | undefined {
+    if (!this.sessionId) return undefined;
+    return `${this.opts.promptCacheKeyPrefix ?? "ggcoder"}:${this.sessionId}`;
   }
 
   async dispose(): Promise<void> {

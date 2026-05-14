@@ -96,6 +96,15 @@ export const GENERAL_PHRASES = [
   "Confabulating",
 ];
 
+export const WAITING_PHRASES = [
+  "Waiting",
+  "Connecting",
+  "Starting",
+  "Warming up",
+  "Contacting model",
+  "Awaiting response",
+];
+
 export const THINKING_PHRASES = [
   "Cogitating",
   "Ruminating",
@@ -156,6 +165,7 @@ export function selectPhrases(
   phase: ActivityPhase,
   userMessage: string,
   activeToolNames: string[],
+  thinkingEnabled = true,
 ): string[] {
   switch (phase) {
     case "thinking":
@@ -165,6 +175,8 @@ export function selectPhrases(
     case "tools":
       return selectToolPhrases(activeToolNames);
     default: {
+      if (!thinkingEnabled) return WAITING_PHRASES;
+
       // waiting / idle — use contextual phrases based on user message
       for (const set of CONTEXTUAL_PHRASES) {
         if (set.keywords.test(userMessage)) {

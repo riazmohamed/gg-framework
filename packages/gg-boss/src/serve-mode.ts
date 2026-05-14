@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import chalk from "chalk";
 import { getAppPaths, MODELS, type ModelInfo } from "@abukhaled/ogcoder";
 import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
+import { setStreamDiagnostic } from "@abukhaled/gg-agent";
 import { GGBoss } from "./orchestrator.js";
 import { loadLinks } from "./links.js";
 import { tasksStore } from "./tasks-store.js";
@@ -166,6 +167,9 @@ export async function runBossServeMode(options: BossServeOptions): Promise<void>
     workerProvider: options.workerProvider,
     workerModel: options.workerModel,
     projectCount: 0,
+  });
+  setStreamDiagnostic((phase, data) => {
+    log("INFO", "stream", phase, data as Record<string, unknown>);
   });
 
   // Load linked projects — same path as interactive `ggboss`. Without links

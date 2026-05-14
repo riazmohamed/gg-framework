@@ -125,6 +125,21 @@ function toAnthropicToolResultContent(
   });
 }
 
+/**
+ * Anthropic requires tool_use IDs to match `^[a-zA-Z0-9_-]+$`. Codex tool IDs
+ * are composite (`callId|itemId`) and other providers may include dots/colons.
+ * Replace any disallowed characters with `_` and memoize so the assistant's
+ * tool_use ID matches the corresponding tool_result.tool_use_id.
+ */
+function remapAnthropicToolCallId(id: string, idMap: Map<string, string>): string {
+  if (/^[a-zA-Z0-9_-]+$/.test(id)) return id;
+  const existing = idMap.get(id);
+  if (existing) return existing;
+  const mapped = id.replace(/[^a-zA-Z0-9_-]/g, "_");
+  idMap.set(id, mapped);
+  return mapped;
+}
+
 export function toAnthropicMessages(
   messages: Message[],
   cacheControl?: { type: "ephemeral"; ttl?: "1h" },
@@ -134,6 +149,7 @@ export function toAnthropicMessages(
 } {
   let systemText: string | undefined;
   const out: Anthropic.MessageParam[] = [];
+  const idMap = new Map<string, string>();
 
   for (const msg of messages) {
     if (msg.role === "system") {
@@ -204,7 +220,7 @@ export function toAnthropicMessages(
                 if (part.type === "tool_call")
                   return {
                     type: "tool_use",
-                    id: part.id,
+                    id: remapAnthropicToolCallId(part.id, idMap),
                     name: part.name,
                     input: part.args,
                   };
@@ -235,7 +251,7 @@ export function toAnthropicMessages(
         role: "user",
         content: msg.content.map((result) => ({
           type: "tool_result" as const,
-          tool_use_id: result.toolCallId,
+          tool_use_id: remapAnthropicToolCallId(result.toolCallId, idMap),
           content: toAnthropicToolResultContent(result.content),
           is_error: result.isError,
         })),
@@ -298,13 +314,29 @@ export function toAnthropicMessages(
   return { system, messages: out };
 }
 
-export function toAnthropicTools(tools: Tool[]): Anthropic.Tool[] {
-  return tools.map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    input_schema: (tool.rawInputSchema ??
-      zodToJsonSchema(tool.parameters)) as Anthropic.Tool["input_schema"],
-  }));
+export function toAnthropicTools(
+  tools: Tool[],
+  options?: {
+    cacheControl?: { type: "ephemeral"; ttl?: "1h" };
+    enableFineGrainedToolStreaming?: boolean;
+  },
+): Anthropic.Tool[] {
+  return tools.map((tool, index) => {
+    const anthropicTool: Anthropic.Tool & {
+      cache_control?: { type: "ephemeral"; ttl?: "1h" };
+      eager_input_streaming?: boolean;
+    } = {
+      name: tool.name,
+      description: tool.description,
+      input_schema: (tool.rawInputSchema ??
+        zodToJsonSchema(tool.parameters)) as Anthropic.Tool["input_schema"],
+      ...(options?.enableFineGrainedToolStreaming ? { eager_input_streaming: true } : {}),
+    };
+    if (options?.cacheControl && index === tools.length - 1) {
+      anthropicTool.cache_control = options.cacheControl;
+    }
+    return anthropicTool;
+  });
 }
 
 export function toAnthropicToolChoice(choice: ToolChoice): Anthropic.ToolChoice {
@@ -609,19 +641,10 @@ export function toOpenAIToolChoice(choice: ToolChoice): OpenAI.ChatCompletionToo
   return { type: "function", function: { name: choice.name } };
 }
 
-// GPT-5.5-era Pro variants ("gpt-5.5-pro", "gpt-5.4-pro", …) only accept
-// medium / high / xhigh — they reject `low` and `none`. Standard models
-// (gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex) accept the full range.
-// Reference: https://developers.openai.com/api/docs/models/gpt-5.5
-function isOpenAIProVariant(model: string): boolean {
-  return /^gpt-5\.\d+-pro$/i.test(model);
-}
-
 export function toOpenAIReasoningEffort(
   level: ThinkingLevel,
-  model: string,
+  _model: string,
 ): "low" | "medium" | "high" | "xhigh" {
-  if (isOpenAIProVariant(model) && level === "low") return "medium";
   return level;
 }
 

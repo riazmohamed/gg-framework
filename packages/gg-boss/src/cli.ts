@@ -7,6 +7,7 @@
 import path from "node:path";
 import chalk from "chalk";
 import type { Provider } from "@abukhaled/gg-ai";
+import { setStreamDiagnostic } from "@abukhaled/gg-agent";
 import { GGBoss } from "./orchestrator.js";
 import type { ProjectSpec } from "./types.js";
 import { loadLinks } from "./links.js";
@@ -244,6 +245,9 @@ async function runOrchestrator(args: CliArgs): Promise<void> {
   });
   log("INFO", "cli", "linked projects", {
     projects: args.projects.map((p) => p.name).join(","),
+  });
+  setStreamDiagnostic((phase, data) => {
+    log("INFO", "stream", phase, data as Record<string, unknown>);
   });
 
   // Auto-update: instantly applies any pending install from the prior run

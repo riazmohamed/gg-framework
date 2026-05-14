@@ -116,6 +116,7 @@ interface ActivityIndicatorProps {
   runStartRef?: React.RefObject<number>;
   thinkingMs: number;
   isThinking: boolean;
+  thinkingEnabled?: boolean;
   tokenEstimate: number;
   /** Raw character count ref for smooth token animation (read every tick). */
   charCountRef?: React.RefObject<number>;
@@ -156,6 +157,7 @@ export function ActivityIndicator({
   runStartRef,
   thinkingMs,
   isThinking,
+  thinkingEnabled = false,
   tokenEstimate,
   charCountRef: charCountRefProp,
   realTokensAccumRef: realTokensAccumRefProp,
@@ -239,9 +241,9 @@ export function ActivityIndicator({
           ? overridePhrases
           : planMode && phase === "waiting"
             ? PLANNING_PHRASES
-            : selectPhrases(phase, userMessage, activeToolNames),
+            : selectPhrases(phase, userMessage, activeToolNames, thinkingEnabled),
       ),
-    [phase, userMessage, toolNamesKey, planMode, overridePhrases], // activeToolNames captured via stable string key
+    [phase, userMessage, toolNamesKey, planMode, overridePhrases, thinkingEnabled], // activeToolNames captured via stable string key
   );
   const phraseInterval = phase === "waiting" ? WAITING_PHRASE_INTERVAL : OTHER_PHRASE_INTERVAL;
   const phraseIndex = Math.floor((tick * SHIMMER_INTERVAL) / phraseInterval) % phrases.length;

@@ -13,6 +13,7 @@ import type {
 } from "../types.js";
 import { ProviderError } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
+import { providerDiag } from "../utils/diag.js";
 import { zodToJsonSchema } from "../utils/zod-to-json-schema.js";
 import { downgradeUnsupportedImages } from "./transform.js";
 
@@ -42,6 +43,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
 
   if (options.tools?.length) {
     body.tools = toCodexTools(options.tools);
+  }
+  if (options.promptCacheKey) {
+    body.prompt_cache_key = options.promptCacheKey;
   }
   if (options.temperature != null && !options.thinking) {
     body.temperature = options.temperature;
@@ -75,25 +79,33 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    let message = `Codex API error (${response.status}): ${text}`;
+    const parsed = parseCodexErrorBody(text);
+    const message = parsed.message ?? `Codex API returned HTTP ${response.status}.`;
+    const requestId =
+      parsed.requestId ??
+      response.headers.get("x-request-id") ??
+      response.headers.get("openai-request-id") ??
+      undefined;
 
-    // Add helpful context for common errors
+    let hint: string | undefined;
     if (response.status === 400 && text.includes("not supported")) {
-      message +=
-        `\n\nHint: Codex models require a ChatGPT Plus ($20/mo) or Pro ($200/mo) subscription. ` +
-        `The "codex-spark" variants require ChatGPT Pro. ` +
-        `Ensure your account has an active subscription at https://chatgpt.com/settings`;
-    }
-
-    // Friendly hint for codex-mini-latest requiring Pro/Max subscription
-    if (response.status === 404 && text.includes("does not exist")) {
-      message +=
-        `\n\nHint: codex-mini-latest requires an OpenAI Pro ($200/mo) or Max subscription. ` +
-        `GPT-5.4 and GPT-5.4 Mini work with any active ChatGPT plan.`;
+      if (options.model === "gpt-5.5-pro") {
+        hint = "Use gpt-5.5 instead. OpenAI's Codex model catalog does not list gpt-5.5-pro.";
+      } else {
+        hint =
+          "This model is not available through Codex for the authenticated account. " +
+          "Run /model and choose a model listed for OpenAI Codex, or check your Codex model picker/usage limits.";
+      }
+    } else if (response.status === 404 && text.includes("does not exist")) {
+      hint =
+        "This model is not in the current OpenAI Codex catalog for this account. " +
+        "Try gpt-5.5, gpt-5.4, gpt-5.4-mini, or gpt-5.3-codex.";
     }
 
     throw new ProviderError("openai", message, {
       statusCode: response.status,
+      ...(requestId ? { requestId } : {}),
+      ...(hint ? { hint } : {}),
     });
   }
 
@@ -106,20 +118,56 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const toolCalls = new Map<string, { id: string; name: string; argsJson: string }>();
   let inputTokens = 0;
   let outputTokens = 0;
+  let cacheRead = 0;
+
+  // ── Diagnostic: log the first occurrence of each raw SSE event type with
+  // timing, so we can see what Codex sends during the pre-reasoning window
+  // and decide whether earlier signals are available to drive the UI.
+  const diagStart = Date.now();
+  const diagSeen = new Set<string>();
 
   for await (const event of parseSSE(response.body)) {
     const type = event.type as string | undefined;
     if (!type) continue;
 
+    if (!diagSeen.has(type)) {
+      diagSeen.add(type);
+      providerDiag("codex_event_first", { type, sinceStartMs: Date.now() - diagStart });
+    }
+
     if (type === "error") {
-      const msg = (event.message as string) || JSON.stringify(event);
-      throw new ProviderError("openai", `Codex error: ${msg}`);
+      // Codex Responses streams two error shapes:
+      //   { type:"error", error:{ type, code, message, param }, sequence_number }
+      //   { type:"error", code, message, param, sequence_number }
+      // Pick the first message field we find; fall back to the chunk code/type
+      // rather than dumping the raw JSON at the user.
+      const nested = (event.error as Record<string, unknown> | undefined) ?? undefined;
+      const message =
+        (nested?.message as string | undefined) ??
+        (event.message as string | undefined) ??
+        "Codex stream emitted an error chunk without a message.";
+      const code =
+        (nested?.code as string | undefined) ??
+        (nested?.type as string | undefined) ??
+        (event.code as string | undefined) ??
+        "server_error";
+      // OpenAI sometimes embeds the request ID inside the human-readable
+      // message ("…request ID abc123 in your message"); fish it out so the
+      // FormattedError can surface it on its own line.
+      const requestId = extractCodexRequestId(message) ?? (event.request_id as string | undefined);
+      throw new ProviderError("openai", message, {
+        ...(requestId != null ? { requestId } : {}),
+        ...(code === "server_error" ? { statusCode: 500 } : {}),
+      });
     }
 
     if (type === "response.failed") {
-      const msg =
-        ((event.error as Record<string, unknown>)?.message as string) || "Codex response failed";
-      throw new ProviderError("openai", msg);
+      const nested = event.error as Record<string, unknown> | undefined;
+      const message = (nested?.message as string | undefined) ?? "Codex response failed.";
+      const requestId = extractCodexRequestId(message) ?? (event.request_id as string | undefined);
+      throw new ProviderError("openai", message, {
+        ...(requestId != null ? { requestId } : {}),
+      });
     }
 
     // Text delta
@@ -133,6 +181,17 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     if (type === "response.reasoning_summary_text.delta") {
       const delta = event.delta as string;
       yield { type: "thinking_delta", text: delta };
+    }
+
+    // Reasoning item started — the model has begun reasoning on the server.
+    // Surface this as an empty thinking_delta so the UI can flip to the
+    // "thinking" phase ~3s before the summary text actually starts streaming.
+    // (Codex emits this at ~1s vs reasoning_summary_text.delta at ~4–10s.)
+    if (type === "response.output_item.added") {
+      const item = event.item as Record<string, unknown>;
+      if (item?.type === "reasoning") {
+        yield { type: "thinking_delta", text: "" };
+      }
     }
 
     // Tool call started
@@ -206,9 +265,14 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     // Response completed
     if (type === "response.completed" || type === "response.done") {
       const resp = event.response as Record<string, unknown> | undefined;
-      const usage = resp?.usage as Record<string, number> | undefined;
+      const usage = resp?.usage as
+        | (Record<string, number> & {
+            input_tokens_details?: { cached_tokens?: number };
+          })
+        | undefined;
       if (usage) {
-        inputTokens = usage.input_tokens ?? 0;
+        cacheRead = usage.input_tokens_details?.cached_tokens ?? 0;
+        inputTokens = (usage.input_tokens ?? 0) - cacheRead;
         outputTokens = usage.output_tokens ?? 0;
       }
     }
@@ -244,7 +308,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       content: contentParts.length > 0 ? contentParts : textAccum || "",
     },
     stopReason,
-    usage: { inputTokens, outputTokens },
+    usage: { inputTokens, outputTokens, ...(cacheRead > 0 && { cacheRead }) },
   };
 
   yield { type: "done", stopReason };
@@ -431,4 +495,34 @@ function toCodexTools(tools: Tool[]): unknown[] {
     parameters: tool.rawInputSchema ?? zodToJsonSchema(tool.parameters),
     strict: null,
   }));
+}
+
+// OpenAI's server_error messages embed the request ID inline ("…request ID
+// abc123 in your message"). Pull it out so we can surface it as a structured
+// field rather than leaving it buried in the message.
+function extractCodexRequestId(message: string): string | undefined {
+  const match = message.match(/request ID ([a-z0-9-]{8,})/i);
+  return match?.[1];
+}
+
+// HTTP error bodies come back as JSON or plain text. Try to extract a clean
+// message string + request_id so we never spill the raw JSON into the UI.
+function parseCodexErrorBody(text: string): { message?: string; requestId?: string } {
+  if (!text) return {};
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const error = parsed.error as Record<string, unknown> | undefined;
+    const message =
+      (error?.message as string | undefined) ?? (parsed.message as string | undefined);
+    const requestId =
+      (parsed.request_id as string | undefined) ??
+      (error?.request_id as string | undefined) ??
+      (message ? extractCodexRequestId(message) : undefined);
+    return { ...(message ? { message } : {}), ...(requestId ? { requestId } : {}) };
+  } catch {
+    // Non-JSON body — return the trimmed text directly, capped so we never
+    // splat a huge HTML error page.
+    const trimmed = text.trim().slice(0, 240);
+    return trimmed ? { message: trimmed } : {};
+  }
 }

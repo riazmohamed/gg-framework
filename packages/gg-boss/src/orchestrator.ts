@@ -71,6 +71,8 @@ export class GGBoss {
   private authStorage = new AuthStorage();
   /** Path to the boss's per-session jsonl log under ~/.gg/boss/sessions/. */
   private sessionPath = "";
+  /** Stable id for the current boss conversation, used as a provider cache routing key. */
+  private bossSessionId = "";
   /** Last index in the boss's messages array we've persisted to disk. */
   private lastPersistedIndex = 0;
   /** project → task id currently dispatched to that worker. Used to mark
@@ -158,18 +160,21 @@ export class GGBoss {
       const info = await getSessionById(this.opts.resumeSessionId);
       if (info) {
         this.sessionPath = info.path;
+        this.bossSessionId = info.id;
         priorMessages = (await loadSession(info.path)).filter((m) => m.role !== "system");
       }
     } else if (this.opts.continueRecent) {
       const recent = await getMostRecent();
       if (recent) {
         this.sessionPath = recent.path;
+        this.bossSessionId = recent.id;
         priorMessages = (await loadSession(recent.path)).filter((m) => m.role !== "system");
       }
     }
     if (!this.sessionPath) {
       const session = await createSession();
       this.sessionPath = session.filePath;
+      this.bossSessionId = session.id;
     }
     // Rebuild the visible TUI history from the loaded messages so the chat
     // shows the prior conversation, not just the agent's hidden context.
@@ -186,6 +191,7 @@ export class GGBoss {
       accountId: creds.accountId,
       signal: this.ac.signal,
       cacheRetention: "short",
+      promptCacheKey: this.getBossPromptCacheKey(),
       thinking: this.opts.bossThinkingLevel,
       priorMessages,
     });
@@ -309,6 +315,7 @@ export class GGBoss {
       accountId: creds.accountId,
       signal: this.ac.signal,
       cacheRetention: "short",
+      promptCacheKey: this.getBossPromptCacheKey(),
       thinking: this.opts.bossThinkingLevel,
       priorMessages: oldMessages,
     });
@@ -351,12 +358,15 @@ export class GGBoss {
         contextWindow,
         signal: this.ac.signal,
       });
-      await this.replaceBossMessages(compactedMessages);
       // Start a new session file so `ggboss continue` resumes the COMPACTED
       // history, not the full original. Mirrors ggcoder/AgentSession.compact.
+      // Set bossSessionId before rebuilding the Agent so its provider cache key
+      // matches the new compacted session.
       const session = await createSession();
       this.sessionPath = session.filePath;
+      this.bossSessionId = session.id;
       this.lastPersistedIndex = 0;
+      await this.replaceBossMessages(compactedMessages);
       await this.persistNewMessages();
       bossStore.setBossInputTokens(0);
       bossStore.endCompaction(result.originalCount, result.newCount);
@@ -438,6 +448,7 @@ export class GGBoss {
       accountId: creds.accountId,
       signal: this.ac.signal,
       cacheRetention: "short",
+      promptCacheKey: this.getBossPromptCacheKey(),
       thinking: level,
       priorMessages: oldMessages,
     });
@@ -460,6 +471,7 @@ export class GGBoss {
       accountId: creds.accountId,
       signal: this.ac.signal,
       cacheRetention: "short",
+      promptCacheKey: this.getBossPromptCacheKey(),
       thinking: this.opts.bossThinkingLevel,
       priorMessages,
     });
@@ -473,6 +485,7 @@ export class GGBoss {
   async newSession(): Promise<void> {
     const session = await createSession();
     this.sessionPath = session.filePath;
+    this.bossSessionId = session.id;
     this.lastPersistedIndex = 0;
     await this.replaceBossMessages([]);
     bossStore.setBossInputTokens(0);
@@ -484,6 +497,10 @@ export class GGBoss {
   /** Alias kept for the existing /clear path which used "reset" terminology. */
   async resetConversation(): Promise<void> {
     return this.newSession();
+  }
+
+  private getBossPromptCacheKey(): string {
+    return this.bossSessionId ? `ggboss:${this.bossSessionId}` : "ggboss";
   }
 
   async run(): Promise<void> {

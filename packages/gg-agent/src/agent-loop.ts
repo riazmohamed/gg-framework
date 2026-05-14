@@ -436,9 +436,12 @@ export async function* agentLoop(
           signal: streamController.signal,
           accountId: options.accountId,
           cacheRetention: options.cacheRetention,
+          promptCacheKey: options.promptCacheKey,
+          serviceTier: options.serviceTier,
           supportsImages: options.supportsImages,
           compaction: options.compaction,
           clearToolUses: options.clearToolUses,
+          userAgent: options.userAgent,
           // Flip to non-streaming fallback after repeated stream stalls.
           ...(useNonStreamingFallback ? { streaming: false } : {}),
         });
@@ -452,14 +455,22 @@ export async function* agentLoop(
         hasReceivedEvent = false;
         lastEventTime = Date.now();
         streamCallStart = Date.now();
+        // Reset to streamCallStart so the first event's consumerLag reflects
+        // network/provider latency, not the time spent before stream() returned.
+        lastYieldEndTime = Date.now();
         resetIdleTimer();
         for await (const event of result) {
           // Measure consumer lag: time between finishing previous yield and
-          // receiving this event.  High lag means React rendering is starving
-          // the stream consumer.  Low lag means the API was slow to send.
+          // receiving this event. For event #1 this still includes network/
+          // provider latency; for subsequent events it isolates how long
+          // React/UI rendering held up the next pull.
           const pullTime = Date.now();
           const consumerLag = pullTime - lastYieldEndTime;
-          if (consumerLag > maxConsumerLagMs) maxConsumerLagMs = consumerLag;
+          // Only track mid-stream lag — first event lag is dominated by
+          // server-side TTFB and would mask real UI starvation issues.
+          if (streamEventCount > 0 && consumerLag > maxConsumerLagMs) {
+            maxConsumerLagMs = consumerLag;
+          }
 
           streamEventCount++;
           eventTypeCounts[event.type] = (eventTypeCounts[event.type] ?? 0) + 1;
