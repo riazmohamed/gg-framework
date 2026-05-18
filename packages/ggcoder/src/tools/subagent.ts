@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import type { AgentDefinition } from "../core/agents.js";
+import { log } from "../core/logger.js";
 import { truncateTail } from "./truncate.js";
 
 const SUB_AGENT_MAX_TURNS = 10;
@@ -37,6 +38,7 @@ export function createSubAgentTool(
   parentProvider: string,
   parentModel: string,
   planModeRef?: { current: boolean },
+  getParentCacheKey?: () => string | undefined,
 ): AgentTool<typeof SubAgentParams> {
   const agentList = agents.map((a) => `- ${a.name}: ${a.description}`).join("\n");
   const agentDesc = agentList
@@ -80,6 +82,16 @@ export function createSubAgentTool(
         String(SUB_AGENT_MAX_TURNS),
       ];
 
+      // Inherit parent's cache-routing key so all sub-agents in one parent run
+      // share the same prompt_cache_key prefix instead of each spawning with a
+      // fresh sessionId-derived key (cold cache every time). Suffix the key so
+      // the parent and its sub-agents route to distinct shards but each share
+      // among themselves.
+      const parentCacheKey = getParentCacheKey?.();
+      if (parentCacheKey) {
+        cliArgs.push("--prompt-cache-key", `${parentCacheKey}:subagent`);
+      }
+
       if (agentDef?.systemPrompt) {
         cliArgs.push("--system-prompt", agentDef.systemPrompt);
       }
@@ -96,8 +108,23 @@ export function createSubAgentTool(
       // Track progress
       let toolUseCount = 0;
       const tokenUsage = { input: 0, output: 0 };
+      const cacheTotals = { read: 0, write: 0 };
+      let turnCount = 0;
       let currentActivity: string | undefined;
       let textOutput = "";
+
+      // Mirror the child sub-agent's cache key into the parent log so
+      // `grep cacheRead ~/.gg/debug.log` shows whether sub-agents are
+      // hitting the cache. JSON mode in the child has no logger of its
+      // own (concurrent writes would corrupt the shared file), so the
+      // parent is the only place this can be observed.
+      const subCacheKey = parentCacheKey ? `${parentCacheKey}:subagent` : "(unset)";
+      log("INFO", "subagent", "Sub-agent spawn", {
+        cacheKey: subCacheKey,
+        provider: useProvider,
+        model: parentModel,
+        agent: agentDef?.name ?? "(default)",
+      });
 
       // Track whether the child has actually exited
       let childExited = false;
@@ -153,11 +180,29 @@ export function createSubAgentTool(
                 break;
               case "turn_end": {
                 const usage = event.usage as
-                  | { inputTokens: number; outputTokens: number }
+                  | {
+                      inputTokens: number;
+                      outputTokens: number;
+                      cacheRead?: number;
+                      cacheWrite?: number;
+                    }
                   | undefined;
                 if (usage) {
                   tokenUsage.input += usage.inputTokens;
                   tokenUsage.output += usage.outputTokens;
+                  if (usage.cacheRead) cacheTotals.read += usage.cacheRead;
+                  if (usage.cacheWrite) cacheTotals.write += usage.cacheWrite;
+                  turnCount++;
+                  // Per-turn line lets you eyeball cache health turn-by-turn
+                  // when debugging a runaway sub-agent. The aggregate sum on
+                  // close is also useful but hides the curve.
+                  log("INFO", "subagent", "Sub-agent turn", {
+                    turn: turnCount,
+                    inputTokens: String(usage.inputTokens),
+                    outputTokens: String(usage.outputTokens),
+                    ...(usage.cacheRead != null && { cacheRead: String(usage.cacheRead) }),
+                    ...(usage.cacheWrite != null && { cacheWrite: String(usage.cacheWrite) }),
+                  });
                 }
                 context.onUpdate?.({
                   toolUseCount,
@@ -194,6 +239,20 @@ export function createSubAgentTool(
             tokenUsage: { ...tokenUsage },
             durationMs,
           };
+
+          // Roll-up. Total cacheRead vs cumulative input shows whether the
+          // cache key propagation actually saved tokens — read this number,
+          // not the raw input sum, to judge regressions.
+          log("INFO", "subagent", "Sub-agent done", {
+            durationMs: String(durationMs),
+            turns: String(turnCount),
+            toolUseCount: String(toolUseCount),
+            inputTokens: String(tokenUsage.input),
+            outputTokens: String(tokenUsage.output),
+            cacheRead: String(cacheTotals.read),
+            cacheWrite: String(cacheTotals.write),
+            exitCode: String(code),
+          });
 
           if (code !== 0 && !textOutput) {
             resolve({

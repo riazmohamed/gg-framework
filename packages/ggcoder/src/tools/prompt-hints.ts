@@ -7,8 +7,8 @@
 export const TOOL_PROMPT_HINTS: Record<string, string> = {
   read: "Read file contents. Use offset/limit for large files.",
   write: "Create or fully rewrite a file. Must read first if it exists. Prefer edit for changes.",
-  edit: "Surgical edits via { old_text, new_text } pairs. Copy `old_text` verbatim from the read — no paraphrasing, no `...`. Each must match exactly once. Must read first.",
-  bash: "Run shell commands. CWD is the project root. Set run_in_background=true for long processes.",
+  edit: "Surgical edits via { old_text, new_text } pairs from the read — verbatim, no paraphrasing. Partial-apply by default: re-issue ONLY listed failures, never the whole batch. Use replace_all for renames; a `...`-only line in both old/new elides a preserved middle. Read first.",
+  bash: "Run shell commands. CWD is the project root. Set run_in_background=true for long processes. Use for COMPUTATION (word counts, regex generation, structural analysis) — but apply the result with the `edit` tool, not by writing files from a script. Shelling out to write loses read-tracking, partial-apply, indent forgiveness, and actionable failures.",
   find: "Find files/dirs by name pattern. Faster than bash find, respects .gitignore.",
   grep: "Regex search across files. Use for usages, definitions, imports.",
   ls: "List directory contents.",
@@ -20,8 +20,8 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "Manage the Ctrl+T task pane (add/list/done/remove). Only when the user explicitly asks. Do NOT auto-run.",
   subagent: "Delegate focused, isolated subtasks (research, parallel exploration).",
   skill: "Invoke a named skill for specialized instructions.",
-  mcp__grep__searchGitHub:
-    "Search real-world code in 1M+ GitHub repos. Single literal pattern per call. Sequential only (rate-limited).",
+  "mcp__kencode-search__searchCode":
+    'Literal-text or RE2-regex search across 2M+ public repos. NOT semantic. Have only a concept? Anchor on a literal token a matching file would contain — a library import (`from "remotion"`), a known identifier/hook/prop (`useVideoConfig`, `<Sequence`), or a config key. Filename + topic in `query` does NOT work — put filenames in `path`, topics in `repo`. Filters: `language: ["TypeScript"]`, `repo: "owner/name"`, `path: "src/components/"`. Workflow: `peek: true` → paths+counts; then narrow with `repo` + `path` for full snippets. Defaults exclude tests/vendored/generated — set `includeTests` or `includeVendored` to widen. RE2: no lookahead/lookbehind/backrefs; multi-line needs `(?s)`.',
   enter_plan: "Enter plan mode for read-only research + planning on complex multi-file tasks.",
   exit_plan: "Submit your plan for user review and exit plan mode.",
 };
@@ -41,7 +41,7 @@ export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "tasks",
   "subagent",
   "skill",
-  "mcp__grep__searchGitHub",
+  "mcp__kencode-search__searchCode",
   "enter_plan",
   "exit_plan",
 ];

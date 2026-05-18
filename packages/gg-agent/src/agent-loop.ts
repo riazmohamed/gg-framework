@@ -1,3 +1,4 @@
+import { ZodError, prettifyError } from "zod";
 import {
   stream,
   EventStream,
@@ -122,17 +123,32 @@ export function isToolPairingError(err: unknown): boolean {
   );
 }
 
-export function isOverloaded(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  if (isBillingError(err)) return false;
+/**
+ * Distinguish rate-limit (HTTP 429) from server-side overload (HTTP 529).
+ * Returns null for errors that should not enter the overload-retry bucket.
+ * Both kinds use the same backoff schedule, but the UI shows different copy
+ * and the log line records the true cause.
+ */
+export function classifyOverload(err: unknown): "rate_limit" | "overloaded" | null {
+  if (!(err instanceof Error)) return null;
+  if (isBillingError(err)) return null;
   const msg = err.message.toLowerCase();
-  return (
-    msg.includes("overloaded") ||
+  if (
+    msg.includes("rate_limit") ||
     msg.includes("rate limit") ||
     msg.includes("too many requests") ||
-    msg.includes("429") ||
-    msg.includes("529")
-  );
+    msg.includes("429")
+  ) {
+    return "rate_limit";
+  }
+  if (msg.includes("overloaded") || msg.includes("529")) {
+    return "overloaded";
+  }
+  return null;
+}
+
+export function isOverloaded(err: unknown): boolean {
+  return classifyOverload(err) !== null;
 }
 
 /**
@@ -150,6 +166,56 @@ export function isMalformedStream(err: unknown): boolean {
   // V8 JSON.parse error messages: "Expected ... in JSON at position N"
   // and "Unexpected token ... in JSON at position N"
   return /\bin JSON at position \d+/i.test(msg);
+}
+
+/**
+ * Detect socket-level transport failures — the remote peer (or an
+ * intermediary) closed the TCP connection mid-stream before the response
+ * finished.  Surfaces as `TypeError: terminated` from undici/fetch, or as
+ * `ECONNRESET` / `socket hang up` / `UND_ERR_SOCKET` from the underlying
+ * Node http layer.  Undici nests the real cause one or more levels deep,
+ * so we walk the `.cause` chain.  Same recovery as a stall: replay the
+ * request, optionally as non-streaming.
+ */
+export function isTransportFailure(err: unknown): boolean {
+  const codes = new Set([
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "ECONNABORTED",
+    "ETIMEDOUT",
+    "EPIPE",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "ENOTFOUND",
+    "UND_ERR_SOCKET",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT",
+    "UND_ERR_BODY_TIMEOUT",
+    "UND_ERR_RESPONSE_STATUS_CODE",
+    "UND_ERR_REQ_CONTENT_LENGTH_MISMATCH",
+    "UND_ERR_RES_CONTENT_LENGTH_MISMATCH",
+  ]);
+  const messages = [
+    /^terminated$/i,
+    /\bother side closed\b/i,
+    /\bsocket hang up\b/i,
+    /\bfetch failed\b/i,
+    /\bbody timeout error\b/i,
+    /\bsse stream disconnected\b/i,
+    /\bfailed to reconnect sse stream\b/i,
+  ];
+  const seen = new Set<unknown>();
+  let cur: unknown = err;
+  while (cur && typeof cur === "object" && !seen.has(cur)) {
+    seen.add(cur);
+    const e = cur as { code?: unknown; message?: unknown; cause?: unknown };
+    if (typeof e.code === "string" && codes.has(e.code)) return true;
+    if (typeof e.message === "string") {
+      for (const re of messages) if (re.test(e.message)) return true;
+    }
+    cur = e.cause;
+  }
+  return false;
 }
 
 /**
@@ -228,6 +294,14 @@ export async function* agentLoop(
   // unreachability doesn't cause multi-minute hangs, but not so aggressively
   // that slow-but-healthy backends get killed.
   const NON_STREAMING_HARD_TIMEOUT_MS = 300_000; // 5min for full non-streaming response
+  // Runaway tool-call circuit breaker. When a model glitches mid-tool-call it
+  // can emit tens of thousands of toolcall_delta events without ever closing,
+  // burning the entire stall-retry budget (~25 min) on what is clearly a
+  // non-recoverable model error. Cap accumulated arg chars and event count;
+  // exceeding either is a hard, non-retriable failure. Thresholds are generous
+  // enough to allow legitimate large file writes through `write`.
+  const MAX_TOOLCALL_DELTA_CHARS = 1_000_000; // 1 MB of accumulated tool-call args
+  const MAX_TOOLCALL_DELTA_EVENTS = 20_000; // 20k delta events in one stream
 
   try {
     while (turn < maxTurns) {
@@ -338,6 +412,13 @@ export async function* agentLoop(
       // Track event types for diagnostics — shows what arrived before a stall
       const eventTypeCounts: Record<string, number> = {};
       let lastEventType = "";
+      // Runaway tool-call detection — accumulated across all toolcall_delta
+      // events in this stream attempt. When tripped we abort the stream and
+      // bail out without retrying (the model has glitched, retries won't help).
+      let toolcallDeltaChars = 0;
+      let toolcallDeltaCount = 0;
+      let runawayDetected: { kind: "chars" | "events"; chars: number; events: number } | null =
+        null;
       // Track consumer processing time — helps distinguish "API stopped sending"
       // from "our consumer was slow to pull the next event"
       let lastYieldEndTime = Date.now();
@@ -421,9 +502,12 @@ export async function* agentLoop(
           signal: streamController.signal,
           accountId: options.accountId,
           cacheRetention: options.cacheRetention,
+          promptCacheKey: options.promptCacheKey,
+          serviceTier: options.serviceTier,
           supportsImages: options.supportsImages,
           compaction: options.compaction,
           clearToolUses: options.clearToolUses,
+          userAgent: options.userAgent,
           // Flip to non-streaming fallback after repeated stream stalls.
           ...(useNonStreamingFallback ? { streaming: false } : {}),
         });
@@ -437,14 +521,22 @@ export async function* agentLoop(
         hasReceivedEvent = false;
         lastEventTime = Date.now();
         streamCallStart = Date.now();
+        // Reset to streamCallStart so the first event's consumerLag reflects
+        // network/provider latency, not the time spent before stream() returned.
+        lastYieldEndTime = Date.now();
         resetIdleTimer();
         for await (const event of result) {
           // Measure consumer lag: time between finishing previous yield and
-          // receiving this event.  High lag means React rendering is starving
-          // the stream consumer.  Low lag means the API was slow to send.
+          // receiving this event. For event #1 this still includes network/
+          // provider latency; for subsequent events it isolates how long
+          // React/UI rendering held up the next pull.
           const pullTime = Date.now();
           const consumerLag = pullTime - lastYieldEndTime;
-          if (consumerLag > maxConsumerLagMs) maxConsumerLagMs = consumerLag;
+          // Only track mid-stream lag — first event lag is dominated by
+          // server-side TTFB and would mask real UI starvation issues.
+          if (streamEventCount > 0 && consumerLag > maxConsumerLagMs) {
+            maxConsumerLagMs = consumerLag;
+          }
 
           streamEventCount++;
           eventTypeCounts[event.type] = (eventTypeCounts[event.type] ?? 0) + 1;
@@ -523,9 +615,29 @@ export async function* agentLoop(
               data: event.data,
             };
           } else if (event.type === "toolcall_delta") {
+            const chunkChars = event.argsJson?.length ?? 0;
+            toolcallDeltaChars += chunkChars;
+            toolcallDeltaCount++;
+            if (
+              !runawayDetected &&
+              (toolcallDeltaChars > MAX_TOOLCALL_DELTA_CHARS ||
+                toolcallDeltaCount > MAX_TOOLCALL_DELTA_EVENTS)
+            ) {
+              runawayDetected = {
+                kind: toolcallDeltaChars > MAX_TOOLCALL_DELTA_CHARS ? "chars" : "events",
+                chars: toolcallDeltaChars,
+                events: toolcallDeltaCount,
+              };
+              diag("runaway_toolcall_detected", {
+                ...runawayDetected,
+                provider: options.provider,
+                model: options.model,
+              });
+              streamController.abort();
+            }
             yield {
               type: "toolcall_delta" as const,
-              chars: event.argsJson?.length ?? 0,
+              chars: chunkChars,
             };
           }
           lastYieldEndTime = Date.now();
@@ -598,21 +710,22 @@ export async function* agentLoop(
           throw err;
         }
         // Overloaded / rate-limited: exponential backoff, retry up to 10 times
-        if (overloadRetries < MAX_OVERLOAD_RETRIES && isOverloaded(err)) {
+        const overloadKind = classifyOverload(err);
+        if (overloadRetries < MAX_OVERLOAD_RETRIES && overloadKind) {
           overloadRetries++;
           const delayMs = Math.min(
             OVERLOAD_BASE_DELAY_MS * 2 ** (overloadRetries - 1),
             OVERLOAD_MAX_DELAY_MS,
           );
           diag("retry", {
-            reason: "overloaded",
+            reason: overloadKind,
             attempt: overloadRetries,
             maxAttempts: MAX_OVERLOAD_RETRIES,
             delayMs,
           });
           yield {
             type: "retry" as const,
-            reason: "overloaded" as const,
+            reason: overloadKind,
             attempt: overloadRetries,
             maxAttempts: MAX_OVERLOAD_RETRIES,
             delayMs,
@@ -626,22 +739,53 @@ export async function* agentLoop(
         // Both are transport failures — retry with exponential backoff and flip
         // to non-streaming mode after STALL_RETRIES_BEFORE_NON_STREAMING attempts,
         // since broken SSE often recovers when replayed as plain HTTP.
+        // Runaway tool-call: the model never closed a tool-call block and
+        // blew past the size/count caps. Retrying just reproduces the loop,
+        // so surface a clear error and stop. Checked before the abort branch
+        // since we ourselves aborted the stream to break the runaway.
+        if (runawayDetected) {
+          diag("runaway_toolcall_aborted", {
+            ...runawayDetected,
+            provider: options.provider,
+            model: options.model,
+          });
+          const detail =
+            runawayDetected.kind === "chars"
+              ? `${(runawayDetected.chars / 1024).toFixed(0)} KB of tool-call arguments`
+              : `${runawayDetected.events} tool-call delta events`;
+          yield {
+            type: "error" as const,
+            error: new Error(
+              `The model glitched mid-tool-call and produced ${detail} without closing the call. ` +
+                `This is usually an upstream model bug — try the same request again or switch models. ` +
+                `Your conversation is preserved.`,
+            ),
+          };
+          break;
+        }
         const malformed = isMalformedStream(err);
-        const transportFailure = (idleTimedOut || malformed) && !options.signal?.aborted;
+        const socketDrop = isTransportFailure(err);
+        const transportFailure =
+          (idleTimedOut || malformed || socketDrop) && !options.signal?.aborted;
         if (transportFailure && stallRetries < MAX_STALL_RETRIES) {
           stallRetries++;
+          const cause = malformed
+            ? "malformed_stream"
+            : socketDrop
+              ? "socket_drop"
+              : "stream_stall";
           if (!useNonStreamingFallback && stallRetries >= STALL_RETRIES_BEFORE_NON_STREAMING) {
             useNonStreamingFallback = true;
             diag("non_streaming_fallback_enabled", {
               stallRetries,
               provider: options.provider,
               model: options.model,
-              cause: malformed ? "malformed_stream" : "stream_stall",
+              cause,
             });
           }
           const delayMs = Math.min(STALL_DELAY_MS * 2 ** (stallRetries - 1), 8_000);
           diag("retry", {
-            reason: malformed ? "malformed_stream" : "stream_stall",
+            reason: cause,
             attempt: stallRetries,
             maxAttempts: MAX_STALL_RETRIES,
             delayMs,
@@ -882,7 +1026,17 @@ export async function* agentLoop(
             details = normalized.details;
           } catch (err) {
             isError = true;
-            resultContent = err instanceof Error ? err.message : String(err);
+            if (err instanceof ZodError) {
+              // Zod v4's default `.message` is a JSON dump of `.issues`, which
+              // the model can't act on. Prettify into "field X: expected Y,
+              // received Z" lines so the next call comes back with valid args.
+              resultContent =
+                `Invalid arguments for tool \`${toolCall.name}\`:\n` +
+                prettifyError(err) +
+                "\nRe-issue the call with each field as the correct type.";
+            } else {
+              resultContent = err instanceof Error ? err.message : String(err);
+            }
           }
         }
 

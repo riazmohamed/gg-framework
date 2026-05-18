@@ -17,7 +17,14 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { playNotificationSound } from "../utils/sound.js";
-import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from "@abukhaled/gg-ai";
+import {
+  formatError,
+  type Message,
+  type Provider,
+  type ThinkingLevel,
+  type TextContent,
+  type ImageContent,
+} from "@abukhaled/gg-ai";
 import { extractImagePaths, type ImageAttachment } from "../utils/image.js";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { useAgentLoop, type UserContent } from "./hooks/useAgentLoop.js";
@@ -55,7 +62,7 @@ import {
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { useTerminalProgress } from "./hooks/useTerminalProgress.js";
 import { getGitBranch } from "../utils/git.js";
-import { getModel, getContextWindow } from "../core/model-registry.js";
+import { getModel, getContextWindow, getMaxThinkingLevel } from "../core/model-registry.js";
 import { createModelRouter } from "../core/model-router.js";
 import { SessionManager, type MessageEntry } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
@@ -69,8 +76,20 @@ import { SettingsManager, type Settings } from "../core/settings-manager.js";
 import { shouldCompact, compact } from "../core/compaction/compactor.js";
 import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
 import { PROMPT_COMMANDS, getPromptCommand } from "../core/prompt-commands.js";
+import {
+  isFirstTimeSetup,
+  markSetupAudited,
+  getAnnouncedLanguages,
+  markLanguagesAnnounced,
+} from "../core/setup-history.js";
 import { loadCustomCommands, type CustomCommand } from "../core/custom-commands.js";
 import { buildSystemPrompt } from "../system-prompt.js";
+import {
+  detectLanguages,
+  LANGUAGE_DISPLAY_NAMES,
+  type LanguageId,
+} from "../core/language-detector.js";
+import { detectVerifyCommands } from "../core/verify-commands.js";
 import type { Skill } from "../core/skills.js";
 import {
   extractPlanSteps,
@@ -88,51 +107,41 @@ import {
   flushOnTurnEnd,
   flushOverflow,
 } from "./live-item-flush.js";
-import { Buddy } from "./buddy/Buddy.js";
 
-// ── Provider Error Hints ──────────────────────────────────
+/** Where ggcoder bugs should be reported. Surfaced in the guidance line. */
+const GGCODER_BUG_REPORT_URL = "github.com/riazmohamed/gg-framework/issues";
 
-/** Detect provider-side errors and return a user-facing hint. */
-function getProviderErrorHint(message: string): string | null {
-  const lower = message.toLowerCase();
-  if (lower.includes("overloaded") || lower.includes("engine_overloaded")) {
-    return "This is a provider-side issue — their servers are under heavy load. Try again in a moment.";
-  }
-  if (
-    lower.includes("insufficient balance") ||
-    lower.includes("no resource package") ||
-    lower.includes("quota exceeded") ||
-    lower.includes("recharge")
-  ) {
-    return "The provider reports a billing or quota issue. Check your account balance or resource package.";
-  }
-  if (
-    lower.includes("rate limit") ||
-    lower.includes("too many requests") ||
-    lower.includes("429")
-  ) {
-    return "You've hit the provider's rate limit. Wait a moment before retrying.";
-  }
-  if (lower.includes("502") || lower.includes("bad gateway")) {
-    return "The provider returned a server error. This is not an OG Coder issue — try again shortly.";
-  }
-  if (lower.includes("503") || lower.includes("service unavailable")) {
-    return "The provider's service is temporarily unavailable. Try again in a moment.";
-  }
-  if (lower.includes("timeout") || lower.includes("timed out")) {
-    return "The request to the provider timed out. Their servers may be slow — try again.";
-  }
-  if (lower.includes("500") && lower.includes("internal server error")) {
-    return "The provider experienced an internal error. This is not an OG Coder issue.";
-  }
-  if (
-    lower.includes("does not recognize the requested model") ||
-    (lower.includes("model") &&
-      (lower.includes("not exist") || lower.includes("not found") || lower.includes("no access")))
-  ) {
-    return "Use /model to switch to a different model, or check that your account has access to the requested model.";
-  }
-  return null;
+/**
+ * Build an ErrorItem from any thrown value. Centralises headline / message /
+ * guidance extraction so every error answers the same question for the user:
+ *   "Should I retry, or is this a ggcoder bug to report?"
+ */
+function toErrorItem(err: unknown, id: string, contextPrefix?: string): ErrorItem {
+  const f = formatError(err);
+  const headline = contextPrefix ? `${contextPrefix} — ${f.headline}` : f.headline;
+  // For ogcoder bugs, swap the generic "see /help" guidance for an actual URL
+  // so users have a clear place to send the report.
+  const guidance =
+    f.source === "ggcoder"
+      ? `This looks like an OG Coder bug — please send it to the dev at ${GGCODER_BUG_REPORT_URL}.`
+      : f.guidance;
+  // Mirror every user-visible error into ~/.gg/debug.log so reports can be
+  // diagnosed even after the terminal scrollback is gone.
+  log("ERROR", "ui-error", headline, {
+    source: f.source,
+    message: f.message,
+    ...(f.provider ? { provider: f.provider } : {}),
+    ...(f.statusCode != null ? { statusCode: String(f.statusCode) } : {}),
+    ...(f.requestId ? { requestId: f.requestId } : {}),
+    ...(err instanceof Error && err.stack ? { stack: err.stack } : {}),
+  });
+  return {
+    kind: "error",
+    headline,
+    message: f.message,
+    guidance,
+    id,
+  };
 }
 
 // ── Completed Item Types ───────────────────────────────────
@@ -183,13 +192,37 @@ interface ToolDoneItem {
 
 interface ErrorItem {
   kind: "error";
+  /** Plain-English headline, e.g. "OpenAI returned an error." */
+  headline: string;
+  /** Detailed message body (clean, no JSON). */
   message: string;
+  /** Action line — "Retry, this is an OpenAI issue" / "Report this ggcoder bug …". */
+  guidance: string;
   id: string;
 }
 
 interface InfoItem {
   kind: "info";
   text: string;
+  id: string;
+}
+
+interface StylePackItem {
+  kind: "style_pack";
+  /** Newly-added language ids in this injection. Rendered via LANGUAGE_DISPLAY_NAMES. */
+  added: readonly LanguageId[];
+  /** Show the one-time /setup hint. Only true for the first badge in a session. */
+  showSetupHint: boolean;
+  id: string;
+}
+
+/**
+ * Shown once per session when initial language detection finds no packs —
+ * keeps `/setup` discoverable in dirs that don't look like a project root
+ * (parent folders, scratch dirs, etc.).
+ */
+interface SetupHintItem {
+  kind: "setup_hint";
   id: string;
 }
 
@@ -266,6 +299,38 @@ interface PlanTransitionItem {
   id: string;
 }
 
+interface ThinkingTransitionItem {
+  kind: "thinking_transition";
+  active: boolean;
+  id: string;
+}
+
+interface ModelTransitionItem {
+  kind: "model_transition";
+  modelName: string;
+  id: string;
+}
+
+interface ThemeTransitionItem {
+  kind: "theme_transition";
+  themeName: string;
+  id: string;
+}
+
+interface PlanEventItem {
+  kind: "plan_event";
+  event: "approved" | "rejected" | "dismissed";
+  /** Free-form detail (reject feedback, etc.) — quoted in the rendered row. */
+  detail?: string;
+  id: string;
+}
+
+interface StoppedItem {
+  kind: "stopped";
+  text: string;
+  id: string;
+}
+
 interface TombstoneItem {
   kind: "tombstone";
   id: string;
@@ -299,6 +364,8 @@ export type CompletedItem =
   | ServerToolDoneItem
   | ErrorItem
   | InfoItem
+  | StylePackItem
+  | SetupHintItem
   | UpdateNoticeItem
   | QueuedItem
   | CompactingItem
@@ -308,6 +375,11 @@ export type CompletedItem =
   | SubAgentGroupItem
   | ToolGroupItem
   | PlanTransitionItem
+  | ThinkingTransitionItem
+  | ModelTransitionItem
+  | ThemeTransitionItem
+  | PlanEventItem
+  | StoppedItem
   | TombstoneItem;
 
 /**
@@ -551,7 +623,11 @@ export interface AppProps {
     approvedPlanPath?: string;
     planSteps?: PlanStep[];
     sessionPath?: string;
-    pendingAction?: { prompt: string; infoText?: string };
+    pendingAction?: {
+      prompt: string;
+      infoText?: string;
+      planEvent?: { event: "approved" | "rejected" | "dismissed"; detail?: string };
+    };
   }) => void;
   /**
    * Wired by `renderApp`. App calls this when the user changes
@@ -579,7 +655,15 @@ export interface AppProps {
     sessionTitleGenerated: boolean;
     overlay?: "model" | "tasks" | "skills" | "plan" | "theme" | "eyes" | null;
     planAutoExpand?: boolean;
-    pendingAction?: { prompt: string; infoText?: string };
+    pendingAction?: {
+      prompt: string;
+      infoText?: string;
+      planEvent?: { event: "approved" | "rejected" | "dismissed"; detail?: string };
+    };
+    isAgentRunning?: boolean;
+    pendingResetUI?: boolean;
+    runAllTasks?: boolean;
+    runAllPixel?: boolean;
   };
 }
 
@@ -652,8 +736,10 @@ export function App(props: AppProps) {
   const [updatePending, setUpdatePending] = useState<boolean>(
     () => getPendingUpdate(props.version) !== null,
   );
-  const [runAllTasks, setRunAllTasks] = useState(false);
-  const runAllTasksRef = useRef(false);
+  // Seed from sessionStore so "Run All" chaining survives the resetUI()
+  // remount that startTask() triggers between tasks.
+  const [runAllTasks, setRunAllTasks] = useState(props.sessionStore?.runAllTasks ?? false);
+  const runAllTasksRef = useRef(props.sessionStore?.runAllTasks ?? false);
   const startTaskRef = useRef<(title: string, prompt: string, taskId: string) => void>(() => {});
   const cwdRef = useRef(props.cwd);
   const [staticKey, setStaticKey] = useState(0);
@@ -674,7 +760,28 @@ export function App(props: AppProps) {
   const approvedPlanPathRef = useRef<string | undefined>(props.sessionStore?.approvedPlanPath);
   const planStepsRef = useRef<PlanStep[]>(props.sessionStore?.planSteps ?? []);
   const [planSteps, setPlanSteps] = useState<PlanStep[]>(props.sessionStore?.planSteps ?? []);
-  const nextIdRef = useRef(0);
+  // Stuck-guard for the plan-continuation follow-up nudge. Tracks how many
+  // times we've nudged the agent to continue the same step. Reset whenever a
+  // new [DONE:n] marker advances progress (see onTurnText). Caps at 2 nudges
+  // so a genuinely stuck agent surfaces instead of looping forever.
+  const followUpNudgesRef = useRef<{ step: number; count: number }>({ step: 0, count: 0 });
+  // Seed the per-item ID counter so it doesn't collide with IDs already in
+  // sessionStore.history (which survives remount). Without this, a remount
+  // (resize, overlay toggle, etc.) starts the counter at 0 and new items
+  // generate ids "0", "1", "2"… that collide with the same ids from the
+  // previous mount, triggering React's duplicate-key warning and causing
+  // duplicate/omitted renders.
+  const nextIdRef = useRef(
+    (() => {
+      const hist = props.sessionStore?.history ?? props.initialHistory ?? [];
+      let max = -1;
+      for (const item of hist) {
+        const n = Number(item.id);
+        if (Number.isFinite(n) && n > max) max = n;
+      }
+      return max + 1;
+    })(),
+  );
   const sessionManagerRef = useRef(
     props.sessionsDir ? new SessionManager(props.sessionsDir) : null,
   );
@@ -686,6 +793,26 @@ export function App(props: AppProps) {
   const lastActualTokensTimestampRef = useRef(0);
   /** Timestamp of last compaction — used for time-based cooldown and staleness detection. */
   const lastCompactionTimeRef = useRef(0);
+  /**
+   * Languages whose style packs are currently injected into the system prompt.
+   * Grown by `maybeInjectLanguagePacks` after `write`/`bash` tool results when
+   * the language detector sees new marker files. Reset on `chdir` (pixel-fix).
+   * Only grows within a session; we never strip packs once injected (cheaper
+   * than invalidating prompt caching, and stale guidance is harmless).
+   */
+  const injectedLanguagesRef = useRef<Set<LanguageId>>(new Set());
+  /**
+   * True until the first style-pack badge is pushed. Used to gate the
+   * one-time "/setup" hint so users learn the slash command without being
+   * spammed on every subsequent pack swap.
+   */
+  const setupHintShownRef = useRef(false);
+  /**
+   * Callback that fires `/setup` programmatically. Assigned later in the
+   * component once `agentLoop` is in scope. Called from the initial
+   * language-detection path when this cwd has never been audited before.
+   */
+  const triggerAutoSetupRef = useRef<() => Promise<void>>(async () => {});
 
   const getId = () => String(nextIdRef.current++);
 
@@ -712,9 +839,9 @@ export function App(props: AppProps) {
   }, [currentProvider, onRuntimeStateChange]);
   useEffect(() => {
     onRuntimeStateChange?.({
-      thinking: thinkingEnabled ? (props.thinking ?? "medium") : undefined,
+      thinking: thinkingEnabled ? getMaxThinkingLevel(currentModel) : undefined,
     });
-  }, [thinkingEnabled, props.thinking, onRuntimeStateChange]);
+  }, [thinkingEnabled, currentModel, onRuntimeStateChange]);
 
   // Mirror session state into renderApp's closure so resetUI() can re-seed
   // the conversation on remount. Each panel that previously did a bare ANSI
@@ -775,6 +902,105 @@ export function App(props: AppProps) {
     }
   }, [planMode, props.planModeRef]);
 
+  /**
+   * Unified "apply detection result" pipeline. Called from three sites:
+   *   1. Initial mount (existing project at startup).
+   *   2. After every `write`/`bash` tool result (reactive to new manifests).
+   *   3. Before every user submit (catches external changes between turns,
+   *      and ensures non-writing prompts still surface the badge).
+   *
+   * No-op when no new languages were added vs `injectedLanguagesRef.current`.
+   * The set-growth gate keeps this safe to call from every hot path.
+   */
+  const applyLanguageDetectionRef = useRef<(source: "initial" | "tool" | "input") => Promise<void>>(
+    async () => {},
+  );
+  applyLanguageDetectionRef.current = async (source) => {
+    const cwd = cwdRef.current;
+    const detected = detectLanguages(cwd);
+    const added: LanguageId[] = [];
+    for (const id of detected) {
+      if (!injectedLanguagesRef.current.has(id)) added.push(id);
+    }
+    if (added.length === 0) {
+      // No new packs to inject. The empty-detection hint + auto-run are
+      // first-time-per-cwd only — once the user has been shown the box and
+      // /setup has had a chance to run, re-showing on every session is noise.
+      // The with-packs path below is gated the same way via
+      // getAnnouncedLanguages / markLanguagesAnnounced: badge fires once per
+      // (cwd, language) and stays silent on subsequent sessions / /clear.
+      if (
+        source === "initial" &&
+        !setupHintShownRef.current &&
+        injectedLanguagesRef.current.size === 0 &&
+        isFirstTimeSetup(cwd)
+      ) {
+        setupHintShownRef.current = true;
+        markSetupAudited(cwd);
+        log("INFO", "language", `No style packs detected for ${cwd}`, { source });
+        setLiveItems((prev) => [...prev, { kind: "setup_hint", id: getId() }]);
+        // /setup handles the empty / parent-folder / scratch-dir case via
+        // its brand-new-empty-project branch in the prompt template.
+        void triggerAutoSetupRef.current();
+      }
+      return;
+    }
+    injectedLanguagesRef.current = detected;
+    try {
+      const newPrompt = await buildSystemPrompt(
+        cwd,
+        props.skills,
+        planMode,
+        approvedPlanPathRef.current,
+        props.provider,
+        undefined,
+        detected,
+      );
+      if (messagesRef.current[0]?.role === "system") {
+        messagesRef.current[0] = { role: "system" as const, content: newPrompt };
+      }
+      const verifyCmds = detectVerifyCommands(cwd, detected);
+      const tag = source === "initial" ? "Initial style packs" : "Style pack(s) loaded";
+      log("INFO", "language", `${tag}: ${added.join(", ")}`, {
+        source,
+        active: [...detected].join(","),
+        verify_count: String(verifyCmds.length),
+        verify: verifyCmds.map((c) => `${c.language}:${c.label}=${c.command}`).join(" | "),
+      });
+      // The badge is purely user-facing notification ("hey, this pack just
+      // turned on"). The system prompt is already updated above — that's the
+      // load-bearing part. We persist the announced set per-cwd so /clear,
+      // restart, and new sessions stay quiet for packs the user has seen.
+      const alreadyAnnounced = new Set(getAnnouncedLanguages(cwd));
+      const toAnnounce = added.filter((id) => !alreadyAnnounced.has(id));
+      if (toAnnounce.length > 0) {
+        markLanguagesAnnounced(cwd, toAnnounce);
+        const showSetupHint = !setupHintShownRef.current;
+        setupHintShownRef.current = true;
+        setLiveItems((prev) => [
+          ...prev,
+          { kind: "style_pack", added: toAnnounce, showSetupHint, id: getId() },
+        ]);
+      }
+      // First-time-per-project auto-run. Fires only on the initial mount
+      // detection path — not on tool/input triggers — so we don't surprise
+      // users mid-session. Persisted across sessions via setup-history.json.
+      if (source === "initial" && isFirstTimeSetup(cwd)) {
+        markSetupAudited(cwd);
+        void triggerAutoSetupRef.current();
+      }
+    } catch (err) {
+      log("WARN", "language", `Detection apply failed (${source}): ${(err as Error).message}`);
+    }
+  };
+
+  // Initial language detection — runs once on mount so existing projects with
+  // marker files (package.json, Cargo.toml, etc.) get their style packs from
+  // turn 1, with a visible badge.
+  useEffect(() => {
+    void applyLanguageDetectionRef.current("initial");
+  }, []);
+
   // Rebuild system prompt when plan mode changes
   useEffect(() => {
     void (async () => {
@@ -784,6 +1010,8 @@ export function App(props: AppProps) {
         planMode,
         approvedPlanPathRef.current,
         props.provider,
+        undefined,
+        injectedLanguagesRef.current,
       );
       if (messagesRef.current[0]?.role === "system") {
         messagesRef.current[0] = {
@@ -867,17 +1095,39 @@ export function App(props: AppProps) {
     persistedIndexRef.current = allMsgs.length;
   }, []);
 
+  /**
+   * Run the language detector against the current cwd. If the detected set is a
+   * strict superset of what's already injected, rebuild the system prompt with
+   * the expanded set and swap `messagesRef.current[0]`.
+   *
+   * Called from `onToolEnd` after `write`/`bash` succeeds — these are the only
+   * tools that can introduce new marker files (package.json, Cargo.toml, etc.).
+   * Other tool kinds skip detection entirely to avoid wasted filesystem stats.
+   *
+   * No restart required: the system prompt is mutated in place, same mechanism
+   * already used for plan mode + pixel-fix chdir.
+   *
+   * Stored in a ref so `onToolEnd` (whose useCallback dep array is intentionally
+   * empty to keep agent-loop options stable) can call the freshest version.
+   */
+  const maybeInjectLanguagePacksRef = useRef<(toolName: string, isError: boolean) => Promise<void>>(
+    async () => {},
+  );
+  maybeInjectLanguagePacksRef.current = async (toolName, isError) => {
+    if (isError) return;
+    if (toolName !== "write" && toolName !== "bash") return;
+    await applyLanguageDetectionRef.current("tool");
+  };
+
   // ── Compaction ─────────────────────────────────────────
 
-  // Load settings for auto-compaction + buddy
+  // Load settings for auto-compaction
   const settingsRef = useRef<SettingsManager | null>(null);
-  const [buddyEnabled, setBuddyEnabled] = useState(false);
   useEffect(() => {
     if (props.settingsFile) {
       const sm = new SettingsManager(props.settingsFile);
       sm.load().then(() => {
         settingsRef.current = sm;
-        setBuddyEnabled(sm.get("buddyEnabled") ?? false);
       });
     }
   }, [props.settingsFile]);
@@ -942,9 +1192,7 @@ export function App(props: AppProps) {
         // Replace spinner with error
         setLiveItems((prev) =>
           prev.map((item) =>
-            item.id === spinId
-              ? ({ kind: "error", message: `Compaction failed: ${msg}`, id: spinId } as ErrorItem)
-              : item,
+            item.id === spinId ? toErrorItem(err, spinId, "Compaction failed") : item,
           ),
         );
         return messages; // Return unchanged on failure
@@ -1081,7 +1329,7 @@ export function App(props: AppProps) {
       tools: currentTools,
       webSearch: props.webSearch,
       maxTokens: props.maxTokens,
-      thinking: thinkingEnabled ? (props.thinking ?? "medium") : undefined,
+      thinking: thinkingEnabled ? getMaxThinkingLevel(currentModel) : undefined,
       apiKey: activeApiKey,
       baseUrl: activeBaseUrl,
       accountId: activeAccountId,
@@ -1106,6 +1354,8 @@ export function App(props: AppProps) {
               planMode,
               undefined,
               props.provider,
+              undefined,
+              injectedLanguagesRef.current,
             );
             if (messagesRef.current[0]?.role === "system") {
               messagesRef.current[0] = { role: "system" as const, content: newPrompt };
@@ -1179,6 +1429,9 @@ export function App(props: AppProps) {
               planStepsRef.current = updated;
               setPlanSteps(updated);
             }
+            // Real progress happened — reset the stuck-guard so the next
+            // step gets its own fresh nudge budget.
+            followUpNudgesRef.current = { step: 0, count: 0 };
           }
         }
 
@@ -1335,6 +1588,10 @@ export function App(props: AppProps) {
           durationMs: number,
           details?: unknown,
         ) => {
+          // Language-pack detection — gated on `write`/`bash` inside the
+          // helper; cheap to call unconditionally. Fire-and-forget; the next
+          // LLM turn picks up the swapped system prompt automatically.
+          void maybeInjectLanguagePacksRef.current(name, isError);
           const level = isError ? "ERROR" : "INFO";
           log(level as "INFO" | "ERROR", "tool", `Tool call ended: ${name}`, {
             id: toolCallId,
@@ -1638,7 +1895,7 @@ export function App(props: AppProps) {
             }
             return item;
           });
-          return [...next, { kind: "info", text: "Request was stopped.", id: getId() }];
+          return [...next, { kind: "stopped", text: "Request was stopped.", id: getId() }];
         });
       }, []),
       onQueuedStart: useCallback((content: UserContent) => {
@@ -1669,8 +1926,75 @@ export function App(props: AppProps) {
         setDoneStatus(null);
         setLiveItems([userItem]);
       }, []),
+      // Inject a "continue with the next step" follow-up when the agent
+      // would otherwise stop mid-plan. The prompt-only instruction wasn't
+      // enough — some models (notably Opus) treat each [DONE:n] as a
+      // natural completion boundary regardless. The stuck-guard caps
+      // nudges per step so a genuinely blocked agent surfaces.
+      getFollowUpMessages: useCallback(() => {
+        const steps = planStepsRef.current;
+        if (steps.length === 0 || !approvedPlanPathRef.current) return null;
+        const next = steps.find((s) => !s.completed);
+        if (!next) return null;
+        const r = followUpNudgesRef.current;
+        if (r.step !== next.step) {
+          r.step = next.step;
+          r.count = 0;
+        }
+        if (r.count >= 2) return null;
+        r.count++;
+        return [
+          {
+            role: "user" as const,
+            content:
+              `Continue with step ${next.step}: ${next.text}. ` +
+              `Emit [DONE:${next.step}] when done, then proceed to step ${next.step + 1} ` +
+              `in the same turn. Only stop when every step in \`## Steps\` is complete ` +
+              `or you genuinely need user input.`,
+          },
+        ];
+      }, []),
     },
   );
+
+  // First-time-per-project auto-run of /setup. Bound after `agentLoop` is in
+  // scope so the ref closure can dispatch to it. Called from the initial
+  // language-detection path when `isFirstTimeSetup(cwd)` is true. Pushes a
+  // notice item explaining what's happening, then runs the audit prompt.
+  triggerAutoSetupRef.current = async () => {
+    const setupCmd = getPromptCommand("setup");
+    if (!setupCmd) {
+      log("WARN", "setup", "Auto-setup skipped — /setup command not found in registry.");
+      return;
+    }
+    log("INFO", "setup", `Auto-running /setup (first session for ${cwdRef.current})`);
+    setLiveItems((prev) => [
+      ...prev,
+      {
+        kind: "info",
+        text:
+          "First time in this project — auto-running /setup to audit hygiene, tooling, and style-pack alignment. " +
+          "Press Esc to cancel.",
+        id: getId(),
+      },
+      { kind: "user", text: "/setup", id: getId() },
+    ]);
+    setLastUserMessage("/setup");
+    setDoneStatus(null);
+    try {
+      await agentLoop.run(setupCmd.prompt);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isAbort = msg.includes("aborted") || msg.includes("abort");
+      log(isAbort ? "INFO" : "ERROR", "setup", `Auto-setup ended: ${msg}`);
+      setLiveItems((prev) => [
+        ...prev,
+        isAbort
+          ? { kind: "stopped", text: "Auto-setup cancelled.", id: getId() }
+          : toErrorItem(err, getId()),
+      ]);
+    }
+  };
 
   // Phase 2 of the two-phase flush: after onDone clears liveItems (phase 1)
   // and Ink renders the smaller live area (updating its internal line
@@ -1692,6 +2016,28 @@ export function App(props: AppProps) {
     setTitleRunning(agentLoop.isRunning);
   }, [agentLoop.isRunning]);
 
+  // Mirror agent running state into sessionStore so renderApp's resize
+  // handler and overlay toggles can skip their unmount/remount while the
+  // agent is in flight (unmounting fires useAgentLoop's cleanup which
+  // aborts the in-flight request). On the running→idle transition,
+  // consume any pendingResetUI flag set during the run by scheduling a
+  // deferred resetUI to clean up accumulated log-update drift. The 100ms
+  // setTimeout lets onDone's two-phase flush commit to sessionStore.history
+  // first, so the chat isn't lost. The cleanup also bails if the user
+  // started a new run before the timer fires, to avoid aborting it.
+  useEffect(() => {
+    if (!sessionStore) return;
+    sessionStore.isAgentRunning = agentLoop.isRunning;
+    if (!agentLoop.isRunning && sessionStore.pendingResetUI) {
+      sessionStore.pendingResetUI = false;
+      const timer = setTimeout(() => {
+        if (sessionStore.isAgentRunning) return;
+        props.resetUI?.();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [agentLoop.isRunning, sessionStore, props.resetUI]);
+
   // Consume sessionStore.pendingAction once on mount. Set by resetUI options
   // for paths that remount AND immediately drive the agent (plan accept,
   // plan reject, startTask, pixel fix). The action survives the unmount
@@ -1702,7 +2048,13 @@ export function App(props: AppProps) {
     if (!action) return;
     pendingActionConsumedRef.current = true;
     if (sessionStore) sessionStore.pendingAction = undefined;
-    if (action.infoText) {
+    if (action.planEvent) {
+      const ev = action.planEvent;
+      setLiveItems((prev) => [
+        ...prev,
+        { kind: "plan_event", event: ev.event, detail: ev.detail, id: getId() },
+      ]);
+    } else if (action.infoText) {
       setLiveItems((prev) => [
         ...prev,
         { kind: "info", text: action.infoText as string, id: getId() },
@@ -1712,7 +2064,7 @@ export function App(props: AppProps) {
     void agentLoop.run(action.prompt).catch((err: unknown) => {
       const errMsg = err instanceof Error ? err.message : String(err);
       log("ERROR", "error", errMsg);
-      setLiveItems((prev) => [...prev, { kind: "error", message: errMsg, id: getId() }]);
+      setLiveItems((prev) => [...prev, toErrorItem(err, getId())]);
     });
     // Intentional one-shot: run once on mount, never re-fire on re-render.
   }, []);
@@ -1752,6 +2104,11 @@ export function App(props: AppProps) {
           "input",
           `User input: ${truncated}${inputImages.length > 0 ? ` (+${inputImages.length} image${inputImages.length > 1 ? "s" : ""})` : ""}`,
         );
+        // Re-detect on every user submit — cheap (fs stats only). Catches
+        // external changes between turns and ensures non-writing prompts still
+        // surface the badge when packs are newly applicable. No-op if the set
+        // has not grown.
+        void applyLanguageDetectionRef.current("input");
       }
 
       // Handle /model directly — open inline selector
@@ -1795,6 +2152,8 @@ export function App(props: AppProps) {
               planMode,
               undefined,
               props.provider,
+              undefined,
+              injectedLanguagesRef.current,
             );
             props.resetUI?.({
               wipeSession: true,
@@ -1822,6 +2181,8 @@ export function App(props: AppProps) {
             planMode,
             undefined,
             props.provider,
+            undefined,
+            injectedLanguagesRef.current,
           );
           messagesRef.current = [{ role: "system" as const, content: newPrompt }];
           persistedIndexRef.current = messagesRef.current.length;
@@ -1897,43 +2258,29 @@ export function App(props: AppProps) {
             planMode,
             undefined,
             props.provider,
+            undefined,
+            injectedLanguagesRef.current,
           );
           if (messagesRef.current[0]?.role === "system") {
             messagesRef.current[0] = { role: "system" as const, content: newPrompt };
           }
         })();
-        setLiveItems([{ kind: "info", text: "Approved plan dismissed.", id: getId() }]);
-        return;
-      }
-
-      // Handle /buddy — toggle companion
-      if (trimmed === "/buddy") {
-        const next = !buddyEnabled;
-        setBuddyEnabled(next);
-        if (settingsRef.current) {
-          settingsRef.current.set("buddyEnabled", next);
-        }
-        setLiveItems((items) => [
-          ...items,
-          {
-            kind: "info" as const,
-            text: next
-              ? "Buddy enabled! Your companion will appear near the prompt."
-              : "Buddy disabled.",
-            id: getId(),
-          },
-        ]);
+        setLiveItems([{ kind: "plan_event", event: "dismissed", id: getId() }]);
         return;
       }
 
       // Handle /plans — open plan pane
       if (trimmed === "/plans") {
-        if (props.resetUI && props.sessionStore) {
+        if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
           props.sessionStore.overlay = "plan";
           props.sessionStore.planAutoExpand = false;
           props.resetUI();
         } else {
-          stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+          if (props.sessionStore) {
+            props.sessionStore.overlay = "plan";
+            props.sessionStore.planAutoExpand = false;
+            if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+          }
           setPlanAutoExpand(false);
           setOverlay("plan");
         }
@@ -1989,8 +2336,8 @@ export function App(props: AppProps) {
             setLiveItems((prev) => [
               ...prev,
               isAbort
-                ? { kind: "info", text: "Request was stopped.", id: getId() }
-                : { kind: "error", message: msg, id: getId() },
+                ? { kind: "stopped", text: "Request was stopped.", id: getId() }
+                : toErrorItem(err, getId()),
             ]);
           }
           // Reload custom commands in case a setup command created new ones
@@ -2107,8 +2454,8 @@ export function App(props: AppProps) {
         setLiveItems((prev) => [
           ...prev,
           isAbort
-            ? { kind: "info", text: "Request was stopped.", id: getId() }
-            : { kind: "error", message: msg, id: getId() },
+            ? { kind: "stopped", text: "Request was stopped.", id: getId() }
+            : toErrorItem(err, getId()),
         ]);
       }
     },
@@ -2132,7 +2479,7 @@ export function App(props: AppProps) {
       log("INFO", "thinking", `Thinking ${next ? "enabled" : "disabled"}`);
       setLiveItems((items) => [
         ...items,
-        { kind: "info", text: `Thinking ${next ? "on" : "off"}`, id: getId() },
+        { kind: "thinking_transition", active: next, id: getId() },
       ]);
       if (props.settingsFile) {
         const sm = new SettingsManager(props.settingsFile);
@@ -2218,7 +2565,7 @@ export function App(props: AppProps) {
       const displayName = modelInfo?.name ?? newModelId;
       setLiveItems((prev) => [
         ...prev,
-        { kind: "info", text: `Switched to ${displayName}`, id: getId() },
+        { kind: "model_transition", modelName: displayName, id: getId() },
       ]);
 
       // Persist model selection for next CLI launch
@@ -2255,10 +2602,7 @@ export function App(props: AppProps) {
         const sm = new SettingsManager(props.settingsFile);
         sm.load().then(() => sm.set("theme", name as Settings["theme"]));
       }
-      setLiveItems((prev) => [
-        ...prev,
-        { kind: "info", text: `Theme switched to: ${name}`, id: getId() },
-      ]);
+      setLiveItems((prev) => [...prev, { kind: "theme_transition", themeName: name, id: getId() }]);
     },
     [switchTheme, props.settingsFile],
   );
@@ -2277,6 +2621,7 @@ export function App(props: AppProps) {
       "research",
       "scan",
       "verify",
+      "bullet-proof",
       "simplify",
       "compare",
       "batch",
@@ -2356,6 +2701,81 @@ export function App(props: AppProps) {
             </Text>
           </Box>
         );
+      case "style_pack": {
+        const names = item.added.map((id) => LANGUAGE_DISPLAY_NAMES[id]);
+        const headerLabel = item.added.length > 1 ? "STYLE PACKS ACTIVE" : "STYLE PACK ACTIVE";
+        return (
+          <Box
+            key={item.id}
+            marginTop={1}
+            flexShrink={1}
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={theme.language}
+            paddingX={1}
+          >
+            <Text wrap="wrap">
+              <Text color={theme.language} bold>
+                {"◆ "}
+              </Text>
+              <Text color={theme.language} bold>
+                {headerLabel}
+              </Text>
+            </Text>
+            <Text color={theme.text} bold wrap="wrap">
+              {names.join(", ")}
+            </Text>
+            {item.showSetupHint && (
+              <Box marginTop={1}>
+                <Text wrap="wrap">
+                  <Text color={theme.textMuted}>{"Tip: run "}</Text>
+                  <Text color={theme.language} bold>
+                    {"/setup"}
+                  </Text>
+                  <Text color={theme.textMuted}>
+                    {" to audit this project against the active pack(s)"}
+                  </Text>
+                </Text>
+              </Box>
+            )}
+          </Box>
+        );
+      }
+      case "setup_hint":
+        return (
+          <Box
+            key={item.id}
+            marginTop={1}
+            flexShrink={1}
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={theme.language}
+            paddingX={1}
+          >
+            <Text wrap="wrap">
+              <Text color={theme.language} bold>
+                {"◆ "}
+              </Text>
+              <Text color={theme.language} bold>
+                {"NO STYLE PACKS DETECTED"}
+              </Text>
+            </Text>
+            <Text color={theme.textMuted} wrap="wrap">
+              {"This directory has no recognized language manifest at its root."}
+            </Text>
+            <Box marginTop={1}>
+              <Text wrap="wrap">
+                <Text color={theme.textMuted}>{"Tip: run "}</Text>
+                <Text color={theme.language} bold>
+                  {"/setup"}
+                </Text>
+                <Text color={theme.textMuted}>
+                  {" to audit project hygiene or bootstrap a new project from scratch"}
+                </Text>
+              </Text>
+            </Box>
+          </Box>
+        );
       case "assistant":
         return (
           <AssistantMessage
@@ -2413,19 +2833,21 @@ export function App(props: AppProps) {
           />
         );
       case "error": {
-        const providerHint = getProviderErrorHint(item.message);
+        const showMessage = item.message && item.message !== item.headline;
         return (
           <Box key={item.id} marginTop={1} flexDirection="column" flexShrink={1}>
             <Text color={theme.error} wrap="wrap">
               {"✗ "}
-              {item.message}
+              {item.headline}
             </Text>
-            {providerHint && (
+            {showMessage && (
               <Text color={theme.textDim} wrap="wrap">
-                {"  Hint: "}
-                {providerHint}
+                {`  ${item.message}`}
               </Text>
             )}
+            <Text color={theme.textDim} wrap="wrap">
+              {`  → ${item.guidance}`}
+            </Text>
           </Box>
         );
       }
@@ -2458,6 +2880,94 @@ export function App(props: AppProps) {
           <Box key={item.id} marginTop={1} flexShrink={1}>
             <Text color={theme.planPrimary} bold wrap="wrap">
               {item.active ? "● " : "● "}
+              {item.text}
+            </Text>
+          </Box>
+        );
+      case "thinking_transition": {
+        // Borderless. While in liveItems the glyph color cycles through the
+        // shared TRANSITION_COLORS gradient (~500ms per color). Once the item
+        // flushes to <Static>, its last-rendered color sticks — re-renders
+        // don't propagate into scrollback. Cheap: the animation timer is
+        // already running for the activity indicator.
+        const glyphFrame = item.active
+          ? deriveFrame(animTick, 500, THINKING_BORDER_COLORS.length)
+          : 0;
+        const glyphColor = item.active ? THINKING_BORDER_COLORS[glyphFrame] : theme.textDim;
+        return (
+          <Box key={item.id} marginTop={1} flexShrink={1}>
+            <Text color={glyphColor} bold>
+              {"✻ "}
+            </Text>
+            <Text color={item.active ? theme.accent : theme.textDim} bold>
+              {item.active ? "Thinking ON" : "Thinking OFF"}
+            </Text>
+          </Box>
+        );
+      }
+      case "model_transition": {
+        // Same animated-gradient pattern as thinking_transition, distinct
+        // glyph (▸) and primary-blue model name so the two transitions read
+        // as related but different.
+        const glyphFrame = deriveFrame(animTick, 500, THINKING_BORDER_COLORS.length);
+        const glyphColor = THINKING_BORDER_COLORS[glyphFrame];
+        return (
+          <Box key={item.id} marginTop={1} flexShrink={1}>
+            <Text color={glyphColor} bold>
+              {"▸ "}
+            </Text>
+            <Text color={theme.textDim}>{"Switched to "}</Text>
+            <Text color={theme.primary} bold>
+              {item.modelName}
+            </Text>
+          </Box>
+        );
+      }
+      case "theme_transition": {
+        // Same family as model/thinking transitions. The ◐ glyph (half-filled
+        // circle) reads as the light/dark dichotomy.
+        const glyphFrame = deriveFrame(animTick, 500, THINKING_BORDER_COLORS.length);
+        const glyphColor = THINKING_BORDER_COLORS[glyphFrame];
+        return (
+          <Box key={item.id} marginTop={1} flexShrink={1}>
+            <Text color={glyphColor} bold>
+              {"◐ "}
+            </Text>
+            <Text color={theme.textDim}>{"Theme switched to "}</Text>
+            <Text color={theme.primary} bold>
+              {item.themeName}
+            </Text>
+          </Box>
+        );
+      }
+      case "plan_event": {
+        // Plan-domain status changes (approve / reject / dismiss). Uses
+        // theme.planPrimary to match the existing plan_transition family,
+        // distinct from the model/thinking gradient.
+        const label =
+          item.event === "approved"
+            ? "Plan approved"
+            : item.event === "rejected"
+              ? "Plan rejected"
+              : "Plan dismissed";
+        return (
+          <Box key={item.id} marginTop={1} flexShrink={1}>
+            <Text color={theme.planPrimary} bold>
+              {"○ "}
+              {label}
+            </Text>
+            {item.detail ? <Text color={theme.textDim}>{` — "${item.detail}"`}</Text> : null}
+          </Box>
+        );
+      }
+      case "stopped":
+        // Cancellation / abort acknowledgement (ESC, auto-setup cancel, etc.).
+        // Muted dim treatment — this is an ack, not a state change worth a
+        // gradient. Glyph `⊘` reads as "stop" without being alarming.
+        return (
+          <Box key={item.id} marginTop={1} flexShrink={1}>
+            <Text color={theme.textDim} bold>
+              {"⊘ "}
               {item.text}
             </Text>
           </Box>
@@ -2573,8 +3083,8 @@ export function App(props: AppProps) {
           setLiveItems((prev) => [
             ...prev,
             isAbort
-              ? { kind: "info", text: "Request was stopped.", id: getId() }
-              : { kind: "error", message: msg, id: getId() },
+              ? { kind: "stopped", text: "Request was stopped.", id: getId() }
+              : toErrorItem(err, getId()),
           ]);
           setRunAllTasks(false);
         }
@@ -2595,7 +3105,8 @@ export function App(props: AppProps) {
   startTaskRef.current = startTask;
   useEffect(() => {
     runAllTasksRef.current = runAllTasks;
-  }, [runAllTasks]);
+    if (props.sessionStore) props.sessionStore.runAllTasks = runAllTasks;
+  }, [runAllTasks, props.sessionStore]);
 
   const isTaskView = overlay === "tasks";
   const isSkillsView = overlay === "skills";
@@ -2608,7 +3119,7 @@ export function App(props: AppProps) {
       {/* History — scrolled up, managed by Ink Static. */}
       <Static
         key={`${resizeKey}-${staticKey}`}
-        items={isOverlayView ? [] : history}
+        items={isOverlayView && !agentLoop.isRunning ? [] : history}
         style={{ width: "100%" }}
       >
         {(item) => (
@@ -2623,13 +3134,15 @@ export function App(props: AppProps) {
           cwd={props.cwd}
           agentRunning={agentLoop.isRunning}
           onClose={() => {
-            if (props.resetUI && props.sessionStore) {
+            if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
               props.sessionStore.overlay = null;
               props.resetUI();
             } else {
-              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+              if (props.sessionStore) {
+                props.sessionStore.overlay = null;
+                if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+              }
               setTaskCount(getTaskCount(props.cwd));
-              setStaticKey((k) => k + 1);
               setOverlay(null);
             }
           }}
@@ -2651,12 +3164,14 @@ export function App(props: AppProps) {
         <SkillsOverlay
           cwd={props.cwd}
           onClose={() => {
-            if (props.resetUI && props.sessionStore) {
+            if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
               props.sessionStore.overlay = null;
               props.resetUI();
             } else {
-              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-              setStaticKey((k) => k + 1);
+              if (props.sessionStore) {
+                props.sessionStore.overlay = null;
+                if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+              }
               setOverlay(null);
             }
           }}
@@ -2665,15 +3180,17 @@ export function App(props: AppProps) {
         <EyesOverlay
           cwd={props.cwd}
           onClose={() => {
-            if (props.resetUI && props.sessionStore) {
+            if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
               props.sessionStore.overlay = null;
               props.resetUI();
             } else {
-              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+              if (props.sessionStore) {
+                props.sessionStore.overlay = null;
+                if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+              }
               setEyesCount(
                 isEyesActive(props.cwd) ? journalCount({ status: "open" }, props.cwd) : undefined,
               );
-              setStaticKey((k) => k + 1);
               setOverlay(null);
             }
           }}
@@ -2687,13 +3204,16 @@ export function App(props: AppProps) {
           autoExpandNewest={planAutoExpand}
           onClose={() => {
             planOverlayPendingRef.current = false;
-            if (props.resetUI && props.sessionStore) {
+            if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
               props.sessionStore.overlay = null;
               props.sessionStore.planAutoExpand = false;
               props.resetUI();
             } else {
-              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
-              setStaticKey((k) => k + 1);
+              if (props.sessionStore) {
+                props.sessionStore.overlay = null;
+                props.sessionStore.planAutoExpand = false;
+                if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+              }
               setPlanAutoExpand(false);
               setOverlay(null);
             }
@@ -2720,6 +3240,8 @@ export function App(props: AppProps) {
                   false,
                   planPath,
                   props.provider,
+                  undefined,
+                  injectedLanguagesRef.current,
                 );
 
                 // Create a new session file BEFORE remount so the new tree
@@ -2745,7 +3267,7 @@ export function App(props: AppProps) {
                     pendingAction: {
                       prompt:
                         "The plan has been approved. Implement it now, following each step in order.",
-                      infoText: "Plan approved — starting fresh session for implementation",
+                      planEvent: { event: "approved" },
                     },
                   });
                   return;
@@ -2779,7 +3301,7 @@ export function App(props: AppProps) {
               } catch (err) {
                 const errMsg = err instanceof Error ? err.message : String(err);
                 log("ERROR", "error", errMsg);
-                setLiveItems((prev) => [...prev, { kind: "error", message: errMsg, id: getId() }]);
+                setLiveItems((prev) => [...prev, toErrorItem(err, getId())]);
               }
             })();
           }}
@@ -2796,7 +3318,7 @@ export function App(props: AppProps) {
               props.resetUI({
                 pendingAction: {
                   prompt: rejectionMsg,
-                  infoText: `Plan rejected — "${feedback}"`,
+                  planEvent: { event: "rejected", detail: feedback },
                 },
               });
               return;
@@ -2813,7 +3335,7 @@ export function App(props: AppProps) {
             void agentLoop.run(rejectionMsg).catch((err: unknown) => {
               const errMsg = err instanceof Error ? err.message : String(err);
               log("ERROR", "error", errMsg);
-              setLiveItems((prev) => [...prev, { kind: "error", message: errMsg, id: getId() }]);
+              setLiveItems((prev) => [...prev, toErrorItem(err, getId())]);
             });
           }}
         />
@@ -2854,6 +3376,7 @@ export function App(props: AppProps) {
                 runStartRef={agentLoop.runStartRef}
                 thinkingMs={agentLoop.thinkingMs}
                 isThinking={agentLoop.isThinking}
+                thinkingEnabled={thinkingEnabled}
                 tokenEstimate={agentLoop.streamedTokenEstimate}
                 charCountRef={agentLoop.charCountRef}
                 realTokensAccumRef={agentLoop.realTokensAccumRef}
@@ -2905,20 +3428,32 @@ export function App(props: AppProps) {
             onDownAtEnd={handleFocusTaskBar}
             onShiftTab={handleToggleThinking}
             onToggleTasks={() => {
-              if (props.resetUI && props.sessionStore) {
+              // While the agent is running, skip the screen-clear + staticKey
+              // bump that would otherwise wipe the chat history from scrollback.
+              // Just flip the overlay state — Ink's log-update handles the
+              // live-area transition (chat input → TaskOverlay) natively, and
+              // the chat history above stays in scrollback. When the overlay
+              // closes, the history is still there (banner included).
+              if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
                 props.sessionStore.overlay = "tasks";
                 props.resetUI();
               } else {
-                stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+                if (props.sessionStore) {
+                  props.sessionStore.overlay = "tasks";
+                  if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+                }
                 setOverlay("tasks");
               }
             }}
             onToggleSkills={() => {
-              if (props.resetUI && props.sessionStore) {
+              if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
                 props.sessionStore.overlay = "skills";
                 props.resetUI();
               } else {
-                stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+                if (props.sessionStore) {
+                  props.sessionStore.overlay = "skills";
+                  if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
+                }
                 setOverlay("skills");
               }
             }}
@@ -2960,13 +3495,11 @@ export function App(props: AppProps) {
               tokensIn={agentLoop.contextUsed}
               cwd={props.cwd}
               gitBranch={gitBranch}
-              thinkingEnabled={thinkingEnabled}
+              thinkingLevel={thinkingEnabled ? getMaxThinkingLevel(currentModel) : undefined}
               planMode={planMode}
               exitPending={exitPending}
             />
           )}
-          {/* Buddy companion */}
-          {buddyEnabled && <Buddy phase={agentLoop.activityPhase} />}
           {/* Status row — background tasks, eyes call-to-action, and the
               update-ready indicator all share a single line. Order is
               intentional: active work (bg tasks) first, actionable signals

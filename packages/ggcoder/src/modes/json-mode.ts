@@ -13,6 +13,13 @@ export interface JsonModeOptions {
   cwd: string;
   thinkingLevel?: ThinkingLevel;
   maxTurns?: number;
+  /**
+   * Stable prompt-cache routing key inherited from the parent ggcoder
+   * process. Without this, each sub-agent session generates a unique
+   * sessionId-derived cache key and starts with a cold cache on providers
+   * that route caching by key (OpenAI Codex, OpenAI Chat, Moonshot).
+   */
+  promptCacheKey?: string;
 }
 
 function emitJson(payload: Record<string, unknown>): void {
@@ -36,7 +43,15 @@ export async function runJsonMode(options: JsonModeOptions): Promise<void> {
     thinkingLevel: options.thinkingLevel,
     maxTurns: options.maxTurns,
     signal: ac.signal,
-    enableSubAgents: false, // Prevent infinite recursion
+    // Subagent runs are one-shot, NDJSON-streamed to the parent over stdout,
+    // and have no resumable identity. Skip writing a `.jsonl` so the spawn
+    // doesn't show up in `ggcoder continue` for the parent project.
+    transient: true,
+    // Parent-supplied cache routing key. When set, AgentSession uses it
+    // verbatim instead of generating `${prefix}:${sessionId}` — so every
+    // sub-agent spawned by one parent shares the same prompt_cache_key and
+    // benefits from warm cache lookups on the shared system+tool prefix.
+    promptCacheKey: options.promptCacheKey,
   };
 
   const session = new AgentSession(sessionOpts);

@@ -4,6 +4,9 @@ import type { Provider } from "@abukhaled/gg-ai";
 import { isEyesActive, readJournal } from "@abukhaled/ggcoder-eyes";
 import { formatSkillsForPrompt, type Skill } from "./core/skills.js";
 import { TOOL_PROMPT_HINTS, DEFAULT_TOOL_NAMES } from "./tools/prompt-hints.js";
+import type { LanguageId } from "./core/language-detector.js";
+import { renderStylePacksSection } from "./core/style-packs/index.js";
+import { detectVerifyCommands, renderVerifySection } from "./core/verify-commands.js";
 
 const CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", ".cursorrules", "CONVENTIONS.md"];
 
@@ -24,6 +27,7 @@ export async function buildSystemPrompt(
   approvedPlanPath?: string,
   provider?: Provider,
   toolNames?: readonly string[],
+  activeLanguages?: Set<LanguageId>,
 ): Promise<string> {
   const sections: string[] = [];
 
@@ -53,12 +57,15 @@ export async function buildSystemPrompt(
   sections.push(
     `## How to Work\n\n` +
       `- **Read before \`edit\`/\`write\`.** No edit/write without a prior read this session — missed reads waste the payload.\n` +
+      `- **Re-read after mutating tools.** Anything that rewrites files on disk (formatter, \`lint --fix\`, codemods, codegen, \`git checkout --\`) invalidates your cached view. Read the file again before the next \`edit\`/\`write\` — stale \`old_string\` matches fail, or worse, silently overwrite the mutation.\n` +
+      `- **Compute in bash, write with \`edit\`.** When a task needs computation (word counts, regex, padding, structural validation), use bash for the computation and the \`edit\` tool to apply the result. Shelling out to \`python -c '... f.write(...)'\` or \`sed -i\` loses read-tracking, partial-apply, indent forgiveness, and actionable error messages — and a mid-script crash leaves the file in unknown state.\n` +
       `- **Match the neighbors.** Before any user-visible change: find the closest existing equivalent, reuse components/tokens, mirror tone. No sibling? Stop and ask. Generic-looking output is a regression.\n` +
       `- **Edits stay small.** Plan multi-file work first. After: run tests/typecheck/lint, read errors, rebuild.\n` +
       `- **Just do it.** Routine follow-up (build, migrate, seed, re-run) is yours — don't ask.\n` +
       `- **Ask first for destructive actions**: deleting files, force-push, dropping data, killing processes, \`rm -rf\`, \`--hard\`, \`--force\`.\n` +
       `- **Investigate unexpected state** (unfamiliar files, branches, locks) — may be the user's in-progress work.\n` +
-      `- **Honor CLAUDE.md / AGENTS.md** — they override defaults.\n` +
+      `- **Precedence when rules conflict** (highest first): CLAUDE.md / AGENTS.md → existing patterns in the file/module being edited → Language Style Packs → defaults in this prompt. Apply pack conventions to new code; mirror existing patterns when extending old code. Library names in packs are illustrative — use what the project already imports.\n` +
+      `- **Verify after meaningful edits.** When a Verification section is present, run the relevant commands for the language(s) you touched. Fix failures before reporting completion.\n` +
       `- **Untracked files → \`.gitignore\`**: artifacts, configs, secrets, logs, scratch, \`.env\`, caches.\n` +
       `- **Never fake verification.** If you didn't run the check or it failed, say so. Don't invent results.`,
   );
@@ -70,7 +77,7 @@ export async function buildSystemPrompt(
         `You are in PLAN MODE. Research and design an implementation plan before writing any code.\n\n` +
         `### Workflow\n` +
         `1. Explore: read, grep, find, ls to understand the codebase\n` +
-        `2. Research: web_search + web_fetch for docs, mcp__grep__searchGitHub for real code samples\n` +
+        `2. Research: \`web_search\` + \`web_fetch\` for docs; \`mcp__kencode-search__searchCode\` for real code samples — literal text or RE2 regex (NOT semantic); start with \`peek: true\` for paths+counts, then drill in narrowed by \`repo\` + \`path\` (full usage in Research & Verification below)\n` +
         `3. Draft: write the plan to .gg/plans/<name>.md\n` +
         `4. Submit: call exit_plan with the plan path\n\n` +
         `### Rules\n` +
@@ -98,7 +105,7 @@ export async function buildSystemPrompt(
           `Follow this plan strictly. File: ${approvedPlanPath}\n\n` +
           `<approved_plan>\n${planContent.trim()}\n</approved_plan>\n\n` +
           `- Follow step order. Don't deviate without user confirmation.\n` +
-          `- After each step from \`## Steps\`, output \`[DONE:n]\` (e.g. \`[DONE:1]\`) to update the progress widget.`,
+          `- After each step from \`## Steps\`, output \`[DONE:n]\` (e.g. \`[DONE:1]\`) to update the progress widget, then continue with step n+1 in the same turn.`,
       );
     }
   }
@@ -108,8 +115,19 @@ export async function buildSystemPrompt(
     `## Research & Verification\n\n` +
       `Your training data may be outdated. Do not assume — verify.\n\n` +
       `- **Docs first**: \`web_search\` → \`web_fetch\`.\n` +
-      `- **Real code second**: \`mcp__grep__searchGitHub\` for patterns, UI, library usage, APIs.\n` +
-      `- Applies to everything — APIs, CLI flags, configs, versions. Not just "unfamiliar" code.`,
+      `- **Real code second**: \`mcp__kencode-search__searchCode\` — literal-text or RE2-regex search across 2M+ public repos. **Not semantic.**\n` +
+      `  - **Concept → query recipe.** If you only have a concept ("karaoke captions", "spring animation"), DO NOT search the concept. Anchor on a literal token a matching file would contain:\n` +
+      `    1. A library import — \`from "remotion"\`, \`import { spring }\`, \`from "@remotion/captions"\`\n` +
+      `    2. A known identifier/prop/hook — \`useVideoConfig\`, \`interpolate(\`, \`<Sequence\`, \`SubtitlePage\`\n` +
+      `    3. A unique config key — \`"defaultExport":\`, \`assetsInclude:\`\n` +
+      `    Bad: \`karaoke word animation subtitle\` → zero hits, every time. Good: \`from "@remotion/captions"\` + \`peek: true\` → real files; then narrow with \`repo\` + \`path\` and read them.\n` +
+      `  - **Filename + topic ≠ query.** \`Page.tsx tiktok\` won't match. Use \`path: "Page.tsx"\` + \`repo: "remotion-dev"\` + a literal token in \`query\`.\n` +
+      `  - Filters: \`language: ["TypeScript"]\`, \`repo: "owner/name"\` (substring), \`path: "src/components/"\` (substring), \`matchCase\`, \`useRegexp\`.\n` +
+      `  - Workflow: \`peek: true\` first → paths + match counts only (cheap triage). Then call again narrowed by \`repo\` + \`path\` for full snippets. Paginate with \`offset\`.\n` +
+      `  - Defaults exclude tests, \`node_modules\`, vendored, build, and generated files — pass \`includeTests: true\` or \`includeVendored: true\` to widen.\n` +
+      `  - Token budget: \`maxResults\` defaults to 10 (cap 200), \`contextLines\` defaults to 5 (range 0–20). Keep both small unless you need more.\n` +
+      `  - RE2 regex only: no lookahead/lookbehind/backrefs; multi-line patterns need \`(?s)\` prefix.\n` +
+      `- Applies to everything — APIs, CLI flags, configs (vite.config.ts, package.json, Dockerfile, GH Actions), shell idioms, schema shapes, error wording, conventions. Not just "unfamiliar" code.`,
   );
 
   // 4. Code Quality
@@ -155,32 +173,50 @@ export async function buildSystemPrompt(
   );
 
   // 8. Project context — walk from cwd to root looking for context files
-  // Skip for Ollama to reduce reprocessing overhead (no prompt caching like Claude API)
   const contextParts: string[] = [];
-  if (provider !== "ollama") {
-    let dir = cwd;
-    const visited = new Set<string>();
+  let dir = cwd;
+  const visited = new Set<string>();
 
-    while (!visited.has(dir)) {
-      visited.add(dir);
-      for (const name of CONTEXT_FILES) {
-        const filePath = path.join(dir, name);
-        try {
-          const content = await fs.readFile(filePath, "utf-8");
-          const relPath = path.relative(cwd, filePath) || name;
-          contextParts.push(`### ${relPath}\n\n${content.trim()}`);
-        } catch {
-          // File doesn't exist, skip
-        }
+  while (!visited.has(dir)) {
+    visited.add(dir);
+    for (const name of CONTEXT_FILES) {
+      const filePath = path.join(dir, name);
+      try {
+        const content = await fs.readFile(filePath, "utf-8");
+        const relPath = path.relative(cwd, filePath) || name;
+        contextParts.push(`### ${relPath}\n\n${content.trim()}`);
+      } catch {
+        // File doesn't exist, skip
       }
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
     }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
 
-    if (contextParts.length > 0) {
-      sections.push(`## Project Context\n\n${contextParts.join("\n\n")}`);
-    }
+  if (contextParts.length > 0) {
+    sections.push(
+      `## Project Context\n\n` +
+        `**Highest precedence** — the files below override anything stated earlier ` +
+        `in this prompt (How to Talk / How to Work / Code Quality / Style Packs).\n\n` +
+        contextParts.join("\n\n"),
+    );
+  }
+
+  // 6b. Language Style Packs — injected when the language detector has
+  // identified the project's active languages. See `core/language-detector.ts`
+  // and the swap logic in `ui/App.tsx`.
+  if (activeLanguages && activeLanguages.size > 0) {
+    const stylePacks = renderStylePacksSection(activeLanguages, cwd);
+    if (stylePacks) sections.push(stylePacks);
+
+    // 6c. Verification — detected commands for the active languages, so the
+    // agent can close the feedback loop after pack-influenced edits. Without
+    // this anchor, packs are advisory; with it, the model has concrete
+    // commands to run and verify against.
+    const verifyCmds = detectVerifyCommands(cwd, activeLanguages);
+    const verifySection = renderVerifySection(verifyCmds);
+    if (verifySection) sections.push(verifySection);
   }
 
   // 7. Eyes — open improvement signals from past probe use (gated on .gg/eyes/manifest.json)

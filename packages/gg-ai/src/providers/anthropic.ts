@@ -35,7 +35,10 @@ function createClient(options: StreamOptions): Anthropic {
     ...(isOAuth
       ? {
           defaultHeaders: {
-            "user-agent": "claude-cli/2.1.75",
+            // Anthropic's OAuth edge validates the claude-cli version. Callers
+            // (ggcoder) resolve the live version at runtime; the literal here
+            // is the offline fallback for direct gg-ai consumers.
+            "user-agent": options.userAgent ?? "claude-cli/2.1.75 (external, cli)",
             "x-app": "cli",
           },
         }
@@ -53,6 +56,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const useStreaming = options.streaming !== false;
 
   const cacheControl = toAnthropicCacheControl(options.cacheRetention, options.baseUrl);
+  const supportsFirstPartyToolExtras =
+    !options.baseUrl || options.baseUrl.includes("api.anthropic.com");
   const downgradedMessages = downgradeUnsupportedImages(options.messages, options.supportsImages);
   const { system: rawSystem, messages } = toAnthropicMessages(downgradedMessages, cacheControl);
 
@@ -93,13 +98,35 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     ...(options.topP != null ? { top_p: options.topP } : {}),
     ...(options.stop ? { stop_sequences: options.stop } : {}),
     ...(options.tools?.length || options.serverTools?.length || options.webSearch
-      ? {
-          tools: [
-            ...(options.tools?.length ? toAnthropicTools(options.tools) : []),
-            ...(options.serverTools ?? []),
-            ...(options.webSearch ? [{ type: "web_search_20250305", name: "web_search" }] : []),
-          ] as Anthropic.MessageCreateParams["tools"],
-        }
+      ? (() => {
+          // Build the tools array with server-side tools taking precedence over
+          // client tools that share their name. Anthropic rejects duplicate tool
+          // names with a 400, so when both a client `web_search` (from a non-
+          // anthropic provider's tool list left over after a /model switch) and
+          // the native server-side web_search are present, drop the client one.
+          const reservedServerNames = new Set<string>();
+          if (options.webSearch) reservedServerNames.add("web_search");
+          for (const t of options.serverTools ?? []) {
+            const name = (t as { name?: string }).name;
+            if (name) reservedServerNames.add(name);
+          }
+          const clientTools = options.tools?.length
+            ? toAnthropicTools(
+                options.tools.filter((t) => !reservedServerNames.has(t.name)),
+                {
+                  ...(supportsFirstPartyToolExtras && cacheControl ? { cacheControl } : {}),
+                  ...(supportsFirstPartyToolExtras ? { enableFineGrainedToolStreaming: true } : {}),
+                },
+              )
+            : [];
+          return {
+            tools: [
+              ...clientTools,
+              ...(options.serverTools ?? []),
+              ...(options.webSearch ? [{ type: "web_search_20250305", name: "web_search" }] : []),
+            ] as Anthropic.MessageCreateParams["tools"],
+          };
+        })()
       : {}),
     ...(options.toolChoice && options.tools?.length
       ? { tool_choice: toAnthropicToolChoice(options.toolChoice) }
@@ -229,7 +256,14 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
           }
 
           blocks.set(idx, accum);
-          yield keepalive;
+          // Surface "reasoning started" as an empty thinking_delta the moment
+          // a thinking content block opens, so the UI flips to the thinking
+          // phase before the first delta with real content arrives.
+          if (block.type === "thinking") {
+            yield { type: "thinking_delta", text: "" };
+          } else {
+            yield keepalive;
+          }
           break;
         }
 
@@ -510,8 +544,14 @@ function messageToResponse(message: Anthropic.Message): StreamResponse {
 
 function toError(err: unknown): ProviderError {
   if (err instanceof Anthropic.APIError) {
+    // Anthropic surfaces request IDs on the APIError itself (`request_id`)
+    // and sometimes inside the body. Prefer the structured field.
+    const requestId =
+      (err as unknown as { request_id?: string }).request_id ??
+      ((err.error as Record<string, unknown> | undefined)?.request_id as string | undefined);
     return new ProviderError("anthropic", err.message, {
       statusCode: err.status,
+      ...(requestId ? { requestId } : {}),
       cause: err,
     });
   }

@@ -10,6 +10,7 @@ import { PROMPT_COMMANDS, getPromptCommand } from "./prompt-commands.js";
 import { loadCustomCommands } from "./custom-commands.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage } from "./auth-storage.js";
+import { getClaudeCliUserAgent } from "./claude-code-version.js";
 import { SessionManager, type MessageEntry, type BranchInfo } from "./session-manager.js";
 import { ExtensionLoader } from "./extensions/loader.js";
 import type { ExtensionContext } from "./extensions/types.js";
@@ -47,6 +48,23 @@ export interface AgentSessionOptions {
   maxTokens?: number;
   thinkingLevel?: ThinkingLevel;
   signal?: AbortSignal;
+  /** Prefix used for provider prompt-cache routing keys. */
+  promptCacheKeyPrefix?: string;
+  /**
+   * Explicit prompt-cache routing key. When set, overrides the
+   * `${promptCacheKeyPrefix}:${sessionId}` default so spawned sub-agents can
+   * inherit a stable parent-scoped key — without this, each sub-agent process
+   * generates a fresh sessionId and starts with a cold cache.
+   */
+  promptCacheKey?: string;
+  /**
+   * If true, this session does NOT create a `.jsonl` session file or persist
+   * any messages. Used by subagent spawns (`--json` mode) so their transcripts
+   * don't leak into `ggcoder continue` for the parent project. Subagent runs
+   * are one-shot, NDJSON-streamed to the parent over stdout, and have no
+   * resumable identity.
+   */
+  transient?: boolean;
 }
 
 // ── State ──────────────────────────────────────────────────
@@ -74,6 +92,7 @@ export class AgentSession {
   private messages: Message[] = [];
   private tools: AgentTool[] = [];
   private skills: Skill[] = [];
+  private cacheKeyLogged = false;
   private processManager?: ProcessManager;
   private mcpManager?: MCPClientManager;
 
@@ -149,6 +168,9 @@ export class AgentSession {
       skills: this.skills,
       provider: this.provider,
       model: this.model,
+      // Lazy — sessionId isn't assigned yet when createTools() runs, so we
+      // must defer reading the cache key until the sub-agent actually fires.
+      getCacheKey: () => this.getPromptCacheKey(),
     });
     this.tools = tools;
     this.processManager = processManager;
@@ -175,8 +197,12 @@ export class AgentSession {
       );
     }
 
-    // Load or create session
-    if (this.opts.sessionId) {
+    // Load or create session. Transient sessions (subagent spawns) never
+    // touch the session store — sessionPath stays empty and persistMessage
+    // is a no-op so their transcripts can't pollute `ggcoder continue`.
+    if (this.opts.transient) {
+      this.lastPersistedIndex = this.messages.length;
+    } else if (this.opts.sessionId) {
       await this.loadExistingSession(this.opts.sessionId);
     } else if (this.opts.continueRecent) {
       const recentPath = await this.sessionManager.getMostRecent(this.cwd);
@@ -293,6 +319,19 @@ export class AgentSession {
 
   /** Auto-compact if needed, run agent loop with auth retry, and persist messages. */
   private async runLoop(): Promise<void> {
+    // One-shot cache-key marker per session so turn_end cacheRead numbers
+    // in the log can be traced back to a specific routing namespace —
+    // particularly useful when sub-agents inherit `parentKey:subagent`.
+    if (!this.cacheKeyLogged) {
+      this.cacheKeyLogged = true;
+      log("INFO", "cache", "Session cache key", {
+        provider: this.provider,
+        model: this.model,
+        key: this.getPromptCacheKey() ?? "(none)",
+        transient: String(!!this.opts.transient),
+      });
+    }
+
     // Auto-compact if needed
     if (this.settingsManager.get("autoCompact")) {
       const contextWindow = getContextWindow(this.model);
@@ -306,6 +345,8 @@ export class AgentSession {
     // On 401, force-refresh the token and retry once — the provider may have
     // revoked the token server-side before the stored expiry (e.g. after a restart).
     let creds = await this.authStorage.resolveCredentials(this.provider);
+
+    const userAgent = this.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined;
 
     const runAgentLoop = async (apiKey: string, accountId?: string) => {
       const modelInfo = getModel(this.model);
@@ -324,7 +365,9 @@ export class AgentSession {
         signal: this.opts.signal,
         accountId,
         cacheRetention: "short",
+        promptCacheKey: this.getPromptCacheKey(),
         supportsImages: modelInfo?.supportsImages,
+        userAgent,
         // clearToolUses disabled — causes model to output unsolicited context summaries
         // Single tool result shouldn't exceed 30% of context window (in chars)
         maxToolResultChars: Math.floor(getContextWindow(this.model) * 3.5 * 0.3),
@@ -554,6 +597,17 @@ export class AgentSession {
     this.opts = { ...this.opts, signal };
   }
 
+  private getPromptCacheKey(): string | undefined {
+    if (this.opts.promptCacheKey) return this.opts.promptCacheKey;
+    if (!this.sessionId) return undefined;
+    return `${this.opts.promptCacheKeyPrefix ?? "ggcoder"}:${this.sessionId}`;
+  }
+
+  /** Stable cache-routing key for downstream sub-agent processes. */
+  getCurrentCacheKey(): string | undefined {
+    return this.getPromptCacheKey();
+  }
+
   async dispose(): Promise<void> {
     this.processManager?.shutdownAll();
     await this.mcpManager?.dispose();
@@ -618,6 +672,8 @@ export class AgentSession {
   }
 
   private async persistMessage(message: Message): Promise<void> {
+    // Transient sessions (subagent spawns) have no session file — skip.
+    if (!this.sessionPath) return;
     const entryId = crypto.randomUUID();
     const entry: MessageEntry = {
       type: "message",

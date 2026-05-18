@@ -4,6 +4,7 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { z } from "zod";
+import os from "node:os";
 import { log } from "../logger.js";
 import type { MCPServerConfig } from "./types.js";
 
@@ -45,15 +46,33 @@ export class MCPClientManager {
     let transport: StreamableHTTPClientTransport | SSEClientTransport | StdioClientTransport;
 
     if (config.command) {
-      // Stdio transport for local processes
+      // Stdio transport for local processes.
+      // cwd is forced to homedir so the user's working directory can't
+      // affect resolution. e.g. running ggcoder from a folder whose
+      // package.json names the same package as the MCP server makes
+      // `npx -y <pkg>` self-resolve to the local source (no built bin
+      // shim) and fail with "command not found".
       transport = new StdioClientTransport({
         command: config.command,
         args: config.args,
         env: { ...process.env, ...config.env } as Record<string, string>,
+        cwd: os.homedir(),
         stderr: "pipe",
       });
+      const stderrChunks: string[] = [];
+      transport.stderr?.on("data", (chunk: Buffer | string) => {
+        stderrChunks.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+      });
       client = new Client({ name: "ogcoder", version: "1.0.0" });
-      await client.connect(transport, { timeout });
+      try {
+        await client.connect(transport, { timeout });
+      } catch (err) {
+        const stderr = stderrChunks.join("").slice(-4000);
+        if (stderr.trim()) {
+          log("WARN", "mcp", `stdio child stderr for "${config.name}"`, { stderr });
+        }
+        throw err;
+      }
     } else {
       // HTTP transport — try StreamableHTTP first, fall back to SSE
       const url = new URL(config.url!);

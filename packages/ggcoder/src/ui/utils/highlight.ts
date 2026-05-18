@@ -51,16 +51,17 @@ function ensureLoaded(): HighlightModule | undefined {
   // Kick off async load for next call
   import("cli-highlight").then(
     (m) => {
-      // esbuild wraps CJS deps as `{ default: <exports> }`, while Node's
-      // direct CJS-from-ESM import exposes named exports on the namespace.
-      // Handle both shapes.
-      const candidate = m as unknown as Partial<HighlightModule> & {
-        default?: HighlightModule;
-      };
-      hlModule =
-        typeof candidate.supportsLanguage === "function"
-          ? (candidate as HighlightModule)
-          : candidate.default;
+      // Bundler interop: dynamic ESM `import()` of CJS modules can return
+      // `{ default: { supportsLanguage, highlight, ... } }` with no named
+      // exports at the top level. Native Node ESM loader DOES mirror named
+      // exports up, so probing for the actual method works in both modes.
+      const candidate = m as unknown as HighlightModule & { default?: HighlightModule };
+      if (typeof candidate.supportsLanguage === "function") {
+        hlModule = candidate;
+      } else if (candidate.default && typeof candidate.default.supportsLanguage === "function") {
+        hlModule = candidate.default;
+      }
+      // else: shape we don't recognise — stay undefined, fall back to plain text.
     },
     () => {
       // Failed to load — will fall back to plain text permanently

@@ -1,4 +1,10 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --max-old-space-size=8192 --expose-gc
+// Default V8 heap (~1.5–4GB depending on Node version) can fatal-OOM on
+// long sessions — tool results are capped at 50KB each but accumulate
+// across thousands of turns, and Ink/React state plus the SDK clients
+// share the same heap. 8GB gives ample headroom; --expose-gc is unused
+// today but matches gg-boss for consistency. NODE_OPTIONS overrides via
+// Node's standard flag merge.
 
 // Catch stray abort-related promise rejections that escape the normal error
 // handling chain (e.g. race conditions during Ctrl+C). Without this, Node.js
@@ -62,12 +68,13 @@ import { SessionManager } from "./core/session-manager.js";
 import { ensureAppDirs, getAppPaths, loadSavedSettings } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
 import { setStreamDiagnostic, type AgentTool } from "@abukhaled/gg-agent";
+import { setProviderDiagnostic } from "@abukhaled/gg-ai";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { isEyesActive, journalCount } from "@abukhaled/ggcoder-eyes";
 import { createTools } from "./tools/index.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import { setEstimatorModel } from "./core/compaction/token-estimator.js";
-import { getContextWindow, getDefaultModel } from "./core/model-registry.js";
+import { getContextWindow, getDefaultModel, getMaxThinkingLevel } from "./core/model-registry.js";
 import { MCPClientManager, getMCPServers } from "./core/mcp/index.js";
 import { discoverAgents } from "./core/agents.js";
 import { discoverSkills } from "./core/skills.js";
@@ -345,6 +352,7 @@ function main(): void {
       model: { type: "string" },
       "max-turns": { type: "string" },
       "system-prompt": { type: "string" },
+      "prompt-cache-key": { type: "string" },
     },
     allowPositionals: true,
     strict: true,
@@ -367,6 +375,7 @@ function main(): void {
     const jsonModel = values.model ?? "claude-opus-4-7";
     const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
     const systemPrompt = values["system-prompt"];
+    const promptCacheKey = values["prompt-cache-key"];
     const cwd = process.cwd();
     runJsonMode({
       message,
@@ -375,6 +384,7 @@ function main(): void {
       cwd,
       systemPrompt,
       maxTurns,
+      promptCacheKey,
     }).catch((err: unknown) => {
       process.stderr.write(formatUserError(err) + "\n");
       process.exit(1);
@@ -417,7 +427,9 @@ function main(): void {
   }
 
   const model: string = saved.model ?? getHardcodedDefault(provider);
-  const thinkingLevel: ThinkingLevel | undefined = saved.thinkingEnabled ? "medium" : undefined;
+  const thinkingLevel: ThinkingLevel | undefined = saved.thinkingEnabled
+    ? getMaxThinkingLevel(model)
+    : undefined;
 
   // Interactive mode (Ink TUI)
   const cwd = process.cwd();
@@ -459,6 +471,9 @@ async function runInkTUI(opts: {
   // Wire stream stall diagnostics into the debug log
   setStreamDiagnostic((phase, data) => {
     log("INFO", "stream", phase, data as Record<string, unknown>);
+  });
+  setProviderDiagnostic((phase, data) => {
+    log("INFO", "provider", phase, data as Record<string, unknown>);
   });
 
   const authStorage = new AuthStorage(paths.authFile);
@@ -1166,7 +1181,9 @@ async function runSessions(): Promise<void> {
   }
 
   const model = saved2.model ?? getDefault(provider);
-  const thinkingLevel: ThinkingLevel | undefined = saved2.thinkingEnabled ? "medium" : undefined;
+  const thinkingLevel: ThinkingLevel | undefined = saved2.thinkingEnabled
+    ? getMaxThinkingLevel(model)
+    : undefined;
 
   closeLogger();
 
@@ -1396,7 +1413,6 @@ async function runServe(): Promise<void> {
   }
 
   const saved3 = loadSavedSettings();
-  const thinkingLevel: ThinkingLevel | undefined = saved3.thinkingEnabled ? "medium" : undefined;
 
   const paths = await ensureAppDirs();
   const authStorage = new AuthStorage(paths.authFile);
@@ -1409,6 +1425,10 @@ async function runServe(): Promise<void> {
     preferredProvider,
     serveValues.model ?? saved3.model,
   );
+
+  const thinkingLevel: ThinkingLevel | undefined = saved3.thinkingEnabled
+    ? getMaxThinkingLevel(model)
+    : undefined;
 
   initLogger(paths.logFile, {
     version: CLI_VERSION,
@@ -1572,7 +1592,6 @@ async function runAgentHome(): Promise<void> {
   }
 
   const saved4 = loadSavedSettings();
-  const thinkingLevel: ThinkingLevel | undefined = saved4.thinkingEnabled ? "medium" : undefined;
 
   const paths = await ensureAppDirs();
   const authStorage = new AuthStorage(paths.authFile);
@@ -1585,6 +1604,10 @@ async function runAgentHome(): Promise<void> {
     preferredProvider,
     ahValues.model ?? saved4.model,
   );
+
+  const thinkingLevel: ThinkingLevel | undefined = saved4.thinkingEnabled
+    ? getMaxThinkingLevel(model)
+    : undefined;
 
   initLogger(paths.logFile, {
     version: CLI_VERSION,

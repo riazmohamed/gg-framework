@@ -96,7 +96,43 @@ export interface SessionStore {
    * startTask, etc. The new App reads this on mount, fires the agent,
    * and clears the field.
    */
-  pendingAction?: { prompt: string; infoText?: string };
+  pendingAction?: {
+    prompt: string;
+    infoText?: string;
+    /** Structured event for the post-resetUI banner — renders as a styled
+     *  plan_event item instead of the bland info row. */
+    planEvent?: { event: "approved" | "rejected" | "dismissed"; detail?: string };
+  };
+  /**
+   * True while the agent loop is running. Mirrored by App.tsx so renderApp's
+   * resize handler can skip the unmount/remount that would abort the agent
+   * (useAgentLoop's unmount cleanup calls abortRef.abort()).
+   */
+  isAgentRunning?: boolean;
+  /**
+   * Set whenever a path that would normally `resetUI()` had to fall back to
+   * an in-place update because the agent was running (resize, overlay open/
+   * close). Consumed by App.tsx when the agent goes idle: a deferred
+   * resetUI() runs to clean up any log-update drift that accumulated during
+   * the run. The setTimeout delay lets onDone's two-phase flush commit to
+   * sessionStore.history before the unmount, so the chat isn't lost.
+   */
+  pendingResetUI?: boolean;
+  /**
+   * "Run All" task chaining flag. startTask() calls resetUI() between tasks
+   * (wipeSession + new pendingAction), which unmounts App. Without
+   * mirroring this through sessionStore, the new mount loses the flag and
+   * the onDone callback's auto-chain check (`if (runAllTasksRef.current)`)
+   * is always false on the second task onward.
+   */
+  runAllTasks?: boolean;
+  /**
+   * Same pattern as `runAllTasks` — pixel fix auto-chaining flag. Survives
+   * the deferred resetUI() that may fire when the agent goes idle (e.g.
+   * after a pane was toggled mid-fix). Without this, the second fix
+   * onward loses the chaining intent.
+   */
+  runAllPixel?: boolean;
 }
 
 export interface ResetUIOptions {
@@ -113,7 +149,13 @@ export interface ResetUIOptions {
   /** Override session path (e.g. plan accept creates a new session file). */
   sessionPath?: string;
   /** Action to fire on the new mount (info banner + agent prompt). */
-  pendingAction?: { prompt: string; infoText?: string };
+  pendingAction?: {
+    prompt: string;
+    infoText?: string;
+    /** Structured event for the post-resetUI banner — renders as a styled
+     *  plan_event item instead of the bland info row. */
+    planEvent?: { event: "approved" | "rejected" | "dismissed"; detail?: string };
+  };
 }
 
 /** Stateful theme provider — enables runtime theme switching via useSetTheme(). */
@@ -149,12 +191,40 @@ const INK_OPTIONS = {
   exitOnCtrlC: false,
 };
 
+// XTMODKEYS "off" — turns off xterm's modifyOtherKeys=2 mode where Shift+Enter,
+// Ctrl+letters, etc. arrive as ESC[27;<mod>;<keycode>~. Some terminals
+// (Terminal.app, tmux passthrough, certain xterm configs) leave this enabled
+// by default, which conflicts with the kitty keyboard protocol we enable
+// above — both modes overlap and the raw CSI 27 bytes leak into Ink's text
+// input. Writing this at startup (and on each screen clear) matches the
+// pattern used by openai/codex (keyboard_modes.rs) and google-gemini/gemini-cli
+// (terminal.ts), which both disable modifyOtherKeys immediately before
+// enabling kitty enhancement flags. Cleared again on exit so we don't leave
+// the terminal in an unusual state.
+const DISABLE_MODIFY_OTHER_KEYS = "\x1b[>4;0m";
+const SCREEN_CLEAR = DISABLE_MODIFY_OTHER_KEYS + "\x1b[2J\x1b[3J\x1b[H";
+
 export async function renderApp(config: RenderAppConfig): Promise<void> {
   const themeSetting = config.theme ?? "auto";
   const resolvedTheme = themeSetting === "auto" ? await detectTheme() : themeSetting;
 
-  // Clear screen + scrollback so old commands don't appear above the TUI
-  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+  // Clear screen + scrollback so old commands don't appear above the TUI.
+  // Also disables modifyOtherKeys (see DISABLE_MODIFY_OTHER_KEYS).
+  process.stdout.write(SCREEN_CLEAR);
+
+  // Belt-and-suspenders cleanup: tmux can re-enable modifyOtherKeys when it
+  // forwards keyboard mode changes, and Ink's unmount path doesn't touch this
+  // mode (it manages kitty + alternate-screen but not XTMODKEYS). Re-disable
+  // on every exit path so the terminal isn't left generating CSI 27 sequences
+  // that confuse the parent shell.
+  const onProcessExit = (): void => {
+    try {
+      process.stdout.write(DISABLE_MODIFY_OTHER_KEYS);
+    } catch {
+      // stdout may already be torn down; nothing useful to do here.
+    }
+  };
+  process.on("exit", onProcessExit);
 
   // Runtime state lives in this closure so unmount/remount doesn't lose
   // the user's runtime model/provider/thinking choices.
@@ -192,7 +262,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       { initial: resolvedTheme },
       React.createElement(
         TerminalSizeProvider,
-        null,
+        { isAgentRunning: () => !!sessionStore.isAgentRunning },
         React.createElement(
           AnimationProvider,
           null,
@@ -264,24 +334,69 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     if (options?.sessionPath !== undefined) sessionStore.sessionPath = options.sessionPath;
     if (options?.pendingAction) sessionStore.pendingAction = options.pendingAction;
 
-    process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+    process.stdout.write(SCREEN_CLEAR);
     old.unmount();
     ref.instance = render(buildElement(), INK_OPTIONS);
   }
 
   ref.instance = render(buildElement(), INK_OPTIONS);
 
+  // Terminal resize → full unmount/remount. The TerminalSizeProvider hook
+  // already debounces resize and writes a screen clear at the end of a
+  // drag, but that doesn't reset Ink's log-update internal line-count
+  // tracking — so on the very next render the live area is positioned
+  // against stale cursor state and the input box ends up pinned to the top
+  // of the viewport with new chat lines disappearing off-screen. Same
+  // symptom /clear hit; same fix — tear down the React tree and start
+  // fresh. Debounced 250ms (shorter than the hook's 300ms) so resetUI wins
+  // the race; the hook's pending timer is cancelled by its own useEffect
+  // cleanup when the old instance unmounts.
+  let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  const onTerminalResize = (): void => {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null;
+      // While the agent is running, the full unmount/remount would fire
+      // useAgentLoop's cleanup and abort the in-flight request — so the
+      // agent dies on maximize. Skip the unmount in that case;
+      // useTerminalSize already clears the screen and bumps resizeKey so
+      // <Static> remounts and re-prints the full history. Flag
+      // pendingResetUI so App.tsx fires a deferred resetUI the moment the
+      // agent goes idle, fixing any log-update drift that accumulated.
+      if (sessionStore.isAgentRunning) {
+        sessionStore.pendingResetUI = true;
+        return;
+      }
+      resetUI();
+    }, 250);
+  };
+  process.stdout.on("resize", onTerminalResize);
+
   // Loop: when /clear remounts, the OLD instance's waitUntilExit resolves
   // (because unmount() resolves it). We then need to wait on the NEW
   // instance. If exit was final (no replacement), ref.instance is nulled
   // by unmount and the loop ends.
-  while (true) {
-    const current: InkInstance | null = ref.instance;
-    if (!current) return;
-    await current.waitUntilExit();
-    if (ref.instance === current) {
-      ref.instance = null;
-      return;
+  try {
+    while (true) {
+      const current: InkInstance | null = ref.instance;
+      if (!current) return;
+      await current.waitUntilExit();
+      if (ref.instance === current) {
+        ref.instance = null;
+        return;
+      }
+    }
+  } finally {
+    process.stdout.off("resize", onTerminalResize);
+    if (resizeTimer) clearTimeout(resizeTimer);
+    process.off("exit", onProcessExit);
+    // Final cleanup on normal exit — also covered by the "exit" handler,
+    // but writing here ensures the disable lands before Node tears stdout
+    // down on process termination.
+    try {
+      process.stdout.write(DISABLE_MODIFY_OTHER_KEYS);
+    } catch {
+      // ignored
     }
   }
 }
