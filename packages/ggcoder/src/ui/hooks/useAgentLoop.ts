@@ -220,9 +220,7 @@ export function useAgentLoop(
   const realTokensAccumRef = useRef(0);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const doneCalledRef = useRef(false);
-<<<<<<< HEAD
   const lastRoutedModelRef = useRef<string | undefined>(undefined);
-=======
   // Diagnostic: log when streamingThinking first becomes non-empty for a run,
   // so we can measure the React → Ink commit time on top of the flush throttle.
   const thinkingCommitLoggedRef = useRef(false);
@@ -253,7 +251,6 @@ export function useAgentLoop(
       textCommitLoggedRef.current = false;
     }
   }, [streamingText]);
->>>>>>> main
 
   const abort = useCallback(() => {
     abortRef.current?.abort();
