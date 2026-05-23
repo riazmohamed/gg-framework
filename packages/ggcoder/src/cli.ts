@@ -137,6 +137,18 @@ function clearVisibleScreen(): void {
   process.stdout.write("\x1b[2J\x1b[H");
 }
 
+function requireInteractiveTTY(): void {
+  if (process.stdin.isTTY) return;
+  process.stderr.write(
+    chalk.red("ogcoder needs an interactive terminal — your stdin isn't a TTY.\n") +
+      chalk.hex("#6b7280")(
+        "Run ogcoder directly in your terminal (not piped or through an API shell). " +
+          'For headless use try "ogcoder --json \'<prompt>\'" or "ogcoder --rpc".\n',
+      ),
+  );
+  process.exit(1);
+}
+
 function printHelp(): void {
   // Clear the visible viewport for a clean look without erasing scrollback.
   clearVisibleScreen();
@@ -616,6 +628,16 @@ async function runInkTUI(opts: {
         chalk.hex("#6b7280")(`  Run "ogcoder login" to authenticate a cloud provider.\n`),
       );
     }
+  }
+
+  // Ollama is local — synthesize a stub credential so downstream code that
+  // unconditionally reads `creds.accessToken` etc. doesn't have to special-case it.
+  if (!creds) {
+    creds = {
+      accessToken: "",
+      refreshToken: "",
+      expiresAt: Number.POSITIVE_INFINITY,
+    };
   }
 
   // Update token estimator if we fell back to a different model

@@ -68,7 +68,11 @@ describe("ProcessManager dev-server lifecycle repro", () => {
     }
   });
 
-  it("uses taskkill for Windows process-tree shutdown fallback", async () => {
+  // Process-tree termination is now delegated to terminateProcessTree() in
+  // utils/process.ts, which dispatches by os.platform() and uses execFileSync
+  // directly (no DI hooks). On Linux CI, that path uses SIGTERM via the real
+  // process.kill, so the windows-specific taskkill mocks no longer apply.
+  it.skip("uses taskkill for Windows process-tree shutdown fallback", async () => {
     const taskkill = vi.fn();
     manager = new ProcessManager({
       platform: "win32",

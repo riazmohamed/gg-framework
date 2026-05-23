@@ -242,7 +242,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: false,
     supportsImages: true,
     costTier: "low",
-    maxThinkingLevel: "high",
+    maxThinkingLevel: "low",
   },
   // ── MiniMax ───────────────────────────────────────────────
   // Note: MiniMax's Anthropic-compatible endpoint does NOT support image

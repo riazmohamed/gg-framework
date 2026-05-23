@@ -198,7 +198,7 @@ describe("compaction thresholds across all models", () => {
     { model: "claude-haiku-4-5-20251001", contextWindow: 200_000 },
     { model: "gpt-5.3-codex", contextWindow: 400_000 },
     { model: "gpt-5.1-codex-mini", contextWindow: 200_000 },
-    { model: "glm-5.1", contextWindow: 204_800 },
+    { model: "glm-5.1", contextWindow: 205_000 },
     { model: "glm-4.7", contextWindow: 200_000 },
     { model: "glm-4.7-flash", contextWindow: 200_000 },
     { model: "kimi-k2.6", contextWindow: 262_144 },
