@@ -18,27 +18,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `packages/gg-editor-premiere-panel` | `@kenkaiiii/gg-editor-premiere-panel` | CEP panel bridge for Premiere |
 | `packages/gg-boss` | `@kenkaiiii/gg-boss` | Orchestrator (`ggboss` binary) — drives multiple ogcoder workers across projects from one chat |
 
-**Install**: `npm i -g @abukhaled/ogcoder`
-
 **Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`). `gg-boss` consumes `gg-ai` + `gg-agent` + `ogcoder` to spawn worker sessions.
 
-> **Branch note (rebrand/abukhaled)**: This branch rebrand the three core packages from `@kenkaiiii/{gg-ai,gg-agent,ggcoder}` to `@abukhaled/{gg-ai,gg-agent,ogcoder}` (binary renamed `ggcoder → ogcoder`). The auxiliary packages (`gg-editor`, `gg-boss`, `gg-pixel`) still publish under `@kenkaiiii/*` but their workspace deps and source imports point at `@abukhaled/*` so the monorepo builds end-to-end (`pnpm check && pnpm lint && pnpm format:check` all clean). See recent commits for version synchronization across core packages.
->
-> **Latest merges brought in**:
-> - (2026-05-06–05-07) `gg-boss` audio system, auto-update, splash screen, orchestrator expansions, event queue, worker coordination
-> - (2026-05-06) `.github/workflows/ci.yml` — new CI pipeline running `pnpm check && pnpm lint && pnpm format:check && pnpm test`
-> - (2026-05-06) `gg-editor` new tests: concat-videos, generate-gif, path-traversal, python, whisper, resolve-bridge
-> - (2026-05-06) `ggcoder` Plan-mode polish + UI updates (dynamic `_brand`/`_primary`, login screen revamp)
-> - (2026-05-09) `gg-boss` Telegram integration: `serve-mode.ts`, `telegram.ts`, `telegram-setup.ts`, `voice-transcriber.ts` (Whisper-based)
-> - (2026-05-09) `gg-boss` and `ggcoder` version bumps: gg-ai/gg-agent 4.3.155, ogcoder 4.3.157, og-boss 4.3.156
-> - (2026-05-09) `ggcoder` MCP client: stderr capture and improved error reporting for stdio transports
-> - (2026-05-09) Merged into rebrand/abukhaled with rebranded package scopes and imports preserved (@abukhaled/* for core 3)
-> - (2026-05-11) Sync with main: version bumps (gg-ai/gg-agent 4.3.163, ogcoder 4.3.163, og-boss 4.3.157), language detector, style packs, verify commands, App.tsx updates with language-aware prompts
-> - (2026-05-13) Synced with main: version bumps to 4.3.165, removed buddy system, added GLM/Xiaomi ThinkingLevel support, improved model registry with detailed Xiaomi MiMo block (Pro/Omni/Flash variants)
-> - (2026-05-14) Synced rebrand/abukhaled with main: version bumps to 4.3.174 (gg-ai/gg-agent/ogcoder), 4.3.158 (og-boss), added `formatError` export from gg-ai, `ModelRouterResult` type, diagnostic logging in useAgentLoop (first_thinking_committed, first_text_committed), and `getClaudeCliUserAgent` imports for tracking Claude Code versions
-> - (2026-05-20) Branch sync: resolved merge conflict in useAgentLoop.ts (merged `lastRoutedModelRef` with diagnostic thinking/text commit logging), all checks pass, build clean
-> - (2026-05-23) Merged main (version 4.3.212) with rebrand/abukhaled: integrated Gemini provider support, goal system, repomap context, session compaction improvements, and enhanced agent-home SDK integration while preserving @abukhaled scopes for core packages
-> - (2026-05-23) App-update sync: verified branch is in sync with main, rebuilt and globally linked @abukhaled/ogcoder (v4.3.212) via pnpm
+## Development Approach
+
+**og-framework** is being developed as an independent product under the `@abukhaled` scope. Currently in Phase 1 (learning-first development):
+
+- **Branch strategy**: `main` = independent codebase. `rebrand/abukhaled` = temporary feature branch (will rebase onto main when ready to diverge completely).
+- **Selective cherry-picks**: When useful code appears in upstream, cherry-pick it into main as needed.
+- **Build method**: Build from source locally via `pnpm build`, then link globally with `pnpm --filter @abukhaled/ogcoder link --global`. This avoids npm dependency lock-in until publishing infrastructure is ready.
+- **Three phases**:
+  1. **Phase 1 (now)**: Learn codebase deeply by working with a copy. Understand agent loop, LLM streaming, tool execution, UI patterns.
+  2. **Phase 2 (future)**: Implement own features and improvements as expertise grows. Diverge from upstream where beneficial.
+  3. **Phase 3 (long-term)**: Publish independently to npm under `@abukhaled` scope.
 
 ## Commands
 
