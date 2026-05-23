@@ -38,6 +38,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - (2026-05-14) Synced rebrand/abukhaled with main: version bumps to 4.3.174 (gg-ai/gg-agent/ogcoder), 4.3.158 (og-boss), added `formatError` export from gg-ai, `ModelRouterResult` type, diagnostic logging in useAgentLoop (first_thinking_committed, first_text_committed), and `getClaudeCliUserAgent` imports for tracking Claude Code versions
 > - (2026-05-20) Branch sync: resolved merge conflict in useAgentLoop.ts (merged `lastRoutedModelRef` with diagnostic thinking/text commit logging), all checks pass, build clean
 > - (2026-05-23) Merged main (version 4.3.212) with rebrand/abukhaled: integrated Gemini provider support, goal system, repomap context, session compaction improvements, and enhanced agent-home SDK integration while preserving @abukhaled scopes for core packages
+> - (2026-05-23) App-update sync: verified branch is in sync with main, rebuilt and globally linked @abukhaled/ogcoder (v4.3.212) via pnpm
 
 ## Commands
 
