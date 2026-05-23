@@ -1,4 +1,4 @@
-import type { ActivityPhase } from "@abukhaled/ogcoder/ui";
+import type { ActivityPhase } from "@abukhaled/ggcoder/ui";
 
 /**
  * Boss-themed phrase library for the activity indicator. Replaces ggcoder's

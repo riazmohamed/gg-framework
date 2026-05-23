@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { ActivityPhase, RetryInfo } from "@abukhaled/ogcoder/ui";
+import type { ActivityPhase, RetryInfo } from "@abukhaled/ggcoder/ui";
 import type {
   ContentPart,
   Message,

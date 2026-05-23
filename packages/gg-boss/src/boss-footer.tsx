@@ -1,8 +1,8 @@
 import React from "react";
 import { Text, Box } from "ink";
-import { useTheme } from "@abukhaled/ogcoder/ui/theme";
-import { useTerminalSize } from "@abukhaled/ogcoder/ui/hooks/terminal-size";
-import { getContextWindow } from "@abukhaled/ogcoder";
+import { useTheme } from "@abukhaled/ggcoder/ui/theme";
+import { useTerminalSize } from "@abukhaled/ggcoder/ui/hooks/terminal-size";
+import { getContextWindow } from "@abukhaled/ggcoder";
 import { COLORS } from "./branding.js";
 
 const PARTIAL_BLOCKS = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];

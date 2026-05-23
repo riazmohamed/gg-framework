@@ -1,4 +1,4 @@
-import type { ToolExecutionFormatters } from "@abukhaled/ogcoder/ui";
+import type { ToolExecutionFormatters } from "@abukhaled/ggcoder/ui";
 import { projectColor } from "./colors.js";
 
 function truncate(s: string, max: number): string {
