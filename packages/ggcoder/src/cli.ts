@@ -2010,6 +2010,17 @@ function openBrowser(url: string): void {
   });
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  main();
+if (process.argv[1]) {
+  // Follow symlinks on argv[1] so the global npm/pnpm bin (which is a
+  // symlink into the package's dist/cli.js) matches `import.meta.url`, which
+  // Node already realpath-resolves. Without this, invoking the binary via
+  // its symlink would silently exit without running main().
+  let invoked = path.resolve(process.argv[1]);
+  try {
+    invoked = fs.realpathSync(invoked);
+  } catch {
+    // argv[1] doesn't exist on disk (rare) — fall back to the literal path.
+  }
+  const self = fileURLToPath(import.meta.url);
+  if (self === invoked) main();
 }
