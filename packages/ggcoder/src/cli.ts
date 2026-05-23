@@ -102,7 +102,7 @@ const _require = createRequire(import.meta.url);
 const CLI_VERSION = (_require("../package.json") as { version: string }).version;
 
 // ── Logo + gradient (mirrors Banner.tsx) ────────────────────────────
-const LOGO_LINES = ["OG", "OG", "OG"];
+const LOGO_LINES = ["", "", ""];
 const GRADIENT = [
   "#60a5fa",
   "#6da1f9",
