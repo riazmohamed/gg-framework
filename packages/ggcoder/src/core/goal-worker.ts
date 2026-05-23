@@ -85,7 +85,7 @@ function getCliPath(): string {
 export function buildGoalWorkerSystemPrompt(context: GoalWorkerContext): string {
   const title = context.taskTitle ? ` (${context.taskTitle})` : "";
   return (
-    "You are a disposable Goal worker running inside the same project as the main GG Coder session. " +
+    "You are a disposable Goal worker running inside the same project as the main OG Coder session. " +
     `Goal context: cwd=${context.cwd}; run_id=${context.goalRunId}; task_id=${context.goalTaskId}${title}. ` +
     "Follow only the assigned Goal task prompt, which is passed as this worker's user message. Keep changes focused, use local/free tools, source_path/docs/kencode real-code research when relevant, and translate the requested outcome into observable proof: ask what would prove this goal actually worked end-to-end, then create the simplest reliable local/free proof path for the domain. " +
     "create needed scripts/fixtures/harnesses and use tests, local CLIs, dev servers, browser/simulator/device screenshots, video/frame inspection, logs, generated assets, protocol traces, database assertions, API probes, contract tests, performance measurements, source/docs comparison, or other artifacts as appropriate; for mobile/UI, prefer local simulator/browser evidence such as iOS Simulator screenshots when available before requiring a physical phone. " +

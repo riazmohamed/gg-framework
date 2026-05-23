@@ -111,7 +111,7 @@ export function renderLoginSelector(
   const opts: LoginSelectorOptions =
     typeof optsOrVersion === "string" ? { version: optsOrVersion } : (optsOrVersion ?? {});
   _version = opts.version ?? "";
-  _brand = opts.brand ?? "GG Coder";
+  _brand = opts.brand ?? "OG Coder";
   _gradient = opts.gradient && opts.gradient.length > 0 ? opts.gradient : DEFAULT_GRADIENT;
   _primary = opts.primary ?? DEFAULT_PRIMARY;
   _accent = opts.accent ?? DEFAULT_ACCENT;

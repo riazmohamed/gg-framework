@@ -89,7 +89,7 @@ describe("buildSystemPrompt", () => {
       new Set<LanguageId>(["typescript"]),
     );
 
-    expect(prompt.startsWith("You are GG Coder by Ken Kai")).toBe(true);
+    expect(prompt.startsWith("You are OG Coder by Abu Khaled")).toBe(true);
     expect(sectionIndex(prompt, "## How to Talk")).toBeLessThan(
       sectionIndex(prompt, "## How to Work"),
     );

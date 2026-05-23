@@ -170,10 +170,10 @@ export function renderScreen(
   lines.push(
     gradientLine(LOGO_LINES[0]!) +
       GAP +
-      chalk.hex("#60a5fa").bold("GG Coder") +
+      chalk.hex("#60a5fa").bold("OG Coder") +
       (version ? chalk.hex(TEXT_DIM)(` v${version}`) : "") +
       chalk.hex(TEXT_DIM)(" · By ") +
-      chalk.hex(TEXT).bold("Ken Kai"),
+      chalk.hex(TEXT).bold("Abu Khaled"),
   );
   lines.push(gradientLine(LOGO_LINES[1]!) + GAP + chalk.hex(PRIMARY)("Pixel"));
   lines.push(gradientLine(LOGO_LINES[2]!) + GAP + chalk.hex(TEXT_DIM)(summarize(data)));

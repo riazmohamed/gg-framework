@@ -5136,7 +5136,7 @@ export function App(props: AppProps) {
                   paddingRight={1}
                 >
                   <Text color={theme.accent} bold wrap="truncate">
-                    {`${eyesCount} eyes signal${eyesCount === 1 ? "" : "s"} · Run /eyes-improve to enhance GG Coder`}
+                    {`${eyesCount} eyes signal${eyesCount === 1 ? "" : "s"} · Run /eyes-improve to enhance OG Coder`}
                   </Text>
                 </Box>
               )}

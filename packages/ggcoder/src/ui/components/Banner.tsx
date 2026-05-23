@@ -64,7 +64,7 @@ export function Banner({ version, model, cwd, taskCount, goalCount }: BannerProp
         <GradientText text={LOGO_LINES[2]} shift={shift} />
         <Box marginTop={1}>
           <Text color={theme.primary} bold>
-            GG Coder
+            OG Coder
           </Text>
           <Text color={theme.textDim}> v{version}</Text>
         </Box>
@@ -104,12 +104,12 @@ export function Banner({ version, model, cwd, taskCount, goalCount }: BannerProp
         <GradientText text={LOGO_LINES[0]} shift={shift} />
         <Text>{GAP}</Text>
         <Text color={theme.primary} bold>
-          GG Coder
+          OG Coder
         </Text>
         <Text color={theme.textDim}> v{version}</Text>
         <Text color={theme.textDim}> · By </Text>
         <Text color={theme.text} bold>
-          Ken Kai
+          Abu Khaled
         </Text>
       </Box>
       <Box>
