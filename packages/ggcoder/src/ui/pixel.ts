@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DEFAULT_INGEST_URL } from "@kenkaiiii/gg-pixel";
 import { fetchPixelEntries, type PixelEntry, type PixelFetchResult } from "../core/pixel.js";
 
-const LOGO_LINES = [" ▄▀▀▀ ▄▀▀▀", " █ ▀█ █ ▀█", " ▀▄▄▀ ▀▄▄▀"];
+const LOGO_LINES = [" ▄▀▀▀ ▄▀▀▀", " █  █ █ ▀█", " ▀▄▄▀ ▀▄▄▀"];
 const GRADIENT = [
   "#60a5fa",
   "#6da1f9",

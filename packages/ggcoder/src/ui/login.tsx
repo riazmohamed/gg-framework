@@ -6,7 +6,7 @@ const LOGO_LINES = [
   " \u2588  \u2588 \u2588 \u2580\u2588",
   " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
 ];
-// Defaults — ggcoder branding. ggeditor passes its own palette.
+// Defaults — ogcoder branding. ggeditor passes its own palette.
 const DEFAULT_GRADIENT = [
   "#60a5fa",
   "#6da1f9",
