@@ -15,9 +15,9 @@ interface BannerProps {
 }
 
 const LOGO_LINES = [
-  " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
-  " \u2588  \u2588 \u2588 \u2580\u2588",
-  " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
+  " O G",
+  "O O G G",
+  " O G",
 ];
 
 // Extended gradient with reverse path for smooth animation loop

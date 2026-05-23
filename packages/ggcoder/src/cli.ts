@@ -103,9 +103,9 @@ const CLI_VERSION = (_require("../package.json") as { version: string }).version
 
 // ── Logo + gradient (mirrors Banner.tsx) ────────────────────────────
 const LOGO_LINES = [
-  " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
-  " \u2588  \u2588 \u2588 \u2580\u2588",
-  " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
+  " O G",
+  "O O G G",
+  " O G",
 ];
 const GRADIENT = [
   "#60a5fa",

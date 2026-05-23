@@ -2,9 +2,9 @@ import chalk from "chalk";
 import type { Provider } from "@abukhaled/gg-ai";
 
 const LOGO_LINES = [
-  " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
-  " \u2588  \u2588 \u2588 \u2580\u2588",
-  " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
+  " O G",
+  "O O G G",
+  " O G",
 ];
 // Defaults — ogcoder branding. ggeditor passes its own palette.
 const DEFAULT_GRADIENT = [
