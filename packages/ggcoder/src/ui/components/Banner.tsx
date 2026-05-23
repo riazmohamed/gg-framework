@@ -14,11 +14,7 @@ interface BannerProps {
   goalCount?: number;
 }
 
-const LOGO_LINES = [
-  " O G",
-  "O O G G",
-  " O G",
-];
+const LOGO_LINES = ["OG", "OG", "OG"];
 
 // Extended gradient with reverse path for smooth animation loop
 const GRADIENT = [
