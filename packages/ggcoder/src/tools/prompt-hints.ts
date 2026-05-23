@@ -6,12 +6,14 @@
  */
 export const TOOL_PROMPT_HINTS: Record<string, string> = {
   read: "Read file contents. Use offset/limit for large files.",
-  write: "Create or fully rewrite a file. Must read first if it exists. Prefer edit for changes.",
-  edit: "Surgical edits via { old_text, new_text } pairs. Copy `old_text` verbatim from the read — no paraphrasing, no `...`. Each must match exactly once. Must read first.",
-  bash: "Run shell commands. CWD is the project root. Set run_in_background=true for long processes.",
+  write: "Create or overwrite files; read existing files first. Prefer edit for changes.",
+  edit: "Apply surgical { old_text, new_text } edits from a prior read. Use exact text; retry only failed edits; replace_all for renames.",
+  bash: "Run shell commands from project root; use for computation and long/background processes, not direct file rewrites.",
   find: "Find files/dirs by name pattern. Faster than bash find, respects .gitignore.",
   grep: "Regex search across files. Use for usages, definitions, imports.",
   ls: "List directory contents.",
+  source_path:
+    "Resolve installed package/repo source via opensrc. Use before assuming dependency APIs; inspect returned absolute path with read/grep/find/ls.",
   web_fetch: "Fetch a URL (docs, endpoints, external resources).",
   web_search: "Search the web. Use before web_fetch to find pages.",
   task_output: "Read new output from a background process by id.",
@@ -20,8 +22,12 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "Manage the Ctrl+T task pane (add/list/done/remove). Only when the user explicitly asks. Do NOT auto-run.",
   subagent: "Delegate focused, isolated subtasks (research, parallel exploration).",
   skill: "Invoke a named skill for specialized instructions.",
+  "mcp__kencode-search__referenceSources":
+    "Get curated, categorized reference repos for examples, inspiration, architecture, UI, agents, SaaS, workflows, and domain patterns. Repo-only starting points; fetch docs/source, then verify code with searchCode.",
+  "mcp__kencode-search__discoverRepos":
+    "Search GitHub repos live by keyword/language/topic/stars/recency. Use for current/top repos or long-tail discovery; returns metadata, not snippets. Follow with docs/source and searchCode.",
   "mcp__kencode-search__searchCode":
-    'Literal-text or RE2-regex search across 2M+ public repos. NOT semantic. Have only a concept? Anchor on a literal token a matching file would contain — a library import (`from "remotion"`), a known identifier/hook/prop (`useVideoConfig`, `<Sequence`), or a config key. Filename + topic in `query` does NOT work — put filenames in `path`, topics in `repo`. Filters: `language: ["TypeScript"]`, `repo: "owner/name"`, `path: "src/components/"`. Workflow: `peek: true` → paths+counts; then narrow with `repo` + `path` for full snippets. Defaults exclude tests/vendored/generated — set `includeTests` or `includeVendored` to widen. RE2: no lookahead/lookbehind/backrefs; multi-line needs `(?s)`.',
+    "Verify public GitHub code by literal text or RE2 regex; NOT semantic. Put code/import/API tokens in `query`; `path` is a literal file-path substring, not a concept. Start broad/peek, then narrow by repo/path. RE2 multi-line needs `(?s)`.",
   enter_plan: "Enter plan mode for read-only research + planning on complex multi-file tasks.",
   exit_plan: "Submit your plan for user review and exit plan mode.",
 };
@@ -35,12 +41,15 @@ export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "find",
   "grep",
   "ls",
+  "source_path",
   "web_fetch",
   "task_output",
   "task_stop",
   "tasks",
   "subagent",
   "skill",
+  "mcp__kencode-search__referenceSources",
+  "mcp__kencode-search__discoverRepos",
   "mcp__kencode-search__searchCode",
   "enter_plan",
   "exit_plan",

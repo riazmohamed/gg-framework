@@ -29,8 +29,16 @@ export interface ToolContext {
 
 // ── Agent Tool ──────────────────────────────────────────────
 
+export type ToolExecutionMode = "parallel" | "sequential";
+
 export interface AgentTool<T extends z.ZodType = z.ZodType> extends Tool {
   parameters: T;
+  /**
+   * Per-tool execution hint for batches of tool calls from one assistant turn.
+   * Tools default to parallel. If any requested tool is sequential, the whole
+   * batch runs in source order so stateful mutations cannot race each other.
+   */
+  executionMode?: ToolExecutionMode;
   execute: (
     args: z.infer<T>,
     context: ToolContext,
@@ -96,10 +104,20 @@ export interface AgentDoneEvent {
 
 export interface AgentRetryEvent {
   type: "retry";
-  reason: "overloaded" | "rate_limit" | "empty_response" | "stream_stall" | "overflow_compact";
+  reason:
+    | "overloaded"
+    | "rate_limit"
+    | "provider_error"
+    | "empty_response"
+    | "stream_stall"
+    | "overflow_compact";
   attempt: number;
   maxAttempts: number;
   delayMs: number;
+  /** Provider-reported prompt/context token count, when present in an overflow error. */
+  observedTokens?: number;
+  /** Provider-reported context/token limit, when present in an overflow error. */
+  observedLimit?: number;
   /** When true, the retry should not be shown to the user (hidden retry). */
   silent?: boolean;
 }
@@ -182,6 +200,7 @@ export interface AgentOptions {
   baseUrl?: string;
   signal?: AbortSignal;
   accountId?: string;
+  projectId?: StreamOptions["projectId"];
   cacheRetention?: StreamOptions["cacheRetention"];
   /** Stable per-session cache routing key for providers that support it. */
   promptCacheKey?: StreamOptions["promptCacheKey"];

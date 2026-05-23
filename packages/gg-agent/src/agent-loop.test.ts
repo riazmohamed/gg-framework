@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { isContextOverflow, agentLoop } from "./agent-loop.js";
-import type { AgentEvent, AgentResult } from "./types.js";
+import { z } from "zod";
+import { ProviderError } from "@abukhaled/gg-ai";
+import {
+  agentLoop,
+  classifyOverload,
+  extractContextOverflowDetails,
+  isContextOverflow,
+} from "./agent-loop.js";
+import type { AgentEvent, AgentResult, AgentTool } from "./types.js";
 import type { Message, StreamOptions } from "@abukhaled/gg-ai";
 
 // ── Mock stream ────────────────────────────────────────────
@@ -13,6 +20,7 @@ vi.mock("@abukhaled/gg-ai", async (importOriginal) => {
 
 import { stream } from "@abukhaled/gg-ai";
 const mockStream = vi.mocked(stream);
+const emptyParams = z.object({});
 
 function makeResponse(text: string, stopReason = "end_turn") {
   return {
@@ -46,6 +54,14 @@ function mockErrorResult(error: Error) {
     },
     response: p,
   };
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
 }
 
 async function collectLoop(
@@ -82,6 +98,22 @@ describe("isContextOverflow", () => {
     expect(isContextOverflow(err)).toBe(true);
   });
 
+  it("extracts provider-reported overflow token counts", () => {
+    expect(
+      extractContextOverflowDetails(
+        new Error(
+          "[openai] This model's maximum context length is 128000 tokens. " +
+            "However, your messages resulted in 130000 tokens.",
+        ),
+      ),
+    ).toEqual({ observedTokens: 130000, observedLimit: 128000 });
+    expect(
+      extractContextOverflowDetails(
+        new Error("[anthropic] prompt is too long: 203,456 tokens > 200,000 maximum"),
+      ),
+    ).toEqual({ observedTokens: 203456, observedLimit: 200000 });
+  });
+
   it("detects context_length_exceeded code", () => {
     const err = new Error("context_length_exceeded");
     expect(isContextOverflow(err)).toBe(true);
@@ -102,6 +134,31 @@ describe("isContextOverflow", () => {
     expect(isContextOverflow("some string")).toBe(false);
     expect(isContextOverflow(null)).toBe(false);
     expect(isContextOverflow(undefined)).toBe(false);
+  });
+});
+
+describe("classifyOverload", () => {
+  it("classifies provider 5xx and api_error as transient provider errors", () => {
+    const cases = [
+      new ProviderError("anthropic", "api_error: Internal server error", { statusCode: undefined }),
+      new ProviderError("anthropic", "Internal server error", { statusCode: 500 }),
+      new ProviderError("anthropic", "Bad Gateway", { statusCode: 502 }),
+      new ProviderError("anthropic", "Service Unavailable", { statusCode: 503 }),
+      new ProviderError("anthropic", "Gateway Timeout", { statusCode: 504 }),
+    ];
+
+    for (const error of cases) {
+      expect(classifyOverload(error)).toBe("provider_error");
+    }
+  });
+
+  it("keeps rate limits and overloads distinct", () => {
+    expect(
+      classifyOverload(new ProviderError("anthropic", "rate_limit_error", { statusCode: 429 })),
+    ).toBe("rate_limit");
+    expect(
+      classifyOverload(new ProviderError("anthropic", "overloaded_error", { statusCode: 529 })),
+    ).toBe("overloaded");
   });
 });
 
@@ -214,7 +271,9 @@ describe("agentLoop", () => {
   });
 
   it("retries the turn after force-compaction reduces the messages on context overflow", async () => {
-    const overflowErr = new Error("context_length_exceeded");
+    const overflowErr = new Error(
+      "This model's maximum context length is 128000 tokens. However, your messages resulted in 130000 tokens.",
+    );
     mockStream
       .mockReturnValueOnce(mockErrorResult(overflowErr) as unknown as ReturnType<typeof stream>)
       .mockReturnValueOnce(mockOkResult("recovered") as unknown as ReturnType<typeof stream>);
@@ -239,12 +298,58 @@ describe("agentLoop", () => {
       transformContext,
     });
 
-    expect(events.some((e) => e.type === "retry" && e.reason === "overflow_compact")).toBe(true);
+    const retry = events.find((e) => e.type === "retry" && e.reason === "overflow_compact");
+    expect(retry).toBeDefined();
+    expect(retry && "observedTokens" in retry ? retry.observedTokens : undefined).toBe(130000);
+    expect(retry && "observedLimit" in retry ? retry.observedLimit : undefined).toBe(128000);
     expect(mockStream).toHaveBeenCalledTimes(2);
     const forceCalls = transformContext.mock.calls.filter(
       (c: unknown[]) => (c[1] as { force?: boolean })?.force === true,
     );
     expect(forceCalls.length).toBe(1);
+  });
+
+  it("truncates oversized tool results once before force-compacting on context overflow", async () => {
+    const overflowErr = new Error("prompt is too long: 250000 tokens > 200000 maximum");
+    mockStream
+      .mockReturnValueOnce(mockErrorResult(overflowErr) as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(mockOkResult("recovered") as unknown as ReturnType<typeof stream>);
+
+    const oversized = "x".repeat(250);
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_call", id: "tc1", name: "read", args: {} }],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "tc1", content: oversized }],
+      },
+    ];
+    const transformContext = vi.fn().mockImplementation((msgs: Message[]) => msgs);
+
+    const { events } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      transformContext,
+      maxToolResultChars: 120,
+    });
+
+    expect(mockStream).toHaveBeenCalledTimes(2);
+    expect(transformContext).toHaveBeenCalledTimes(2);
+    expect(
+      transformContext.mock.calls.every(
+        (c) => (c[1] as { force?: boolean } | undefined)?.force !== true,
+      ),
+    ).toBe(true);
+    const toolMessage = messages.find((m) => m.role === "tool");
+    const result = Array.isArray(toolMessage?.content) ? toolMessage.content[0] : undefined;
+    expect(typeof result?.content === "string" ? result.content.length : 0).toBeLessThan(
+      oversized.length,
+    );
+    expect(events.some((e) => e.type === "retry" && e.reason === "overflow_compact")).toBe(true);
   });
 
   it("throws on context overflow when no transformContext is provided", async () => {
@@ -440,6 +545,189 @@ describe("agentLoop", () => {
     expect(events.some((e) => e.type === "agent_done")).toBe(true);
     expect(result.totalTurns).toBe(1); // stall retries don't count as turns
   }, 30_000);
+
+  it("runs parallel tools concurrently by default", async () => {
+    const firstStarted = deferred();
+    const releaseFirst = deferred();
+    const calls: string[] = [];
+
+    mockStream
+      .mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve({
+          message: {
+            role: "assistant" as const,
+            content: [
+              { type: "tool_call" as const, id: "t1", name: "slow", args: {} },
+              { type: "tool_call" as const, id: "t2", name: "fast", args: {} },
+            ],
+          },
+          stopReason: "tool_use",
+          usage: { inputTokens: 50, outputTokens: 25 },
+        }),
+      } as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    const slowTool: AgentTool<typeof emptyParams> = {
+      name: "slow",
+      description: "slow test tool",
+      parameters: emptyParams,
+      async execute() {
+        calls.push("slow:start");
+        firstStarted.resolve();
+        await releaseFirst.promise;
+        calls.push("slow:end");
+        return "slow done";
+      },
+    };
+    const fastTool: AgentTool<typeof emptyParams> = {
+      name: "fast",
+      description: "fast test tool",
+      parameters: emptyParams,
+      async execute() {
+        await firstStarted.promise;
+        calls.push("fast");
+        releaseFirst.resolve();
+        return "fast done";
+      },
+    };
+
+    await collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "test" },
+      ],
+      {
+        provider: "anthropic",
+        model: "test",
+        tools: [slowTool, fastTool],
+      },
+    );
+
+    expect(calls).toEqual(["slow:start", "fast", "slow:end"]);
+  });
+
+  it("runs the entire tool batch sequentially when any tool opts in", async () => {
+    const calls: string[] = [];
+
+    mockStream
+      .mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve({
+          message: {
+            role: "assistant" as const,
+            content: [
+              { type: "tool_call" as const, id: "t1", name: "mutate", args: {} },
+              { type: "tool_call" as const, id: "t2", name: "read_after", args: {} },
+            ],
+          },
+          stopReason: "tool_use",
+          usage: { inputTokens: 50, outputTokens: 25 },
+        }),
+      } as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    const mutateTool: AgentTool<typeof emptyParams> = {
+      name: "mutate",
+      description: "mutating test tool",
+      parameters: emptyParams,
+      executionMode: "sequential",
+      async execute() {
+        calls.push("mutate:start");
+        await Promise.resolve();
+        calls.push("mutate:end");
+        return "mutated";
+      },
+    };
+    const readAfterTool: AgentTool<typeof emptyParams> = {
+      name: "read_after",
+      description: "read-after test tool",
+      parameters: emptyParams,
+      async execute() {
+        calls.push("read_after");
+        return "read";
+      },
+    };
+
+    await collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "test" },
+      ],
+      {
+        provider: "anthropic",
+        model: "test",
+        tools: [mutateTool, readAfterTool],
+      },
+    );
+
+    expect(calls).toEqual(["mutate:start", "mutate:end", "read_after"]);
+  });
+
+  it("stops after repeated invalid tool arguments", async () => {
+    const toolResponse = (id: string) => ({
+      message: {
+        role: "assistant" as const,
+        content: [{ type: "tool_call" as const, id, name: "bash", args: {} }],
+      },
+      stopReason: "tool_use",
+      usage: { inputTokens: 50, outputTokens: 25 },
+    });
+
+    mockStream
+      .mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve(toolResponse("t1")),
+      } as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve(toolResponse("t2")),
+      } as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve(toolResponse("t3")),
+      } as unknown as ReturnType<typeof stream>);
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+    ];
+
+    const { events, result } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      tools: [
+        {
+          name: "bash",
+          description: "test",
+          parameters: z.object({ command: z.string() }),
+          execute: () => "should not execute",
+        },
+      ],
+    });
+
+    expect(mockStream).toHaveBeenCalledTimes(3);
+    expect(events.filter((e) => e.type === "tool_call_end" && e.isError)).toHaveLength(3);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "error",
+        error: expect.objectContaining({
+          message: expect.stringContaining("repeatedly issued invalid arguments"),
+        }),
+      }),
+    );
+    expect(result.totalTurns).toBe(3);
+  });
 
   it("respects maxTurns", async () => {
     // Return tool_use to force looping, but cap at 2 turns

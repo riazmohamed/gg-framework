@@ -2,7 +2,7 @@ import type { Provider } from "@abukhaled/gg-ai";
 import type { MCPServerConfig } from "./types.js";
 
 export const DEFAULT_MCP_SERVERS: MCPServerConfig[] = [
-  { name: "kencode-search", command: "npx", args: ["-y", "@kenkaiiii/kencode-search"] },
+  { name: "kencode-search", command: "npx", args: ["-y", "@abukhaled/kencode-search"] },
 ];
 
 /**

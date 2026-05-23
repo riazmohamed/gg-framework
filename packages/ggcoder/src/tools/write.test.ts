@@ -38,6 +38,12 @@ describe("createWriteTool", () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
+  it("opts into sequential agent-loop execution", () => {
+    const tool = createWriteTool(tmpDir);
+
+    expect(tool.executionMode).toBe("sequential");
+  });
+
   it("writes file and returns line count with absolute path", async () => {
     const tool = createWriteTool(tmpDir);
     const content = "line1\nline2\nline3\n";
@@ -188,5 +194,38 @@ describe("createWriteTool", () => {
 
     const result = resultToString(raw);
     expect(result).toBe(`Wrote 1 lines to ${path.join(tmpDir, "empty.txt")}`);
+  });
+
+  it("calls mutation callback after successful writes", async () => {
+    const mutated: string[] = [];
+    const tool = createWriteTool(tmpDir, undefined, undefined, undefined, (filePath) => {
+      mutated.push(filePath);
+    });
+
+    await tool.execute(
+      { file_path: "mutated.txt", content: "changed" },
+      { signal: new AbortController().signal, toolCallId: "test-mutated" },
+    );
+
+    expect(mutated).toEqual([path.join(tmpDir, "mutated.txt")]);
+  });
+
+  it("does not call mutation callback when write validation fails", async () => {
+    const readFiles: ReadTracker = new Map();
+    const mutated: string[] = [];
+    const filePath = path.join(tmpDir, "existing.txt");
+    await fs.writeFile(filePath, "original");
+    const tool = createWriteTool(tmpDir, readFiles, undefined, undefined, (mutatedPath) => {
+      mutated.push(mutatedPath);
+    });
+
+    await expect(
+      tool.execute(
+        { file_path: "existing.txt", content: "new" },
+        { signal: new AbortController().signal, toolCallId: "test-mutated-fail" },
+      ),
+    ).rejects.toThrow("File must be read first");
+
+    expect(mutated).toEqual([]);
   });
 });

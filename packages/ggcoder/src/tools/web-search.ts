@@ -23,14 +23,38 @@ const RATE_LIMIT_PATTERNS = [
   "challenge-form",
 ];
 
-type SearchEngine = "DuckDuckGo" | "DuckDuckGoLite" | "Brave" | "Google";
-const ENGINES: SearchEngine[] = ["DuckDuckGo", "DuckDuckGoLite", "Brave", "Google"];
+type SearchEngine = "DuckDuckGo" | "DuckDuckGoLite" | "Brave" | "Bing" | "Google";
+const ENGINES: SearchEngine[] = ["DuckDuckGo", "DuckDuckGoLite", "Brave", "Bing", "Google"];
 
 interface SearchResult {
   title: string;
   url: string;
   snippet: string;
 }
+
+const AD_URL_PATTERNS = [
+  /(?:^|\.)googleadservices\.com$/i,
+  /(?:^|\.)doubleclick\.net$/i,
+  /(?:^|\.)googlesyndication\.com$/i,
+  /(?:^|\.)adsystem\.com$/i,
+  /(?:^|\.)adnxs\.com$/i,
+  /(?:^|\.)taboola\.com$/i,
+  /(?:^|\.)outbrain\.com$/i,
+];
+
+const AD_QUERY_KEYS = new Set([
+  "ad_domain",
+  "ad_provider",
+  "ad_type",
+  "adurl",
+  "adurlurl",
+  "gclid",
+  "gbraid",
+  "wbraid",
+  "msclkid",
+]);
+
+const AD_PATH_PATTERNS = [/^\/y\.js$/i, /^\/aclk$/i, /^\/aclick$/i, /^\/pagead\//i];
 
 // ── HTML helpers ──────────────────────────────────────────
 
@@ -51,6 +75,51 @@ function cleanHTML(text: string): string {
   return decodeHTMLEntities(text.replace(/<[^>]+>/g, ""))
     .replace(/\s+/g, " ")
     .trim();
+}
+
+export function isAdSearchResultUrl(rawURL: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawURL, "https://duckduckgo.com");
+  } catch {
+    return true;
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (AD_URL_PATTERNS.some((pattern) => pattern.test(hostname))) return true;
+  if (AD_PATH_PATTERNS.some((pattern) => pattern.test(parsed.pathname))) return true;
+
+  for (const key of parsed.searchParams.keys()) {
+    if (AD_QUERY_KEYS.has(key.toLowerCase())) return true;
+  }
+
+  const nestedURL = parsed.searchParams.get("u3") ?? parsed.searchParams.get("adurl");
+  if (nestedURL && isAdSearchResultUrl(nestedURL)) return true;
+
+  return false;
+}
+
+function isAdSearchResult(result: SearchResult): boolean {
+  if (isAdSearchResultUrl(result.url)) return true;
+  const combinedText = `${result.title} ${result.snippet}`.toLowerCase();
+  return /\b(sponsored|advertisement|promoted result|exclusive discounts|limited-time offer)\b/.test(
+    combinedText,
+  );
+}
+
+function filterSearchResults(results: SearchResult[], maxResults: number): SearchResult[] {
+  const filtered: SearchResult[] = [];
+  const seenUrls = new Set<string>();
+
+  for (const result of results) {
+    if (isAdSearchResult(result)) continue;
+    if (seenUrls.has(result.url)) continue;
+    seenUrls.add(result.url);
+    filtered.push(result);
+    if (filtered.length >= maxResults) break;
+  }
+
+  return filtered;
 }
 
 // ── Request building ─────────────────────────────────────
@@ -81,6 +150,10 @@ function buildRequest(engine: SearchEngine, query: string) {
       break;
     case "Brave":
       url = `https://search.brave.com/search?q=${encoded}&source=web`;
+      headers.Accept = "text/html";
+      break;
+    case "Bing":
+      url = `https://www.bing.com/search?q=${encoded}`;
       headers.Accept = "text/html";
       break;
     case "Google":
@@ -137,27 +210,48 @@ function isRateLimited(statusCode: number, html: string): boolean {
 
 // ── Parsers ──────────────────────────────────────────────
 
+function getAttributeValue(html: string, attribute: string): string {
+  const match = html.match(new RegExp(`${attribute}=["']([^"']+)["']`, "i"));
+  return match?.[1] ?? "";
+}
+
 function parseDDGResults(html: string): SearchResult[] {
   const results: SearchResult[] = [];
 
-  const resultRegex = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gs;
-  const snippetRegex = /class="[^"]*result__snippet[^"]*"[^>]*>(.*?)<\/(?:a|div|span)>/gs;
+  const blockRegex =
+    /<div[^>]*class="[^"]*\bresult\b[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]*class="[^"]*\bresult\b|<\/body>|$)/g;
+  const fallbackLinkRegex =
+    /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gs;
 
-  const resultMatches = [...html.matchAll(resultRegex)];
-  const snippetMatches = [...html.matchAll(snippetRegex)];
+  for (const block of html.matchAll(blockRegex)) {
+    const blockHTML = block[1];
+    const linkMatch = blockHTML.match(
+      /<a[^>]*class="[^"]*(?:result__a|result__title)[^"]*"[^>]*>[\s\S]*?<\/a>/i,
+    );
+    if (!linkMatch) continue;
 
-  for (let i = 0; i < resultMatches.length; i++) {
-    const [, rawURL, rawTitle] = resultMatches[i];
-    const title = cleanHTML(rawTitle);
+    const rawLink = linkMatch[0];
+    const rawURL = getAttributeValue(rawLink, "href");
+    const title = cleanHTML(rawLink);
+    const snippetMatch = blockHTML.match(
+      /<[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|div|span)>/i,
+    );
+    const snippet = snippetMatch ? cleanHTML(snippetMatch[1]) : "";
     const url = unwrapDDGRedirect(rawURL);
-
-    let snippet = "";
-    if (i < snippetMatches.length) {
-      snippet = cleanHTML(snippetMatches[i][1]);
-    }
 
     if (url && title) {
       results.push({ title, url, snippet });
+    }
+  }
+
+  if (results.length > 0) return results;
+
+  for (const link of html.matchAll(fallbackLinkRegex)) {
+    const [, rawURL, rawTitle] = link;
+    const url = unwrapDDGRedirect(rawURL);
+    const title = cleanHTML(rawTitle);
+    if (url && title) {
+      results.push({ title, url, snippet: "" });
     }
   }
 
@@ -176,6 +270,25 @@ function unwrapDDGRedirect(rawURL: string): string {
   }
   if (rawURL.startsWith("//")) return "https:" + rawURL;
   return rawURL;
+}
+
+function unwrapBingRedirect(rawURL: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawURL, "https://www.bing.com");
+  } catch {
+    return rawURL;
+  }
+
+  const encodedURL = parsed.searchParams.get("u");
+  if (!encodedURL) return parsed.href;
+
+  try {
+    const base64URL = encodedURL.startsWith("a1") ? encodedURL.slice(2) : encodedURL;
+    return Buffer.from(base64URL, "base64url").toString("utf8");
+  } catch {
+    return parsed.href;
+  }
 }
 
 function parseBraveResults(html: string): SearchResult[] {
@@ -203,27 +316,70 @@ function parseBraveResults(html: string): SearchResult[] {
   return results;
 }
 
+function parseBingResults(html: string): SearchResult[] {
+  const results: SearchResult[] = [];
+
+  const blockRegex =
+    /<li class="b_algo"[\s\S]*?<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<p[^>]*>([\s\S]*?)<\/p>)?[\s\S]*?<\/li>/g;
+
+  for (const block of html.matchAll(blockRegex)) {
+    const [, rawURL, rawTitle, rawSnippet = ""] = block;
+    const url = unwrapBingRedirect(decodeHTMLEntities(rawURL));
+    const title = cleanHTML(rawTitle);
+    const snippet = cleanHTML(rawSnippet);
+
+    if (url && title) {
+      results.push({ title, url, snippet });
+    }
+  }
+
+  return results;
+}
+
+function unwrapGoogleRedirect(rawURL: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawURL, "https://www.google.com");
+  } catch {
+    return rawURL;
+  }
+
+  if (parsed.pathname === "/url") {
+    const resultURL = parsed.searchParams.get("q") ?? parsed.searchParams.get("url");
+    if (resultURL) return resultURL;
+  }
+
+  return parsed.href;
+}
+
 function parseGoogleResults(html: string): SearchResult[] {
   const results: SearchResult[] = [];
 
-  const linkRegex = /<a[^>]*href="\/url\?q=([^&"]+)[^"]*"[^>]*>/g;
-  const headingRegex = /<h3[^>]*>(.*?)<\/h3>/gs;
+  const blockRegex =
+    /<div[^>]*class="[^"]*\bg\b[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]*class="[^"]*\bg\b|<\/body>|$)/g;
+  const fallbackBlockRegex =
+    /<div[^>]*data-hveid="[^"]+"[^>]*>([\s\S]*?)(?=<div[^>]*data-hveid="[^"]+"|<\/body>|$)/g;
 
-  const linkMatches = [...html.matchAll(linkRegex)];
-  const headingMatches = [...html.matchAll(headingRegex)];
+  for (const regex of [blockRegex, fallbackBlockRegex]) {
+    for (const block of html.matchAll(regex)) {
+      const blockHTML = block[1];
+      const titleMatch = blockHTML.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+      const linkMatch = blockHTML.match(/<a[^>]*href="([^"]+)"[^>]*>/i);
+      if (!titleMatch || !linkMatch) continue;
 
-  for (let i = 0; i < linkMatches.length; i++) {
-    const rawURL = linkMatches[i][1];
-    const url = decodeURIComponent(rawURL);
+      const snippetMatch = blockHTML.match(
+        /<div[^>]*(?:class="[^"]*(?:VwiC3b|yDYNvb)[^"]*"|data-sncf="[^"]*")[^>]*>([\s\S]*?)<\/div>/i,
+      );
+      const url = unwrapGoogleRedirect(decodeHTMLEntities(linkMatch[1]));
+      const title = cleanHTML(titleMatch[1]);
+      const snippet = snippetMatch ? cleanHTML(snippetMatch[1]) : "";
 
-    let title = url;
-    if (i < headingMatches.length) {
-      title = cleanHTML(headingMatches[i][1]);
+      if (url.startsWith("http") && title) {
+        results.push({ title, url, snippet });
+      }
     }
 
-    if (url && url.startsWith("http")) {
-      results.push({ title, url, snippet: "" });
-    }
+    if (results.length > 0) break;
   }
 
   return results;
@@ -252,13 +408,17 @@ async function performSearch(
         case "Brave":
           results = parseBraveResults(html);
           break;
+        case "Bing":
+          results = parseBingResults(html);
+          break;
         case "Google":
           results = parseGoogleResults(html);
           break;
       }
 
-      if (results.length > 0) {
-        return { results: results.slice(0, maxResults), engine };
+      const filteredResults = filterSearchResults(results, maxResults);
+      if (filteredResults.length > 0) {
+        return { results: filteredResults, engine };
       }
     } catch {
       // try next engine

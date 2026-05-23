@@ -76,6 +76,23 @@ function formatArgs(name: string, args: Record<string, unknown>): string {
       return ` ${chalk.dim(String(args.pattern ?? ""))}`;
     case "ls":
       return args.path ? ` ${chalk.dim(String(args.path))}` : "";
+    case "source_path":
+      return args.package ? ` ${chalk.dim(String(args.package))}` : "";
+    case "task_output":
+    case "task_stop":
+      return args.id ? ` ${chalk.dim(String(args.id))}` : "";
+    case "tasks":
+      return args.action ? ` ${chalk.dim(String(args.action))}` : "";
+    case "enter_plan":
+      return args.reason ? ` ${chalk.dim(String(args.reason))}` : "";
+    case "exit_plan":
+      return args.plan_path ? ` ${chalk.dim(String(args.plan_path))}` : "";
+    case "web_fetch":
+      return args.url ? ` ${chalk.dim(String(args.url))}` : "";
+    case "web_search":
+      return args.query ? ` ${chalk.dim(String(args.query))}` : "";
+    case "skill":
+      return args.skill ? ` ${chalk.dim(String(args.skill))}` : "";
     default:
       return "";
   }
@@ -115,6 +132,31 @@ function summarizeResult(name: string, result: string, isError: boolean): string
     case "ls": {
       const lineCount = result.split("\n").length;
       return `${lineCount} entries`;
+    }
+    case "source_path": {
+      const match = result.match(/^Source path:\s*(.+)$/m);
+      if (!match) return "resolved";
+      const parts = match[1].split("/").filter(Boolean);
+      return parts.length <= 2 ? match[1] : `…/${parts.slice(-2).join("/")}`;
+    }
+    case "task_output": {
+      const lines = result.split("\n").filter((line) => line.length > 0);
+      return lines[0] ?? "no output";
+    }
+    case "task_stop":
+    case "tasks":
+    case "enter_plan":
+    case "exit_plan":
+    case "skill":
+      return result.split("\n")[0] || "done";
+    case "web_fetch": {
+      if (result.startsWith("Error")) return result.split("\n")[0];
+      const lines = result.split("\n").filter((line) => line.length > 0);
+      return `${lines.length} lines`;
+    }
+    case "web_search": {
+      const count = (result.match(/^\d+\./gm) ?? []).length;
+      return `${count} results`;
     }
     default:
       return "done";

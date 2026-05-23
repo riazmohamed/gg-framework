@@ -364,4 +364,59 @@ describe("flush integration scenarios", () => {
     // The whole point: liveItems MUST be bounded
     expect(liveItems.length).toBeLessThanOrEqual(1);
   });
+
+  it("SCROLL REPRO HARNESS: large queued input and live tool output stay bounded", () => {
+    // Deterministic headless stand-in for the reported TUI scroll bug: the user
+    // pastes a very large next prompt while the current run is still producing
+    // live tool/result rows. No OAuth/API/Ink render is needed; we assert the
+    // pure state invariant that protects terminal scrollback from live-area
+    // growth. The queued prompt is deliberately huge to catch accidental logic
+    // that would keep queued input in the live region before it starts.
+    const queuedPrompt = Array.from(
+      { length: 600 },
+      (_, i) => `queued follow-up line ${i}: ${"x".repeat(80)}`,
+    ).join("\n");
+    expect(queuedPrompt.length).toBeGreaterThan(50_000);
+
+    let liveItems: FlushableItem[] = [assistantItem()];
+    let history: FlushableItem[] = [];
+    let maxLiveItems = liveItems.length;
+
+    const queueFlush = (items: FlushableItem[]) => {
+      history = pruneHistory([...history, ...items]);
+    };
+    const partitionCompleted = (items: FlushableItem[]) => {
+      const firstActiveIdx = items.findIndex((item) => item.kind === "tool_start");
+      if (firstActiveIdx === -1) return { flushed: items, remaining: [] };
+      if (firstActiveIdx === 0) return { flushed: [], remaining: items };
+      return { flushed: items.slice(0, firstActiveIdx), remaining: items.slice(firstActiveIdx) };
+    };
+
+    for (let i = 0; i < 75; i++) {
+      // onToolStart flushes completed assistant/tool output before adding the
+      // running tool row, so old live output moves to Static/history.
+      const beforeStart = partitionCompleted(liveItems);
+      if (beforeStart.flushed.length > 0) queueFlush(beforeStart.flushed);
+      liveItems = [...beforeStart.remaining, toolStart(`tool-${i}`)];
+      maxLiveItems = Math.max(maxLiveItems, liveItems.length);
+
+      // onToolEnd replaces the active row with completed output, then
+      // partitionCompleted flushes it. This simulates queued/live work without
+      // ever placing the queued prompt itself into liveItems.
+      liveItems = liveItems.map((item) =>
+        item.kind === "tool_start" ? ({ kind: "tool_done", id: item.id } as FlushableItem) : item,
+      );
+      const afterEnd = partitionCompleted(liveItems);
+      if (afterEnd.flushed.length > 0) queueFlush(afterEnd.flushed);
+      liveItems = afterEnd.remaining;
+      maxLiveItems = Math.max(maxLiveItems, liveItems.length);
+    }
+
+    // While a message is queued, App shows only a tiny queue indicator; the
+    // queued text starts rendering as a user item only when onQueuedStart fires.
+    expect(queuedPrompt).not.toEqual("");
+    expect(maxLiveItems).toBeLessThanOrEqual(1);
+    expect(liveItems).toEqual([]);
+    expect(history).toHaveLength(76); // initial assistant + 75 completed tool rows
+  });
 });

@@ -1,4 +1,4 @@
-import React, { memo } from "react";
+import React, { memo, useEffect, useState } from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { Spinner } from "./Spinner.js";
@@ -51,6 +51,8 @@ interface ToolRunningProps {
   args: Record<string, unknown>;
   /** Live progress output (e.g., bash streaming stdout). */
   progressOutput?: string;
+  /** Animate the running indicator until this timestamp, then settle static. */
+  animateUntil?: number;
   formatters?: ToolExecutionFormatters;
 }
 
@@ -67,14 +69,41 @@ interface ToolDoneProps {
 type ToolExecutionProps = ToolRunningProps | ToolDoneProps;
 
 /** Tools that use compact one-line summaries instead of showing output. */
-const COMPACT_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const COMPACT_TOOLS = new Set(["read", "grep", "find", "ls", "source_path"]);
+const STATE_TOOLS = new Set(["tasks", "goals"]);
 
 /** Tools rendered with the server-tool style (spinner + summary, no output). */
 const SERVER_STYLE_TOOLS = new Set(["web_search"]);
 
+function useStaticAfter(animateUntil: number | undefined): boolean {
+  const [isStatic, setIsStatic] = useState(
+    () => animateUntil == null || Date.now() >= animateUntil,
+  );
+
+  useEffect(() => {
+    if (animateUntil == null) {
+      setIsStatic(true);
+      return undefined;
+    }
+
+    const remainingMs = animateUntil - Date.now();
+    if (remainingMs <= 0) {
+      setIsStatic(true);
+      return undefined;
+    }
+
+    setIsStatic(false);
+    const timer = setTimeout(() => setIsStatic(true), remainingMs);
+    return () => clearTimeout(timer);
+  }, [animateUntil]);
+
+  return isStatic;
+}
+
 export function ToolExecution(props: ToolExecutionProps) {
   const theme = useTheme();
   const { columns } = useTerminalSize();
+  const staticDisplay = useStaticAfter(props.status === "running" ? props.animateUntil : undefined);
 
   if (props.status === "running") {
     // Server-style tools (web_search) — blinking dot + spinner "Searching..."
@@ -89,7 +118,7 @@ export function ToolExecution(props: ToolExecutionProps) {
       return (
         <Box flexDirection="column" marginTop={1}>
           <Box flexDirection="row">
-            <ToolUseLoader status="running" />
+            <ToolUseLoader status="running" staticDisplay={staticDisplay} />
             <Box flexGrow={1} width={headerContentWidth}>
               <Text wrap="wrap">
                 <Text bold color={theme.toolName}>
@@ -108,7 +137,7 @@ export function ToolExecution(props: ToolExecutionProps) {
             </Box>
           </Box>
           <MessageResponse>
-            <Spinner label="Searching..." />
+            <Spinner label="Searching..." staticDisplay={staticDisplay} />
           </MessageResponse>
         </Box>
       );
@@ -118,14 +147,26 @@ export function ToolExecution(props: ToolExecutionProps) {
       const summary = getCompactRunningLabel(props.name, props.args);
       return (
         <Box marginTop={1} flexDirection="row">
-          <ToolUseLoader status="running" />
+          <ToolUseLoader status="running" staticDisplay={staticDisplay} />
           <Text color={theme.toolName} bold>
             {summary}
           </Text>
-          <Text color={theme.textDim}>{" (ctrl+o to expand)"}</Text>
         </Box>
       );
     }
+    if (STATE_TOOLS.has(props.name)) {
+      const { label, detail } = getToolHeaderParts(props.name, props.args);
+      return (
+        <Box marginTop={1} flexDirection="row">
+          <ToolUseLoader status="running" staticDisplay={staticDisplay} />
+          <Text color={theme.toolName} bold>
+            {label}
+          </Text>
+          {detail ? <Text color={theme.textDim}> {detail}</Text> : null}
+        </Box>
+      );
+    }
+
     // Non-compact tools keep the sparkle spinner with a blinking dot prefix
     const { label, detail } = getToolHeaderParts(props.name, props.args);
 
@@ -136,8 +177,8 @@ export function ToolExecution(props: ToolExecutionProps) {
       return (
         <Box marginTop={1} flexDirection="column">
           <Box flexDirection="row">
-            <ToolUseLoader status="running" />
-            <Spinner label={detail ? `${label}(${detail})` : label} />
+            <ToolUseLoader status="running" staticDisplay={staticDisplay} />
+            <Spinner label={detail ? `${label}(${detail})` : label} staticDisplay={staticDisplay} />
           </Box>
           <MessageResponse>
             <Box flexDirection="column">
@@ -154,8 +195,8 @@ export function ToolExecution(props: ToolExecutionProps) {
 
     return (
       <Box marginTop={1} flexDirection="row">
-        <ToolUseLoader status="running" />
-        <Spinner label={detail ? `${label}(${detail})` : label} />
+        <ToolUseLoader status="running" staticDisplay={staticDisplay} />
+        <Spinner label={detail ? `${label}(${detail})` : label} staticDisplay={staticDisplay} />
       </Box>
     );
   }
@@ -215,6 +256,25 @@ export function ToolExecution(props: ToolExecutionProps) {
         <Box flexGrow={1} width={headerContentWidth}>
           <Text bold color={theme.toolName} wrap="wrap">
             {summary}
+          </Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (STATE_TOOLS.has(name)) {
+    const { label, detail } = getToolHeaderParts(name, args);
+    const inline = getInlineSummary(name, result, isError);
+    return (
+      <Box marginTop={1} flexDirection="row">
+        <ToolUseLoader status={isError ? "error" : "done"} />
+        <Box flexGrow={1} width={headerContentWidth}>
+          <Text wrap="wrap">
+            <Text bold color={isError ? theme.toolError : theme.toolName}>
+              {label}
+            </Text>
+            {detail ? <Text color={theme.textDim}> {detail}</Text> : null}
+            {inline ? <Text color={theme.textDim}> · {inline}</Text> : null}
           </Text>
         </Box>
       </Box>
@@ -302,7 +362,7 @@ export function ToolExecution(props: ToolExecutionProps) {
             <Text color={theme.textDim} wrap="wrap">
               {"… +"}
               {hiddenCount}
-              {" lines (ctrl+o to expand)"}
+              {" lines"}
             </Text>
           )}
         </Box>
@@ -323,6 +383,11 @@ function getCompactRunningLabel(name: string, _args: Record<string, unknown>): s
       return "Finding files…";
     case "ls":
       return "Listing…";
+    case "source_path": {
+      const packageName = String(_args.package ?? "");
+      const suffix = packageName ? ` for ${packageName}` : "";
+      return `Resolving source${suffix}…`;
+    }
     default:
       return `${name}…`;
   }
@@ -349,6 +414,12 @@ function getCompactDoneLabel(name: string, args: Record<string, unknown>, result
       const lines = result.split("\n").filter((l) => l.length > 0);
       return `Listed ${lines.length} item${lines.length !== 1 ? "s" : ""}`;
     }
+    case "source_path": {
+      const packageName = String(args.package ?? "source");
+      const sourcePath = extractSourcePath(result);
+      const shortSourcePath = sourcePath ? shortenPath(sourcePath) : "source path";
+      return `Resolved ${packageName} → ${shortSourcePath}`;
+    }
     default:
       return name;
   }
@@ -361,6 +432,10 @@ function shortenPath(filePath: string): string {
   const parts = filePath.split("/");
   if (parts.length <= 3) return filePath;
   return "…/" + parts.slice(-2).join("/");
+}
+
+function extractSourcePath(result: string): string | undefined {
+  return result.match(/^Source path:\s*(.+)$/m)?.[1]?.trim();
 }
 
 function getToolHeaderParts(
@@ -401,10 +476,26 @@ function getToolHeaderParts(
       const skillName = String(args.skill ?? "");
       return { label: displayName, detail: skillName };
     }
+    case "task_output":
+      return { label: displayName, detail: String(args.id ?? "") };
+    case "task_stop":
+      return { label: displayName, detail: String(args.id ?? "") };
+    case "enter_plan": {
+      const reason = String(args.reason ?? "");
+      const trunc = reason.length > 50 ? reason.slice(0, 47) + "…" : reason;
+      return { label: displayName, detail: trunc };
+    }
+    case "exit_plan":
+      return { label: displayName, detail: shortenPath(String(args.plan_path ?? "")) };
     case "web_search": {
       const query = String(args.query ?? "");
       const trunc = query.length > 60 ? query.slice(0, 57) + "…" : query;
       return { label: "Web Search", detail: trunc };
+    }
+    case "source_path": {
+      const packageName = String(args.package ?? "");
+      const trunc = packageName.length > 60 ? packageName.slice(0, 57) + "…" : packageName;
+      return { label: displayName, detail: trunc };
     }
     case "web_fetch": {
       const url = String(args.url ?? "");
@@ -412,6 +503,10 @@ function getToolHeaderParts(
       return { label: displayName, detail: trunc };
     }
     case "tasks": {
+      const action = String(args.action ?? "");
+      return { label: displayName, detail: action };
+    }
+    case "goals": {
       const action = String(args.action ?? "");
       return { label: displayName, detail: action };
     }
@@ -455,8 +550,22 @@ function toolDisplayName(name: string): string {
       return "Skill";
     case "web_fetch":
       return "Fetch";
+    case "web_search":
+      return "Web Search";
+    case "task_output":
+      return "Task Output";
+    case "task_stop":
+      return "Task Stop";
+    case "enter_plan":
+      return "Enter Plan";
+    case "exit_plan":
+      return "Exit Plan";
+    case "source_path":
+      return "Source";
     case "tasks":
       return "Task";
+    case "goals":
+      return "Goal";
     default:
       // snake_case → Title Case so downstream consumers (gg-editor's 91 tools,
       // future MCP tools, custom tools) get readable names without each
@@ -562,6 +671,16 @@ function getInlineSummary(name: string, result: string, isError: boolean): strin
       if (result.startsWith("Error")) return result.split("\n")[0];
       return `${lines.length} line${lines.length !== 1 ? "s" : ""}`;
     }
+    case "source_path": {
+      const sourcePath = extractSourcePath(result);
+      return sourcePath ? shortenPath(sourcePath) : "resolved";
+    }
+    case "task_stop":
+      return result.split("\n")[0] || "stopped";
+    case "enter_plan":
+      return "activated";
+    case "exit_plan":
+      return result.split("\n")[0] || "submitted";
     case "tasks": {
       // Extract just the task text from results like 'Task added: "Fix bug" (id: abc…)'
       const quoted = result.match(/"([^"]+)"/);
@@ -570,6 +689,15 @@ function getInlineSummary(name: string, result: string, isError: boolean): strin
         return text.length > 50 ? text.slice(0, 47) + "…" : text;
       }
       return result.split("\n")[0];
+    }
+    case "goals": {
+      const quoted = result.match(/"([^"]+)"/);
+      if (quoted) {
+        const text = quoted[1];
+        return text.length > 50 ? text.slice(0, 47) + "…" : text;
+      }
+      const firstLine = result.split("\n")[0] ?? "";
+      return firstLine.length > 60 ? firstLine.slice(0, 57) + "…" : firstLine;
     }
     default: {
       if (name.startsWith("mcp__")) {
@@ -791,6 +919,25 @@ function buildResultBody(
       }
       return null; // compact display with inline summary
     }
+    case "source_path":
+      return null; // compact display with resolved source path inline
+    case "task_output": {
+      const lines = result.split("\n").filter((l) => l.length > 0);
+      if (lines.length === 0) return null;
+      const display = lines.slice(0, MAX_OUTPUT_LINES);
+      return {
+        lines: display.map((line, i) => (
+          <Text key={i} color={i === 0 ? "#60a5fa" : "#9ca3af"} wrap="wrap">
+            {truncateLine(line, columns)}
+          </Text>
+        )),
+        totalLines: lines.length,
+      };
+    }
+    case "task_stop":
+    case "enter_plan":
+    case "exit_plan":
+      return null; // compact display with inline summary
     case "tasks": {
       const lines = result.split("\n").filter((l) => l.length > 0);
       // Single-line results (add, done, remove) → compact inline display

@@ -8,6 +8,7 @@ export {
   createFindTool,
   createGrepTool,
   createLsTool,
+  createSourcePathTool,
 } from "./tools/index.js";
 
 // System prompt
@@ -36,6 +37,7 @@ export {
   getModelsForProvider,
   getDefaultModel,
   getContextWindow,
+  usesOpenAICodexTransport,
   getMaxThinkingLevel,
   shouldCompact,
   compact,
@@ -66,6 +68,7 @@ export type {
   AgentSessionOptions,
   AgentSessionState,
   BusEventMap,
+  ContextWindowOptions,
   ModelInfo,
   Settings,
   SlashCommand,

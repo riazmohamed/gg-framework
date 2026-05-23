@@ -1,0 +1,295 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import type { ChildProcess } from "node:child_process";
+import { getGoalRun, updateGoalTask, upsertGoalRun } from "./goal-store.js";
+
+const spawnMock = vi.hoisted(() => vi.fn());
+const killProcessTreeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("node:child_process", () => ({ spawn: spawnMock }));
+vi.mock("../utils/process.js", () => ({ killProcessTree: killProcessTreeMock }));
+
+class FakeChild extends EventEmitter {
+  stdout = new PassThrough();
+  stderr = new PassThrough();
+  pid = 4242;
+  kill = vi.fn();
+}
+
+let tmpBase: string;
+let tmpProject: string;
+let child: FakeChild;
+
+async function flushUntil(assertion: () => void | Promise<void>): Promise<void> {
+  let lastError: unknown;
+  for (let i = 0; i < 50; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    try {
+      await assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+async function seedGoal(): Promise<void> {
+  await upsertGoalRun(tmpProject, {
+    id: "goal-a",
+    title: "Worker harness",
+    goal: "Exercise worker exits",
+    status: "ready",
+    successCriteria: ["worker covered"],
+    prerequisites: [],
+    harness: [],
+    tasks: [],
+    evidence: [],
+    blockers: [],
+  });
+  await updateGoalTask(tmpProject, "goal-a", "task-a", {
+    id: "task-a",
+    title: "Run worker",
+    prompt: "Do work",
+    status: "pending",
+    attempts: 0,
+  });
+}
+
+async function start(onComplete = vi.fn()) {
+  const mod = await import("./goal-worker.js");
+  const record = await mod.startGoalWorker({
+    cwd: tmpProject,
+    provider: "anthropic",
+    model: "claude-test",
+    goalRunId: "goal-a",
+    goalTaskId: "task-a",
+    prompt: "Do deterministic work",
+    onComplete,
+  });
+  return { mod, record, onComplete };
+}
+
+beforeEach(async () => {
+  tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), "goal-worker-test-base-"));
+  tmpProject = await fs.mkdtemp(path.join(os.tmpdir(), "goal-worker-test-project-"));
+  process.env.GG_GOALS_BASE = tmpBase;
+  child = new FakeChild();
+  spawnMock.mockReturnValue(child as unknown as ChildProcess);
+  killProcessTreeMock.mockReset();
+  process.argv[1] = "/tmp/fake-ggcoder-cli.js";
+  await seedGoal();
+});
+
+afterEach(async () => {
+  const mod = await import("./goal-worker.js");
+  mod.shutdownGoalWorkers(tmpProject);
+  vi.clearAllMocks();
+  delete process.env.GG_GOALS_BASE;
+  await fs.rm(tmpBase, { recursive: true, force: true });
+  await fs.rm(tmpProject, { recursive: true, force: true });
+});
+
+describe("goal worker failure propagation", () => {
+  it("prompts workers with explicit durable Goal context before claiming verification", async () => {
+    await start();
+    const args = spawnMock.mock.calls[0]?.[1] as string[];
+    const systemPromptIndex = args.indexOf("--system-prompt") + 1;
+    const prompt = args[systemPromptIndex];
+
+    expect(prompt).toContain(`cwd=${tmpProject}`);
+    expect(prompt).toContain("run_id=goal-a");
+    expect(prompt).toContain("task_id=task-a");
+    expect(prompt).toContain("create needed scripts/fixtures/harnesses");
+    expect(prompt).toContain("source_path/docs/kencode real-code research when relevant");
+    expect(prompt).toContain("command/file evidence");
+    expect(prompt).toContain(
+      'goals({ action: "evidence" | "task", run_id: "goal-a", task_id: "task-a"',
+    );
+  });
+
+  it("exports a testable worker system prompt/context helper", async () => {
+    const mod = await import("./goal-worker.js");
+
+    const prompt = mod.buildGoalWorkerSystemPrompt({
+      cwd: "/repo",
+      goalRunId: "goal-123",
+      goalTaskId: "task-456",
+      taskTitle: "Implement typed handoff",
+    });
+
+    expect(prompt).toContain("cwd=/repo");
+    expect(prompt).toContain("run_id=goal-123");
+    expect(prompt).toContain("task_id=task-456");
+    expect(prompt).toContain("Implement typed handoff");
+    expect(prompt).toContain("Do not mark the whole goal complete");
+  });
+
+  it("marks the task done, persists evidence, and notifies callbacks/subscribers for worker success", async () => {
+    const { mod, record, onComplete } = await start();
+    const listener = vi.fn();
+    const unsubscribe = mod.subscribeGoalWorkerCompletions(listener, tmpProject);
+
+    child.stdout.write(JSON.stringify({ type: "text_delta", text: "implemented" }) + "\n");
+    child.stdout.write(
+      JSON.stringify({
+        type: "tool_call_start",
+        toolCallId: "tool-a",
+        name: "bash",
+        args: { command: "pnpm test" },
+      }) + "\n",
+    );
+    child.stdout.write(
+      JSON.stringify({ type: "tool_call_end", toolCallId: "tool-a", isError: false }) + "\n",
+    );
+    child.emit("close", 0);
+    await flushUntil(() => expect(onComplete).toHaveBeenCalled());
+
+    const run = await getGoalRun(tmpProject, "goal-a");
+    expect(record.status).toBe("done");
+    expect(run?.activeWorkerId).toBeUndefined();
+    expect(run?.tasks[0]).toMatchObject({
+      status: "done",
+      workerId: record.id,
+      lastSummary: expect.stringContaining("implemented"),
+    });
+    expect(
+      run?.evidence.some(
+        (item) =>
+          item.label === `Worker ${record.id} done` && item.content?.includes("implemented"),
+      ),
+    ).toBe(true);
+    expect(onComplete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "done",
+        exitCode: 0,
+        toolsUsed: [{ name: "bash", ok: true }],
+      }),
+    );
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        worker: expect.objectContaining({ id: record.id, goalRunId: "goal-a" }),
+        status: "done",
+        exitCode: 0,
+      }),
+    );
+    unsubscribe();
+  });
+
+  it("replays a pending completion to the next subscriber after a remount gap", async () => {
+    const { mod, record } = await start();
+
+    child.stdout.write(
+      JSON.stringify({ type: "text_delta", text: "finished during remount" }) + "\n",
+    );
+    child.emit("close", 0);
+
+    await flushUntil(() => expect(record.status).toBe("done"));
+    const listener = vi.fn();
+    const unsubscribe = mod.subscribeGoalWorkerCompletions(listener, tmpProject);
+
+    await flushUntil(() =>
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          worker: expect.objectContaining({ id: record.id, cwd: tmpProject }),
+          summary: expect.stringContaining("finished during remount"),
+          status: "done",
+        }),
+      ),
+    );
+    unsubscribe();
+  });
+
+  it("marks the task failed and persists stderr evidence for worker non-zero exit", async () => {
+    const { record, onComplete } = await start();
+
+    child.stderr.write("boom from stderr");
+    child.emit("close", 1);
+    await flushUntil(() => expect(onComplete).toHaveBeenCalled());
+
+    const run = await getGoalRun(tmpProject, "goal-a");
+    expect(record.status).toBe("failed");
+    expect(run?.tasks[0]).toMatchObject({
+      status: "failed",
+      workerId: record.id,
+      lastSummary: expect.stringContaining("boom from stderr"),
+    });
+    expect(
+      run?.evidence.some(
+        (item) => item.label === `Worker ${record.id} failed` && item.content?.includes("boom"),
+      ),
+    ).toBe(true);
+    expect(onComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "failed", exitCode: 1 }),
+    );
+  });
+
+  it("records spawn crashes as failed task evidence and notifies the orchestrator continuation path", async () => {
+    const { mod, record, onComplete } = await start();
+    const listener = vi.fn();
+    const unsubscribe = mod.subscribeGoalWorkerCompletions(listener, tmpProject);
+
+    child.emit("error", new Error("spawn exploded"));
+    await flushUntil(async () => {
+      const next = await getGoalRun(tmpProject, "goal-a");
+      expect(next?.tasks[0]?.status).toBe("failed");
+      expect(next?.evidence.some((item) => item.label === `Worker ${record.id} spawn failed`)).toBe(
+        true,
+      );
+      expect(onComplete).toHaveBeenCalled();
+    });
+
+    const run = await getGoalRun(tmpProject, "goal-a");
+    expect(record.status).toBe("failed");
+    expect(run?.tasks[0]).toMatchObject({
+      status: "failed",
+      lastSummary: "Failed to spawn Goal worker: spawn exploded",
+    });
+    expect(
+      run?.evidence.some(
+        (item) =>
+          item.label === `Worker ${record.id} spawn failed` && item.content === "spawn exploded",
+      ),
+    ).toBe(true);
+    expect(onComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "failed", exitCode: 1, reason: "spawn_error" }),
+    );
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        worker: expect.objectContaining({ id: record.id, cwd: tmpProject }),
+        status: "failed",
+        exitCode: 1,
+        reason: "spawn_error",
+      }),
+    );
+    unsubscribe();
+  });
+
+  it("manual stop blocks the task, clears the active worker, and ignores later close completion", async () => {
+    const { mod, record, onComplete } = await start();
+
+    const result = await mod.stopGoalWorker(record.id);
+    child.emit("close", 0);
+    await flushUntil(() => expect(record.status).toBe("stopped"));
+
+    const run = await getGoalRun(tmpProject, "goal-a");
+    expect(result).toBe(`Goal worker ${record.id} stopped.`);
+    expect(record.status).toBe("stopped");
+    expect(killProcessTreeMock).toHaveBeenCalledWith(4242);
+    expect(run?.activeWorkerId).toBeUndefined();
+    expect(run?.tasks[0]).toMatchObject({
+      status: "blocked",
+      lastSummary: "Worker stopped by user.",
+    });
+    expect(
+      run?.evidence.some(
+        (item) => item.kind === "summary" && item.label === `Worker ${record.id} stopped`,
+      ),
+    ).toBe(true);
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+});

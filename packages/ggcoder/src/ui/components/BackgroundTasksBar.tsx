@@ -15,6 +15,41 @@ interface BackgroundTasksBarProps {
   onKill: (id: string) => void;
   onExit: () => void;
   onNavigate: (index: number) => void;
+  compact?: boolean;
+}
+
+export interface FooterStatusLayoutOptions {
+  columns: number;
+  backgroundTaskCount: number;
+  eyesCount?: number;
+  updatePending: boolean;
+}
+
+export interface FooterStatusLayoutDecision {
+  hasBackgroundTasks: boolean;
+  hasEyesSignals: boolean;
+  hasUpdateNotice: boolean;
+  stack: boolean;
+  compactBackgroundTasks: boolean;
+}
+
+export function getFooterStatusLayoutDecision({
+  columns,
+  backgroundTaskCount,
+  eyesCount,
+  updatePending,
+}: FooterStatusLayoutOptions): FooterStatusLayoutDecision {
+  const hasBackgroundTasks = backgroundTaskCount > 0;
+  const hasEyesSignals = eyesCount !== undefined && eyesCount > 0;
+  const hasUpdateNotice = updatePending;
+  const visibleCount = [hasBackgroundTasks, hasEyesSignals, hasUpdateNotice].filter(Boolean).length;
+  return {
+    hasBackgroundTasks,
+    hasEyesSignals,
+    hasUpdateNotice,
+    stack: visibleCount > 1 && columns < 100,
+    compactBackgroundTasks: visibleCount > 1 && columns < 120,
+  };
 }
 
 function truncateCommand(command: string, maxLen: number): string {
@@ -32,6 +67,7 @@ export function BackgroundTasksBar({
   onKill,
   onExit,
   onNavigate,
+  compact = false,
 }: BackgroundTasksBarProps) {
   const theme = useTheme();
 
@@ -93,8 +129,8 @@ export function BackgroundTasksBar({
         <Text color={theme.accent} bold>
           ({count})
         </Text>
-        <Text color={focused ? theme.text : theme.textMuted}> {label}</Text>
-        {focused && (
+        <Text color={focused ? theme.text : theme.textMuted}> {compact ? "bg tasks" : label}</Text>
+        {focused && !compact && (
           <Text color={theme.textDim}>
             {" \u00B7 "}
             <Text color={theme.accent}>Enter</Text> to view

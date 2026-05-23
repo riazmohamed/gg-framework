@@ -16,6 +16,7 @@ export function createWriteTool(
   readFiles?: ReadTracker,
   ops: ToolOperations = localOperations,
   planModeRef?: { current: boolean },
+  onFileMutated?: (filePath: string) => void | Promise<void>,
 ): AgentTool<typeof WriteParams> {
   return {
     name: "write",
@@ -23,6 +24,7 @@ export function createWriteTool(
       "Write content to a file. Creates parent directories if needed. " +
       "Existing files must be read first before overwriting. Use for new files or complete rewrites.",
     parameters: WriteParams,
+    executionMode: "sequential",
     async execute({ file_path, content }) {
       const resolved = resolvePath(cwd, file_path);
       await rejectSymlink(resolved);
@@ -53,6 +55,7 @@ export function createWriteTool(
       }
       await ops.writeFile(resolved, content);
       await recordWrite(readFiles, resolved, content, ops);
+      await onFileMutated?.(resolved);
       const lines = content.split("\n").length;
       return `Wrote ${lines} lines to ${resolved}`;
     },

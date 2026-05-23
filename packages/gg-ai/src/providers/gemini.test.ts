@@ -1,0 +1,316 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { streamGemini } from "./gemini.js";
+
+const originalFetch = globalThis.fetch;
+const originalCodeAssistEndpoint = process.env.CODE_ASSIST_ENDPOINT;
+const originalCodeAssistApiVersion = process.env.CODE_ASSIST_API_VERSION;
+
+describe("streamGemini", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    globalThis.fetch = originalFetch;
+    if (originalCodeAssistEndpoint === undefined) {
+      delete process.env.CODE_ASSIST_ENDPOINT;
+    } else {
+      process.env.CODE_ASSIST_ENDPOINT = originalCodeAssistEndpoint;
+    }
+    if (originalCodeAssistApiVersion === undefined) {
+      delete process.env.CODE_ASSIST_API_VERSION;
+    } else {
+      process.env.CODE_ASSIST_API_VERSION = originalCodeAssistApiVersion;
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("sends Code Assist requests with tools, tool responses, and thinking", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          response: {
+            candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+            usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    globalThis.fetch = fetchMock;
+
+    const result = streamGemini({
+      provider: "gemini",
+      model: "gemini-3-flash-preview",
+      projectId: "test-project",
+      apiKey: "access-token",
+      streaming: false,
+      messages: [
+        { role: "system", content: "system" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_call", id: "call_1", name: "bash", args: { command: "pwd" } }],
+        },
+        {
+          role: "tool",
+          content: [{ type: "tool_result", toolCallId: "call_1", content: "done" }],
+        },
+        { role: "user", content: "hi" },
+      ],
+      tools: [
+        {
+          name: "bash",
+          description: "Run a command",
+          parameters: z.object({ command: z.string() }),
+        },
+      ],
+      toolChoice: "auto",
+      thinking: "high",
+      promptCacheKey: "ggcoder:test-session",
+    });
+
+    await result.response;
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toBe("https://cloudcode-pa.googleapis.com/v1internal:generateContent");
+    expect(init.headers).toMatchObject({
+      Authorization: "Bearer access-token",
+      "Content-Type": "application/json",
+      "User-Agent": "google-gemini-cli",
+      "X-Goog-Api-Client": "gemini-cli/0.0.0",
+    });
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      model: "gemini-3-flash-preview",
+      project: "test-project",
+      request: {
+        systemInstruction: { parts: [{ text: "system" }] },
+        contents: [
+          {
+            role: "model",
+            parts: [
+              {
+                functionCall: { id: "call_1", name: "bash", args: { command: "pwd" } },
+                thoughtSignature: "skip_thought_signature_validator",
+              },
+            ],
+          },
+          {
+            role: "user",
+            parts: [
+              {
+                functionResponse: {
+                  id: "call_1",
+                  name: "bash",
+                  response: { content: "done" },
+                },
+              },
+            ],
+          },
+          { role: "user", parts: [{ text: "hi" }] },
+        ],
+        tools: [
+          {
+            functionDeclarations: [
+              {
+                name: "bash",
+                description: "Run a command",
+              },
+            ],
+          },
+        ],
+        toolConfig: { functionCallingConfig: { mode: "AUTO" } },
+        generationConfig: { thinkingConfig: { includeThoughts: true, thinkingLevel: "HIGH" } },
+        session_id: "ggcoder:test-session",
+      },
+    });
+  });
+
+  it("still sends Code Assist requests for Code Assist-only preview models", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          response: {
+            candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+            usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    globalThis.fetch = fetchMock;
+
+    const result = streamGemini({
+      provider: "gemini",
+      model: "gemini-3-flash-preview",
+      projectId: "test-project",
+      apiKey: "access-token",
+      streaming: false,
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    await result.response;
+
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toBe("https://cloudcode-pa.googleapis.com/v1internal:generateContent");
+    expect(init.headers).toMatchObject({
+      Authorization: "Bearer access-token",
+      "User-Agent": "google-gemini-cli",
+      "X-Goog-Api-Client": "gemini-cli/0.0.0",
+    });
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      model: "gemini-3-flash-preview",
+      project: "test-project",
+      request: { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
+    });
+  });
+
+  it("honors Gemini CLI Code Assist endpoint overrides", async () => {
+    process.env.CODE_ASSIST_ENDPOINT = "https://code-assist.example.test";
+    process.env.CODE_ASSIST_API_VERSION = "v2test";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          response: {
+            candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    globalThis.fetch = fetchMock;
+
+    const result = streamGemini({
+      provider: "gemini",
+      model: "gemini-3-flash-preview",
+      projectId: "test-project",
+      apiKey: "access-token",
+      streaming: false,
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    await result.response;
+
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toBe("https://code-assist.example.test/v2test:generateContent");
+  });
+
+  it("retries non-streaming Code Assist requests on upstream retryable statuses", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            response: {
+              candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    globalThis.fetch = fetchMock;
+
+    const result = streamGemini({
+      provider: "gemini",
+      model: "gemini-3-flash-preview",
+      projectId: "test-project",
+      apiKey: "access-token",
+      streaming: false,
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    const responsePromise = result.response;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await responsePromise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("explains unsupported Gemini OAuth models without calling paid endpoints", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock;
+
+    const result = streamGemini({
+      provider: "gemini",
+      model: "gemini-3.5-flash",
+      projectId: "test-project",
+      apiKey: "access-token",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    await expect(result.response).rejects.toThrow(
+      'Gemini OAuth is configured to use the Gemini Code Assist subscription endpoint only. That endpoint does not currently expose model "gemini-3.5-flash".',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("emits thoughts, text, and tool calls from SSE chunks", async () => {
+    const body = [
+      `data: ${JSON.stringify({
+        candidates: [{ content: { parts: [{ text: "thinking", thought: true }] } }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        candidates: [
+          {
+            content: {
+              parts: [
+                { text: "hello" },
+                {
+                  functionCall: {
+                    id: "call_2",
+                    name: "read",
+                    args: { file_path: "README.md" },
+                  },
+                },
+              ],
+            },
+            finishReason: "STOP",
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 7,
+          candidatesTokenCount: 3,
+          cachedContentTokenCount: 2,
+        },
+      })}\n\n`,
+    ].join("");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+      );
+    globalThis.fetch = fetchMock;
+
+    const result = streamGemini({
+      provider: "gemini",
+      model: "gemini-3-flash-preview",
+      projectId: "test-project",
+      apiKey: "access-token",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    const events = [];
+    for await (const event of result) events.push(event);
+    const response = await result.response;
+
+    expect(events).toContainEqual({ type: "thinking_delta", text: "thinking" });
+    expect(events).toContainEqual({ type: "text_delta", text: "hello" });
+    expect(events).toContainEqual({
+      type: "toolcall_done",
+      id: "call_2",
+      name: "read",
+      args: { file_path: "README.md" },
+    });
+    expect(response).toMatchObject({
+      message: {
+        content: [
+          { type: "thinking", text: "thinking" },
+          { type: "text", text: "hello" },
+          { type: "tool_call", id: "call_2", name: "read", args: { file_path: "README.md" } },
+        ],
+      },
+      stopReason: "tool_use",
+      usage: { inputTokens: 5, outputTokens: 3, cacheRead: 2 },
+    });
+  });
+});

@@ -10,9 +10,11 @@ import { createLsTool } from "./ls.js";
 import { createSubAgentTool } from "./subagent.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import { createWebSearchTool } from "./web-search.js";
+import { createSourcePathTool } from "./source-path.js";
 import { createTaskOutputTool } from "./task-output.js";
 import { createTaskStopTool } from "./task-stop.js";
 import { createTasksTool } from "./tasks.js";
+import { createGoalsTool } from "./goals.js";
 import { createSkillTool } from "./skill.js";
 import { createEnterPlanTool } from "./enter-plan.js";
 import { createExitPlanTool } from "./exit-plan.js";
@@ -34,6 +36,19 @@ export interface CreateToolsOptions {
   onEnterPlan?: (reason?: string) => void;
   /** Callback when the LLM exits plan mode. Returns approval result string. */
   onExitPlan?: (planPath: string) => Promise<string>;
+  /** Callback after read tool successfully reads a text file. */
+  onFileRead?: (filePath: string) => void | Promise<void>;
+  /** Callback after write/edit tools successfully mutate a file. */
+  onFileMutated?: (filePath: string) => void | Promise<void>;
+  /**
+   * Getter for parent's prompt-cache routing key, evaluated lazily at
+   * sub-agent spawn time. Returning a stable key from this getter lets every
+   * sub-agent spawned by one parent share the same prompt_cache_key prefix —
+   * without it, each child generates a fresh sessionId-derived key and pays a
+   * cold-cache cost on every turn. Lazy because the parent's sessionId is
+   * only assigned after `createTools()` runs during session init.
+   */
+  getCacheKey?: () => string | undefined;
 }
 
 export interface CreateToolsResult {
@@ -48,17 +63,19 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
   const planModeRef = opts?.planModeRef;
 
   const tools: AgentTool[] = [
-    createReadTool(cwd, readFiles, ops),
-    createWriteTool(cwd, readFiles, ops, planModeRef),
-    createEditTool(cwd, readFiles, ops, planModeRef),
+    createReadTool(cwd, readFiles, ops, opts?.onFileRead),
+    createWriteTool(cwd, readFiles, ops, planModeRef, opts?.onFileMutated),
+    createEditTool(cwd, readFiles, ops, planModeRef, opts?.onFileMutated),
     createBashTool(cwd, processManager, ops, planModeRef),
     createFindTool(cwd),
     createGrepTool(cwd, ops),
     createLsTool(cwd, ops),
+    createSourcePathTool(cwd),
     createWebFetchTool(),
     createTaskOutputTool(processManager),
     createTaskStopTool(processManager),
     createTasksTool(cwd),
+    createGoalsTool(cwd),
   ];
 
   // Add web search tool for providers without reliable native web search
@@ -67,7 +84,16 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
   }
 
   if (opts?.agents && opts.agents.length > 0 && opts.provider && opts.model) {
-    tools.push(createSubAgentTool(cwd, opts.agents, opts.provider, opts.model, planModeRef));
+    tools.push(
+      createSubAgentTool(
+        cwd,
+        opts.agents,
+        opts.provider,
+        opts.model,
+        planModeRef,
+        opts.getCacheKey,
+      ),
+    );
   }
 
   if (opts?.skills && opts.skills.length > 0) {
@@ -94,9 +120,11 @@ export { createGrepTool } from "./grep.js";
 export { createLsTool } from "./ls.js";
 export { createWebFetchTool } from "./web-fetch.js";
 export { createWebSearchTool } from "./web-search.js";
+export { createSourcePathTool } from "./source-path.js";
 export { createTaskOutputTool } from "./task-output.js";
 export { createTaskStopTool } from "./task-stop.js";
 export { createTasksTool } from "./tasks.js";
+export { createGoalsTool } from "./goals.js";
 export { createSkillTool } from "./skill.js";
 export { createEnterPlanTool } from "./enter-plan.js";
 export { createExitPlanTool } from "./exit-plan.js";

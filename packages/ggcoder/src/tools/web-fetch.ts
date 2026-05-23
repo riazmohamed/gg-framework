@@ -5,7 +5,7 @@ import type { AgentTool } from "@abukhaled/gg-agent";
  * Block requests to private/internal network addresses to prevent SSRF.
  * Checks the hostname against known private IP ranges and reserved domains.
  */
-function isBlockedUrl(urlString: string): boolean {
+export function isBlockedUrl(urlString: string): boolean {
   let parsed: URL;
   try {
     parsed = new URL(urlString);
@@ -49,6 +49,117 @@ function isBlockedUrl(urlString: string): boolean {
   return false;
 }
 
+const BOILERPLATE_SELECTOR_PATTERNS = [
+  "script",
+  "style",
+  "noscript",
+  "svg",
+  "canvas",
+  "iframe",
+  "form",
+  "input",
+  "button",
+  "select",
+  "textarea",
+  "nav",
+  "footer",
+  "header",
+  "aside",
+  "dialog",
+  "cookie",
+  "consent",
+  "banner",
+  "modal",
+  "popup",
+  "newsletter",
+  "subscribe",
+  "social",
+  "share",
+  "sidebar",
+  "advert",
+  "ads",
+  "ad-",
+  "-ad",
+  "sponsor",
+  "promo",
+  "tracking",
+  "analytics",
+];
+
+const BOILERPLATE_LINE_PATTERNS = [
+  /^(advertisement|sponsored|promoted|ad)\b/i,
+  /^skip to (main content|content|search|navigation)$/i,
+  /^open (main )?menu$/i,
+  /\b(cookie|privacy) (settings|preferences|policy)\b/i,
+  /\b(accept|reject|manage) (all )?(cookies|preferences)\b/i,
+  /\bsubscribe (to|for)\b/i,
+  /\bsign up for (our )?(newsletter|emails?)\b/i,
+  /^share (this|on)\b/i,
+];
+
+function removeElementsByTag(html: string, tagName: string): string {
+  return html.replace(new RegExp(`<${tagName}\\b[\\s\\S]*?<\\/${tagName}>`, "gi"), " ");
+}
+
+function removeBoilerplateElements(html: string): string {
+  let cleaned = html;
+
+  for (const pattern of BOILERPLATE_SELECTOR_PATTERNS) {
+    cleaned = cleaned.replace(
+      new RegExp(
+        `<([a-z][a-z0-9]*)\\b[^>]*(?:id|class|role|aria-label|data-testid|data-test|data-component)=["'][^"']*${pattern}[^"']*["'][^>]*>[\\s\\S]*?<\\/\\1>`,
+        "gi",
+      ),
+      " ",
+    );
+  }
+
+  for (const tagName of [
+    "script",
+    "style",
+    "noscript",
+    "svg",
+    "canvas",
+    "iframe",
+    "form",
+    "nav",
+    "footer",
+    "header",
+    "aside",
+  ]) {
+    cleaned = removeElementsByTag(cleaned, tagName);
+  }
+
+  return cleaned;
+}
+
+function decodeHTMLEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#x27;/g, "'")
+    .replace(/&#x2F;/g, "/");
+}
+
+export function htmlToCleanText(html: string): string {
+  const withUsefulBreaks = removeBoilerplateElements(html)
+    .replace(/<\s*br\s*\/?>/gi, "\n")
+    .replace(/<\/\s*(p|div|section|article|main|h[1-6]|li|tr|blockquote)\s*>/gi, "\n");
+
+  return decodeHTMLEntities(withUsefulBreaks.replace(/<[^>]+>/g, " "))
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter((line) => line && !BOILERPLATE_LINE_PATTERNS.some((pattern) => pattern.test(line)))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function createWebFetchTool(): AgentTool<typeof parameters> {
   return {
     name: "web_fetch",
@@ -68,8 +179,19 @@ export function createWebFetchTool(): AgentTool<typeof parameters> {
             "User-Agent": "Mozilla/5.0 (compatible; OGCoder/1.0)",
             Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           },
+          redirect: "manual",
           signal: AbortSignal.timeout(30000),
         });
+
+        if (response.status >= 300 && response.status < 400) {
+          const location = response.headers.get("location");
+          if (!location) return `Error: HTTP ${response.status} redirect without Location header`;
+          const redirectUrl = new URL(location, args.url).toString();
+          if (isBlockedUrl(redirectUrl)) {
+            return "Error: Redirect blocked — target URL is private/internal or unsupported.";
+          }
+          return `Error: Redirects are not followed automatically. Safe redirect target: ${redirectUrl}`;
+        }
 
         if (!response.ok) {
           return `Error: HTTP ${response.status} ${response.statusText}`;
@@ -80,12 +202,7 @@ export function createWebFetchTool(): AgentTool<typeof parameters> {
 
         let content: string;
         if (contentType.includes("html")) {
-          content = text
-            .replace(/<script[\s\S]*?<\/script>/gi, "")
-            .replace(/<style[\s\S]*?<\/style>/gi, "")
-            .replace(/<[^>]+>/g, " ")
-            .replace(/\s+/g, " ")
-            .trim();
+          content = htmlToCleanText(text);
         } else {
           content = text;
         }

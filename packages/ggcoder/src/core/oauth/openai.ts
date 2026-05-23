@@ -146,19 +146,21 @@ async function loginWithServer(
       callbacks.onStatus("Waiting for browser callback...");
     });
 
+    const timeout = setTimeout(() => {
+      if (!receivedCode) {
+        server.close();
+      }
+    }, 120_000);
+    timeout.unref();
+
     server.on("close", () => {
+      clearTimeout(timeout);
       if (receivedCode) {
         resolve(receivedCode);
       } else {
         reject(new Error("Server closed without receiving code"));
       }
     });
-
-    setTimeout(() => {
-      if (!receivedCode) {
-        server.close();
-      }
-    }, 120_000);
   });
 }
 

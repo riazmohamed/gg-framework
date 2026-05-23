@@ -60,6 +60,7 @@ const VALID_PROVIDERS = new Set<Provider>([
   "anthropic",
   "xiaomi",
   "openai",
+  "gemini",
   "glm",
   "moonshot",
   "minimax",
@@ -114,7 +115,7 @@ async function seedDefaultAgents(agentsDir: string): Promise<void> {
     "owl.md": `---
 name: owl
 description: "Codebase explorer \u2014 reads, searches, and maps out code"
-tools: read, grep, find, ls, bash
+tools: read, grep, find, ls, source_path, bash
 ---
 
 You are Owl, a sharp-eyed codebase explorer.
@@ -139,7 +140,7 @@ Be thorough but concise. Explore widely, report tightly.
     "bee.md": `---
 name: bee
 description: "Task worker \u2014 writes code, runs commands, fixes bugs, does anything"
-tools: read, write, edit, bash, find, grep, ls
+tools: read, write, edit, bash, find, grep, ls, source_path
 ---
 
 You are Bee, an industrious task worker.

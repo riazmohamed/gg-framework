@@ -6,7 +6,9 @@ import type { ProcessManager } from "../core/process-manager.js";
 import type { MCPClientManager } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
 import type { Skill } from "../core/skills.js";
-import { App, type CompletedItem } from "./App.js";
+import { App, type CompletedItem, type DoneStatus } from "./App.js";
+import type { GoalStatusEntry } from "./components/GoalStatusBar.js";
+import { shutdownGoalWorkers } from "../core/goal-worker.js";
 import type { PlanStep } from "../utils/plan-steps.js";
 import { ThemeContext, SetThemeContext, loadTheme, type ThemeName } from "./theme/theme.js";
 import { detectTheme } from "./theme/detect-theme.js";
@@ -26,16 +28,16 @@ export interface RenderAppConfig {
   apiKey?: string;
   baseUrl?: string;
   accountId?: string;
+  projectId?: string;
   cwd: string;
   version: string;
   theme?: "auto" | ThemeName;
-  showThinking?: boolean;
   showTokenUsage?: boolean;
   onSlashCommand?: (input: string) => Promise<string | null>;
   loggedInProviders?: Provider[];
   credentialsByProvider?: Record<
     string,
-    { accessToken: string; accountId?: string; baseUrl?: string }
+    { accessToken: string; accountId?: string; projectId?: string; baseUrl?: string }
   >;
   initialHistory?: CompletedItem[];
   sessionsDir?: string;
@@ -48,8 +50,10 @@ export interface RenderAppConfig {
   onEnterPlanRef?: { current: (reason?: string) => void };
   onExitPlanRef?: { current: (planPath: string) => Promise<string> };
   skills?: Skill[];
-  initialOverlay?: "pixel";
+  initialOverlay?: "pixel" | "goal";
   rebuildToolsForCwd?: (cwd: string) => AgentTool[];
+  repoMapChangedFilesRef?: { current: Set<string> };
+  repoMapReadFilesRef?: { current: Set<string> };
 }
 
 /**
@@ -76,17 +80,30 @@ interface RuntimeState {
  * as our reset mechanism (the only thing that actually escapes Ink's
  * cumulative live-area drift).
  */
-type OverlayKind = "model" | "tasks" | "skills" | "plan" | "theme" | "eyes" | "pixel" | null;
+type OverlayKind =
+  | "model"
+  | "tasks"
+  | "goal"
+  | "skills"
+  | "plan"
+  | "theme"
+  | "eyes"
+  | "pixel"
+  | null;
 
 export interface SessionStore {
   messages: Message[];
   history: CompletedItem[];
+  /** Live, not-yet-flushed rows that must survive overlay/resize remounts. */
+  liveItems?: CompletedItem[];
+  /** Transient completion footer (e.g. "✻ Mulled it over for 3s") that is still visible. */
+  doneStatus?: DoneStatus | null;
   approvedPlanPath?: string;
   planSteps: PlanStep[];
   sessionPath?: string;
   sessionTitle?: string;
   sessionTitleGenerated: boolean;
-  /** Which overlay (Tasks, Skills, Plan, Pixel, Eyes, Theme, Model) is open. */
+  /** Which overlay (Tasks, Goal, Skills, Plan, Pixel, Eyes, Theme, Model) is open. */
   overlay?: OverlayKind;
   /** Plan overlay auto-expand-newest flag (only meaningful when overlay==='plan'). */
   planAutoExpand?: boolean;
@@ -133,6 +150,8 @@ export interface SessionStore {
    * onward loses the chaining intent.
    */
   runAllPixel?: boolean;
+  /** Active goal status bar entries. Preserved across Goal pane open/close remounts. */
+  goalStatusEntries?: GoalStatusEntry[];
 }
 
 export interface ResetUIOptions {
@@ -202,6 +221,7 @@ const INK_OPTIONS = {
 // enabling kitty enhancement flags. Cleared again on exit so we don't leave
 // the terminal in an unusual state.
 const DISABLE_MODIFY_OTHER_KEYS = "\x1b[>4;0m";
+const DISABLE_FOCUS_REPORTING = "\x1b[?1004l";
 const SCREEN_CLEAR = DISABLE_MODIFY_OTHER_KEYS + "\x1b[2J\x1b[3J\x1b[H";
 
 export async function renderApp(config: RenderAppConfig): Promise<void> {
@@ -219,7 +239,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
   // that confuse the parent shell.
   const onProcessExit = (): void => {
     try {
-      process.stdout.write(DISABLE_MODIFY_OTHER_KEYS);
+      process.stdout.write(DISABLE_MODIFY_OTHER_KEYS + DISABLE_FOCUS_REPORTING);
     } catch {
       // stdout may already be torn down; nothing useful to do here.
     }
@@ -244,6 +264,8 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
   const sessionStore: SessionStore = {
     messages: config.messages,
     history: config.initialHistory ?? [{ kind: "banner", id: "banner" }],
+    liveItems: [],
+    doneStatus: null,
     approvedPlanPath: undefined,
     planSteps: [],
     sessionPath: config.sessionPath,
@@ -252,6 +274,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     overlay: config.initialOverlay ?? null,
     planAutoExpand: false,
     pendingAction: undefined,
+    goalStatusEntries: [],
   };
 
   const ref: { instance: InkInstance | null } = { instance: null };
@@ -277,9 +300,9 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             apiKey: config.apiKey,
             baseUrl: config.baseUrl,
             accountId: config.accountId,
+            projectId: config.projectId,
             cwd: config.cwd,
             version: config.version,
-            showThinking: config.showThinking,
             showTokenUsage: config.showTokenUsage,
             onSlashCommand: config.onSlashCommand,
             loggedInProviders: config.loggedInProviders,
@@ -297,6 +320,8 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             skills: config.skills,
             initialOverlay: config.initialOverlay,
             rebuildToolsForCwd: config.rebuildToolsForCwd,
+            repoMapChangedFilesRef: config.repoMapChangedFilesRef,
+            repoMapReadFilesRef: config.repoMapReadFilesRef,
             resetUI,
             onRuntimeStateChange,
             sessionStore,
@@ -310,8 +335,9 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
   // fullStaticOutput dropped) looks correct for one frame but the live area
   // drifts on subsequent streaming responses — Ink's cursor math depends on
   // terminal-state assumptions that ANSI clearing breaks. The only RELIABLE
-  // reset is to tear down the React tree entirely and render a fresh Ink
-  // instance. gg-boss arrived at the same conclusion (orchestrator-app.tsx).
+  // reset is to tear down the React tree entirely, clear after Ink has flushed
+  // its teardown frame, and then render a fresh Ink instance. gg-boss arrived
+  // at the same conclusion (orchestrator-app.tsx).
   function resetUI(options?: ResetUIOptions): void {
     const old = ref.instance;
     if (!old) return;
@@ -321,10 +347,13 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       // re-seed specific fields (e.g. plan accept wipes the chat then sets
       // approvedPlanPath + planSteps for the implementation phase).
       sessionStore.history = [{ kind: "banner", id: "banner" }];
+      sessionStore.liveItems = [];
+      sessionStore.doneStatus = null;
       sessionStore.approvedPlanPath = undefined;
       sessionStore.planSteps = [];
       sessionStore.sessionTitle = undefined;
       sessionStore.sessionTitleGenerated = false;
+      sessionStore.goalStatusEntries = [];
     }
     if (options?.messages) sessionStore.messages = options.messages;
     if (options?.history) sessionStore.history = options.history;
@@ -335,8 +364,8 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     if (options?.sessionPath !== undefined) sessionStore.sessionPath = options.sessionPath;
     if (options?.pendingAction) sessionStore.pendingAction = options.pendingAction;
 
-    process.stdout.write(SCREEN_CLEAR);
     old.unmount();
+    process.stdout.write(SCREEN_CLEAR);
     ref.instance = render(buildElement(), INK_OPTIONS);
   }
 
@@ -391,11 +420,12 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     process.stdout.off("resize", onTerminalResize);
     if (resizeTimer) clearTimeout(resizeTimer);
     process.off("exit", onProcessExit);
+    shutdownGoalWorkers(config.cwd);
     // Final cleanup on normal exit — also covered by the "exit" handler,
     // but writing here ensures the disable lands before Node tears stdout
     // down on process termination.
     try {
-      process.stdout.write(DISABLE_MODIFY_OTHER_KEYS);
+      process.stdout.write(DISABLE_MODIFY_OTHER_KEYS + DISABLE_FOCUS_REPORTING);
     } catch {
       // ignored
     }

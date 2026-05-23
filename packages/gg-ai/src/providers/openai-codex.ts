@@ -15,9 +15,29 @@ import { ProviderError } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import { providerDiag } from "../utils/diag.js";
 import { zodToJsonSchema } from "../utils/zod-to-json-schema.js";
+import { normalizePromptCacheKey } from "./prompt-cache-key.js";
 import { downgradeUnsupportedImages } from "./transform.js";
 
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseToolArguments(argsJson: string): Record<string, unknown> {
+  if (!argsJson) return {};
+  try {
+    const parsed = JSON.parse(argsJson) as unknown;
+    const unwrapped = typeof parsed === "string" ? (JSON.parse(parsed) as unknown) : parsed;
+    return isJsonObject(unwrapped) ? unwrapped : {};
+  } catch {
+    return {};
+  }
+}
+
+function outputTextKey(itemId: string | undefined, contentIndex: number | undefined): string {
+  return `${itemId ?? ""}:${contentIndex ?? 0}`;
+}
 
 export function streamOpenAICodex(options: StreamOptions): StreamResult {
   return new StreamResult(runStream(options));
@@ -44,18 +64,24 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   if (options.tools?.length) {
     body.tools = toCodexTools(options.tools);
   }
-  if (options.promptCacheKey) {
-    body.prompt_cache_key = options.promptCacheKey;
+  // Always set a prompt_cache_key. OpenAI uses this key to route requests
+  // with the same prefix to the same cache shard — without it, the codex
+  // backend hashes only the request body, so cache hits for shared
+  // system+tool prefixes across separate sub-agent processes are accidental
+  // rather than guaranteed.
+  body.prompt_cache_key = normalizePromptCacheKey(options.promptCacheKey ?? "ggcoder");
+  // Map cacheRetention to OpenAI's prompt_cache_retention. "long" pins the
+  // cached prefix for up to 24h (vs the default 5–10 min in-memory window).
+  if (options.cacheRetention === "long") {
+    body.prompt_cache_retention = "24h";
   }
   if (options.temperature != null && !options.thinking) {
     body.temperature = options.temperature;
   }
-  if (options.thinking) {
-    body.reasoning = {
-      effort: options.thinking,
-      summary: "auto",
-    };
-  }
+  body.reasoning = {
+    effort: options.thinking ?? "none",
+    summary: "auto",
+  };
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -68,6 +94,17 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
 
   if (options.accountId) {
     headers["chatgpt-account-id"] = options.accountId;
+  }
+
+  // The chatgpt.com codex backend routes prompt cache lookups by header, not
+  // body — `prompt_cache_key` in the body alone never produces a cache hit
+  // here (verified against gpt-5.5 with a 22k-token shared prefix). Pinning
+  // both `session_id` and `x-client-request-id` to the cache scope is what
+  // makes consecutive requests hit the same cache shard.
+  const cacheScopeId = body.prompt_cache_key as string | undefined;
+  if (cacheScopeId) {
+    headers["session_id"] = cacheScopeId;
+    headers["x-client-request-id"] = cacheScopeId;
   }
 
   const response = await fetch(url, {
@@ -85,6 +122,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       parsed.requestId ??
       response.headers.get("x-request-id") ??
       response.headers.get("openai-request-id") ??
+      response.headers.get("x-oai-request-id") ??
       undefined;
 
     let hint: string | undefined;
@@ -116,6 +154,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const contentParts: ContentPart[] = [];
   let textAccum = "";
   const toolCalls = new Map<string, { id: string; name: string; argsJson: string }>();
+  const outputItemTypes = new Map<string, string>();
+  const outputTextByPart = new Map<string, string>();
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheRead = 0;
@@ -170,17 +210,54 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       });
     }
 
-    // Text delta
+    // Text delta. Some Codex streams attach output_text deltas to a reasoning
+    // item; route those through thinking_delta so model reasoning never leaks
+    // into the assistant's visible text transcript.
     if (type === "response.output_text.delta") {
       const delta = event.delta as string;
-      textAccum += delta;
-      yield { type: "text_delta", text: delta };
+      const itemId = event.item_id as string | undefined;
+      const contentIndex = event.content_index as number | undefined;
+      const key = outputTextKey(itemId, contentIndex);
+      outputTextByPart.set(key, `${outputTextByPart.get(key) ?? ""}${delta}`);
+      if (itemId && outputItemTypes.get(itemId) === "reasoning") {
+        if (options.thinking) yield { type: "thinking_delta", text: delta };
+      } else {
+        textAccum += delta;
+        yield { type: "text_delta", text: delta };
+      }
+    }
+
+    // Text done. The final event can contain text not seen in deltas; emit only
+    // the missing suffix so consumers don't see duplicate visible output.
+    if (type === "response.output_text.done") {
+      const fullText = event.text as string | undefined;
+      if (fullText) {
+        const itemId = event.item_id as string | undefined;
+        const contentIndex = event.content_index as number | undefined;
+        const key = outputTextKey(itemId, contentIndex);
+        const streamedText = outputTextByPart.get(key) ?? "";
+        const missingText = streamedText ? fullText.slice(streamedText.length) : fullText;
+        outputTextByPart.set(key, fullText);
+        if (missingText && fullText.startsWith(streamedText)) {
+          if (itemId && outputItemTypes.get(itemId) === "reasoning") {
+            if (options.thinking) yield { type: "thinking_delta", text: missingText };
+          } else {
+            textAccum += missingText;
+            yield { type: "text_delta", text: missingText };
+          }
+        }
+      }
     }
 
     // Thinking delta
-    if (type === "response.reasoning_summary_text.delta") {
+    if (
+      type === "response.reasoning_summary_text.delta" ||
+      type === "response.reasoning_summary.delta" ||
+      type === "response.reasoning_text.delta" ||
+      type === "response.reasoning.delta"
+    ) {
       const delta = event.delta as string;
-      yield { type: "thinking_delta", text: delta };
+      if (options.thinking) yield { type: "thinking_delta", text: delta };
     }
 
     // Reasoning item started — the model has begun reasoning on the server.
@@ -189,7 +266,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     // (Codex emits this at ~1s vs reasoning_summary_text.delta at ~4–10s.)
     if (type === "response.output_item.added") {
       const item = event.item as Record<string, unknown>;
-      if (item?.type === "reasoning") {
+      const itemId = item?.id as string | undefined;
+      const itemType = item?.type as string | undefined;
+      if (itemId && itemType) {
+        outputItemTypes.set(itemId, itemType);
+      }
+      if (itemType === "reasoning" && options.thinking) {
         yield { type: "thinking_delta", text: "" };
       }
     }
@@ -246,12 +328,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         const id = `${callId}|${itemId}`;
         const tc = toolCalls.get(id);
         if (tc) {
-          let args: Record<string, unknown> = {};
-          try {
-            args = JSON.parse(tc.argsJson) as Record<string, unknown>;
-          } catch {
-            /* malformed JSON */
-          }
+          const args = parseToolArguments(tc.argsJson);
           yield {
             type: "toolcall_done",
             id: tc.id,
@@ -284,12 +361,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   }
 
   for (const [, tc] of toolCalls) {
-    let args: Record<string, unknown> = {};
-    try {
-      args = JSON.parse(tc.argsJson) as Record<string, unknown>;
-    } catch {
-      /* malformed JSON */
-    }
+    const args = parseToolArguments(tc.argsJson);
     const toolCall: ToolCall = {
       type: "tool_call",
       id: tc.id,
@@ -512,8 +584,11 @@ function parseCodexErrorBody(text: string): { message?: string; requestId?: stri
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>;
     const error = parsed.error as Record<string, unknown> | undefined;
+    const detail = parsed.detail as unknown;
     const message =
-      (error?.message as string | undefined) ?? (parsed.message as string | undefined);
+      (error?.message as string | undefined) ??
+      (parsed.message as string | undefined) ??
+      (typeof detail === "string" ? detail : undefined);
     const requestId =
       (parsed.request_id as string | undefined) ??
       (error?.request_id as string | undefined) ??

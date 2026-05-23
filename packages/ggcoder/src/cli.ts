@@ -46,6 +46,7 @@ import { PerformanceObserver, performance } from "node:perf_hooks";
   }).observe({ entryTypes: allTypes });
 }
 
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import fs from "node:fs";
 import readline from "node:readline/promises";
@@ -58,7 +59,8 @@ import { runServeMode } from "./modes/serve-mode.js";
 import { runAgentHomeMode } from "./modes/agent-home-mode.js";
 import { renderLoginSelector } from "./ui/login.js";
 import { renderSessionSelector } from "./ui/sessions.js";
-import type { CompletedItem } from "./ui/App.js";
+import type { CompletedItem, GoalProgressDraft } from "./ui/App.js";
+import { segmentDisplayText, stripDoneMarkers } from "./utils/plan-steps.js";
 import { formatUserError } from "./utils/error-handler.js";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { ThemeName } from "./ui/theme/theme.js";
@@ -72,17 +74,29 @@ import { buildSystemPrompt } from "./system-prompt.js";
 import { isEyesActive, journalCount } from "@abukhaled/ggcoder-eyes";
 import { createTools } from "./tools/index.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
+import {
+  createCompactedSessionCheckpoint,
+  formatRestoreInfoText,
+  getRestoredMessagesForDisplay,
+} from "./core/session-compaction.js";
 import { setEstimatorModel } from "./core/compaction/token-estimator.js";
-import { getContextWindow, getDefaultModel, getMaxThinkingLevel } from "./core/model-registry.js";
+import {
+  getContextWindow,
+  getDefaultModel,
+  getMaxThinkingLevel,
+  getModel,
+} from "./core/model-registry.js";
 import { MCPClientManager, getMCPServers } from "./core/mcp/index.js";
 import { discoverAgents } from "./core/agents.js";
 import { discoverSkills } from "./core/skills.js";
 import path from "node:path";
 import { loginAnthropic } from "./core/oauth/anthropic.js";
 import { loginOpenAI } from "./core/oauth/openai.js";
+import { loginGemini } from "./core/oauth/gemini.js";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "./core/oauth/types.js";
 import chalk from "chalk";
 import { checkAndAutoUpdate } from "./core/auto-update.js";
+import { parseGoalSyntheticEvent } from "./ui/goal-events.js";
 
 const _require = createRequire(import.meta.url);
 const CLI_VERSION = (_require("../package.json") as { version: string }).version;
@@ -122,9 +136,13 @@ function gradientLine(text: string): string {
   return result;
 }
 
+function clearVisibleScreen(): void {
+  process.stdout.write("\x1b[2J\x1b[H");
+}
+
 function printHelp(): void {
-  // Clear screen for a clean look, consistent with the TUI startup
-  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+  // Clear the visible viewport for a clean look without erasing scrollback.
+  clearVisibleScreen();
 
   const dim = chalk.dim;
   const primary = chalk.hex("#60a5fa");
@@ -153,7 +171,7 @@ function printHelp(): void {
   // Commands
   console.log(primary("Commands:"));
   const cmds: [string, string][] = [
-    ["login", "Log in to an AI provider (Anthropic, OpenAI, GLM, Moonshot, Xiaomi)"],
+    ["login", "Log in to an AI provider (Anthropic, OpenAI, Gemini)"],
     ["logout", "Log out and clear stored credentials"],
     ["doctor", "Diagnose and fix auth/config issues"],
     ["sessions", "Browse and resume previous sessions"],
@@ -175,7 +193,7 @@ function printHelp(): void {
     ["-v, --version", "Show version number"],
     [
       "--provider <name>",
-      "AI provider (anthropic, xiaomi, openai, glm, moonshot, minimax, deepseek, openrouter)",
+      "AI provider (anthropic, xiaomi, openai, gemini, glm, moonshot, minimax, deepseek, openrouter)",
     ],
     ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-5.5)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
@@ -193,6 +211,8 @@ function printHelp(): void {
   const slashCmds: [string, string][] = [
     ["/help", "Show available slash commands"],
     ["/model", "Switch AI model"],
+    ["/goal", "Create a programmatic goal loop"],
+    ["/goals", "Open the goal pane"],
     ["/compact", "Compact conversation context"],
     ["/session", "Switch or create sessions"],
     ["/new", "Start a new session"],
@@ -208,6 +228,7 @@ function printHelp(): void {
   console.log(primary("Keyboard shortcuts:"));
   const shortcuts: [string, string][] = [
     ["Ctrl+T", "Toggle task overlay"],
+    ["Ctrl+G", "Toggle goal overlay"],
     ["Ctrl+S", "Toggle skills overlay"],
     ["Ctrl+P", "Toggle plan mode"],
     ["Shift+Tab", "Toggle thinking"],
@@ -362,6 +383,7 @@ function main(): void {
       model: { type: "string" },
       "max-turns": { type: "string" },
       "system-prompt": { type: "string" },
+      "prompt-cache-key": { type: "string" },
     },
     allowPositionals: true,
     strict: true,
@@ -384,6 +406,7 @@ function main(): void {
     const jsonModel = values.model ?? "claude-opus-4-7";
     const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
     const systemPrompt = values["system-prompt"];
+    const promptCacheKey = values["prompt-cache-key"];
     const cwd = process.cwd();
     runJsonMode({
       message,
@@ -392,6 +415,7 @@ function main(): void {
       cwd,
       systemPrompt,
       maxTurns,
+      promptCacheKey,
     }).catch((err: unknown) => {
       process.stderr.write(formatUserError(err) + "\n");
       process.exit(1);
@@ -425,6 +449,7 @@ function main(): void {
 
   function getHardcodedDefault(p: string): string {
     if (p === "openai") return "gpt-5.5";
+    if (p === "gemini") return "gemini-3.1-flash-lite-preview";
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
@@ -517,7 +542,7 @@ async function runInkTUI(opts: {
   // fall back to whichever other provider actually resolved.
   const credentialsByProvider: Record<
     string,
-    { accessToken: string; accountId?: string; baseUrl?: string }
+    { accessToken: string; accountId?: string; projectId?: string; baseUrl?: string }
   > = {};
   const expiredProviders: Provider[] = [];
   for (const p of loggedInProviders) {
@@ -526,6 +551,7 @@ async function runInkTUI(opts: {
       credentialsByProvider[p] = {
         accessToken: resolved.accessToken,
         accountId: resolved.accountId,
+        projectId: resolved.projectId,
         baseUrl: resolved.baseUrl,
       };
     } catch {
@@ -581,6 +607,7 @@ async function runInkTUI(opts: {
   const creds = {
     accessToken: cached.accessToken,
     accountId: cached.accountId,
+    projectId: cached.projectId,
     refreshToken: "", // not needed downstream; SDK only uses accessToken
     expiresAt: Number.POSITIVE_INFINITY,
   };
@@ -601,9 +628,6 @@ async function runInkTUI(opts: {
     projectDir: cwd,
   });
 
-  // Build system prompt & tools (with sub-agent support)
-  const systemPrompt = await buildSystemPrompt(cwd, skills, false, undefined, provider);
-
   // Plan mode refs — shared between tools and UI
   const planModeRef = { current: false };
   const onEnterPlanRef: { current: (reason?: string) => void } = {
@@ -611,6 +635,18 @@ async function runInkTUI(opts: {
   };
   const onExitPlanRef: { current: (planPath: string) => Promise<string> } = {
     current: () => Promise.resolve("cancelled"),
+  };
+  const repoMapChangedFilesRef: { current: Set<string> } = { current: new Set() };
+  const repoMapReadFilesRef: { current: Set<string> } = { current: new Set() };
+  const toRepoMapPath = (root: string, filePath: string): string =>
+    path.relative(root, filePath).split(path.sep).join("/");
+  const markRepoMapRead = (root: string, filePath: string): void => {
+    repoMapReadFilesRef.current.add(toRepoMapPath(root, filePath));
+  };
+  const markRepoMapDirty = (root: string, filePath: string): void => {
+    const relativePath = toRepoMapPath(root, filePath);
+    repoMapChangedFilesRef.current.add(relativePath);
+    repoMapReadFilesRef.current.add(relativePath);
   };
 
   const { tools, processManager } = createTools(cwd, {
@@ -621,6 +657,8 @@ async function runInkTUI(opts: {
     planModeRef,
     onEnterPlan: (reason) => onEnterPlanRef.current(reason),
     onExitPlan: (planPath) => onExitPlanRef.current(planPath),
+    onFileRead: (filePath) => markRepoMapRead(cwd, filePath),
+    onFileMutated: (filePath) => markRepoMapDirty(cwd, filePath),
   });
 
   // Rebuilds the cwd-bound tools for a different project root. Used by the
@@ -635,6 +673,8 @@ async function runInkTUI(opts: {
       planModeRef,
       onEnterPlan: (reason) => onEnterPlanRef.current(reason),
       onExitPlan: (planPath) => onExitPlanRef.current(planPath),
+      onFileRead: (filePath) => markRepoMapRead(newCwd, filePath),
+      onFileMutated: (filePath) => markRepoMapDirty(newCwd, filePath),
     });
     return rebuilt;
   };
@@ -653,6 +693,14 @@ async function runInkTUI(opts: {
       `MCP initialization failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+
+  const systemPrompt = await buildSystemPrompt(
+    cwd,
+    skills,
+    false,
+    undefined,
+    tools.map((tool) => tool.name),
+  );
 
   // Kill all background processes on exit (synchronous — catches all exit paths)
   process.on("exit", () => {
@@ -688,28 +736,50 @@ async function runInkTUI(opts: {
 
         // Auto-compact on load if the restored session exceeds the context window.
         // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
-        const contextWindow = getContextWindow(model);
+        const contextWindow = getContextWindow(model, { provider, accountId: creds.accountId });
         if (shouldCompact(messages, contextWindow, 0.8)) {
           log("INFO", "session", `Restored session exceeds context — auto-compacting`);
-          const compacted = await compact(messages, {
-            provider: provider,
-            model: model,
-            apiKey: creds?.accessToken ?? "",
-            contextWindow,
-          });
-          // Replace messages array contents with compacted messages
-          messages.length = 0;
-          messages.push(...compacted.messages);
-          log("INFO", "session", `Auto-compaction complete`, {
-            before: String(compacted.result.originalCount),
-            after: String(compacted.result.newCount),
-          });
+          const compactionAbort = new AbortController();
+          const onSigint = () => compactionAbort.abort();
+          process.once("SIGINT", onSigint);
+          try {
+            const compacted = await compact(messages, {
+              provider,
+              model,
+              apiKey: creds.accessToken,
+              accountId: creds.accountId,
+              projectId: creds.projectId,
+              baseUrl: cached.baseUrl,
+              contextWindow,
+              signal: compactionAbort.signal,
+            });
+            // Persist compacted continuation to a fresh session so future
+            // `ggcoder continue` starts from the compacted checkpoint instead
+            // of repeatedly restoring the oversized source session.
+            const compactedSession = await createCompactedSessionCheckpoint(sessionManager, {
+              cwd,
+              provider,
+              model,
+              messages: compacted.messages,
+            });
+            sessionPath = compactedSession.path;
+            messages.length = 0;
+            messages.push(...compacted.messages);
+            log("INFO", "session", `Auto-compaction complete`, {
+              before: String(compacted.result.originalCount),
+              after: String(compacted.result.newCount),
+              path: sessionPath,
+            });
+          } finally {
+            process.off("SIGINT", onSigint);
+          }
         }
 
-        initialHistory = messagesToHistoryItems(loadedMessages);
+        const restoredMessages = getRestoredMessagesForDisplay(messages);
+        initialHistory = messagesToHistoryItems(restoredMessages);
         initialHistory.push({
           kind: "info",
-          text: `↻ Restored session (${loadedMessages.length} messages)`,
+          text: formatRestoreInfoText(loadedMessages.length, restoredMessages.length),
           id: `restore-info`,
         });
       }
@@ -749,8 +819,9 @@ async function runInkTUI(opts: {
     version: CLI_VERSION,
     maxTokens: 16384,
     thinking: opts.thinkingLevel,
-    apiKey: creds?.accessToken ?? "",
-    accountId: creds?.accountId,
+    apiKey: creds.accessToken,
+    accountId: creds.accountId,
+    projectId: creds.projectId,
     cwd,
     theme: opts.theme,
     loggedInProviders,
@@ -768,6 +839,8 @@ async function runInkTUI(opts: {
     skills,
     initialOverlay: opts.initialOverlay,
     rebuildToolsForCwd,
+    repoMapChangedFilesRef,
+    repoMapReadFilesRef,
   });
 
   closeLogger();
@@ -777,7 +850,7 @@ async function runInkTUI(opts: {
 
 async function runLogin(): Promise<void> {
   requireInteractiveTTY();
-  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+  clearVisibleScreen();
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, { version: CLI_VERSION });
   log("INFO", "auth", "Login flow started");
@@ -854,7 +927,11 @@ async function runLogin(): Promise<void> {
       } satisfies OAuthCredentials;
     } else {
       creds =
-        provider === "anthropic" ? await loginAnthropic(callbacks) : await loginOpenAI(callbacks);
+        provider === "anthropic"
+          ? await loginAnthropic(callbacks)
+          : provider === "gemini"
+            ? await loginGemini(callbacks)
+            : await loginOpenAI(callbacks);
     }
 
     await authStorage.setCredentials(provider, creds);
@@ -869,7 +946,7 @@ async function runLogin(): Promise<void> {
 // ── Doctor ─────────────────────────────────────────────────
 
 async function runDoctor(): Promise<void> {
-  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+  clearVisibleScreen();
 
   const os = await import("node:os");
   const fsP = await import("node:fs/promises");
@@ -1143,7 +1220,7 @@ async function runLogout(): Promise<void> {
 
 async function runSessions(): Promise<void> {
   requireInteractiveTTY();
-  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+  clearVisibleScreen();
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, { version: CLI_VERSION });
   log("INFO", "session", "Sessions selector started");
@@ -1163,6 +1240,7 @@ async function runSessions(): Promise<void> {
 
   function getDefault(p: string): string {
     if (p === "openai") return "gpt-5.5";
+    if (p === "gemini") return "gemini-3.1-flash-lite-preview";
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.6";
     if (p === "minimax") return "MiniMax-M2.7";
@@ -1214,7 +1292,7 @@ async function saveTelegramConfig(config: TelegramConfig): Promise<void> {
 }
 
 async function runTelegramSetup(): Promise<void> {
-  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+  clearVisibleScreen();
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, { version: CLI_VERSION });
   log("INFO", "telegram", "Telegram setup started");
@@ -1464,7 +1542,7 @@ async function saveAgentHomeConfig(config: AgentHomeConfig): Promise<void> {
 }
 
 async function runAgentHomeLogin(): Promise<void> {
-  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+  clearVisibleScreen();
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, { version: CLI_VERSION });
   log("INFO", "agent-home", "Agent Home login started");
@@ -1697,14 +1775,8 @@ async function runPixel(): Promise<void> {
   });
 }
 
-function defaultModelFor(p: string): string {
-  if (p === "openai") return "gpt-5.5";
-  if (p === "glm") return "glm-5.1";
-  if (p === "moonshot") return "kimi-k2.6";
-  if (p === "minimax") return "MiniMax-M2.7";
-  if (p === "deepseek") return "deepseek-v4-pro";
-  if (p === "openrouter") return "qwen/qwen3.6-plus";
-  return "claude-opus-4-7";
+function defaultModelFor(p: Provider): string {
+  return getDefaultModel(p).id;
 }
 
 interface ParsedInstall {
@@ -1758,6 +1830,7 @@ async function resolveActiveProvider(
     "anthropic",
     "xiaomi",
     "openai",
+    "gemini",
     "glm",
     "moonshot",
     "minimax",
@@ -1774,9 +1847,11 @@ async function resolveActiveProvider(
   }
 
   if (loggedInProviders.includes(preferred)) {
+    const savedModelInfo = savedModel ? getModel(savedModel) : undefined;
     return {
       provider: preferred,
-      model: savedModel ?? getDefaultModel(preferred).id,
+      model:
+        savedModelInfo?.provider === preferred ? savedModelInfo.id : getDefaultModel(preferred).id,
       loggedInProviders,
     };
   }
@@ -1791,6 +1866,7 @@ async function resolveActiveProvider(
 function displayName(provider: Provider): string {
   if (provider === "anthropic") return "Anthropic";
   if (provider === "xiaomi") return "Xiaomi (MiMo)";
+  if (provider === "gemini") return "Gemini";
   if (provider === "glm") return "Z.AI (GLM)";
   if (provider === "moonshot") return "Moonshot";
   if (provider === "minimax") return "MiniMax";
@@ -1808,9 +1884,95 @@ function extractText(content: string | Array<{ type: string; text?: string }>): 
     .join("\n");
 }
 
-function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
+function goalCompletionDetail(summary: string): string | undefined {
+  const lines = summary
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && line !== "[agent_done]");
+  const statusLine = lines.find((line) => /^Status:/i.test(line));
+  const changedLine = lines.find((line) =>
+    /^(Changed|Implemented|Fixed|Added|Key findings|Full verifier)/i.test(line),
+  );
+  const verificationLine = lines.find((line) => /^(Verification|Verified|Result):/i.test(line));
+  return statusLine ?? changedLine ?? verificationLine ?? lines[0];
+}
+
+function goalProgressFromSyntheticText(text: string): GoalProgressDraft | null {
+  const eventInfo = parseGoalSyntheticEvent(text.trimStart());
+  if (!eventInfo) return null;
+  const summary = eventInfo.summary ?? "";
+  const terminalStatus = eventInfo.goalState?.status;
+  if (
+    terminalStatus === "passed" ||
+    terminalStatus === "failed" ||
+    terminalStatus === "blocked" ||
+    terminalStatus === "paused"
+  ) {
+    const terminalTitle =
+      terminalStatus === "passed"
+        ? "Goal passed"
+        : terminalStatus === "failed"
+          ? "Goal failed"
+          : terminalStatus === "blocked"
+            ? "Goal blocked"
+            : "Goal paused";
+    return {
+      kind: "goal_progress",
+      phase: "terminal",
+      title: `${terminalTitle}: ${eventInfo.goal ?? "Goal"}`,
+      detail: goalCompletionDetail(summary),
+      status: terminalStatus,
+    };
+  }
+  if (eventInfo.kind === "worker") {
+    const titlePrefix = eventInfo.status === "done" ? "Done" : "Failed";
+    return {
+      kind: "goal_progress",
+      phase: "worker_finished",
+      title: `${titlePrefix}: ${eventInfo.task ?? "Goal worker"}`,
+      detail: goalCompletionDetail(summary),
+      workerId: eventInfo.worker,
+      status: eventInfo.status,
+    };
+  }
+  return {
+    kind: "goal_progress",
+    phase: "verifier_finished",
+    title: `Verifier ${eventInfo.status ?? "finished"}: ${eventInfo.goal ?? "Goal"}`,
+    detail: goalCompletionDetail(summary),
+    status: eventInfo.status,
+  };
+}
+
+export function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
   const items: CompletedItem[] = [];
   let id = 0;
+
+  const pushGoalProgress = (draft: GoalProgressDraft) => {
+    items.push({ ...draft, id: `restore-${id++}` });
+  };
+
+  const pushRestoredAssistantText = (text: string) => {
+    const segments = segmentDisplayText(text, []);
+    if (segments.length === 0) {
+      const stripped = stripDoneMarkers(text);
+      if (stripped) items.push({ kind: "assistant", text: stripped, id: `restore-${id++}` });
+      return;
+    }
+    for (const segment of segments) {
+      if (segment.kind === "text") {
+        const stripped = stripDoneMarkers(segment.text).trimStart();
+        if (stripped) items.push({ kind: "assistant", text: stripped, id: `restore-${id++}` });
+      } else {
+        items.push({
+          kind: "step_done",
+          stepNum: segment.stepNum,
+          description: segment.description,
+          id: `restore-${id++}`,
+        });
+      }
+    }
+  };
 
   // Index tool results by toolCallId for pairing with tool calls
   const toolResults = new Map<string, { content: string; isError: boolean }>();
@@ -1839,11 +2001,17 @@ function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
 
     if (msg.role === "user") {
       const text = extractText(msg.content);
-      if (text) items.push({ kind: "user", text, id: `restore-${id++}` });
+      if (!text) continue;
+      const goalProgress = goalProgressFromSyntheticText(text);
+      if (goalProgress) {
+        pushGoalProgress(goalProgress);
+      } else {
+        items.push({ kind: "user", text, id: `restore-${id++}` });
+      }
     } else if (msg.role === "assistant") {
       const content = msg.content;
       if (typeof content === "string") {
-        if (content) items.push({ kind: "assistant", text: content, id: `restore-${id++}` });
+        if (content) pushRestoredAssistantText(content);
         continue;
       }
       for (const block of content) {
@@ -1866,7 +2034,7 @@ function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
       let textBuf = "";
       const flushText = () => {
         if (textBuf) {
-          items.push({ kind: "assistant", text: textBuf, id: `restore-${id++}` });
+          pushRestoredAssistantText(textBuf);
           textBuf = "";
         }
       };
@@ -1931,4 +2099,6 @@ function openBrowser(url: string): void {
   });
 }
 
-main();
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  main();
+}

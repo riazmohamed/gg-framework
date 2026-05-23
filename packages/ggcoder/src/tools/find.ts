@@ -35,6 +35,8 @@ export function createFindTool(cwd: string): AgentTool<typeof FindParams> {
         dot: false,
         onlyFiles: true,
         ignore: ["**/node_modules/**", "**/.git/**"],
+        suppressErrors: true,
+        followSymbolicLinks: false,
       });
 
       // Filter by .gitignore

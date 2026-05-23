@@ -4,6 +4,7 @@ import type { StreamResult } from "./utils/event-stream.js";
 import { streamAnthropic } from "./providers/anthropic.js";
 import { streamOpenAI } from "./providers/openai.js";
 import { streamOpenAICodex } from "./providers/openai-codex.js";
+import { streamGemini } from "./providers/gemini.js";
 import { providerRegistry } from "./provider-registry.js";
 
 /** Z.AI coding API endpoint — the primary endpoint for all GLM models. */
@@ -32,6 +33,10 @@ providerRegistry.register("openai", {
     }
     return streamOpenAI(options);
   },
+});
+
+providerRegistry.register("gemini", {
+  stream: (options) => streamGemini(options),
 });
 
 providerRegistry.register("glm", {
