@@ -48,9 +48,10 @@ export function createSubAgentTool(
   return {
     name: "subagent",
     description:
-      `Spawn an isolated sub-agent to handle a focused task. The sub-agent runs as a separate process with its own context window, tools, and system prompt. Use this for tasks that benefit from isolation or parallelism.` +
+      `Spawn an isolated sub-agent to handle a focused task. The sub-agent runs as a separate process with its own context window, tools, and system prompt. Use this for tasks that benefit from an isolated context.` +
       agentDesc,
     parameters: SubAgentParams,
+    executionMode: "sequential",
     async execute(args, context) {
       if (planModeRef?.current) {
         return "Error: subagent is restricted in plan mode. Use read-only tools to explore the codebase.";
@@ -313,6 +314,22 @@ function formatToolActivity(name: string, args: Record<string, unknown>): string
     }
     case "web_fetch":
       return `Fetching ${truncateStr(String(args.url ?? ""), 35)}`;
+    case "source_path":
+      return `Resolving source for ${truncateStr(String(args.package ?? ""), 30)}`;
+    case "task_output":
+      return `Reading task output ${truncateStr(String(args.id ?? ""), 20)}`;
+    case "task_stop":
+      return `Stopping task ${truncateStr(String(args.id ?? ""), 20)}`;
+    case "tasks":
+      return `Managing tasks: ${truncateStr(String(args.action ?? ""), 20)}`;
+    case "enter_plan":
+      return "Entering plan mode";
+    case "exit_plan":
+      return `Submitting plan ${shortenPath(String(args.plan_path ?? ""))}`;
+    case "web_search":
+      return `Searching web for ${truncateStr(String(args.query ?? ""), 30)}`;
+    case "skill":
+      return `Loading skill ${truncateStr(String(args.skill ?? ""), 30)}`;
     default: {
       // MCP or unknown tools — show name + first short arg value
       const firstVal = Object.values(args).find((v) => typeof v === "string" && v.length > 0);

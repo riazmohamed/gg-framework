@@ -1,12 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   shouldCompact,
+  getCompactionReserveTokens,
   findRecentCutPoint,
   prepareMessagesForSummary,
   selectMessagesInBudget,
   buildFallbackSummary,
   extractSummaryText,
   compact,
+  SUMMARY_ATTEMPT_TIMEOUT_MS,
+  MAX_SUMMARY_RETRIES,
 } from "./compactor.js";
 import { estimateConversationTokens } from "./token-estimator.js";
 import { getContextWindow } from "../model-registry.js";
@@ -152,6 +155,20 @@ describe("shouldCompact", () => {
     expect(shouldCompact(messages, contextWindow, 0.8)).toBe(false);
     // But with explicit actualTokens, the guard is bypassed
     expect(shouldCompact(messages, contextWindow, 0.8, 200)).toBe(true);
+  });
+
+  it("uses requested output cap for reserve instead of theoretical model max", () => {
+    const messages = [makeMessage("system", "sys"), makeMessage("user", "hello")];
+    const contextWindow = 272_000;
+    const reserveTokens = getCompactionReserveTokens(16_384);
+
+    expect(reserveTokens).toBe(21_384);
+    expect(shouldCompact(messages, contextWindow, 0.8, 133_000, reserveTokens)).toBe(false);
+    expect(shouldCompact(messages, contextWindow, 0.8, 218_000, reserveTokens)).toBe(true);
+  });
+
+  it("keeps the fixed 16k minimum reserve for tiny output caps", () => {
+    expect(getCompactionReserveTokens(4_096)).toBe(16_384);
   });
 });
 
@@ -677,6 +694,52 @@ describe("compact", () => {
 
     const lastMsg = result.messages[result.messages.length - 1];
     expect(lastMsg.role).not.toBe("assistant");
+  });
+
+  it("uses fallback summary when summary response wait times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const mockStream = vi.mocked(stream);
+      mockStream.mockClear();
+      mockStream.mockReturnValue(mockStreamResult(new Promise(() => {})) as never);
+
+      const messages = buildConversation(30);
+      const promise = compact(messages, baseOptions);
+      await vi.advanceTimersByTimeAsync((SUMMARY_ATTEMPT_TIMEOUT_MS + 1) * 3);
+      const result = await promise;
+
+      expect(mockStream).toHaveBeenCalledTimes(MAX_SUMMARY_RETRIES + 1);
+      const summaryMsg = result.messages[1];
+      expect(summaryMsg.role).toBe("user");
+      expect(summaryMsg.content as string).toContain("## Goal");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("passes AbortSignal to summary stream and rejects without compacting on abort", async () => {
+    const mockStream = vi.mocked(stream);
+    const ac = new AbortController();
+    mockStream.mockImplementation(({ signal }: { signal?: AbortSignal }) => {
+      expect(signal).toBe(ac.signal);
+      return mockStreamResult(
+        new Promise((_, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        }) as never,
+      ) as never;
+    });
+
+    const messages = buildConversation(30);
+    const promise = compact(messages, { ...baseOptions, signal: ac.signal });
+    ac.abort();
+
+    await expect(promise).rejects.toMatchObject({ name: "AbortError" });
+    expect(messages[0]).toEqual(makeMessage("system", "You are a helpful assistant."));
+    expect(messages).toHaveLength(62);
   });
 
   it("retries on empty response before falling back", async () => {

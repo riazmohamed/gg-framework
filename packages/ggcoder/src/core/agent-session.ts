@@ -31,6 +31,19 @@ import { MCPClientManager, getMCPServers } from "./mcp/index.js";
 import { log } from "./logger.js";
 import { setEstimatorModel } from "./compaction/token-estimator.js";
 import { discoverAgents } from "./agents.js";
+import {
+  FOCUSED_REPO_MAP_MAX_CHARS,
+  FIRST_TURN_REPO_MAP_MAX_CHARS,
+  buildRepoMap,
+  createRepoMapCache,
+  type RepoMapCache,
+  type RepoMapSnapshot,
+} from "./repomap.js";
+import {
+  getLatestUserText,
+  injectRepoMapContextMessages,
+  stripRepoMapContextMessages,
+} from "./repomap-context.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -95,6 +108,13 @@ export class AgentSession {
   private cacheKeyLogged = false;
   private processManager?: ProcessManager;
   private mcpManager?: MCPClientManager;
+  private repoMapInjectionEnabled = true;
+  private repoMapDirty = true;
+  private repoMapMarkdown = "";
+  private repoMapSnapshot?: RepoMapSnapshot;
+  private repoMapChangedFiles = new Set<string>();
+  private repoMapReadFiles = new Set<string>();
+  private repoMapCache: RepoMapCache = createRepoMapCache();
 
   private provider: Provider;
   private model: string;
@@ -152,12 +172,6 @@ export class AgentSession {
       projectDir: this.cwd,
     });
 
-    // Build system prompt
-    const basePrompt =
-      this.customSystemPrompt ??
-      (await buildSystemPrompt(this.cwd, this.skills, false, undefined, this.provider));
-    this.messages = [{ role: "system", content: basePrompt }];
-
     // Discover agents and create tools (with sub-agent support)
     const agents = await discoverAgents({
       globalAgentsDir: paths.agentsDir,
@@ -171,6 +185,8 @@ export class AgentSession {
       // Lazy — sessionId isn't assigned yet when createTools() runs, so we
       // must defer reading the cache key until the sub-agent actually fires.
       getCacheKey: () => this.getPromptCacheKey(),
+      onFileRead: (filePath) => this.markRepoMapRead(filePath),
+      onFileMutated: (filePath) => this.markRepoMapDirty(filePath),
     });
     this.tools = tools;
     this.processManager = processManager;
@@ -196,6 +212,17 @@ export class AgentSession {
         `MCP initialization failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+
+    const basePrompt =
+      this.customSystemPrompt ??
+      (await buildSystemPrompt(
+        this.cwd,
+        this.skills,
+        false,
+        undefined,
+        this.tools.map((tool) => tool.name),
+      ));
+    this.messages = [{ role: "system", content: basePrompt }];
 
     // Load or create session. Transient sessions (subagent spawns) never
     // touch the session store — sessionPath stays empty and persistMessage
@@ -332,28 +359,36 @@ export class AgentSession {
       });
     }
 
-    // Auto-compact if needed
-    if (this.settingsManager.get("autoCompact")) {
-      const contextWindow = getContextWindow(this.model);
-      const threshold = this.settingsManager.get("compactThreshold");
-      if (shouldCompact(this.messages, contextWindow, threshold)) {
-        await this.compact();
-      }
-    }
-
     // Resolve OAuth credentials and run agent loop.
     // On 401, force-refresh the token and retry once — the provider may have
     // revoked the token server-side before the stored expiry (e.g. after a restart).
     let creds = await this.authStorage.resolveCredentials(this.provider);
 
+    // Auto-compact if needed. This must happen after credential resolution so
+    // OpenAI OAuth/Codex sessions use the Codex product context window instead
+    // of the public API model window.
+    if (this.settingsManager.get("autoCompact")) {
+      const contextWindow = getContextWindow(this.model, {
+        provider: this.provider,
+        accountId: creds.accountId,
+      });
+      const threshold = this.settingsManager.get("compactThreshold");
+      if (shouldCompact(this.messages, contextWindow, threshold)) {
+        await this.compact(creds);
+      }
+    }
+
     const userAgent = this.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined;
 
-    const runAgentLoop = async (apiKey: string, accountId?: string) => {
+    const latestUserPrompt = getLatestUserText(this.messages);
+    const loopMessages = await this.prepareDynamicContext(latestUserPrompt);
+
+    const runAgentLoop = async (apiKey: string, accountId?: string, projectId?: string) => {
       const modelInfo = getModel(this.model);
       // Build model router based on provider capabilities and user preference
       const modelRouter = createModelRouter(this.routerMode, this.provider, this.model);
 
-      const generator = agentLoop(this.messages, {
+      const generator = agentLoop(loopMessages, {
         provider: this.provider,
         model: this.model,
         tools: this.tools,
@@ -364,13 +399,16 @@ export class AgentSession {
         baseUrl: this.baseUrl,
         signal: this.opts.signal,
         accountId,
+        projectId,
         cacheRetention: "short",
         promptCacheKey: this.getPromptCacheKey(),
         supportsImages: modelInfo?.supportsImages,
         userAgent,
         // clearToolUses disabled — causes model to output unsolicited context summaries
         // Single tool result shouldn't exceed 30% of context window (in chars)
-        maxToolResultChars: Math.floor(getContextWindow(this.model) * 3.5 * 0.3),
+        maxToolResultChars: Math.floor(
+          getContextWindow(this.model, { provider: this.provider, accountId }) * 3.5 * 0.3,
+        ),
         modelRouter,
       });
 
@@ -380,7 +418,7 @@ export class AgentSession {
     };
 
     try {
-      await runAgentLoop(creds.accessToken, creds.accountId);
+      await runAgentLoop(creds.accessToken, creds.accountId, creds.projectId);
     } catch (err) {
       // Abort errors are expected (user cancellation) — don't retry or re-throw
       if (isAbortError(err) || this.opts.signal?.aborted) {
@@ -404,11 +442,13 @@ export class AgentSession {
         }
         log("INFO", "auth", "Got 401, force-refreshing token and retrying");
         creds = await this.authStorage.resolveCredentials(this.provider, { forceRefresh: true });
-        await runAgentLoop(creds.accessToken, creds.accountId);
+        await runAgentLoop(creds.accessToken, creds.accountId, creds.projectId);
       } else {
         throw err;
       }
     }
+
+    this.messages = this.stripDynamicMessages(loopMessages);
 
     // Persist new messages
     for (let i = this.lastPersistedIndex; i < this.messages.length; i++) {
@@ -478,16 +518,26 @@ export class AgentSession {
     log("INFO", "router", `Model routing set to: ${mode}`);
   }
 
-  async compact(): Promise<void> {
-    const contextWindow = getContextWindow(this.model);
+  async compact(existingCredentials?: {
+    accessToken: string;
+    accountId?: string;
+    projectId?: string;
+    baseUrl?: string;
+  }): Promise<void> {
+    const creds = existingCredentials ?? (await this.authStorage.resolveCredentials(this.provider));
+    const contextWindow = getContextWindow(this.model, {
+      provider: this.provider,
+      accountId: creds.accountId,
+    });
     this.eventBus.emit("compaction_start", { messageCount: this.messages.length });
-
-    const creds = await this.authStorage.resolveCredentials(this.provider);
 
     const result = await compact(this.messages, {
       provider: this.provider,
       model: this.model,
       apiKey: creds.accessToken,
+      accountId: creds.accountId,
+      projectId: creds.projectId,
+      baseUrl: this.baseUrl ?? creds.baseUrl,
       contextWindow,
       signal: this.opts.signal,
     });
@@ -516,7 +566,13 @@ export class AgentSession {
   async newSession(): Promise<void> {
     const basePrompt =
       this.customSystemPrompt ??
-      (await buildSystemPrompt(this.cwd, this.skills, false, undefined, this.provider));
+      (await buildSystemPrompt(
+        this.cwd,
+        this.skills,
+        false,
+        undefined,
+        this.tools.map((tool) => tool.name),
+      ));
     this.messages = [{ role: "system", content: basePrompt }];
     await this.createNewSession();
     this.eventBus.emit("session_start", { sessionId: this.sessionId });
@@ -608,6 +664,35 @@ export class AgentSession {
     return this.getPromptCacheKey();
   }
 
+  getRepoMapStatus(): { enabled: boolean; markdown: string; snapshot?: RepoMapSnapshot } {
+    return {
+      enabled: this.repoMapInjectionEnabled,
+      markdown: this.repoMapMarkdown,
+      snapshot: this.repoMapSnapshot,
+    };
+  }
+
+  async refreshRepoMap(
+    latestUserPrompt?: string,
+  ): Promise<{ markdown: string; snapshot: RepoMapSnapshot }> {
+    const rendered = await buildRepoMap({
+      cwd: this.cwd,
+      maxChars: this.getRepoMapBudget(),
+      changedFiles: [...this.repoMapChangedFiles],
+      readFiles: [...this.repoMapReadFiles],
+      focusTerms: latestUserPrompt ? [latestUserPrompt] : [],
+      cache: this.repoMapCache,
+    });
+    this.repoMapMarkdown = rendered.markdown;
+    this.repoMapSnapshot = rendered.snapshot;
+    this.repoMapDirty = false;
+    return { markdown: rendered.markdown, snapshot: rendered.snapshot };
+  }
+
+  setRepoMapInjectionEnabled(enabled: boolean): void {
+    this.repoMapInjectionEnabled = enabled;
+  }
+
   async dispose(): Promise<void> {
     this.processManager?.shutdownAll();
     await this.mcpManager?.dispose();
@@ -640,14 +725,20 @@ export class AgentSession {
 
     // Auto-compact on load if the restored session exceeds the context window.
     // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
-    const contextWindow = getContextWindow(this.model);
+    const creds = await this.authStorage.resolveCredentials(this.provider);
+    const contextWindow = getContextWindow(this.model, {
+      provider: this.provider,
+      accountId: creds.accountId,
+    });
     if (shouldCompact(this.messages, contextWindow, 0.8)) {
       log("INFO", "session", `Restored session exceeds context — auto-compacting`);
-      const creds = await this.authStorage.resolveCredentials(this.provider);
       const compacted = await compact(this.messages, {
         provider: this.provider,
         model: this.model,
         apiKey: creds.accessToken,
+        accountId: creds.accountId,
+        projectId: creds.projectId,
+        baseUrl: this.baseUrl ?? creds.baseUrl,
         contextWindow,
         signal: this.opts.signal,
       });
@@ -669,6 +760,42 @@ export class AgentSession {
       await this.persistMessage(msg);
     }
     this.lastPersistedIndex = this.messages.length;
+  }
+
+  private markRepoMapDirty(filePath: string): void {
+    const relativePath = this.relativeRepoMapPath(filePath);
+    this.repoMapChangedFiles.add(relativePath);
+    this.repoMapReadFiles.add(relativePath);
+    this.repoMapDirty = true;
+  }
+
+  private markRepoMapRead(filePath: string): void {
+    this.repoMapReadFiles.add(this.relativeRepoMapPath(filePath));
+    this.repoMapDirty = true;
+  }
+
+  private relativeRepoMapPath(filePath: string): string {
+    return path.relative(this.cwd, filePath).split(path.sep).join("/");
+  }
+
+  private getRepoMapBudget(): number {
+    const userTurns = this.messages.filter((message) => message.role === "user").length;
+    if (userTurns <= 1 && this.repoMapReadFiles.size === 0) return FIRST_TURN_REPO_MAP_MAX_CHARS;
+    if (this.repoMapReadFiles.size > 0) return FOCUSED_REPO_MAP_MAX_CHARS;
+    return FOCUSED_REPO_MAP_MAX_CHARS + 1000;
+  }
+
+  private async prepareDynamicContext(latestUserPrompt?: string): Promise<Message[]> {
+    if (!this.repoMapInjectionEnabled) return this.stripDynamicMessages(this.messages);
+    if (this.repoMapDirty || !this.repoMapMarkdown) {
+      await this.refreshRepoMap(latestUserPrompt);
+    }
+    if (!this.repoMapMarkdown) return this.stripDynamicMessages(this.messages);
+    return injectRepoMapContextMessages(this.messages, this.repoMapMarkdown);
+  }
+
+  private stripDynamicMessages(messages: readonly Message[]): Message[] {
+    return stripRepoMapContextMessages(messages);
   }
 
   private async persistMessage(message: Message): Promise<void> {
@@ -720,6 +847,27 @@ export class AgentSession {
         const result = await this.branch(stepsBack);
         return `Branched: rewound from ${result.branchedFrom} to ${result.messagesKept} messages. New messages will fork from here.`;
       },
+      repoMap: async (action = "show") => {
+        if (action === "on") {
+          this.setRepoMapInjectionEnabled(true);
+          return "Dynamic repo map injection is on.";
+        }
+        if (action === "off") {
+          this.setRepoMapInjectionEnabled(false);
+          return "Dynamic repo map injection is off for this session.";
+        }
+        if (action === "refresh") {
+          const latestUserPrompt = getLatestUserText(this.messages);
+          const refreshed = await this.refreshRepoMap(latestUserPrompt);
+          return formatRepoMapCommandOutput(this.repoMapInjectionEnabled, refreshed.markdown, true);
+        }
+        const status = this.getRepoMapStatus();
+        if (!status.markdown) {
+          const refreshed = await this.refreshRepoMap(getLatestUserText(this.messages));
+          return formatRepoMapCommandOutput(status.enabled, refreshed.markdown, false);
+        }
+        return formatRepoMapCommandOutput(status.enabled, status.markdown, false);
+      },
       listBranches: async () => {
         const branches = await this.listBranches();
         if (branches.length <= 1) return "No branches — conversation is linear.";
@@ -743,4 +891,16 @@ export class AgentSession {
       },
     };
   }
+}
+
+function formatRepoMapCommandOutput(
+  enabled: boolean,
+  markdown: string,
+  refreshed: boolean,
+): string {
+  const status = enabled ? "on" : "off";
+  const prefix = refreshed
+    ? `Dynamic repo map refreshed · injection: ${status}`
+    : `Dynamic repo map · injection: ${status}`;
+  return `${prefix}\n\n${markdown}`;
 }

@@ -1,12 +1,12 @@
 {
   "name": "@abukhaled/ogcoder",
-  "version": "4.3.185",
+  "version": "4.3.212",
   "type": "module",
-  "description": "CLI coding agent with OAuth authentication for Anthropic and OpenAI",
+  "description": "CLI coding agent with OAuth authentication for Anthropic, OpenAI, and Gemini",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/abukhaled/gg-framework.git",
+    "url": "git+https://github.com/kenkaiiii/gg-framework.git",
     "directory": "packages/ggcoder"
   },
   "bin": {
@@ -48,14 +48,6 @@
     "./models": {
       "import": "./dist/core/model-registry.js",
       "types": "./dist/core/model-registry.d.ts"
-    },
-    "./auth": {
-      "import": "./dist/core/auth/index.js",
-      "types": "./dist/core/auth/index.d.ts"
-    },
-    "./utils/open-browser": {
-      "import": "./dist/utils/open-browser.js",
-      "types": "./dist/utils/open-browser.d.ts"
     }
   },
   "files": [
@@ -64,7 +56,10 @@
   "scripts": {
     "build": "tsup",
     "check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify:goal:e2e": "pnpm dlx tsx scripts/verify-goal-e2e.ts",
+    "verify:repomap": "pnpm build && node scripts/verify-repomap-focus.js",
+    "verify:repomap:cold-start": "pnpm build && node scripts/verify-repomap-cold-start.js"
   },
   "dependencies": {
     "@abukhaled/gg-agent": "workspace:*",
@@ -81,6 +76,7 @@
     "ink": "^7.0.2",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
+    "opensrc": "^0.7.2",
     "react": "^19.2.5",
     "sharp": "^0.34.5",
     "string-width": "^8.2.0",

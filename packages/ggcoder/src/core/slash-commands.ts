@@ -19,11 +19,10 @@ export interface SlashCommandContext {
   branch: (stepsBack?: number) => Promise<string>;
   /** List all branches in the current session. */
   listBranches: () => Promise<string>;
-  /** Get current model routing mode. */
+  /** Show or refresh the dynamic repo map. */
+  repoMap: (action?: "show" | "refresh" | "on" | "off") => Promise<string>;
   getRouterMode: () => RouterMode;
-  /** Set model routing mode. */
   setRouterMode: (mode: RouterMode) => void;
-  /** Get router status info (current model, vision model, executor model). */
   getRouterInfo: () => string;
 }
 
@@ -99,7 +98,7 @@ export function createBuiltinCommands(): SlashCommand[] {
   return [
     {
       name: "model",
-      aliases: ["m"],
+      aliases: ["m", "models"],
       description: "Switch model or list available models",
       usage: "/model [provider:model]",
       async execute(args, ctx) {
@@ -176,6 +175,20 @@ export function createBuiltinCommands(): SlashCommand[] {
       async execute(_args, ctx) {
         await ctx.newSession();
         return "New session created.";
+      },
+    },
+    {
+      name: "map",
+      aliases: [],
+      description: "Show, refresh, or toggle the dynamic repo map",
+      usage: "/map [refresh|on|off]",
+      async execute(args, ctx) {
+        const normalized = args.trim().toLowerCase();
+        if (normalized === "refresh" || normalized === "on" || normalized === "off") {
+          return ctx.repoMap(normalized);
+        }
+        if (normalized.length > 0) return "Usage: /map [refresh|on|off]";
+        return ctx.repoMap("show");
       },
     },
     {

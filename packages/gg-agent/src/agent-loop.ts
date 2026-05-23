@@ -81,6 +81,56 @@ export function isContextOverflow(err: unknown): boolean {
   );
 }
 
+export interface ContextOverflowDetails {
+  observedTokens?: number;
+  observedLimit?: number;
+}
+
+function parseOverflowNumber(value: string): number {
+  return Number(value.replace(/[,_\s]/g, ""));
+}
+
+/** Extract provider-reported token counts from common context overflow messages. */
+export function extractContextOverflowDetails(err: unknown): ContextOverflowDetails {
+  if (!(err instanceof Error)) return {};
+  const text = err.message;
+  const patterns: Array<{ regex: RegExp; tokensGroup: number; limitGroup: number }> = [
+    // Anthropic/OpenAI-compatible: "203456 tokens > 200000 maximum"
+    {
+      regex: /([\d,_.\s]+)\s*tokens?\s*>\s*([\d,_.\s]+)\s*(?:maximum|max|limit)?/i,
+      tokensGroup: 1,
+      limitGroup: 2,
+    },
+    // OpenAI: "maximum context length is 128000 tokens ... resulted in 130000 tokens"
+    {
+      regex:
+        /maximum context length is\s*([\d,_.\s]+)\s*tokens?[\s\S]*?resulted in\s*([\d,_.\s]+)\s*tokens?/i,
+      tokensGroup: 2,
+      limitGroup: 1,
+    },
+    // Generic: "130000 input tokens exceeds 128000 token limit"
+    {
+      regex:
+        /([\d,_.\s]+)\s*(?:input\s*)?tokens?[\s\S]{0,80}?exceeds?[\s\S]{0,80}?([\d,_.\s]+)\s*(?:token\s*)?(?:limit|maximum|max)/i,
+      tokensGroup: 1,
+      limitGroup: 2,
+    },
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern.regex);
+    if (!match) continue;
+    const observedTokens = parseOverflowNumber(match[pattern.tokensGroup] ?? "");
+    const observedLimit = parseOverflowNumber(match[pattern.limitGroup] ?? "");
+    return {
+      ...(Number.isFinite(observedTokens) && observedTokens > 0 ? { observedTokens } : {}),
+      ...(Number.isFinite(observedLimit) && observedLimit > 0 ? { observedLimit } : {}),
+    };
+  }
+
+  return {};
+}
+
 /**
  * Detect billing/quota errors — these should NOT be retried.
  * GLM returns HTTP 429 with "Insufficient balance" for quota exhaustion.
@@ -124,16 +174,22 @@ export function isToolPairingError(err: unknown): boolean {
 }
 
 /**
- * Distinguish rate-limit (HTTP 429) from server-side overload (HTTP 529).
- * Returns null for errors that should not enter the overload-retry bucket.
- * Both kinds use the same backoff schedule, but the UI shows different copy
- * and the log line records the true cause.
+ * Distinguish rate-limit (HTTP 429), server-side overload (HTTP 529), and
+ * transient provider 5xx/API failures. Returns null for errors that should not
+ * enter the retry bucket. All kinds use the same backoff schedule, but the UI
+ * shows different copy and the log line records the true cause.
  */
-export function classifyOverload(err: unknown): "rate_limit" | "overloaded" | null {
+export function classifyOverload(
+  err: unknown,
+): "rate_limit" | "overloaded" | "provider_error" | null {
   if (!(err instanceof Error)) return null;
   if (isBillingError(err)) return null;
   const msg = err.message.toLowerCase();
+  const errorWithStatus = err as Error & { statusCode?: unknown };
+  const statusCode =
+    typeof errorWithStatus.statusCode === "number" ? errorWithStatus.statusCode : undefined;
   if (
+    statusCode === 429 ||
     msg.includes("rate_limit") ||
     msg.includes("rate limit") ||
     msg.includes("too many requests") ||
@@ -141,8 +197,22 @@ export function classifyOverload(err: unknown): "rate_limit" | "overloaded" | nu
   ) {
     return "rate_limit";
   }
-  if (msg.includes("overloaded") || msg.includes("529")) {
+  if (statusCode === 529 || msg.includes("overloaded") || msg.includes("529")) {
     return "overloaded";
+  }
+  if (
+    statusCode === 500 ||
+    statusCode === 502 ||
+    statusCode === 503 ||
+    statusCode === 504 ||
+    msg.includes("api_error") ||
+    msg.includes("server_error") ||
+    msg.includes("internal server error") ||
+    msg.includes("bad gateway") ||
+    msg.includes("service unavailable") ||
+    msg.includes("gateway timeout")
+  ) {
+    return "provider_error";
   }
   return null;
 }
@@ -259,6 +329,8 @@ export async function* agentLoop(
   let emptyResponseRetries = 0;
   let stallRetries = 0;
   let overflowCompactionAttempts = 0;
+  let toolResultTruncationAttempted = false;
+  const invalidToolArgumentCounts = new Map<string, number>();
   // Non-streaming fallback mode. After repeated stream stalls, flip to a
   // plain non-streaming request/response -- often survives broken SSE
   // connections (transient CDN / proxy issues) that streaming retries cannot.
@@ -501,6 +573,7 @@ export async function* agentLoop(
           baseUrl: turnBaseUrl,
           signal: streamController.signal,
           accountId: options.accountId,
+          projectId: options.projectId,
           cacheRetention: options.cacheRetention,
           promptCacheKey: options.promptCacheKey,
           serviceTier: options.serviceTier,
@@ -669,12 +742,46 @@ export async function* agentLoop(
         // MAX_OVERFLOW_COMPACTIONS to avoid loops when compaction can't reduce
         // enough (e.g. single huge user message).
         if (isContextOverflow(err)) {
+          const overflowDetails = extractContextOverflowDetails(err);
+          diag("context_overflow_detected", {
+            ...overflowDetails,
+            error: errMsg.slice(0, 500),
+            messages: messages.length,
+          });
+
+          const overflowToolResultMaxChars = Math.min(
+            options.maxToolResultChars ?? 100_000,
+            100_000,
+          );
+          if (!toolResultTruncationAttempted) {
+            toolResultTruncationAttempted = true;
+            const truncated = truncateOversizedToolResults(messages, overflowToolResultMaxChars);
+            diag("overflow_tool_result_truncation", {
+              truncated,
+              maxChars: overflowToolResultMaxChars,
+            });
+            if (truncated) {
+              yield {
+                type: "retry" as const,
+                reason: "overflow_compact" as const,
+                attempt: overflowCompactionAttempts + 1,
+                maxAttempts: MAX_OVERFLOW_COMPACTIONS,
+                delayMs: 0,
+                ...overflowDetails,
+                silent: true,
+              };
+              turn--;
+              continue;
+            }
+          }
+
           if (options.transformContext && overflowCompactionAttempts < MAX_OVERFLOW_COMPACTIONS) {
             overflowCompactionAttempts++;
             diag("overflow_compact_start", {
               attempt: overflowCompactionAttempts,
               maxAttempts: MAX_OVERFLOW_COMPACTIONS,
               messages: messages.length,
+              ...overflowDetails,
             });
             try {
               const compacted = await options.transformContext(messages, { force: true });
@@ -684,6 +791,7 @@ export async function* agentLoop(
                 diag("overflow_compact_success", {
                   attempt: overflowCompactionAttempts,
                   messages: messages.length,
+                  ...overflowDetails,
                 });
                 yield {
                   type: "retry" as const,
@@ -691,6 +799,7 @@ export async function* agentLoop(
                   attempt: overflowCompactionAttempts,
                   maxAttempts: MAX_OVERFLOW_COMPACTIONS,
                   delayMs: 0,
+                  ...overflowDetails,
                 };
                 turn--;
                 continue;
@@ -699,17 +808,19 @@ export async function* agentLoop(
                 attempt: overflowCompactionAttempts,
                 before: messages.length,
                 after: compacted.length,
+                ...overflowDetails,
               });
             } catch (compactErr) {
               diag("overflow_compact_failed", {
                 error: compactErr instanceof Error ? compactErr.message : String(compactErr),
+                ...overflowDetails,
               });
             }
           }
           yield { type: "error" as const, error: err instanceof Error ? err : new Error(errMsg) };
           throw err;
         }
-        // Overloaded / rate-limited: exponential backoff, retry up to 10 times
+        // Transient provider errors (5xx), overload, and rate-limit: exponential backoff.
         const overloadKind = classifyOverload(err);
         if (overloadRetries < MAX_OVERLOAD_RETRIES && overloadKind) {
           overloadRetries++;
@@ -985,160 +1096,30 @@ export async function* agentLoop(
           toolCalls.push(tc);
         }
       }
-      const eventStream = new EventStream<AgentEvent>();
 
-      // Launch all tool calls in parallel
-      const executions = toolCalls.map(async (toolCall) => {
-        const startTime = Date.now();
+      let fatalToolArgumentError: Error | null = null;
+      const markFatalToolArgumentError = (error: Error): void => {
+        fatalToolArgumentError = error;
+      };
+      const executionOptions: ToolBatchExecutionOptions = {
+        signal: options.signal,
+        maxToolResultChars: options.maxToolResultChars,
+        toolMap,
+        invalidToolArgumentCounts,
+        markFatalToolArgumentError,
+      };
+      const hasSequentialToolCall = toolCalls.some(
+        (toolCall) => toolMap.get(toolCall.name)?.executionMode === "sequential",
+      );
+      const executionResult = hasSequentialToolCall
+        ? yield* executeToolCallsSequential(toolCalls, toolResults, executionOptions)
+        : yield* executeToolCallsParallel(toolCalls, toolResults, executionOptions);
+      messages.push({ role: "tool", content: executionResult.toolResults });
+      const toolsAborted = executionResult.aborted;
 
-        eventStream.push({
-          type: "tool_call_start" as const,
-          toolCallId: toolCall.id,
-          name: toolCall.name,
-          args: toolCall.args,
-        });
-
-        let resultContent: ToolResultContent;
-        let details: unknown;
-        let isError = false;
-
-        const tool = toolMap.get(toolCall.name);
-        if (!tool) {
-          resultContent = `Unknown tool: ${toolCall.name}`;
-          isError = true;
-        } else {
-          try {
-            const parsed = tool.parameters.parse(toolCall.args);
-            const ctx: ToolContext = {
-              signal: options.signal ?? AbortSignal.timeout(300_000),
-              toolCallId: toolCall.id,
-              onUpdate: (update: unknown) => {
-                eventStream.push({
-                  type: "tool_call_update" as const,
-                  toolCallId: toolCall.id,
-                  update,
-                });
-              },
-            };
-            const raw = await tool.execute(parsed, ctx);
-            const normalized = normalizeToolResult(raw);
-            resultContent = normalized.content;
-            details = normalized.details;
-          } catch (err) {
-            isError = true;
-            if (err instanceof ZodError) {
-              // Zod v4's default `.message` is a JSON dump of `.issues`, which
-              // the model can't act on. Prettify into "field X: expected Y,
-              // received Z" lines so the next call comes back with valid args.
-              resultContent =
-                `Invalid arguments for tool \`${toolCall.name}\`:\n` +
-                prettifyError(err) +
-                "\nRe-issue the call with each field as the correct type.";
-            } else {
-              resultContent = err instanceof Error ? err.message : String(err);
-            }
-          }
-        }
-
-        const durationMs = Date.now() - startTime;
-
-        eventStream.push({
-          type: "tool_call_end" as const,
-          toolCallId: toolCall.id,
-          result: toolResultPreview(resultContent),
-          details,
-          isError,
-          durationMs,
-        });
-
-        return { toolCallId: toolCall.id, content: resultContent, isError };
-      });
-
-      // Abort the tool event stream when the signal fires so Ctrl+C
-      // doesn't hang waiting for long-running tools to finish.
-      const abortHandler = () => eventStream.abort(new Error("aborted"));
-      options.signal?.addEventListener("abort", abortHandler, { once: true });
-
-      // Close event stream when all tools complete.
-      // Track whether the finally block has already consumed toolResults
-      // to prevent the race where .then() mutates toolResults after
-      // messages.push() has already captured the array by reference.
-      let toolResultsFinalized = false;
-
-      Promise.all(executions)
-        .then((results) => {
-          if (toolResultsFinalized) return;
-          const resultsMap = new Map(results.map((r) => [r.toolCallId, r]));
-          for (const tc of toolCalls) {
-            const r = resultsMap.get(tc.id)!;
-            toolResults.push({
-              type: "tool_result",
-              toolCallId: tc.id,
-              content: r.content,
-              isError: r.isError || undefined,
-            });
-          }
-          eventStream.close();
-        })
-        .catch((err) => eventStream.abort(err instanceof Error ? err : new Error(String(err))));
-
-      // Yield events as they arrive from parallel tools
-      let toolsAborted = false;
-      try {
-        for await (const event of eventStream) {
-          yield event;
-        }
-      } catch (err) {
-        // Tool event stream aborted (Ctrl+C) — don't propagate, just mark
-        // so the finally block can clean up and the loop can exit.
-        if (isAbortError(err) || options.signal?.aborted) {
-          toolsAborted = true;
-        } else {
-          throw err;
-        }
-      } finally {
-        options.signal?.removeEventListener("abort", abortHandler);
-
-        // Prevent the Promise.all .then() from mutating toolResults after
-        // we finalize and push them into messages.
-        toolResultsFinalized = true;
-
-        // Ensure every tool_use has a matching tool_result, even on abort.
-        // Without this, an aborted turn leaves an orphaned tool_use in the
-        // message history which causes Anthropic API 400 errors on the next
-        // request.
-        const resolvedIds = new Set(toolResults.map((r) => r.toolCallId));
-        for (const tc of toolCalls) {
-          if (!resolvedIds.has(tc.id)) {
-            toolResults.push({
-              type: "tool_result",
-              toolCallId: tc.id,
-              content: "Tool execution was aborted.",
-              isError: true,
-            });
-          }
-        }
-        // Guard: cap oversized tool results before they enter conversation history.
-        // Uses head+tail strategy to preserve error messages / closing structure at the end.
-        if (options.maxToolResultChars) {
-          const HARD_MAX = 400_000; // absolute ceiling regardless of context window
-          const max = Math.min(options.maxToolResultChars, HARD_MAX);
-          for (const tr of toolResults) {
-            // Only truncate string content — array content (text+image blocks)
-            // is already size-bounded by the image resizer.
-            if (typeof tr.content === "string" && tr.content.length > max) {
-              // Keep 70% head + 30% tail to preserve errors/diagnostics at the end
-              const headChars = Math.floor(max * 0.7);
-              const tailChars = max - headChars;
-              const head = tr.content.slice(0, headChars);
-              const tail = tr.content.slice(-tailChars);
-              const omitted = tr.content.length - headChars - tailChars;
-              tr.content = head + `\n\n[... ${omitted} characters omitted ...]\n\n` + tail;
-            }
-          }
-        }
-
-        messages.push({ role: "tool", content: toolResults });
+      if (fatalToolArgumentError) {
+        yield { type: "error" as const, error: fatalToolArgumentError };
+        break;
       }
 
       // Exit loop after cleaning up aborted tools
@@ -1188,6 +1169,260 @@ export async function* agentLoop(
   };
 }
 
+interface ToolExecutionRecord {
+  toolCallId: string;
+  content: ToolResultContent;
+  isError: boolean;
+}
+
+interface ToolBatchExecutionOptions {
+  signal?: AbortSignal;
+  maxToolResultChars?: number;
+  toolMap: Map<string, AgentTool>;
+  invalidToolArgumentCounts: Map<string, number>;
+  markFatalToolArgumentError: (error: Error) => void;
+}
+
+interface ToolBatchExecutionResult {
+  toolResults: ToolResult[];
+  aborted: boolean;
+}
+
+interface ToolEventState {
+  finalized: boolean;
+}
+
+function pushToolEvent(
+  eventStream: EventStream<AgentEvent>,
+  state: ToolEventState,
+  event: AgentEvent,
+): void {
+  if (!state.finalized) eventStream.push(event);
+}
+
+async function executeSingleToolCall(
+  toolCall: ToolCall,
+  options: ToolBatchExecutionOptions,
+  pushEvent: (event: AgentEvent) => void,
+): Promise<ToolExecutionRecord> {
+  const startTime = Date.now();
+
+  pushEvent({
+    type: "tool_call_start" as const,
+    toolCallId: toolCall.id,
+    name: toolCall.name,
+    args: toolCall.args,
+  });
+
+  let resultContent: ToolResultContent;
+  let details: unknown;
+  let isError = false;
+
+  const tool = options.toolMap.get(toolCall.name);
+  if (!tool) {
+    resultContent = `Unknown tool: ${toolCall.name}`;
+    isError = true;
+  } else {
+    try {
+      const parsed = tool.parameters.parse(toolCall.args);
+      const ctx: ToolContext = {
+        signal: options.signal ?? AbortSignal.timeout(300_000),
+        toolCallId: toolCall.id,
+        onUpdate: (update: unknown) => {
+          pushEvent({
+            type: "tool_call_update" as const,
+            toolCallId: toolCall.id,
+            update,
+          });
+        },
+      };
+      const raw = await tool.execute(parsed, ctx);
+      const normalized = normalizeToolResult(raw);
+      resultContent = normalized.content;
+      details = normalized.details;
+      for (const key of options.invalidToolArgumentCounts.keys()) {
+        if (key.startsWith(`${toolCall.name}:`)) options.invalidToolArgumentCounts.delete(key);
+      }
+    } catch (err) {
+      isError = true;
+      if (err instanceof ZodError) {
+        // Zod v4's default `.message` is a JSON dump of `.issues`, which
+        // the model can't act on. Prettify into "field X: expected Y,
+        // received Z" lines so the next call comes back with valid args.
+        const prettyError = prettifyError(err);
+        const failureKey = `${toolCall.name}:${prettyError}`;
+        const failureCount = (options.invalidToolArgumentCounts.get(failureKey) ?? 0) + 1;
+        options.invalidToolArgumentCounts.set(failureKey, failureCount);
+        resultContent =
+          `Invalid arguments for tool \`${toolCall.name}\`:\n` +
+          prettyError +
+          "\nRe-issue the call with each field as the correct type.";
+        if (failureCount >= 3) {
+          options.markFatalToolArgumentError(
+            new Error(
+              `The model repeatedly issued invalid arguments for tool \`${toolCall.name}\`. ` +
+                `This is usually an upstream model/tool-calling bug. Your conversation is preserved; ` +
+                `send another message or switch models to continue.`,
+            ),
+          );
+        }
+      } else {
+        resultContent = err instanceof Error ? err.message : String(err);
+      }
+    }
+  }
+
+  const durationMs = Date.now() - startTime;
+
+  pushEvent({
+    type: "tool_call_end" as const,
+    toolCallId: toolCall.id,
+    result: toolResultPreview(resultContent),
+    details,
+    isError,
+    durationMs,
+  });
+
+  return { toolCallId: toolCall.id, content: resultContent, isError };
+}
+
+async function* executeToolCallsSequential(
+  toolCalls: ToolCall[],
+  initialToolResults: ToolResult[],
+  options: ToolBatchExecutionOptions,
+): AsyncGenerator<AgentEvent, ToolBatchExecutionResult> {
+  const eventStream = new EventStream<AgentEvent>();
+  const state: ToolEventState = { finalized: false };
+  const resultsById = new Map<string, ToolExecutionRecord>();
+  const abortHandler = () => eventStream.abort(new Error("aborted"));
+  options.signal?.addEventListener("abort", abortHandler, { once: true });
+
+  void (async () => {
+    try {
+      for (const toolCall of toolCalls) {
+        if (options.signal?.aborted) break;
+        const record = await executeSingleToolCall(toolCall, options, (event) =>
+          pushToolEvent(eventStream, state, event),
+        );
+        resultsById.set(record.toolCallId, record);
+      }
+      if (!state.finalized) eventStream.close();
+    } catch (err) {
+      if (!state.finalized) eventStream.abort(err instanceof Error ? err : new Error(String(err)));
+    }
+  })();
+
+  let aborted = false;
+  try {
+    for await (const event of eventStream) {
+      yield event;
+    }
+  } catch (err) {
+    if (isAbortError(err) || options.signal?.aborted) {
+      aborted = true;
+    } else {
+      throw err;
+    }
+  } finally {
+    options.signal?.removeEventListener("abort", abortHandler);
+    state.finalized = true;
+  }
+
+  const toolResults = buildToolResults(initialToolResults, toolCalls, resultsById);
+  capToolResults(toolResults, options.maxToolResultChars);
+  return { toolResults, aborted };
+}
+
+async function* executeToolCallsParallel(
+  toolCalls: ToolCall[],
+  initialToolResults: ToolResult[],
+  options: ToolBatchExecutionOptions,
+): AsyncGenerator<AgentEvent, ToolBatchExecutionResult> {
+  const eventStream = new EventStream<AgentEvent>();
+  const state: ToolEventState = { finalized: false };
+  const resultsById = new Map<string, ToolExecutionRecord>();
+  const abortHandler = () => eventStream.abort(new Error("aborted"));
+  options.signal?.addEventListener("abort", abortHandler, { once: true });
+
+  Promise.all(
+    toolCalls.map(async (toolCall) => {
+      const record = await executeSingleToolCall(toolCall, options, (event) =>
+        pushToolEvent(eventStream, state, event),
+      );
+      resultsById.set(record.toolCallId, record);
+    }),
+  )
+    .then(() => {
+      if (!state.finalized) eventStream.close();
+    })
+    .catch((err) => {
+      if (!state.finalized) eventStream.abort(err instanceof Error ? err : new Error(String(err)));
+    });
+
+  let aborted = false;
+  try {
+    for await (const event of eventStream) {
+      yield event;
+    }
+  } catch (err) {
+    if (isAbortError(err) || options.signal?.aborted) {
+      aborted = true;
+    } else {
+      throw err;
+    }
+  } finally {
+    options.signal?.removeEventListener("abort", abortHandler);
+    state.finalized = true;
+  }
+
+  const toolResults = buildToolResults(initialToolResults, toolCalls, resultsById);
+  capToolResults(toolResults, options.maxToolResultChars);
+  return { toolResults, aborted };
+}
+
+function buildToolResults(
+  initialToolResults: ToolResult[],
+  toolCalls: ToolCall[],
+  resultsById: Map<string, ToolExecutionRecord>,
+): ToolResult[] {
+  const toolResults = [...initialToolResults];
+  for (const toolCall of toolCalls) {
+    const result = resultsById.get(toolCall.id);
+    if (result) {
+      toolResults.push({
+        type: "tool_result",
+        toolCallId: toolCall.id,
+        content: result.content,
+        isError: result.isError || undefined,
+      });
+    } else {
+      toolResults.push({
+        type: "tool_result",
+        toolCallId: toolCall.id,
+        content: "Tool execution was aborted.",
+        isError: true,
+      });
+    }
+  }
+  return toolResults;
+}
+
+function capToolResults(toolResults: ToolResult[], maxToolResultChars: number | undefined): void {
+  if (!maxToolResultChars) return;
+  const hardMax = 400_000; // absolute ceiling regardless of context window
+  const max = Math.min(maxToolResultChars, hardMax);
+  for (const toolResult of toolResults) {
+    if (typeof toolResult.content !== "string" || toolResult.content.length <= max) continue;
+    // Keep 70% head + 30% tail to preserve errors/diagnostics at the end.
+    const headChars = Math.floor(max * 0.7);
+    const tailChars = max - headChars;
+    const head = toolResult.content.slice(0, headChars);
+    const tail = toolResult.content.slice(-tailChars);
+    const omitted = toolResult.content.length - headChars - tailChars;
+    toolResult.content = head + `\n\n[... ${omitted} characters omitted ...]\n\n` + tail;
+  }
+}
+
 function normalizeToolResult(raw: ToolExecuteResult): StructuredToolResult {
   return typeof raw === "string" ? { content: raw } : raw;
 }
@@ -1199,6 +1434,42 @@ function toolResultPreview(content: ToolResultContent): string {
   return content
     .map((block) => (block.type === "text" ? block.text : `[image ${block.mediaType}]`))
     .join("\n");
+}
+
+function truncateToolResultText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const tailChars = Math.min(Math.floor(maxChars * 0.3), 20_000);
+  const headChars = Math.max(maxChars - tailChars, 0);
+  const omitted = text.length - headChars - tailChars;
+  return `${text.slice(0, headChars)}\n\n[... ${omitted} characters omitted after context overflow ...]\n\n${text.slice(-tailChars)}`;
+}
+
+function truncateOversizedToolResults(messages: Message[], maxChars: number): boolean {
+  if (maxChars <= 0) return false;
+  let changed = false;
+  for (const msg of messages) {
+    if (msg.role !== "tool" || !Array.isArray(msg.content)) continue;
+    const results = msg.content as ToolResult[];
+    for (const result of results) {
+      if (typeof result.content === "string") {
+        const truncated = truncateToolResultText(result.content, maxChars);
+        if (truncated !== result.content) {
+          result.content = truncated;
+          changed = true;
+        }
+      } else {
+        for (const block of result.content) {
+          if (block.type !== "text") continue;
+          const truncated = truncateToolResultText(block.text, maxChars);
+          if (truncated !== block.text) {
+            block.text = truncated;
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+  return changed;
 }
 
 function extractToolCalls(content: string | ContentPart[]): ToolCall[] {

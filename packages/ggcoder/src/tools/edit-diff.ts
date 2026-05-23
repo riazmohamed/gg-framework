@@ -154,17 +154,38 @@ export function applyDotdotdots(working: string, old: string, next: string): str
 
   let cursor = 0;
   const positions: { start: number; end: number }[] = [];
-  for (const piece of oldPieces) {
+  const matchedOldPieces: string[] = [];
+  const resolvedNewPieces: string[] = [];
+  for (let i = 0; i < oldPieces.length; i++) {
+    const piece = oldPieces[i];
     const idx = working.indexOf(piece, cursor);
-    if (idx === -1) return null;
-    positions.push({ start: idx, end: idx + piece.length });
-    cursor = idx + piece.length;
+    if (idx !== -1) {
+      positions.push({ start: idx, end: idx + piece.length });
+      matchedOldPieces.push(piece);
+      resolvedNewPieces.push(newPieces[i]);
+      cursor = idx + piece.length;
+      continue;
+    }
+
+    const scoped = working.slice(cursor);
+    const flexed = applyMissingLeadingWhitespace(scoped, piece, newPieces[i]);
+    if (flexed === null) return null;
+
+    const before = scoped.length;
+    const prefixLength = commonPrefixLength(scoped, flexed);
+    const suffixLength = commonSuffixLength(scoped.slice(prefixLength), flexed.slice(prefixLength));
+    const start = cursor + prefixLength;
+    const end = cursor + before - suffixLength;
+    positions.push({ start, end });
+    matchedOldPieces.push(working.slice(start, end));
+    resolvedNewPieces.push(flexed.slice(prefixLength, flexed.length - suffixLength));
+    cursor = end;
   }
 
   let result = working.slice(0, positions[0].start);
-  for (let i = 0; i < oldPieces.length; i++) {
-    result += newPieces[i];
-    if (i < oldPieces.length - 1) {
+  for (let i = 0; i < matchedOldPieces.length; i++) {
+    result += resolvedNewPieces[i];
+    if (i < matchedOldPieces.length - 1) {
       // The elided middle from the original file is preserved verbatim —
       // that's the whole point of the `...` placeholder.
       result += working.slice(positions[i].end, positions[i + 1].start);
@@ -172,6 +193,18 @@ export function applyDotdotdots(working: string, old: string, next: string): str
   }
   result += working.slice(positions[positions.length - 1].end);
   return result;
+}
+
+function commonPrefixLength(a: string, b: string): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
+}
+
+function commonSuffixLength(a: string, b: string): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[a.length - 1 - i] === b[b.length - 1 - i]) i++;
+  return i;
 }
 
 /**
@@ -202,35 +235,26 @@ export function fuzzyFindText(
     return { found: true, index: exactIndex, matchLength: oldText.length, usedFuzzy: false };
   }
 
-  // Fuzzy match: normalize both sides
-  const normalizedContent = normalizeForFuzzyMatch(content);
-  const normalizedOld = normalizeForFuzzyMatch(oldText);
+  // Fuzzy match line-by-line so stripped trailing whitespace in earlier lines
+  // cannot shift offsets and make us replace the wrong byte range.
+  const oldLines = oldText.split("\n");
+  const contentLines = content.split("\n");
+  const normalizedOldLines = oldLines.map(normalizeForFuzzyMatch);
 
-  const fuzzyIndex = normalizedContent.indexOf(normalizedOld);
-  if (fuzzyIndex !== -1) {
-    // Map back to original content: find the actual length in original
-    // Since normalization only changes per-character substitutions and trailing whitespace,
-    // we need to find the original range.
-    // Strategy: match line by line to find the original span.
-    const normalizedBefore = normalizedContent.slice(0, fuzzyIndex);
-    const linesBefore = normalizedBefore.split("\n").length - 1;
-    const normalizedMatch = normalizedContent.slice(fuzzyIndex, fuzzyIndex + normalizedOld.length);
-    const matchLineCount = normalizedMatch.split("\n").length;
+  for (let startLine = 0; startLine + oldLines.length <= contentLines.length; startLine++) {
+    const candidateLines = contentLines.slice(startLine, startLine + oldLines.length);
+    const normalizedCandidate = candidateLines.map(normalizeForFuzzyMatch);
+    if (normalizedCandidate.join("\n") !== normalizedOldLines.join("\n")) continue;
 
-    const contentLines = content.split("\n");
-    const matchLines = contentLines.slice(linesBefore, linesBefore + matchLineCount);
-    const originalMatch = matchLines.join("\n");
-
-    // Find actual index of the first match line start
     let actualIndex = 0;
-    for (let i = 0; i < linesBefore; i++) {
+    for (let i = 0; i < startLine; i++) {
       actualIndex += contentLines[i].length + 1; // +1 for \n
     }
 
     return {
       found: true,
       index: actualIndex,
-      matchLength: originalMatch.length,
+      matchLength: candidateLines.join("\n").length,
       usedFuzzy: true,
     };
   }
@@ -251,13 +275,28 @@ export function countOccurrences(content: string, oldText: string): number {
   }
   if (count > 0) return count;
 
-  // Fuzzy count
-  const normalizedContent = normalizeForFuzzyMatch(content);
+  // Fuzzy count. For single-line needles, retain substring semantics; for
+  // multi-line needles, use line windows so trailing-whitespace normalization
+  // cannot create misleading shifted overlaps.
   const normalizedOld = normalizeForFuzzyMatch(oldText);
-  pos = 0;
-  while ((pos = normalizedContent.indexOf(normalizedOld, pos)) !== -1) {
-    count++;
-    pos += normalizedOld.length;
+  if (!oldText.includes("\n")) {
+    const normalizedContent = normalizeForFuzzyMatch(content);
+    pos = 0;
+    while ((pos = normalizedContent.indexOf(normalizedOld, pos)) !== -1) {
+      count++;
+      pos += normalizedOld.length;
+    }
+    return count;
+  }
+
+  const oldLines = oldText.split("\n");
+  const contentLines = content.split("\n");
+  for (let startLine = 0; startLine + oldLines.length <= contentLines.length; startLine++) {
+    const normalizedCandidate = contentLines
+      .slice(startLine, startLine + oldLines.length)
+      .map(normalizeForFuzzyMatch)
+      .join("\n");
+    if (normalizedCandidate === normalizedOld) count++;
   }
   return count;
 }

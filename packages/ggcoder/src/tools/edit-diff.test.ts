@@ -36,6 +36,14 @@ describe("fuzzyFindText", () => {
     expect(result.usedFuzzy).toBe(true);
   });
 
+  it("maps fuzzy matches to the correct original byte range after prior trailing spaces", () => {
+    const content = "prefix   \ntarget   \nnext\n";
+    const result = fuzzyFindText(content, "target\nnext");
+    expect(result.found).toBe(true);
+    expect(result.index).toBe(content.indexOf("target"));
+    expect(content.slice(result.index, result.index + result.matchLength)).toBe("target   \nnext");
+  });
+
   it("fuzzy matches smart quotes to straight quotes", () => {
     const content = 'She said "hello"';
     const search = "She said \u201Chello\u201D";
@@ -262,6 +270,14 @@ describe("applyDotdotdots", () => {
     // Middle preserved verbatim.
     expect(result).toContain("console.log('keep this');");
     expect(result).toContain("doStuff();");
+  });
+
+  it("matches indented elision bookends when the model omits their common prefix", () => {
+    const indented = "  function foo() {\n    keep();\n    return bar;\n  }\n";
+    const old = "function foo() {\n  ...\n  return bar;\n}";
+    const next = "function foo(): Result {\n  ...\n  return baz;\n}";
+    const result = applyDotdotdots(indented, old, next);
+    expect(result).toBe("  function foo(): Result {\n    keep();\n    return baz;\n  }\n");
   });
 
   it("returns null when piece counts mismatch (ambiguous elision)", () => {

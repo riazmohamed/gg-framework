@@ -13,10 +13,45 @@ import { log } from "../logger.js";
 const TOOL_RESULT_MAX_CHARS = 2000;
 
 /** Max retries for empty LLM responses during summarization. */
-const MAX_SUMMARY_RETRIES = 2;
+export const MAX_SUMMARY_RETRIES = 2;
 
 /** Max output tokens for the summary response. */
 const MAX_SUMMARY_OUTPUT_TOKENS = 4096;
+
+/** Local deadline for each compaction summary LLM attempt. */
+export const SUMMARY_ATTEMPT_TIMEOUT_MS = 30_000;
+
+class SummaryTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Summary LLM response timed out after ${timeoutMs}ms`);
+    this.name = "SummaryTimeoutError";
+  }
+}
+
+async function awaitSummaryResponseWithTimeout<T>(
+  response: Promise<T>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<T> {
+  signal?.throwIfAborted();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let abortListener: (() => void) | undefined;
+
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      timeout = setTimeout(() => reject(new SummaryTimeoutError(timeoutMs)), timeoutMs);
+      if (typeof timeout.unref === "function") timeout.unref();
+
+      abortListener = () => reject(new DOMException("Aborted", "AbortError"));
+      signal?.addEventListener("abort", abortListener, { once: true });
+
+      response.then(resolve, reject);
+    });
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    if (abortListener) signal?.removeEventListener("abort", abortListener);
+  }
+}
 
 const COMPACTION_SYSTEM_PROMPT =
   "You are a conversation compaction assistant. Your job is to create a concise summary of a conversation " +
@@ -61,6 +96,22 @@ export interface CompactionResult {
  * Matches the widely-used Pi / Grok-CLI default of 16 384 tokens.
  */
 export const COMPACTION_RESERVE_TOKENS = 16_384;
+
+/** Extra non-output headroom for prompt/cache/accounting overhead. */
+export const COMPACTION_OVERHEAD_RESERVE_TOKENS = 5_000;
+
+/**
+ * Calculate the context headroom to reserve before auto-compaction.
+ *
+ * Use the requested output cap, not the model registry's theoretical maximum.
+ * GPT-5.5 over OpenAI Codex has a 272K effective input window but advertises a
+ * 128K max output capability; reserving that full amount would compact at
+ * ~139K tokens even though the CLI currently requests 16K output tokens.
+ */
+export function getCompactionReserveTokens(maxTokens: number): number {
+  const safeMaxTokens = Number.isFinite(maxTokens) && maxTokens > 0 ? Math.ceil(maxTokens) : 0;
+  return Math.max(COMPACTION_RESERVE_TOKENS, safeMaxTokens + COMPACTION_OVERHEAD_RESERVE_TOKENS);
+}
 
 /** Minimum messages before compaction is attempted (Mysti uses 4). */
 const COMPACTION_MIN_MESSAGES = 4;
@@ -516,6 +567,9 @@ export async function compact(
     provider: Provider;
     model: string;
     apiKey?: string;
+    accountId?: string;
+    projectId?: string;
+    baseUrl?: string;
     contextWindow: number;
     signal?: AbortSignal;
     approvedPlanPath?: string;
@@ -523,6 +577,7 @@ export async function compact(
 ): Promise<{ messages: Message[]; result: CompactionResult }> {
   const originalCount = messages.length;
   const tokensBeforeEstimate = estimateConversationTokens(messages);
+  options.signal?.throwIfAborted();
 
   log("INFO", "compaction", `Starting compaction`, {
     messageCount: String(originalCount),
@@ -583,7 +638,10 @@ export async function compact(
 
   // Pick the appropriate model for summarization
   const summaryModel = getSummaryModel(options.provider, options.model);
-  const summaryContextWindow = getContextWindow(summaryModel.id);
+  const summaryContextWindow = getContextWindow(summaryModel.id, {
+    provider: options.provider,
+    accountId: options.accountId,
+  });
 
   // Prepare messages: truncate tool results, strip thinking blocks
   const preparedMessages = prepareMessagesForSummary(middleMessages);
@@ -632,6 +690,7 @@ export async function compact(
   // Call LLM with retries on empty responses
   let summaryText = "";
   for (let attempt = 0; attempt <= MAX_SUMMARY_RETRIES; attempt++) {
+    options.signal?.throwIfAborted();
     try {
       const result = stream({
         provider: options.provider,
@@ -639,10 +698,18 @@ export async function compact(
         messages: summaryMessages,
         maxTokens: MAX_SUMMARY_OUTPUT_TOKENS,
         apiKey: options.apiKey,
+        accountId: options.accountId,
+        projectId: options.projectId,
+        baseUrl: options.baseUrl,
         signal: options.signal,
       });
 
-      const response = await result.response;
+      const response = await awaitSummaryResponseWithTimeout(
+        result.response,
+        SUMMARY_ATTEMPT_TIMEOUT_MS,
+        options.signal,
+      );
+      options.signal?.throwIfAborted();
 
       log("INFO", "compaction", `Summary LLM response received`, {
         attempt: String(attempt),
@@ -676,11 +743,16 @@ export async function compact(
         outputTokens: String(response.usage.outputTokens),
       });
     } catch (err) {
+      if (options.signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
+        throw err;
+      }
       log(
         "WARN",
         "compaction",
-        `Summary LLM call failed: ${err instanceof Error ? err.message : String(err)}`,
-        { attempt: String(attempt) },
+        err instanceof SummaryTimeoutError
+          ? `Summary LLM call timed out after ${SUMMARY_ATTEMPT_TIMEOUT_MS}ms — using fallback if no later attempt succeeds`
+          : `Summary LLM call failed: ${err instanceof Error ? err.message : String(err)}`,
+        { attempt: String(attempt), timeoutMs: String(SUMMARY_ATTEMPT_TIMEOUT_MS) },
       );
     }
   }

@@ -5,6 +5,12 @@ export interface ModelInfo {
   name: string;
   provider: Provider;
   contextWindow: number;
+  /**
+   * ChatGPT Codex transport uses product-specific windows that can differ from
+   * the public API model window. OpenAI OAuth requests include an accountId and
+   * route through `/codex/responses`; API-key requests do not.
+   */
+  codexContextWindow?: number;
   maxOutputTokens: number;
   supportsThinking: boolean;
   supportsImages: boolean;
@@ -68,6 +74,7 @@ export const MODELS: ModelInfo[] = [
     name: "GPT-5.5",
     provider: "openai",
     contextWindow: 1_050_000,
+    codexContextWindow: 272_000,
     maxOutputTokens: 128_000,
     supportsThinking: true,
     supportsImages: true,
@@ -78,7 +85,8 @@ export const MODELS: ModelInfo[] = [
     id: "gpt-5.4",
     name: "GPT-5.4",
     provider: "openai",
-    contextWindow: 272_000,
+    contextWindow: 1_050_000,
+    codexContextWindow: 272_000,
     maxOutputTokens: 128_000,
     supportsThinking: true,
     supportsImages: true,
@@ -106,6 +114,29 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     costTier: "high",
     maxThinkingLevel: "xhigh",
+  },
+  // ── Gemini ─────────────────────────────────────────────
+  {
+    id: "gemini-3.1-flash-lite-preview",
+    name: "Gemini 3.1 Flash Lite Preview",
+    provider: "gemini",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: true,
+    costTier: "low",
+    maxThinkingLevel: "high",
+  },
+  {
+    id: "gemini-3.5-flash",
+    name: "Gemini 3.5 Flash",
+    provider: "gemini",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: true,
+    costTier: "low",
+    maxThinkingLevel: "high",
   },
   // ── Moonshot (Kimi) ────────────────────────────────────
   {
@@ -330,6 +361,7 @@ export function getModelsForProvider(provider: Provider): ModelInfo[] {
 export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "xiaomi") return MODELS.find((m) => m.id === "mimo-v2-pro")!;
   if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.5")!;
+  if (provider === "gemini") return MODELS.find((m) => m.id === "gemini-3.1-flash-lite-preview")!;
   if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.1")!;
   if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k2.6")!;
   if (provider === "minimax") return MODELS.find((m) => m.id === "MiniMax-M2.7")!;
@@ -338,9 +370,22 @@ export function getDefaultModel(provider: Provider): ModelInfo {
   return MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
 }
 
-export function getContextWindow(modelId: string): number {
+export interface ContextWindowOptions {
+  provider?: Provider;
+  accountId?: string;
+}
+
+export function usesOpenAICodexTransport(options?: ContextWindowOptions): boolean {
+  return options?.provider === "openai" && Boolean(options.accountId);
+}
+
+export function getContextWindow(modelId: string, options?: ContextWindowOptions): number {
   const model = getModel(modelId);
-  return model?.contextWindow ?? 200_000;
+  if (!model) return 200_000;
+  if (usesOpenAICodexTransport(options) && model.codexContextWindow) {
+    return model.codexContextWindow;
+  }
+  return model.contextWindow;
 }
 
 const TIER_RANK: Record<string, number> = { low: 0, medium: 1, high: 2 };
@@ -413,6 +458,7 @@ export function getMaxThinkingLevel(modelId: string): ThinkingLevel {
  * Get the model to use for compaction summarization.
  * - Anthropic: always Sonnet 4.6
  * - OpenAI: cheapest (Codex Mini)
+ * - Gemini: use the current model
  * - GLM: GLM-4.7 Flash (cheap alternative)
  * - Moonshot: use the current model (no cheap alternative)
  */

@@ -39,16 +39,25 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   await fs.mkdir(path.join(localGGDir, "commands"), { recursive: true });
   await fs.mkdir(path.join(localGGDir, "agents"), { recursive: true });
 
-  // Discover skills & build system prompt
+  // Discover skills and create tools before building the prompt so tool names are accurate.
   const skills = await discoverSkills({
     globalSkillsDir: paths.skillsDir,
     projectDir: cwd,
   });
+  const { tools, processManager } = createTools(cwd, {
+    skills,
+    provider,
+    model,
+  });
   const systemPrompt =
-    config.systemPrompt ?? (await buildSystemPrompt(cwd, skills, false, undefined, provider));
-
-  // Create tools
-  const { tools, processManager } = createTools(cwd, { skills });
+    config.systemPrompt ??
+    (await buildSystemPrompt(
+      cwd,
+      skills,
+      false,
+      undefined,
+      tools.map((tool) => tool.name),
+    ));
   process.on("exit", () => processManager.shutdownAll());
   const authStorage = new AuthStorage(paths.authFile);
   await authStorage.load();
@@ -89,18 +98,29 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   // Auto-compact on load if the restored session exceeds the context window.
   // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
   if (messages.length > 1) {
-    const contextWindow = getContextWindow(model);
+    const creds = await authStorage.resolveCredentials(provider);
+    const contextWindow = getContextWindow(model, { provider, accountId: creds.accountId });
     if (shouldCompact(messages, contextWindow, 0.8)) {
       stdout.write("Compacting restored session...\n");
-      const creds = await authStorage.resolveCredentials(provider);
-      const compacted = await compact(messages, {
-        provider,
-        model,
-        apiKey: creds.accessToken,
-        contextWindow,
-      });
-      messages.length = 0;
-      messages.push(...compacted.messages);
+      const compactionAbort = new AbortController();
+      const onSigint = () => compactionAbort.abort();
+      process.once("SIGINT", onSigint);
+      try {
+        const compacted = await compact(messages, {
+          provider,
+          model,
+          apiKey: creds.accessToken,
+          accountId: creds.accountId,
+          projectId: creds.projectId,
+          baseUrl: config.baseUrl ?? creds.baseUrl,
+          contextWindow,
+          signal: compactionAbort.signal,
+        });
+        messages.length = 0;
+        messages.push(...compacted.messages);
+      } finally {
+        process.off("SIGINT", onSigint);
+      }
     }
   }
 
@@ -154,6 +174,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
         baseUrl: config.baseUrl,
         signal: ac.signal,
         accountId: creds.accountId,
+        projectId: creds.projectId,
         // clearToolUses disabled — causes model to output unsolicited context summaries
       });
 

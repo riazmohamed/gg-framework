@@ -25,6 +25,7 @@ export function ModelSelector({
   const providerLabel: Record<string, string> = {
     anthropic: "Anthropic",
     openai: "OpenAI",
+    gemini: "Gemini",
     glm: "Z.AI",
     moonshot: "Moonshot",
     xiaomi: "Xiaomi",

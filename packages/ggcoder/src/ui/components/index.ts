@@ -2,6 +2,8 @@ export {
   AnimationProvider,
   useAnimationTick,
   useAnimationActive,
+  useTerminalFocus,
+  useFocusedAnimation,
   deriveFrame,
 } from "./AnimationContext.js";
 export { Spinner } from "./Spinner.js";
@@ -21,7 +23,6 @@ export { SessionSelector } from "./SessionSelector.js";
 export { SettingsSelector } from "./SettingsSelector.js";
 export { Markdown } from "./Markdown.js";
 export { ThinkingBlock } from "./ThinkingBlock.js";
-export { ThinkingIndicator } from "./ThinkingIndicator.js";
 export { ActivityIndicator } from "./ActivityIndicator.js";
 export { SlashCommandMenu, type SlashCommandInfo } from "./SlashCommandMenu.js";
 export { Banner } from "./Banner.js";

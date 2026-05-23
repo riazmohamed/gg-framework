@@ -74,11 +74,12 @@ export interface AgentLoopOptions {
   apiKey?: string;
   baseUrl?: string;
   accountId?: string;
+  projectId?: string;
   /** Resolve fresh credentials before each run (e.g. OAuth token refresh).
    *  When `forceRefresh` is true, bypass cache and fetch a new token (used on 401 retry). */
   resolveCredentials?: (opts?: {
     forceRefresh?: boolean;
-  }) => Promise<{ apiKey: string; accountId?: string }>;
+  }) => Promise<{ apiKey: string; accountId?: string; projectId?: string }>;
   transformContext?: (
     messages: Message[],
     options?: { force?: boolean },
@@ -94,7 +95,13 @@ export interface AgentLoopOptions {
 export type ActivityPhase = "waiting" | "thinking" | "generating" | "tools" | "retrying" | "idle";
 
 export interface RetryInfo {
-  reason: "overloaded" | "rate_limit" | "empty_response" | "stream_stall" | "overflow_compact";
+  reason:
+    | "overloaded"
+    | "rate_limit"
+    | "provider_error"
+    | "empty_response"
+    | "stream_stall"
+    | "overflow_compact";
   attempt: number;
   maxAttempts: number;
   delayMs: number;
@@ -441,11 +448,13 @@ export function useAgentLoop(
           // Resolve fresh credentials (handles OAuth token refresh)
           let apiKey = options.apiKey;
           let accountId = options.accountId;
+          let projectId = options.projectId;
           const credsStart = Date.now();
           if (options.resolveCredentials) {
             const creds = await options.resolveCredentials(credentialOpts);
             apiKey = creds.apiKey;
             accountId = creds.accountId;
+            projectId = creds.projectId;
           }
           log("INFO", "ui", "creds_resolved", {
             ms: String(Date.now() - credsStart),
@@ -476,6 +485,7 @@ export function useAgentLoop(
             apiKey,
             baseUrl: options.baseUrl,
             accountId,
+            projectId,
             signal: ac.signal,
             userAgent,
             transformContext: options.transformContext,

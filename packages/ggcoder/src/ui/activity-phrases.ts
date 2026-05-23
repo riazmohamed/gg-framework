@@ -143,11 +143,15 @@ export const TOOL_PHRASES: Record<string, string[]> = {
   grep: ["Rummaging", "Sifting", "Bloodhounding"],
   find: ["Dowsing", "Spelunking", "Sniffing"],
   ls: ["Cataloguing", "Inventorying", "Surveying"],
+  source_path: ["Provenancing", "Sourcing", "Unearthing"],
   subagent: ["Cloning", "Spawning", "Mitosing"],
-  "web-fetch": ["Pilfering", "Scrounging", "Plundering"],
+  web_fetch: ["Pilfering", "Scrounging", "Plundering"],
+  web_search: ["Scouting", "Reconnoitering", "Prospecting"],
   tasks: ["Wrangling", "Herding", "Corralling"],
-  "task-output": ["Eavesdropping", "Intercepting"],
-  "task-stop": ["Guillotining", "Tranquilizing"],
+  task_output: ["Eavesdropping", "Intercepting"],
+  task_stop: ["Guillotining", "Tranquilizing"],
+  enter_plan: ["Blueprinting", "Scheming", "Plotting"],
+  exit_plan: ["Submitting", "Presenting", "Handing over"],
 };
 
 function selectToolPhrases(activeToolNames: string[]): string[] {

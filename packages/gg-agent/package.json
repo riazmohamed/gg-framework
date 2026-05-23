@@ -1,12 +1,12 @@
 {
   "name": "@abukhaled/gg-agent",
-  "version": "4.3.185",
+  "version": "4.3.212",
   "type": "module",
   "description": "Agentic loop system with tool execution for LLMs",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/abukhaled/gg-framework.git",
+    "url": "git+https://github.com/kenkaiiii/gg-framework.git",
     "directory": "packages/gg-agent"
   },
   "exports": {

@@ -72,11 +72,21 @@ type MatchResult = MatchSuccess | MatchFailure;
 function tryMatch(working: string, old: string, next: string, replaceAll: boolean): MatchResult {
   if (old.length === 0) return { ok: false, reason: "not_found" };
 
-  if (replaceAll && working.includes(old)) {
-    return { ok: true, newWorking: working.split(old).join(next) };
+  const occurrences = countOccurrences(working, old);
+
+  if (replaceAll && occurrences > 0) {
+    let newWorking = working;
+    let replaced = 0;
+    while (replaced < occurrences) {
+      const match = fuzzyFindText(newWorking, old);
+      if (!match.found) break;
+      newWorking =
+        newWorking.slice(0, match.index) + next + newWorking.slice(match.index + match.matchLength);
+      replaced++;
+    }
+    return replaced === occurrences ? { ok: true, newWorking } : { ok: false, reason: "not_found" };
   }
 
-  const occurrences = countOccurrences(working, old);
   if (occurrences === 0) return { ok: false, reason: "not_found" };
   if (occurrences > 1) return { ok: false, reason: "ambiguous", occurrences };
 
@@ -105,16 +115,18 @@ export function createEditTool(
   readFiles?: ReadTracker,
   ops: ToolOperations = localOperations,
   planModeRef?: { current: boolean },
+  onFileMutated?: (filePath: string) => void | Promise<void>,
 ): AgentTool<typeof EditParams> {
   return {
     name: "edit",
     description:
-      "Replace text in a file via { old_text, new_text } edits applied sequentially. Read the file first. " +
-      "Each old_text must uniquely match exactly one location — set replace_all: true to swap every occurrence (renames). " +
-      "For long blocks, a line containing only `...` in BOTH old_text and new_text elides a middle preserved verbatim. " +
+      "Replace text in a file via { old_text, new_text } edits applied sequentially. Read the file first and copy old_text from the latest read/diff. " +
+      "Each old_text should identify one location — include surrounding context; set replace_all: true only for deliberate global replacements/renames. " +
+      "The matcher tolerates safe whitespace/quote/dash drift, but do not paraphrase. For long blocks, a line containing only `...` in BOTH old_text and new_text elides a middle preserved verbatim. " +
       "Partial-apply by default: failed edits are listed for retry, successful ones are still written — " +
       "re-issue ONLY the listed failures, not the whole batch. Returns a unified diff.",
     parameters: EditParams,
+    executionMode: "sequential",
     async execute({ file_path, edits, atomic = false }) {
       if (planModeRef?.current) {
         return "Error: edit is restricted in plan mode. Use read-only tools to explore the codebase, then write your plan to .gg/plans/.";
@@ -138,10 +150,11 @@ export function createEditTool(
         const normalizedNew = hasCRLF ? new_text.replace(/\r\n/g, "\n") : new_text;
         const replaceAll = replace_all ?? false;
 
-        // Reject no-op edits before they consume a write or silently "succeed"
-        // — usually the model paraphrased the new_text to be identical to old.
+        // Identical replacements are explicit no-op successes. They should not
+        // block atomic batches that contain real edits, and all-no-op batches
+        // should report success without writing.
         if (normalizedOld === normalizedNew) {
-          outcomes[i] = { ok: false, failure: { reason: "noop" } };
+          outcomes[i] = { ok: true };
           continue;
         }
 
@@ -283,18 +296,29 @@ export function createEditTool(
         throw new Error(header + formatFailures());
       }
 
-      const finalContent = hasCRLF ? working.replace(/\n/g, "\r\n") : working;
-      await ops.writeFile(resolved, finalContent);
-      await recordWrite(readFiles, resolved, finalContent, ops);
-      // Partial-apply with a not_found in the mix: recordWrite just refreshed
-      // the tracker, but we still want to force a re-read for the next batch
-      // because the model's view of at least one region is wrong.
-      if (hasNotFound) readFiles?.delete(resolved);
-
       const relPath = path.relative(cwd, resolved);
       const diff = generateDiff(originalNormalized, working, relPath);
+      const changed = working !== originalNormalized;
+
+      if (changed) {
+        const finalContent = hasCRLF ? working.replace(/\n/g, "\r\n") : working;
+        await ops.writeFile(resolved, finalContent);
+        await recordWrite(readFiles, resolved, finalContent, ops);
+        await onFileMutated?.(resolved);
+        // Partial-apply with a not_found in the mix: recordWrite just refreshed
+        // the tracker, but we still want to force a re-read for the next batch
+        // because the model's view of at least one region is wrong.
+        if (hasNotFound) readFiles?.delete(resolved);
+      }
 
       if (failures.length === 0) {
+        if (!changed) {
+          const summary =
+            edits.length > 1
+              ? `No changes needed in ${relPath}; ${edits.length} edits were no-ops.`
+              : `No changes needed in ${relPath}; edit was a no-op.`;
+          return { content: summary, details: { diff } };
+        }
         const summary =
           edits.length > 1
             ? `Successfully applied ${edits.length} edits to ${relPath}.`

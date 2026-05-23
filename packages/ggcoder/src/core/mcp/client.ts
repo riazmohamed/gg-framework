@@ -59,6 +59,10 @@ export class MCPClientManager {
         cwd: os.homedir(),
         stderr: "pipe",
       });
+      // Capture stderr so a crashing server doesn't fail silently — when the
+      // child closes the pipe before completing handshake, the SDK throws
+      // the opaque "-32000 Connection closed" but the real cause (stack
+      // trace, missing dep, port conflict) was just printed to stderr.
       const stderrChunks: string[] = [];
       transport.stderr?.on("data", (chunk: Buffer | string) => {
         stderrChunks.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
