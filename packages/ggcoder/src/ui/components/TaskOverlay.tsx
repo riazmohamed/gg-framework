@@ -3,58 +3,7 @@ import { Box, Text, useInput } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
-import { homedir } from "node:os";
-import { basename, join } from "node:path";
-
-// ── Types ────────────────────────────────────────────────
-
-interface Task {
-  id: string;
-  title: string;
-  prompt: string;
-  /** @deprecated Old field — migrated to title+prompt on load */
-  text?: string;
-  details?: string;
-  status: "pending" | "in-progress" | "done";
-  createdAt: string;
-}
-
-// ── Persistence (inline — avoids cross-package dep) ──────
-
-const TASKS_BASE = join(homedir(), ".gg-tasks", "projects");
-
-function hashPath(cwd: string): string {
-  return createHash("sha256").update(cwd).digest("hex").slice(0, 16);
-}
-
-async function loadTasks(cwd: string): Promise<Task[]> {
-  try {
-    const data = await readFile(join(TASKS_BASE, hashPath(cwd), "tasks.json"), "utf-8");
-    const raw = JSON.parse(data) as Task[];
-    // Migrate old tasks that only have `text` (no title/prompt split)
-    return raw.map((t) => {
-      if (!t.prompt && t.text) {
-        return { ...t, title: t.text, prompt: t.text, text: undefined };
-      }
-      return t;
-    });
-  } catch {
-    return [];
-  }
-}
-
-async function saveTasks(cwd: string, tasks: Task[]): Promise<void> {
-  const dir = join(TASKS_BASE, hashPath(cwd));
-  await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "tasks.json"), JSON.stringify(tasks, null, 2) + "\n", "utf-8");
-
-  // Also write meta so gg-tasks standalone can find this project
-  const metaPath = join(dir, "meta.json");
-  const meta = JSON.stringify({ path: cwd, name: basename(cwd) }, null, 2) + "\n";
-  await writeFile(metaPath, meta, "utf-8");
-}
+import { loadTasks, saveTasks, type Task } from "../../core/task-store.js";
 
 // ── Banner ───────────────────────────────────────────────
 

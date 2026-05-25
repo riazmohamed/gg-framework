@@ -1818,6 +1818,9 @@ export function App(props: AppProps) {
   useEffect(() => {
     if (sessionStore) sessionStore.goalMode = goalMode;
   }, [goalMode, sessionStore]);
+  useEffect(() => {
+    if (sessionStore) sessionStore.runAllTasks = runAllTasks;
+  }, [runAllTasks, sessionStore]);
 
   // pendingAction is consumed via a useEffect AFTER agentLoop is created
   // — see below where useAgentLoop is set up.
@@ -3243,6 +3246,45 @@ export function App(props: AppProps) {
       return () => clearTimeout(timer);
     }
   }, [agentLoop.isRunning, sessionStore, props.resetUI]);
+
+  // Run-all-tasks driver. When runAllTasks is true and the agent is idle,
+  // pick the next pending task, mark it in-progress, run its prompt, mark it
+  // done when the agent settles, and loop. Stops automatically when there are
+  // no more pending tasks. Cancel by toggling runAllTasks off (e.g. via the
+  // abort path in onAborted).
+  const runAllTasksRef = useRef(false);
+  useEffect(() => {
+    if (!runAllTasks || agentLoop.isRunning || runAllTasksRef.current) return;
+    runAllTasksRef.current = true;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { getNextPendingTask, setTaskStatus } = await import("../core/task-store.js");
+        const next = await getNextPendingTask(props.cwd);
+        if (cancelled) return;
+        if (!next) {
+          setRunAllTasks(false);
+          return;
+        }
+        await setTaskStatus(props.cwd, next.id, "in-progress");
+        if (cancelled) return;
+        try {
+          await agentLoop.run(next.prompt);
+          if (cancelled) return;
+          await setTaskStatus(props.cwd, next.id, "done");
+        } catch (err) {
+          log("ERROR", "tasks", err instanceof Error ? err.message : String(err));
+          await setTaskStatus(props.cwd, next.id, "pending");
+          setRunAllTasks(false);
+        }
+      } finally {
+        runAllTasksRef.current = false;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [runAllTasks, agentLoop.isRunning, agentLoop, props.cwd]);
 
   // Consume sessionStore.pendingAction once on mount. Set by resetUI options
   // for paths that remount AND immediately drive the agent (plan accept,
