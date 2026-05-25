@@ -57,6 +57,8 @@ import { Banner } from "./components/Banner.js";
 import { PlanOverlay } from "./components/PlanOverlay.js";
 import { ModelSelector } from "./components/ModelSelector.js";
 import { GoalOverlay } from "./components/GoalOverlay.js";
+import { EyesOverlay } from "./components/EyesOverlay.js";
+import { TaskOverlay } from "./components/TaskOverlay.js";
 import {
   buildGoalFinalSummarySections,
   buildGoalSummaryRows,
@@ -4352,7 +4354,7 @@ export function App(props: AppProps) {
   };
 
   const openOverlay = useCallback(
-    (kind: "tasks" | "goal" | "skills" | "plan") => {
+    (kind: "tasks" | "goal" | "skills" | "plan" | "eyes") => {
       if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
         props.sessionStore.overlay = kind;
         if (kind !== "plan") props.sessionStore.planAutoExpand = false;
@@ -5244,6 +5246,28 @@ export function App(props: AppProps) {
             }
           }}
         />
+      ) : isEyesView ? (
+        <EyesOverlay
+          cwd={props.cwd}
+          onClose={closeOverlay}
+          onQueueMessage={(msg) => {
+            agentLoop.queueMessage(msg);
+          }}
+        />
+      ) : isTaskView ? (
+        <TaskOverlay
+          cwd={props.cwd}
+          agentRunning={agentLoop.isRunning}
+          onClose={closeOverlay}
+          onWorkOnTask={(_title, prompt) => {
+            setOverlay(null);
+            void agentLoop.run(prompt);
+          }}
+          onRunAllTasks={() => {
+            setRunAllTasks(true);
+            setOverlay(null);
+          }}
+        />
       ) : isPlanView ? (
         <PlanOverlay
           cwd={props.cwd}
@@ -5490,6 +5514,9 @@ export function App(props: AppProps) {
               }}
               onToggleTasks={() => {
                 openOverlay("tasks");
+              }}
+              onToggleEyes={() => {
+                openOverlay("eyes");
               }}
               onToggleMarkdown={() => {
                 setRenderMarkdown((prev) => !prev);

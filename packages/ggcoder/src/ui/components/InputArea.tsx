@@ -210,6 +210,7 @@ interface InputAreaProps {
   onToggleGoal?: () => void;
   onToggleSkills?: () => void;
   onToggleTasks?: () => void;
+  onToggleEyes?: () => void;
   onToggleMarkdown?: () => void;
   cwd: string;
   commands?: SlashCommandInfo[];
@@ -299,6 +300,7 @@ export function InputArea({
   onToggleGoal,
   onToggleSkills,
   onToggleTasks,
+  onToggleEyes,
   onToggleMarkdown,
   cwd,
   commands = [],
@@ -852,6 +854,12 @@ export function InputArea({
       // Ctrl+T toggles tasks overlay
       if (key.ctrl && input === "t") {
         onToggleTasks?.();
+        return;
+      }
+
+      // Ctrl+Y toggles eyes overlay (perception probes / improvement signals)
+      if (key.ctrl && input === "y") {
+        onToggleEyes?.();
         return;
       }
 
