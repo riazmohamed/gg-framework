@@ -3248,10 +3248,15 @@ export function App(props: AppProps) {
   }, [agentLoop.isRunning, sessionStore, props.resetUI]);
 
   // Run-all-tasks driver. When runAllTasks is true and the agent is idle,
-  // pick the next pending task, mark it in-progress, run its prompt, mark it
-  // done when the agent settles, and loop. Stops automatically when there are
-  // no more pending tasks. Cancel by toggling runAllTasks off (e.g. via the
-  // abort path in onAborted).
+  // pick the next pending task, mark it in-progress, run its prompt with a
+  // completion contract appended, and verify the agent self-marked the task
+  // done via the `tasks` tool before advancing.
+  //
+  // Verification rule: after agentLoop.run resolves, re-read the task. Only
+  // advance to the next task if its status is "done" (i.e. the agent called
+  // `tasks done <id>`). If still "in-progress", stop the loop and leave the
+  // task as-is for inspection — auto-retrying could loop forever on a stuck
+  // task. On thrown error, revert to "pending" so it gets picked up later.
   const runAllTasksRef = useRef(false);
   useEffect(() => {
     if (!runAllTasks || agentLoop.isRunning || runAllTasksRef.current) return;
@@ -3259,7 +3264,9 @@ export function App(props: AppProps) {
     let cancelled = false;
     void (async () => {
       try {
-        const { getNextPendingTask, setTaskStatus } = await import("../core/task-store.js");
+        const { getNextPendingTask, loadTasks, setTaskStatus } = await import(
+          "../core/task-store.js"
+        );
         const next = await getNextPendingTask(props.cwd);
         if (cancelled) return;
         if (!next) {
@@ -3268,10 +3275,38 @@ export function App(props: AppProps) {
         }
         await setTaskStatus(props.cwd, next.id, "in-progress");
         if (cancelled) return;
+
+        // Completion contract — tells the agent how to signal it finished.
+        // Without this hint the agent rarely calls `tasks done` and we'd
+        // have to fall back to "completed iff didn't throw," which is wrong.
+        const taskPrompt =
+          `${next.prompt}\n\n` +
+          `---\n` +
+          `Task ID: \`${next.id}\`\n` +
+          `When you have completed this task, call the \`tasks\` tool with ` +
+          `\`action: "done"\` and \`id: "${next.id}"\`. If you cannot complete ` +
+          `the task (blocker, missing info, etc.), do NOT call done — leave it ` +
+          `in-progress and explain what's needed.`;
+
         try {
-          await agentLoop.run(next.prompt);
+          await agentLoop.run(taskPrompt);
           if (cancelled) return;
-          await setTaskStatus(props.cwd, next.id, "done");
+          // Verify: re-read tasks.json. Did the agent self-mark done?
+          const after = await loadTasks(props.cwd);
+          const updated = after.find((t) => t.id === next.id);
+          if (updated?.status === "done") {
+            // Agent verified completion — keep looping
+          } else {
+            // Agent stopped without marking done — halt the loop so the user
+            // can inspect. The task stays in-progress on disk; user can
+            // resume later or restart run-all.
+            log(
+              "WARN",
+              "tasks",
+              `Task ${next.id} ended without agent calling tasks done — halting run-all`,
+            );
+            setRunAllTasks(false);
+          }
         } catch (err) {
           log("ERROR", "tasks", err instanceof Error ? err.message : String(err));
           await setTaskStatus(props.cwd, next.id, "pending");
