@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (uses `ggcoder-eyes` for perception)
 
-Current published version: **4.3.212** (last app-update sync: 2026-05-23 from `rebrand/abukhaled`).
+Current published version: **4.3.217** (last app-update sync: 2026-05-25 from `main`).
 
 This windows fork is a slimmer subset of the upstream `kenkaiiii/gg-framework`: it keeps only `gg-ai`, `gg-agent`, `ggcoder` (binary `ogcoder`), and `ggcoder-eyes`. Upstream packages introduced after the previous sync (`gg-boss`, `gg-pixel`, `gg-pixel-server`, `gg-editor`, `gg-editor-premiere-panel`, and pixel-language variants `gg-pixel-go`/`-py`/`-rb`/`-rs`/`-swift`, `gg-voice`) and the in-app Pixel error-tracking flow (`pixel.ts`, `pixel-fix.ts`, `PixelOverlay.tsx`, `core/auth/index.ts`, `utils/open-browser.ts`) are intentionally excluded. When merging from upstream, drop those packages/files and rewrite any `@kenkaiiii/*` workspace imports to `@abukhaled/*`. Prefer merging from `rebrand/abukhaled` over `main` — it already carries the `@abukhaled` scope rewrites.
 
@@ -44,7 +44,9 @@ pnpm --filter @abukhaled/ogcoder exec vitest run -t "should read files"
 
 ## Code Quality — Zero Tolerance
 
-After editing ANY file, run:
+Run targeted verification that is appropriate to the change before calling work complete. Do not run the full quality suite after every edit by default; reserve it for broad code changes, release work, or when explicitly requested.
+
+For full verification, use:
 
 ```bash
 pnpm check && pnpm lint && pnpm format:check

@@ -56,6 +56,10 @@ function mergeUserContent(items: UserContent[]): UserContent {
   return parts;
 }
 
+export function shouldRetainThinkingDelta(): boolean {
+  return false;
+}
+
 export interface ActiveToolCall {
   toolCallId: string;
   name: string;
@@ -109,6 +113,12 @@ export interface RetryInfo {
 
 export type UserContent = string | (TextContent | ImageContent)[];
 
+export interface StreamSnapshot {
+  text: string;
+  thinking: string;
+  thinkingMs: number;
+}
+
 export interface UseAgentLoopReturn {
   run: (userContent: UserContent) => Promise<void>;
   abort: () => void;
@@ -150,7 +160,12 @@ export function useAgentLoop(
   callbacks?: {
     onComplete?: (newMessages: Message[]) => void;
     onTurnText?: (text: string, thinking: string, thinkingMs: number) => void;
-    onToolStart?: (toolCallId: string, name: string, args: Record<string, unknown>) => void;
+    onToolStart?: (
+      toolCallId: string,
+      name: string,
+      args: Record<string, unknown>,
+      stream: StreamSnapshot,
+    ) => void;
     onToolUpdate?: (toolCallId: string, update: unknown) => void;
     onToolEnd?: (
       toolCallId: string,
@@ -167,7 +182,7 @@ export function useAgentLoop(
       args?: Record<string, unknown>,
     ) => void;
     onModelSwitch?: (fromModel: string, toModel: string, reason: string) => void;
-    onServerToolCall?: (id: string, name: string, input: unknown) => void;
+    onServerToolCall?: (id: string, name: string, input: unknown, stream: StreamSnapshot) => void;
     onServerToolResult?: (toolUseId: string, resultType: string, data: unknown) => void;
     onTurnEnd?: (
       turn: number,
@@ -543,13 +558,12 @@ export function useAgentLoop(
                     sinceRunStartMs: String(firstThinkingArrivedMs),
                   });
                 }
-                thinkingBufferRef.current += event.text;
-                // Stream live to the visible ref so the user sees reasoning as
-                // it generates instead of waiting until text or tool calls
-                // arrive. Buffer is kept separately for persistence at turn_end.
-                thinkingVisibleRef.current += event.text;
-                streamThinkingDirty = true;
-                scheduleStreamFlush();
+                if (shouldRetainThinkingDelta()) {
+                  thinkingBufferRef.current += event.text;
+                  thinkingVisibleRef.current += event.text;
+                  streamThinkingDirty = true;
+                  scheduleStreamFlush();
+                }
                 charCountRef.current += event.text.length;
                 if (phaseRef.current !== "thinking") {
                   thinkingStartRef.current = Date.now();
@@ -597,7 +611,11 @@ export function useAgentLoop(
                   startTime: Date.now(),
                   updates: [],
                 };
-                onToolStart?.(event.toolCallId, event.name, event.args);
+                onToolStart?.(event.toolCallId, event.name, event.args, {
+                  text: textVisibleRef.current,
+                  thinking: thinkingBufferRef.current,
+                  thinkingMs: thinkingAccumRef.current,
+                });
                 toolsUsedRef.current.add(event.name);
                 activeToolCallsRef.current = [...activeToolCallsRef.current, newTc];
                 setActiveToolCalls(activeToolCallsRef.current);
@@ -665,7 +683,12 @@ export function useAgentLoop(
                 break;
 
               case "server_tool_call":
-                onServerToolCall?.(event.id, event.name, event.input);
+                flushStreamState();
+                onServerToolCall?.(event.id, event.name, event.input, {
+                  text: textVisibleRef.current,
+                  thinking: thinkingBufferRef.current,
+                  thinkingMs: thinkingAccumRef.current,
+                });
                 break;
 
               case "server_tool_result":

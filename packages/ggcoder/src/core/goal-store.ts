@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type { GoalControllerDecision } from "./goal-controller.js";
@@ -16,6 +16,12 @@ export type GoalRunStatus =
 
 export type GoalTaskStatus = "pending" | "running" | "verifying" | "done" | "failed" | "blocked";
 
+export type GoalTaskMergeStrategy =
+  | "parallel_candidate"
+  | "after_dependencies"
+  | "serial"
+  | "manual";
+
 export type GoalPrerequisiteStatus = "unknown" | "met" | "missing";
 
 export type GoalEvidenceKind = "log" | "command" | "screenshot" | "file" | "summary";
@@ -29,6 +35,14 @@ export interface GoalVerificationResult {
   exitCode?: number;
   outputPath?: string;
   checkedAt: string;
+}
+
+export interface GoalCompletionAudit {
+  status: GoalVerificationStatus;
+  summary: string;
+  checkedAt: string;
+  verifierCheckedAt?: string;
+  outputPath?: string;
 }
 
 export interface GoalPrerequisite {
@@ -74,6 +88,20 @@ export interface GoalEvidencePlan {
   evidence?: string;
 }
 
+export type GoalReferenceKind = "prompt" | "url" | "repo" | "file" | "image" | "text";
+
+export interface GoalReference {
+  id: string;
+  kind: GoalReferenceKind;
+  label: string;
+  value?: string;
+  path?: string;
+  mediaType?: string;
+  description?: string;
+  content?: string;
+  source?: string;
+}
+
 export interface GoalTask {
   id: string;
   title: string;
@@ -81,6 +109,10 @@ export interface GoalTask {
   status: GoalTaskStatus;
   workerId?: string;
   attempts: number;
+  dependsOn?: string[];
+  parallelGroup?: string;
+  expectedChangedScope?: string[];
+  mergeStrategy?: GoalTaskMergeStrategy;
   verification?: GoalVerificationResult;
   lastSummary?: string;
 }
@@ -112,9 +144,11 @@ export interface GoalRun {
   prerequisites: GoalPrerequisite[];
   harness: GoalHarnessItem[];
   evidencePlan: GoalEvidencePlan[];
+  references?: GoalReference[];
   tasks: GoalTask[];
   evidence: GoalEvidence[];
   verifier?: GoalVerifier;
+  completionAudit?: GoalCompletionAudit;
   blockers: string[];
   activeWorkerId?: string;
   continueRequestedAt?: string;
@@ -150,9 +184,11 @@ export interface GoalRunInput {
   prerequisites?: GoalPrerequisite[];
   harness?: GoalHarnessItem[];
   evidencePlan?: GoalEvidencePlan[];
+  references?: GoalReference[];
   tasks?: GoalTask[];
   evidence?: GoalEvidence[];
   verifier?: GoalVerifier;
+  completionAudit?: GoalCompletionAudit;
   blockers?: string[];
   activeWorkerId?: string;
   continueRequestedAt?: string;
@@ -165,6 +201,10 @@ export interface GoalTaskInput {
   status?: GoalTaskStatus;
   workerId?: string;
   attempts?: number;
+  dependsOn?: string[];
+  parallelGroup?: string;
+  expectedChangedScope?: string[];
+  mergeStrategy?: GoalTaskMergeStrategy;
   verification?: GoalVerificationResult;
   lastSummary?: string;
 }
@@ -208,6 +248,10 @@ function mergeGoalTasks(existing: GoalTask[], input: GoalTask[] | undefined): Go
         task.status !== next.status || task.attempts > next.attempts ? task.status : next.status,
       attempts: Math.max(task.attempts, next.attempts),
       workerId: task.workerId ?? next.workerId,
+      dependsOn: task.dependsOn ?? next.dependsOn,
+      parallelGroup: task.parallelGroup ?? next.parallelGroup,
+      expectedChangedScope: task.expectedChangedScope ?? next.expectedChangedScope,
+      mergeStrategy: task.mergeStrategy ?? next.mergeStrategy,
       verification: task.verification ?? next.verification,
       lastSummary: task.lastSummary ?? next.lastSummary,
     };
@@ -227,6 +271,31 @@ function mergeGoalEvidence(
   const merged = [...existing];
   for (const item of input) {
     if (!byId.has(item.id)) merged.push(item);
+  }
+  return merged;
+}
+
+function mergeGoalReferences(
+  existing: GoalReference[],
+  input: GoalReference[] | undefined,
+): GoalReference[] {
+  if (!input) return existing;
+  const merged = [...existing];
+  const seen = new Set(
+    existing
+      .map((item) => item.id)
+      .concat(
+        existing.map(
+          (item) => `${item.kind}:${item.value ?? item.path ?? item.content ?? item.label}`,
+        ),
+      ),
+  );
+  for (const item of input) {
+    const identity = `${item.kind}:${item.value ?? item.path ?? item.content ?? item.label}`;
+    if (seen.has(item.id) || seen.has(identity)) continue;
+    seen.add(item.id);
+    seen.add(identity);
+    merged.push(item);
   }
   return merged;
 }
@@ -269,6 +338,15 @@ function isTaskStatus(value: unknown): value is GoalTaskStatus {
   );
 }
 
+function isTaskMergeStrategy(value: unknown): value is GoalTaskMergeStrategy {
+  return (
+    value === "parallel_candidate" ||
+    value === "after_dependencies" ||
+    value === "serial" ||
+    value === "manual"
+  );
+}
+
 function isPrerequisiteStatus(value: unknown): value is GoalPrerequisiteStatus {
   return value === "unknown" || value === "met" || value === "missing";
 }
@@ -297,6 +375,17 @@ function isEvidenceMechanism(value: unknown): value is GoalEvidenceMechanism {
     value === "source" ||
     value === "file" ||
     value === "manual"
+  );
+}
+
+function isGoalReferenceKind(value: unknown): value is GoalReferenceKind {
+  return (
+    value === "prompt" ||
+    value === "url" ||
+    value === "repo" ||
+    value === "file" ||
+    value === "image" ||
+    value === "text"
   );
 }
 
@@ -370,6 +459,24 @@ function normalizeEvidencePlanItem(value: unknown): GoalEvidencePlan | null {
   };
 }
 
+function normalizeReference(value: unknown): GoalReference | null {
+  if (!isObject(value)) return null;
+  const label = typeof value.label === "string" ? value.label : "Goal reference";
+  return {
+    id: typeof value.id === "string" ? value.id : randomUUID(),
+    kind: isGoalReferenceKind(value.kind) ? value.kind : "text",
+    label,
+    ...(optionalString(value.value) ? { value: optionalString(value.value) } : {}),
+    ...(optionalString(value.path) ? { path: optionalString(value.path) } : {}),
+    ...(optionalString(value.mediaType) ? { mediaType: optionalString(value.mediaType) } : {}),
+    ...(optionalString(value.description)
+      ? { description: optionalString(value.description) }
+      : {}),
+    ...(optionalString(value.content) ? { content: optionalString(value.content) } : {}),
+    ...(optionalString(value.source) ? { source: optionalString(value.source) } : {}),
+  };
+}
+
 function normalizeTask(value: unknown): GoalTask | null {
   if (!isObject(value)) return null;
   const title = typeof value.title === "string" ? value.title : "Goal task";
@@ -381,6 +488,14 @@ function normalizeTask(value: unknown): GoalTask | null {
     status: isTaskStatus(value.status) ? value.status : "pending",
     ...(optionalString(value.workerId) ? { workerId: optionalString(value.workerId) } : {}),
     attempts: typeof value.attempts === "number" && value.attempts >= 0 ? value.attempts : 0,
+    ...(stringArray(value.dependsOn).length > 0 ? { dependsOn: stringArray(value.dependsOn) } : {}),
+    ...(optionalString(value.parallelGroup)
+      ? { parallelGroup: optionalString(value.parallelGroup) }
+      : {}),
+    ...(stringArray(value.expectedChangedScope).length > 0
+      ? { expectedChangedScope: stringArray(value.expectedChangedScope) }
+      : {}),
+    ...(isTaskMergeStrategy(value.mergeStrategy) ? { mergeStrategy: value.mergeStrategy } : {}),
     ...(normalizeVerification(value.verification)
       ? { verification: normalizeVerification(value.verification) }
       : {}),
@@ -412,6 +527,19 @@ function normalizeVerifier(value: unknown): GoalVerifier | undefined {
     ...(normalizeVerification(value.lastResult)
       ? { lastResult: normalizeVerification(value.lastResult) }
       : {}),
+  };
+}
+
+function normalizeCompletionAudit(value: unknown): GoalCompletionAudit | undefined {
+  if (!isObject(value)) return undefined;
+  return {
+    status: isVerificationStatus(value.status) ? value.status : "unknown",
+    summary: typeof value.summary === "string" ? value.summary : "",
+    checkedAt: typeof value.checkedAt === "string" ? value.checkedAt : nowIso(),
+    ...(optionalString(value.verifierCheckedAt)
+      ? { verifierCheckedAt: optionalString(value.verifierCheckedAt) }
+      : {}),
+    ...(optionalString(value.outputPath) ? { outputPath: optionalString(value.outputPath) } : {}),
   };
 }
 
@@ -453,12 +581,18 @@ function normalizeRun(value: unknown, fallbackProjectPath: string): GoalRun | nu
           .map(normalizeEvidencePlanItem)
           .filter((item): item is GoalEvidencePlan => !!item)
       : [],
+    references: Array.isArray(value.references)
+      ? value.references.map(normalizeReference).filter((item): item is GoalReference => !!item)
+      : [],
     tasks,
     evidence: Array.isArray(value.evidence)
       ? value.evidence.map(normalizeEvidence).filter((item): item is GoalEvidence => !!item)
       : [],
     ...(normalizeVerifier(value.verifier) ? { verifier: normalizeVerifier(value.verifier) } : {}),
-    blockers: stringArray(value.blockers),
+    ...(normalizeCompletionAudit(value.completionAudit)
+      ? { completionAudit: normalizeCompletionAudit(value.completionAudit) }
+      : {}),
+    blockers: dedupeGoalBlockers(stringArray(value.blockers)),
     ...(optionalString(value.activeWorkerId)
       ? { activeWorkerId: optionalString(value.activeWorkerId) }
       : {}),
@@ -481,12 +615,24 @@ function isActiveGoalRun(run: GoalRun): boolean {
   );
 }
 
-function wouldEraseActiveGoalRuns(
+function omittedActiveGoalRuns(
   previousRuns: readonly GoalRun[],
   nextRuns: readonly GoalRun[],
-): boolean {
-  if (nextRuns.length > 0) return false;
-  return previousRuns.some(isActiveGoalRun);
+): GoalRun[] {
+  const nextIds = new Set(nextRuns.map((run) => run.id));
+  return previousRuns.filter((run) => isActiveGoalRun(run) && !nextIds.has(run.id));
+}
+
+export function dedupeGoalBlockers(blockers: readonly string[]): string[] {
+  return Array.from(new Set(blockers.map((item) => item.trim()).filter(Boolean)));
+}
+
+export function appendGoalBlockers(
+  blockers: readonly string[],
+  nextBlockers: string | readonly string[] | undefined,
+): string[] {
+  const additions = typeof nextBlockers === "string" ? [nextBlockers] : (nextBlockers ?? []);
+  return dedupeGoalBlockers([...blockers, ...additions]);
 }
 
 function deriveRunnableStatus(
@@ -516,38 +662,69 @@ function enqueueWrite<T>(fn: () => Promise<T>): Promise<T> {
 async function writeGoalRunsFile(cwd: string, runs: readonly GoalRun[]): Promise<void> {
   const normalizedCwd = normalizeProjectPath(cwd);
   const dir = projectDir(normalizedCwd);
-  await mkdir(dir, { recursive: true });
-  const goalsPath = join(dir, "goals.json");
-  const existingRuns = await readGoalRunsFile(normalizedCwd);
-  if (wouldEraseActiveGoalRuns(existingRuns, runs)) {
-    const timestamp = nowIso();
-    const repairedRuns = existingRuns.map((run) => ({
-      ...run,
-      evidence: [
-        ...run.evidence,
-        createGoalEvidence({
-          kind: "summary",
-          label: "Goal store write rejected",
-          content:
-            "Rejected an attempted empty Goal overwrite while active work was present; preserving existing durable state.",
-          createdAt: timestamp,
-        }),
-      ],
-      updatedAt: timestamp,
-    }));
-    await atomicWriteJson(goalsPath, sortNewestFirst(repairedRuns));
-    await Promise.all(
-      repairedRuns.map((run) => writeGoalProgressJournalFromRun(normalizedCwd, run)),
-    );
-    return;
-  }
-  const sorted = sortNewestFirst([...runs]);
-  await atomicWriteJson(goalsPath, sorted);
-  await atomicWriteJson(join(dir, "meta.json"), {
-    path: normalizedCwd,
-    name: basename(normalizedCwd),
+  await withGoalStoreLock(dir, async () => {
+    await mkdir(dir, { recursive: true });
+    const goalsPath = join(dir, "goals.json");
+    const existingRuns = await readGoalRunsFile(normalizedCwd);
+    const omittedActive = omittedActiveGoalRuns(existingRuns, runs);
+    if (omittedActive.length > 0) {
+      const timestamp = nowIso();
+      const rejectedIds = new Set(omittedActive.map((run) => run.id));
+      const repairedRuns = existingRuns.map((run) =>
+        rejectedIds.has(run.id)
+          ? {
+              ...run,
+              evidence: [
+                ...run.evidence,
+                createGoalEvidence({
+                  kind: "summary",
+                  label: "Goal store write rejected",
+                  content:
+                    "Rejected an attempted Goal overwrite that omitted active work; preserving existing durable state.",
+                  createdAt: timestamp,
+                }),
+              ],
+              updatedAt: timestamp,
+            }
+          : run,
+      );
+      await atomicWriteJson(goalsPath, sortNewestFirst(repairedRuns));
+      await Promise.all(
+        repairedRuns.map((run) => writeGoalProgressJournalFromRun(normalizedCwd, run)),
+      );
+      return;
+    }
+    const sorted = sortNewestFirst([...runs]);
+    await atomicWriteJson(goalsPath, sorted);
+    await atomicWriteJson(join(dir, "meta.json"), {
+      path: normalizedCwd,
+      name: basename(normalizedCwd),
+    });
+    await Promise.all(sorted.map((run) => writeGoalProgressJournalFromRun(normalizedCwd, run)));
   });
-  await Promise.all(sorted.map((run) => writeGoalProgressJournalFromRun(normalizedCwd, run)));
+}
+
+async function withGoalStoreLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  await mkdir(dir, { recursive: true });
+  const lockPath = join(dir, "goals.lock");
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(lockPath, "wx");
+      await handle.writeFile(`${process.pid}\n${new Date().toISOString()}\n`, "utf-8");
+      await handle.close();
+      try {
+        return await fn();
+      } finally {
+        await rm(lockPath, { force: true });
+      }
+    } catch (err) {
+      await handle?.close().catch(() => undefined);
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() > deadline) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
 }
 
 async function atomicWriteJson(path: string, value: unknown): Promise<void> {
@@ -624,6 +801,12 @@ export function createGoalTask(input: GoalTaskInput): GoalTask {
     status: input.status ?? "pending",
     ...(input.workerId ? { workerId: input.workerId } : {}),
     attempts: input.attempts ?? 0,
+    ...(input.dependsOn && input.dependsOn.length > 0 ? { dependsOn: input.dependsOn } : {}),
+    ...(input.parallelGroup ? { parallelGroup: input.parallelGroup } : {}),
+    ...(input.expectedChangedScope && input.expectedChangedScope.length > 0
+      ? { expectedChangedScope: input.expectedChangedScope }
+      : {}),
+    ...(input.mergeStrategy ? { mergeStrategy: input.mergeStrategy } : {}),
     ...(input.verification ? { verification: input.verification } : {}),
     ...(input.lastSummary ? { lastSummary: input.lastSummary } : {}),
   };
@@ -657,10 +840,12 @@ export function createGoalRun(cwd: string, input: GoalRunInput): GoalRun {
     prerequisites,
     harness: input.harness ?? [],
     evidencePlan: input.evidencePlan ?? [],
+    references: input.references ?? [],
     tasks: input.tasks ?? [],
     evidence: input.evidence ?? [],
     ...(input.verifier ? { verifier: input.verifier } : {}),
-    blockers: input.blockers ?? [],
+    ...(input.completionAudit ? { completionAudit: input.completionAudit } : {}),
+    blockers: dedupeGoalBlockers(input.blockers ?? []),
     ...(input.activeWorkerId ? { activeWorkerId: input.activeWorkerId } : {}),
     ...(input.continueRequestedAt ? { continueRequestedAt: input.continueRequestedAt } : {}),
   };
@@ -760,7 +945,7 @@ export async function reconcileActiveGoalRuns(
       return {
         ...next,
         evidence: [...next.evidence, ...evidence],
-        blockers: [...blockers],
+        blockers: dedupeGoalBlockers([...blockers]),
         updatedAt: timestamp,
       };
     });
@@ -787,9 +972,12 @@ export async function upsertGoalRun(cwd: string, input: GoalRun | GoalRunInput):
           prerequisites: input.prerequisites ?? existing.prerequisites,
           harness: input.harness ?? existing.harness,
           evidencePlan: input.evidencePlan ?? existing.evidencePlan,
+          references: mergeGoalReferences(existing.references ?? [], input.references),
           tasks: mergeGoalTasks(existing.tasks, input.tasks),
           evidence: mergeGoalEvidence(existing.evidence, input.evidence),
-          blockers: input.blockers ?? existing.blockers,
+          blockers: input.blockers
+            ? dedupeGoalBlockers(input.blockers)
+            : dedupeGoalBlockers(existing.blockers),
           status: deriveRunnableStatus(
             input.status ?? existing.status,
             input.prerequisites ?? existing.prerequisites,
@@ -1008,6 +1196,14 @@ async function writeGoalProgressJournalFromRun(cwd: string, run: GoalRun): Promi
         )
       : ["- none"]),
     "",
+    "## References",
+    ...(run.references?.length
+      ? run.references.map(
+          (item) =>
+            `- [${item.kind}] ${item.id}: ${item.label}${item.value ? ` — ${item.value}` : ""}${item.path ? ` (${item.path})` : ""}`,
+        )
+      : ["- none"]),
+    "",
     "## Tasks",
     ...(run.tasks.length
       ? run.tasks.map(
@@ -1020,6 +1216,11 @@ async function writeGoalProgressJournalFromRun(cwd: string, run: GoalRun): Promi
     run.verifier?.lastResult
       ? `- ${run.verifier.lastResult.status}: ${run.verifier.lastResult.summary}${run.verifier.lastResult.outputPath ? ` (${run.verifier.lastResult.outputPath})` : ""}`
       : `- ${run.verifier?.command ?? "none"}`,
+    "",
+    "## Final completion audit",
+    run.completionAudit
+      ? `- ${run.completionAudit.status}: ${run.completionAudit.summary}${run.completionAudit.outputPath ? ` (${run.completionAudit.outputPath})` : ""}`
+      : "- none",
     "",
     "## Blockers",
     ...(run.blockers.length ? run.blockers.map((item) => `- ${item}`) : ["- none"]),

@@ -1,0 +1,1338 @@
+import chalk from "chalk";
+import stringWidth from "string-width";
+import wrapAnsi from "wrap-ansi";
+import type { Provider } from "@abukhaled/gg-ai";
+import { getModel } from "../core/model-registry.js";
+import { LANGUAGE_DISPLAY_NAMES, type LanguageId } from "../core/language-detector.js";
+import type { CompletedItem } from "./App.js";
+import type { PasteInfo } from "./components/InputArea.js";
+import { BLACK_CIRCLE, RETURN_SYMBOL } from "./constants/figures.js";
+import { SPINNER_FRAMES } from "./spinner-frames.js";
+import type { Theme } from "./theme/theme.js";
+import { getUserMessageDisplayParts } from "./utils/user-message-display.js";
+import { buildToolGroupSummary, segmentsToPlainText } from "./tool-group-summary.js";
+import { renderMarkdownToAnsiLines } from "./utils/markdown-renderer.js";
+
+const LOGO_LINES = [" ▄▀▀▀ ▄▀▀▀", " █ ▀█ █ ▀█", " ▀▄▄▀ ▀▄▄▀"];
+const GRADIENT = [
+  "#60a5fa",
+  "#6da1f9",
+  "#7a9df7",
+  "#8799f5",
+  "#9495f3",
+  "#a18ff1",
+  "#a78bfa",
+  "#a18ff1",
+  "#9495f3",
+  "#8799f5",
+  "#7a9df7",
+  "#6da1f9",
+];
+const GAP = "   ";
+const LOGO_WIDTH = 9;
+const SIDE_BY_SIDE_MIN = LOGO_WIDTH + GAP.length + 20;
+const MAX_OUTPUT_LINES = 4;
+const RESPONSE_LEFT_PADDING = " ";
+const USER_MESSAGE_BACKGROUND = "#374151";
+const USER_MESSAGE_PREFIX = "> ";
+const USER_MESSAGE_TOP_FILL = "▄";
+const USER_MESSAGE_BOTTOM_FILL = "▀";
+const USER_MESSAGE_HORIZONTAL_PADDING = 2;
+const ANSI_ESCAPE_PATTERN = new RegExp(String.raw`\u001B\[[0-?]*[ -/]*[@-~]`, "gu");
+const COMPACT_TOOLS = new Set(["read", "grep", "find", "ls", "source_path"]);
+const STATE_TOOLS = new Set(["tasks", "goals"]);
+const SERVER_STYLE_TOOLS = new Set(["web_search"]);
+const SINGLE_LEFT_BORDER = "│";
+const ROUND_BORDER = {
+  topLeft: "╭",
+  topRight: "╮",
+  bottomLeft: "╰",
+  bottomRight: "╯",
+  horizontal: "─",
+  vertical: "│",
+} as const;
+
+export interface TerminalHistoryPrinter {
+  print(
+    items: readonly CompletedItem[],
+    context: TerminalHistoryContext,
+    options?: { force?: boolean; write?: (data: string) => void },
+  ): void;
+  clear(): void;
+  resetPrinted(): void;
+  readonly printedIds: ReadonlySet<string>;
+}
+
+export interface TerminalHistoryPrinterOptions {
+  stream?: NodeJS.WriteStream;
+}
+
+export interface TerminalHistoryContext {
+  theme: Theme;
+  columns: number;
+  version: string;
+  model: string;
+  provider: Provider;
+  cwd: string;
+}
+
+function isAgentSpacingKind(kind: CompletedItem["kind"]): boolean {
+  return [
+    "assistant",
+    "queued",
+    "goal_progress",
+    "tool_start",
+    "tool_done",
+    "tool_group",
+    "server_tool_start",
+    "server_tool_done",
+    "subagent_group",
+    "info",
+    "error",
+    "stopped",
+    "plan_transition",
+    "goal_agent_transition",
+    "thinking_transition",
+    "model_transition",
+    "theme_transition",
+    "plan_event",
+    "update_notice",
+    "compacting",
+    "compacted",
+    "style_pack",
+    "setup_hint",
+  ].includes(kind);
+}
+
+export function createTerminalHistoryPrinter({
+  stream = process.stdout,
+}: TerminalHistoryPrinterOptions = {}): TerminalHistoryPrinter {
+  const printed = new Set<string>();
+  let previousPrintedKind: CompletedItem["kind"] | null = null;
+
+  return {
+    print(items, context, options) {
+      const writeOutput = options?.write ?? ((data: string) => void stream.write(data));
+      for (const item of items) {
+        if (!options?.force && printed.has(item.id)) continue;
+        const output = serializeCompletedItemToTerminalHistory(item, context);
+        const endsWithBlankLine = item.kind === "banner";
+        const formatted = formatHistoryWrite(output, {
+          leadingSeparator:
+            previousPrintedKind !== null &&
+            isAgentSpacingKind(previousPrintedKind) &&
+            isAgentSpacingKind(item.kind),
+          trailingBlankLine: endsWithBlankLine,
+        });
+        if (formatted.length === 0) continue;
+        printed.add(item.id);
+        writeOutput(formatted);
+        previousPrintedKind = item.kind;
+      }
+    },
+    clear() {
+      printed.clear();
+      previousPrintedKind = null;
+    },
+    resetPrinted() {
+      printed.clear();
+      previousPrintedKind = null;
+    },
+    get printedIds() {
+      return printed;
+    },
+  };
+}
+
+export function serializeCompletedItemToTerminalHistory(
+  item: CompletedItem,
+  context: TerminalHistoryContext,
+): string {
+  switch (item.kind) {
+    case "banner":
+      return renderBanner(context);
+    case "user":
+      return renderUser(item.text, item.imageCount, item.pasteInfo, context);
+    case "queued":
+      return renderQueued(item.text, item.imageCount, context);
+    case "assistant":
+      return renderAssistant(item.text, context, item.continuation);
+    case "tool_start":
+      return renderToolStart(item.name, item.args, item.progressOutput, context);
+    case "tool_done":
+      return renderToolDone(
+        item.name,
+        item.args,
+        item.result,
+        item.isError,
+        item.durationMs,
+        context,
+      );
+    case "tool_group":
+      return renderToolGroup(item.tools, context);
+    case "server_tool_start":
+      return renderServerToolStart(item.name, item.input, context);
+    case "server_tool_done":
+      return renderServerToolDone(item.name, item.input, item.resultType, item.durationMs, context);
+    case "subagent_group":
+      return renderSubAgentGroup(item.agents, item.aborted, context);
+    case "goal":
+      return renderGoal(item.title, item.workerId, context);
+    case "goal_progress":
+      return renderGoalProgress(item, context);
+    case "error":
+      return renderError(item.headline, item.message, item.guidance, context);
+    case "info":
+      return renderStatusLine(
+        "○",
+        normalizeStatusText(item.text),
+        context,
+        context.theme.commandColor,
+        false,
+      );
+    case "style_pack":
+      return renderStylePack(item.added, item.showSetupHint, context);
+    case "setup_hint":
+      return renderSetupHint(context);
+    case "update_notice":
+      return renderUpdateNotice(item.text, context);
+    case "compacting":
+      return renderCompacting(context);
+    case "compacted":
+      return renderCompacted(
+        item.originalCount,
+        item.newCount,
+        item.tokensBefore,
+        item.tokensAfter,
+        context,
+      );
+    case "duration":
+      return indent(
+        dim(context, `✻ ${item.verb} ${formatDuration(item.durationMs)}`),
+        RESPONSE_LEFT_PADDING,
+      );
+    case "plan_transition":
+      return renderStatusLine(
+        "●",
+        normalizeStatusText(item.text),
+        context,
+        context.theme.commandColor,
+        true,
+      );
+    case "goal_agent_transition":
+      return renderStatusLine(
+        "●",
+        normalizeStatusText(item.text),
+        context,
+        context.theme.commandColor,
+        true,
+      );
+    case "model_transition":
+      return renderStatusLine(
+        "▸",
+        `${dim(context, "Switched to ")}${color(context.theme.commandColor, item.modelName, true)}`,
+        context,
+        context.theme.commandColor,
+        true,
+        true,
+      );
+    case "theme_transition":
+      return renderStatusLine(
+        "◐",
+        `${dim(context, "Theme switched to ")}${color(context.theme.commandColor, item.themeName, true)}`,
+        context,
+        context.theme.commandColor,
+        true,
+        true,
+      );
+    case "plan_event":
+      return renderPlanEvent(item.event, item.detail, context);
+    case "stopped":
+      return renderStatusLine(
+        "⊘",
+        normalizeStatusText(item.text),
+        context,
+        context.theme.commandColor,
+        true,
+      );
+    case "step_done":
+      return renderStepDone(item.stepNum, item.description, context);
+    case "tombstone":
+      return "";
+  }
+}
+
+function normalizeStatusText(text: string): string {
+  return text.replace(/\\n/g, "\n").replace(/^\n+|\n+$/g, "");
+}
+
+function renderStatusLine(
+  glyph: string,
+  text: string,
+  context: TerminalHistoryContext,
+  glyphColor: string,
+  bold: boolean,
+  textAlreadyStyled = false,
+): string {
+  const prefix = ` ${color(glyphColor, glyph, true)} `;
+  const continuation = "   ";
+  const body = textAlreadyStyled
+    ? text
+    : color(bold ? glyphColor : context.theme.textDim, text, bold);
+  return prefixFirstLine(body, prefix, continuation);
+}
+
+function renderRoundBorderBox(
+  lines: readonly string[],
+  context: TerminalHistoryContext,
+  borderColor: string,
+): string {
+  const longestLineWidth = Math.max(
+    0,
+    ...lines.map((lineText) => stringWidth(stripAnsi(lineText))),
+  );
+  const maxFrameWidth = Math.max(4, context.columns - stringWidth(RESPONSE_LEFT_PADDING));
+  const frameWidth = Math.max(4, Math.min(maxFrameWidth, longestLineWidth + 4));
+  const contentWidth = Math.max(1, frameWidth - 4);
+  const horizontal = color(borderColor, ROUND_BORDER.horizontal.repeat(frameWidth - 2));
+  const top = `${color(borderColor, ROUND_BORDER.topLeft)}${horizontal}${color(borderColor, ROUND_BORDER.topRight)}`;
+  const bottom = `${color(borderColor, ROUND_BORDER.bottomLeft)}${horizontal}${color(borderColor, ROUND_BORDER.bottomRight)}`;
+  const rows = lines.flatMap((lineText) => wrapBoxLine(lineText, contentWidth));
+  const body = rows.map((lineText) => {
+    const fillWidth = Math.max(0, contentWidth - stringWidth(stripAnsi(lineText)));
+    return `${color(borderColor, ROUND_BORDER.vertical)} ${lineText}${" ".repeat(fillWidth)} ${color(borderColor, ROUND_BORDER.vertical)}`;
+  });
+  return indent([top, ...body, bottom].join("\n"), RESPONSE_LEFT_PADDING);
+}
+
+function renderLeftBorderBox(
+  lines: readonly string[],
+  borderColor: string,
+  options: { padding?: number } = {},
+): string {
+  const padding = " ".repeat(options.padding ?? 1);
+  return indent(
+    lines
+      .map((lineText) => `${color(borderColor, SINGLE_LEFT_BORDER)}${padding}${lineText}`)
+      .join("\n"),
+    RESPONSE_LEFT_PADDING,
+  );
+}
+
+function formatHistoryWrite(
+  output: string,
+  options: { leadingSeparator: boolean; trailingBlankLine: boolean },
+): string {
+  const trimmed = output.replace(/\n+$/u, "");
+  if (trimmed.length === 0) return "";
+  const leading = options.leadingSeparator ? "\n" : "";
+  const trailing = options.trailingBlankLine ? "\n\n" : "\n";
+  return `${leading}${trimmed}${trailing}`;
+}
+
+function renderBanner(context: TerminalHistoryContext): string {
+  const modelInfo = getModel(context.model);
+  const modelName = modelInfo?.name ?? context.model;
+  const home = process.env.HOME ?? "";
+  const displayPath =
+    home && context.cwd.startsWith(home) ? `~${context.cwd.slice(home.length)}` : context.cwd;
+  const logo = LOGO_LINES.map((lineText) => gradientLine(lineText));
+
+  if (context.columns < SIDE_BY_SIDE_MIN) {
+    return block([
+      "",
+      ...logo,
+      "",
+      `${color(context.theme.primary, "GG Coder", true)}${dim(context, ` v${context.version}`)}`,
+      `${color(context.theme.secondary, modelName)}  ${dim(context, truncatePlain(displayPath, context.columns))}`,
+      `${color(context.theme.primary, "/goal")} ${dim(context, "start goal · ")}${color(context.theme.primary, "Shift+Tab")} ${dim(context, "toggle thinking")}`,
+      "",
+    ]);
+  }
+
+  return block([
+    "",
+    `${logo[0]}${GAP}${color(context.theme.primary, "GG Coder", true)}${dim(context, ` v${context.version} · By `)}${color(context.theme.text, "Ken Kai", true)}`,
+    `${logo[1]}${GAP}${color(context.theme.secondary, modelName)}  ${dim(context, truncatePlain(displayPath, Math.max(10, context.columns - LOGO_WIDTH - GAP.length - stringWidth(modelName) - 2)))}`,
+    `${logo[2]}${GAP}${color(context.theme.primary, "/goal")} ${dim(context, "start goal · ")}${color(context.theme.primary, "Shift+Tab")} ${dim(context, "toggle thinking")}`,
+    "",
+  ]);
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(ANSI_ESCAPE_PATTERN, "");
+}
+
+function renderUser(
+  text: string,
+  imageCount: number | undefined,
+  pasteInfo: PasteInfo | undefined,
+  context: TerminalHistoryContext,
+): string {
+  const imageBadges = Array.from({ length: imageCount ?? 0 }, (_, index) =>
+    userChipSegment(`[Image #${index + 1}]`, context.theme.accent),
+  );
+  const userMessageText = context.theme.commandColor;
+  const separator = userChipSegment(" ", userMessageText);
+  const content = [
+    ...getUserMessageDisplayParts(text, pasteInfo).map((part) =>
+      userChipSegment(part.text, part.kind === "paste" ? context.theme.textDim : userMessageText),
+    ),
+    ...imageBadges,
+  ]
+    .filter((part) => part.length > 0)
+    .join(separator);
+  const messageWidth = Math.max(10, context.columns);
+  const contentWidth = Math.max(
+    1,
+    messageWidth - USER_MESSAGE_HORIZONTAL_PADDING - USER_MESSAGE_PREFIX.length,
+  );
+  const wrapped = wrapAnsi(content || userChipSegment("(empty)", userMessageText), contentWidth, {
+    hard: true,
+    wordWrap: true,
+  });
+  const top = chalk.hex(USER_MESSAGE_BACKGROUND)(USER_MESSAGE_TOP_FILL.repeat(messageWidth));
+  const bottom = chalk.hex(USER_MESSAGE_BACKGROUND)(USER_MESSAGE_BOTTOM_FILL.repeat(messageWidth));
+  const rows = wrapped.split("\n").map((lineText, index) => {
+    const prefix =
+      index === 0
+        ? userChipSegment(USER_MESSAGE_PREFIX, userMessageText, true)
+        : userChipSegment(" ".repeat(USER_MESSAGE_PREFIX.length), userMessageText);
+    const line = `${userChipSegment(" ", userMessageText)}${prefix}${lineText}`;
+    const fillWidth = Math.max(0, messageWidth - stringWidth(stripAnsi(line)));
+    return `${line}${userChipSegment(" ".repeat(fillWidth), userMessageText)}`;
+  });
+  return [top, ...rows, bottom].join("\n");
+}
+
+function renderQueued(
+  text: string,
+  imageCount: number | undefined,
+  context: TerminalHistoryContext,
+): string {
+  const suffix = imageCount ? ` (+${imageCount} image${imageCount > 1 ? "s" : ""})` : "";
+  return prefixFirstLine(
+    wrapPlain(
+      `${dim(context, "Queued: ")}${color(context.theme.text, text || "(empty)")}${color(context.theme.text, suffix)}`,
+      context.columns - 4,
+    ),
+    ` ${color(context.theme.warning, "•", true)} `,
+    "   ",
+  );
+}
+
+function renderAssistant(
+  text: string,
+  context: TerminalHistoryContext,
+  continuation = false,
+): string {
+  const lines: string[] = [];
+  const body = renderMarkdownToAnsiLines({
+    text,
+    theme: context.theme,
+    width: Math.max(10, context.columns - 4),
+  })
+    .join("\n")
+    .replace(/^\n+|\n+$/g, "");
+  if (body.length > 0) {
+    lines.push(
+      continuation
+        ? indent(body, "   ")
+        : prefixFirstLine(body, ` ${color(context.theme.primary, BLACK_CIRCLE)} `, "   "),
+    );
+  }
+  return block(lines);
+}
+
+function renderToolStart(
+  name: string,
+  args: Record<string, unknown>,
+  progressOutput: string | undefined,
+  context: TerminalHistoryContext,
+): string {
+  if (SERVER_STYLE_TOOLS.has(name)) {
+    const { label, detail } = getToolHeaderParts(name, args);
+    return block([
+      toolHeader("running", label, detail, context, { quoteDetail: true }),
+      ...messageResponse([dim(context, "Searching...")], context),
+    ]);
+  }
+
+  if (COMPACT_TOOLS.has(name)) {
+    return toolHeader("running", getCompactRunningLabel(name, args), "", context);
+  }
+
+  if (STATE_TOOLS.has(name)) {
+    const { label, detail } = getToolHeaderParts(name, args);
+    return stateToolHeader("running", label, detail, "", context);
+  }
+
+  const { label, detail } = getToolHeaderParts(name, args);
+  const header = toolHeader("running", label, detail, context);
+  if (name !== "bash" || !progressOutput?.trim()) return header;
+  return block([
+    header,
+    ...messageResponse(
+      outputPreview(progressOutput, context, context.theme.textMuted, { tail: true }),
+      context,
+    ),
+  ]);
+}
+
+function renderToolDone(
+  name: string,
+  args: Record<string, unknown>,
+  result: string,
+  isError: boolean,
+  durationMs: number,
+  context: TerminalHistoryContext,
+): string {
+  if (SERVER_STYLE_TOOLS.has(name)) {
+    return renderServerStyleToolDone(name, args, result, isError, context);
+  }
+
+  if (COMPACT_TOOLS.has(name) && !isError) {
+    return toolHeader("done", getCompactDoneLabel(name, args, result), "", context);
+  }
+
+  if (STATE_TOOLS.has(name)) {
+    const { label, detail } = getToolHeaderParts(name, args);
+    return stateToolHeader(
+      isError ? "error" : "done",
+      label,
+      detail,
+      getInlineSummary(name, result, isError),
+      context,
+    );
+  }
+
+  const { label, detail } = getToolHeaderParts(name, args);
+  const inline = getInlineSummary(name, result, isError);
+  const suffix =
+    inline.length > 0 && toolResultPreview(name, result, isError, context).length === 0
+      ? inline
+      : "";
+  const header = toolHeader(isError ? "error" : "done", label, detail, context, { suffix });
+  const preview = toolResultPreview(name, result, isError, context);
+  if (name === "edit" && !isError) {
+    const diff = extractDiff(result);
+    if (diff)
+      return block([header, ...messageResponse(renderDiffPreview(diff, args, context), context)]);
+  }
+  return block(preview.length > 0 ? [header, ...messageResponse(preview, context)] : [header]);
+}
+
+function renderToolGroup(
+  tools: readonly {
+    name: string;
+    args: Record<string, unknown>;
+    status: "running" | "done";
+    isError?: boolean;
+    result?: string;
+  }[],
+  context: TerminalHistoryContext,
+): string {
+  const allDone = tools.every((tool) => tool.status === "done");
+  const hasError = tools.some((tool) => tool.isError);
+  const status = allDone ? (hasError ? "error" : "done") : "running";
+  return toolHeader(
+    status,
+    segmentsToPlainText(buildToolGroupSummary(tools, allDone)),
+    "",
+    context,
+  );
+}
+
+function renderServerToolStart(
+  name: string,
+  input: unknown,
+  context: TerminalHistoryContext,
+): string {
+  const { label, detail } = getServerToolHeaderParts(name, input);
+  return block([
+    toolHeader("running", label, detail, context, { quoteDetail: true }),
+    ...messageResponse([dim(context, "Searching...")], context),
+  ]);
+}
+
+function renderServerToolDone(
+  name: string,
+  input: unknown,
+  resultType: string,
+  durationMs: number,
+  context: TerminalHistoryContext,
+): string {
+  const { label, detail } = getServerToolHeaderParts(name, input);
+  const isAborted = resultType === "aborted";
+  const summary = isAborted ? "Stopped." : `Did 1 search in ${Math.round(durationMs / 1000)}s`;
+  return block([
+    toolHeader(isAborted ? "error" : "done", label, detail, context, { quoteDetail: true }),
+    ...messageResponse([dim(context, summary)], context),
+  ]);
+}
+
+function renderSubAgentGroup(
+  agents: readonly {
+    status: "running" | "done" | "error" | "aborted" | string;
+    task: string;
+    tokenUsage?: { input: number; output: number };
+    currentActivity?: string;
+    result?: string;
+    durationMs?: number;
+  }[],
+  aborted: boolean | undefined,
+  context: TerminalHistoryContext,
+): string {
+  if (agents.length === 0) return "";
+  const runningCount = agents.filter((agent) => agent.status === "running").length;
+  const allDone = runningCount === 0;
+  const headerText = aborted
+    ? `${agents.length} agent${agents.length !== 1 ? "s" : ""} interrupted`
+    : allDone
+      ? `${agents.length} agent${agents.length !== 1 ? "s" : ""} completed`
+      : `${agents.length} agent${agents.length !== 1 ? "s" : ""} launched`;
+  const lines = [
+    toolHeader(aborted ? "error" : allDone ? "done" : "running", headerText, "", context),
+  ];
+  agents.forEach((agent, index) => {
+    lines.push(
+      ...renderSubAgentRows(agent, index === agents.length - 1, aborted === true, context),
+    );
+  });
+  return block(lines);
+}
+
+function renderGoal(
+  title: string,
+  workerId: string | undefined,
+  context: TerminalHistoryContext,
+): string {
+  return `${RESPONSE_LEFT_PADDING}${color(context.theme.success, "▶", true)} ${dim(context, "Goal: ")}${color(context.theme.success, title)}${workerId ? dim(context, ` · worker ${workerId}`) : ""}`;
+}
+
+function renderGoalProgress(
+  item: Extract<CompletedItem, { kind: "goal_progress" }>,
+  context: TerminalHistoryContext,
+): string {
+  const isError = item.status === "failed" || item.status === "fail" || item.status === "blocked";
+  const status = isError
+    ? "error"
+    : item.phase === "worker_finished" ||
+        item.phase === "verifier_finished" ||
+        item.phase === "terminal"
+      ? "done"
+      : "running";
+  const labelColor = isError
+    ? context.theme.error
+    : item.phase === "worker_finished" || item.phase === "terminal"
+      ? context.theme.success
+      : item.phase === "verifier_finished" || item.phase === "verifier_started"
+        ? context.theme.accent
+        : item.phase === "orchestrator_reviewing" || item.phase === "orchestrator_working"
+          ? context.theme.secondary
+          : item.phase === "continuing"
+            ? context.theme.warning
+            : context.theme.primary;
+  const header = `${toolHeader(status, color(labelColor, item.title, true), "", context)}${item.workerId ? dim(context, ` · worker ${item.workerId}`) : ""}`;
+  const bodyLines: string[] = [];
+  if (item.detail) {
+    bodyLines.push(dim(context, wrapPlain(item.detail, context.columns - 8)));
+  }
+  for (const row of item.summaryRows ?? []) {
+    bodyLines.push(
+      `${dim(context, row.label.padEnd(12))}${color(context.theme.text, row.value)}${row.detail ? dim(context, ` · ${row.detail}`) : ""}`,
+    );
+  }
+  for (const section of item.summarySections ?? []) {
+    bodyLines.push(dim(context, section.title));
+    for (const sectionLine of section.lines) {
+      bodyLines.push(`${color(context.theme.text, "• ")}${color(context.theme.text, sectionLine)}`);
+    }
+  }
+  return block([header, ...messageResponse(bodyLines, context)]);
+}
+
+function renderError(
+  headline: string,
+  message: string,
+  guidance: string,
+  context: TerminalHistoryContext,
+): string {
+  const lines = [color(context.theme.error, `✗ ${headline}`)];
+  if (message && message !== headline) {
+    lines.push(dim(context, indent(wrapPlain(message, context.columns - 4), "  ")));
+  }
+  lines.push(dim(context, indent(wrapPlain(`→ ${guidance}`, context.columns - 4), "  ")));
+  return indent(block(lines), RESPONSE_LEFT_PADDING);
+}
+
+function renderStylePack(
+  added: readonly LanguageId[],
+  showSetupHint: boolean,
+  context: TerminalHistoryContext,
+): string {
+  const names = added.map((id) => LANGUAGE_DISPLAY_NAMES[id] ?? id).join(", ");
+  const headerLabel = added.length > 1 ? "STYLE PACKS ACTIVE" : "STYLE PACK ACTIVE";
+  const lines = [
+    `${color(context.theme.language, "◆ ", true)}${color(context.theme.language, headerLabel, true)}`,
+    color(context.theme.text, names, true),
+  ];
+  if (showSetupHint) {
+    lines.push(
+      "",
+      `${dim(context, "Tip: run ")}${color(context.theme.language, "/setup", true)}${dim(context, " to audit this project against the active pack(s)")}`,
+    );
+  }
+  return renderRoundBorderBox(lines, context, context.theme.language);
+}
+
+function renderSetupHint(context: TerminalHistoryContext): string {
+  return renderRoundBorderBox(
+    [
+      `${color(context.theme.language, "◆ ", true)}${color(context.theme.language, "NO STYLE PACKS DETECTED", true)}`,
+      dim(context, "This directory has no recognized language manifest at its root."),
+      "",
+      `${dim(context, "Tip: run ")}${color(context.theme.language, "/setup", true)}${dim(context, " to audit project hygiene or bootstrap a new project from scratch")}`,
+    ],
+    context,
+    context.theme.language,
+  );
+}
+
+function renderUpdateNotice(text: string, context: TerminalHistoryContext): string {
+  return renderRoundBorderBox(
+    [color(context.theme.commandColor, `✨ ${text}`, true)],
+    context,
+    context.theme.commandColor,
+  );
+}
+
+function renderCompacting(context: TerminalHistoryContext): string {
+  return renderLeftBorderBox(
+    [
+      `${color(context.theme.warning, "· ")}${dim(context, "Compacting conversation")}${dim(context, "...")}`,
+    ],
+    context.theme.warning,
+    { padding: 2 },
+  );
+}
+
+function renderCompacted(
+  originalCount: number,
+  newCount: number,
+  tokensBefore: number,
+  tokensAfter: number,
+  context: TerminalHistoryContext,
+): string {
+  const reduction = tokensBefore > 0 ? Math.round((1 - tokensAfter / tokensBefore) * 100) : 0;
+  return renderLeftBorderBox(
+    [
+      `${color(context.theme.warning, "⟳ ")}${dim(context, "Conversation compacted")}`,
+      dim(
+        context,
+        `  ${originalCount} → ${newCount} messages · ${formatTokenCount(tokensBefore)} → ${formatTokenCount(tokensAfter)} tokens · ${reduction}% reduction`,
+      ),
+    ],
+    context.theme.warning,
+  );
+}
+
+function renderPlanEvent(
+  event: "approved" | "rejected" | "dismissed",
+  detail: string | undefined,
+  context: TerminalHistoryContext,
+): string {
+  const labels = {
+    approved: "Plan approved",
+    rejected: "Plan rejected",
+    dismissed: "Plan dismissed",
+  } satisfies Record<typeof event, string>;
+  const lines = [color(context.theme.commandColor, ` ○ ${labels[event]}`, true)];
+  if (detail) lines[0] += dim(context, ` — "${detail}"`);
+  return block(lines);
+}
+
+function renderStepDone(
+  stepNum: number,
+  description: string,
+  context: TerminalHistoryContext,
+): string {
+  return `${RESPONSE_LEFT_PADDING}${color(context.theme.success, "✓", true)} ${color(context.theme.success, `Step ${stepNum} done`, true)}${description ? dim(context, ` — ${description}`) : ""}`;
+}
+
+function renderServerStyleToolDone(
+  name: string,
+  args: Record<string, unknown>,
+  result: string,
+  isError: boolean,
+  context: TerminalHistoryContext,
+): string {
+  const { label, detail } = getToolHeaderParts(name, args);
+  const searchCount = (result.match(/^\d+\./gm) ?? []).length;
+  const summaryText = isError
+    ? (result.split("\n")[0] ?? "")
+    : `${searchCount} result${searchCount !== 1 ? "s" : ""}`;
+  return block([
+    toolHeader(isError ? "error" : "done", label, detail, context, { quoteDetail: true }),
+    ...messageResponse([dim(context, summaryText)], context),
+  ]);
+}
+
+function renderSubAgentRows(
+  agent: {
+    status: "running" | "done" | "error" | "aborted" | string;
+    task: string;
+    tokenUsage?: { input: number; output: number };
+    currentActivity?: string;
+    durationMs?: number;
+  },
+  isLast: boolean,
+  aborted: boolean,
+  context: TerminalHistoryContext,
+): string[] {
+  const branch = isLast ? "└─" : "├─";
+  const continuation = isLast ? "   " : "│  ";
+  const isRunning = agent.status === "running" && !aborted;
+  const firstLine = agent.task.split("\n")[0]?.replace(/\*\*/g, "") ?? "";
+  const taskDisplay = firstLine.length > 60 ? `${firstLine.slice(0, 57)}…` : firstLine;
+  const taskPrefix =
+    agent.status === "done"
+      ? color(context.theme.success, "✓ ", true)
+      : agent.status === "error"
+        ? color(context.theme.error, "✗ ", true)
+        : "";
+  const taskLine = `${dim(context, `   ${branch.padEnd(3)}`)}${taskPrefix}${color(agent.status === "done" ? context.theme.success : context.theme.text, taskDisplay, isRunning)}`;
+
+  const totalTokens = agent.tokenUsage ? agent.tokenUsage.input + agent.tokenUsage.output : 0;
+  let detail: string;
+  if (isRunning) {
+    detail = `${color(context.theme.primary, "· ")}${dim(context, agent.currentActivity ?? "Starting…")}`;
+  } else if (agent.status === "done") {
+    detail = dim(
+      context,
+      `${formatCompactTokens(totalTokens)} tokens${agent.durationMs != null ? ` · ${formatDuration(agent.durationMs)}` : ""}`,
+    );
+  } else {
+    detail = color(
+      context.theme.error,
+      `${agent.status === "aborted" || aborted ? "Interrupted" : "Failed"}${agent.durationMs != null ? ` · ${formatDuration(agent.durationMs)}` : ""}`,
+    );
+  }
+
+  return [taskLine, `${dim(context, `   ${continuation}${RETURN_SYMBOL} `)}${detail}`];
+}
+
+function toolResultPreview(
+  name: string,
+  result: string,
+  isError: boolean,
+  context: TerminalHistoryContext,
+): string[] {
+  if (isError) return outputPreview(result, context, context.theme.error);
+  if (["read", "write", "skill", "web_fetch", "source_path", "task_stop"].includes(name)) return [];
+  if (name === "edit" && extractDiff(result)) return [];
+  const lines = result.split("\n").filter((lineText) => lineText.length > 0);
+  if (name === "bash" && /^Exit code:/.test(lines[0] ?? "")) lines.shift();
+  if (lines.length === 0 || result === "No matches found.") return [];
+  return outputPreview(
+    lines.join("\n"),
+    context,
+    name === "bash" && getBashExitCode(result) !== "0"
+      ? context.theme.warning
+      : context.theme.textMuted,
+  );
+}
+
+function outputPreview(
+  text: string,
+  context: TerminalHistoryContext,
+  colorHex: string,
+  options: { tail?: boolean } = {},
+): string[] {
+  const lines = text.split("\n").filter((lineText) => lineText.length > 0);
+  const selected = options.tail ? lines.slice(-3) : lines.slice(0, MAX_OUTPUT_LINES);
+  const display = selected.map((lineText) => {
+    const wrapped = wrapPlain(truncatePlain(lineText, context.columns - 8), context.columns - 8);
+    return color(colorHex, wrapped);
+  });
+  if (lines.length > MAX_OUTPUT_LINES) {
+    display.push(
+      dim(
+        context,
+        `… +${lines.length - MAX_OUTPUT_LINES} line${lines.length - MAX_OUTPUT_LINES === 1 ? "" : "s"}`,
+      ),
+    );
+  }
+  return display;
+}
+
+function toolHeader(
+  status: "running" | "done" | "error",
+  label: string,
+  detail: string,
+  context: TerminalHistoryContext,
+  options: { suffix?: string; quoteDetail?: boolean } = {},
+): string {
+  const dotColor =
+    status === "error"
+      ? context.theme.error
+      : status === "done"
+        ? context.theme.success
+        : context.theme.spinnerColor;
+  const indicator = status === "running" ? SPINNER_FRAMES[0] : BLACK_CIRCLE;
+  const labelColor =
+    status === "error"
+      ? context.theme.error
+      : status === "done"
+        ? context.theme.success
+        : context.theme.toolName;
+  const detailText = detail
+    ? color(
+        context.theme.text,
+        options.quoteDetail ? `(${dim(context, '"')}${detail}${dim(context, '"')})` : `(${detail})`,
+      )
+    : "";
+  const suffixText = options.suffix ? dim(context, ` ${options.suffix}`) : "";
+  return `${RESPONSE_LEFT_PADDING}${color(dotColor, indicator)} ${color(labelColor, label, true)}${detailText}${suffixText}`;
+}
+
+function stateToolHeader(
+  status: "running" | "done" | "error",
+  label: string,
+  detail: string,
+  inline: string,
+  context: TerminalHistoryContext,
+): string {
+  const suffix = [detail, inline ? `· ${inline}` : ""]
+    .filter((value) => value.length > 0)
+    .join(" ");
+  return `${toolHeader(status, label, "", context)}${suffix ? dim(context, ` ${suffix}`) : ""}`;
+}
+
+function messageResponse(lines: readonly string[], context: TerminalHistoryContext): string[] {
+  if (lines.length === 0) return [];
+  const [first, ...rest] = lines;
+  return [
+    `${RESPONSE_LEFT_PADDING}${dim(context, `  ${RETURN_SYMBOL}  `)}${first}`,
+    ...rest.map((lineText) => `${RESPONSE_LEFT_PADDING}${dim(context, "     ")}${lineText}`),
+  ];
+}
+
+function prefixFirstLine(text: string, firstPrefix: string, nextPrefix: string): string {
+  return text
+    .split("\n")
+    .map((lineText, index) => {
+      if (lineText.length === 0) return "";
+      return `${index === 0 ? firstPrefix : nextPrefix}${lineText}`;
+    })
+    .join("\n");
+}
+
+function formatDuration(ms: number): string {
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
+}
+
+function getToolHeaderParts(
+  name: string,
+  args: Record<string, unknown>,
+): { label: string; detail: string } {
+  const displayName = toolDisplayName(name);
+  switch (name) {
+    case "bash": {
+      const command = String(args.command ?? "");
+      const firstLine = command.split("\n")[0] ?? "";
+      const detail = firstLine.length > 60 ? `${firstLine.slice(0, 57)}…` : firstLine;
+      return { label: displayName, detail: command.includes("\n") ? `${detail} …` : detail };
+    }
+    case "edit":
+    case "write":
+      return { label: displayName, detail: shortenPath(String(args.file_path ?? "")) };
+    case "read":
+      return { label: "Read", detail: shortenPath(String(args.file_path ?? "")) };
+    case "grep":
+    case "find": {
+      const pattern = String(args.pattern ?? "");
+      return {
+        label: displayName,
+        detail: pattern.length > 40 ? `${pattern.slice(0, 37)}…` : pattern,
+      };
+    }
+    case "ls":
+      return { label: displayName, detail: shortenPath(String(args.path ?? ".")) };
+    case "subagent": {
+      const task = String(args.task ?? "");
+      return { label: displayName, detail: task.length > 50 ? `${task.slice(0, 47)}…` : task };
+    }
+    case "skill":
+      return { label: displayName, detail: String(args.skill ?? "") };
+    case "task_output":
+    case "task_stop":
+      return { label: displayName, detail: String(args.id ?? "") };
+    case "web_search": {
+      const query = String(args.query ?? "");
+      return { label: "Web Search", detail: query.length > 60 ? `${query.slice(0, 57)}…` : query };
+    }
+    case "source_path": {
+      const packageName = String(args.package ?? "");
+      return {
+        label: displayName,
+        detail: packageName.length > 60 ? `${packageName.slice(0, 57)}…` : packageName,
+      };
+    }
+    case "web_fetch": {
+      const url = String(args.url ?? "");
+      return { label: displayName, detail: url.length > 60 ? `${url.slice(0, 57)}…` : url };
+    }
+    case "tasks":
+    case "goals":
+      return { label: displayName, detail: String(args.action ?? "") };
+    default:
+      return { label: displayName, detail: name.startsWith("mcp__") ? getMCPDetailArg(args) : "" };
+  }
+}
+
+function toolDisplayName(name: string): string {
+  if (name.startsWith("mcp__")) {
+    const parts = name.split("__");
+    return snakeToTitle(parts[2] ?? parts[1] ?? "mcp");
+  }
+  switch (name) {
+    case "bash":
+      return "Bash";
+    case "read":
+      return "Read";
+    case "write":
+      return "Write";
+    case "edit":
+      return "Update";
+    case "grep":
+      return "Search";
+    case "find":
+      return "Find";
+    case "ls":
+      return "List";
+    case "subagent":
+      return "Agent";
+    case "skill":
+      return "Skill";
+    case "web_fetch":
+      return "Fetch";
+    case "web_search":
+      return "Web Search";
+    case "task_output":
+      return "Task Output";
+    case "task_stop":
+      return "Task Stop";
+    case "source_path":
+      return "Source";
+    case "tasks":
+      return "Task";
+    case "goals":
+      return "Goal";
+    default:
+      return snakeToTitle(name);
+  }
+}
+
+function snakeToTitle(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .split("_")
+    .filter((word) => word.length > 0)
+    .map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1).toLowerCase()}`)
+    .join(" ");
+}
+
+function getMCPDetailArg(args: Record<string, unknown>): string {
+  const entries = Object.entries(args).filter(
+    ([, value]) => value !== undefined && value !== null && value !== "",
+  );
+  if (entries.length === 0) return "";
+  const preferred = ["query", "prompt", "url", "path", "pattern", "name", "command", "repo"];
+  const preferredEntry = preferred
+    .map((key) => entries.find(([entryKey]) => entryKey.toLowerCase() === key))
+    .find((entry): entry is [string, unknown] => entry !== undefined);
+  const best =
+    preferredEntry ??
+    entries
+      .filter(([, value]) => typeof value === "string")
+      .sort((a, b) => String(a[1]).length - String(b[1]).length)[0] ??
+    entries[0];
+  const value = String(best?.[1] ?? "");
+  return value.length > 50 ? `${value.slice(0, 47)}…` : value;
+}
+
+function getCompactRunningLabel(name: string, args: Record<string, unknown>): string {
+  switch (name) {
+    case "grep":
+      return "Searching…";
+    case "read":
+      return "Reading…";
+    case "find":
+      return "Finding files…";
+    case "ls":
+      return "Listing…";
+    case "source_path": {
+      const packageName = String(args.package ?? "");
+      return `Resolving source${packageName ? ` for ${packageName}` : ""}…`;
+    }
+    default:
+      return `${name}…`;
+  }
+}
+
+function getCompactDoneLabel(name: string, args: Record<string, unknown>, result: string): string {
+  switch (name) {
+    case "grep": {
+      const lines = result.split("\n").filter((lineText) => lineText.length > 0);
+      const matchCount = lines.filter(
+        (lineText) => !/^\d+ match|^\[Truncated/.test(lineText),
+      ).length;
+      return `Searched for 1 pattern${matchCount > 0 ? ` (${matchCount} match${matchCount !== 1 ? "es" : ""})` : ""}`;
+    }
+    case "read":
+      return `Read ${shortenPath(String(args.file_path ?? ""))}`;
+    case "find": {
+      const lines = result.split("\n").filter((lineText) => lineText.length > 0);
+      return `Found ${lines.length} file${lines.length !== 1 ? "s" : ""}`;
+    }
+    case "ls": {
+      const lines = result.split("\n").filter((lineText) => lineText.length > 0);
+      return `Listed ${lines.length} item${lines.length !== 1 ? "s" : ""}`;
+    }
+    case "source_path": {
+      const packageName = String(args.package ?? "source");
+      const sourcePath = extractSourcePath(result);
+      return `Resolved ${packageName} → ${sourcePath ? shortenPath(sourcePath) : "source path"}`;
+    }
+    default:
+      return name;
+  }
+}
+
+function getInlineSummary(name: string, result: string, isError: boolean): string {
+  if (isError) {
+    const firstLine = result.split("\n")[0] ?? "";
+    return firstLine.length > 60 ? `${firstLine.slice(0, 57)}…` : firstLine;
+  }
+  switch (name) {
+    case "read": {
+      const lines = result.split("\n").filter((lineText) => lineText.length > 0);
+      return `${lines.length} line${lines.length !== 1 ? "s" : ""}`;
+    }
+    case "write":
+      return result.match(/^Wrote \d+ lines?/)?.[0] ?? result.split("\n")[0] ?? "";
+    case "bash": {
+      const exitCode = result.match(/^Exit code: (.+)/)?.[1];
+      return exitCode ? `exit ${exitCode}` : "done";
+    }
+    case "subagent":
+      return "completed";
+    case "skill":
+      return result.startsWith("Error") ? (result.split("\n")[0] ?? "") : "loaded";
+    case "web_fetch": {
+      if (result.startsWith("Error")) return result.split("\n")[0] ?? "";
+      const lines = result.split("\n").filter((lineText) => lineText.length > 0);
+      return `${lines.length} line${lines.length !== 1 ? "s" : ""}`;
+    }
+    case "source_path":
+      return extractSourcePath(result) ? shortenPath(extractSourcePath(result) ?? "") : "resolved";
+    case "task_stop":
+      return result.split("\n")[0] ?? "stopped";
+    case "tasks":
+    case "goals": {
+      const quoted = result.match(/"([^"]+)"/)?.[1];
+      if (quoted) return quoted.length > 50 ? `${quoted.slice(0, 47)}…` : quoted;
+      const firstLine = result.split("\n")[0] ?? "";
+      return firstLine.length > 60 ? `${firstLine.slice(0, 57)}…` : firstLine;
+    }
+    default: {
+      if (!name.startsWith("mcp__")) return "";
+      const lines = result.split("\n").filter((lineText) => lineText.length > 0);
+      if (lines.length === 0) return "no results";
+      const first = lines[0] ?? "";
+      return lines.length === 1
+        ? first.length > 50
+          ? `${first.slice(0, 47)}…`
+          : first
+        : `${lines.length} lines`;
+    }
+  }
+}
+
+function shortenPath(filePath: string): string {
+  const parts = filePath.split("/");
+  if (parts.length <= 3) return filePath;
+  return `…/${parts.slice(-2).join("/")}`;
+}
+
+function extractSourcePath(result: string): string | undefined {
+  return result.match(/^Source path:\s*(.+)$/m)?.[1]?.trim();
+}
+
+function getServerToolHeaderParts(name: string, input: unknown): { label: string; detail: string } {
+  const values = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+  if (name === "web_search") {
+    const query = String(values.query ?? "");
+    return { label: "Web Search", detail: query.length > 60 ? `${query.slice(0, 57)}…` : query };
+  }
+  return { label: name, detail: "" };
+}
+
+function getBashExitCode(result: string): string {
+  return result.match(/^Exit code: (.+)/)?.[1]?.trim() ?? "0";
+}
+
+function extractDiff(result: string): string | undefined {
+  return result.includes("---") && result.includes("+++") ? result : undefined;
+}
+
+function renderDiffPreview(
+  diff: string,
+  args: Record<string, unknown>,
+  context: TerminalHistoryContext,
+): string[] {
+  const added = (diff.match(/^\+[^+]/gm) ?? []).length;
+  const removed = (diff.match(/^-[^-]/gm) ?? []).length;
+  const lines = [
+    dim(
+      context,
+      `Added ${added} line${added !== 1 ? "s" : ""}, removed ${removed} line${removed !== 1 ? "s" : ""}`,
+    ),
+  ];
+  const diffLines = buildDiffLines(diff, String(args.file_path ?? ""), context);
+  if (diffLines.length > 0) {
+    lines.push(dim(context, "────────────────────────────────────────────────────────────────"));
+    lines.push(...diffLines);
+    lines.push(dim(context, "────────────────────────────────────────────────────────────────"));
+  }
+  const hiddenCount = Math.max(0, countDisplayDiffLines(diff) + 1 - (diffLines.length + 1));
+  if (hiddenCount > 0) lines.push(dim(context, `… +${hiddenCount} lines`));
+  return lines;
+}
+
+function countDisplayDiffLines(diff: string): number {
+  return diff
+    .split("\n")
+    .filter(
+      (lineText) =>
+        !lineText.startsWith("---") && !lineText.startsWith("+++") && !lineText.startsWith("@@"),
+    ).length;
+}
+
+function buildDiffLines(diff: string, filePath: string, context: TerminalHistoryContext): string[] {
+  const lang = langFromFilePath(filePath);
+  const displayLines = diff
+    .split("\n")
+    .filter(
+      (lineText) =>
+        !lineText.startsWith("---") && !lineText.startsWith("+++") && !lineText.startsWith("@@"),
+    )
+    .slice(0, MAX_OUTPUT_LINES);
+  return displayLines.map((lineText, index) => {
+    const marker = lineText[0] === "+" || lineText[0] === "-" ? lineText[0] : " ";
+    const content = truncatePlain(
+      lineText.slice(marker === " " ? 0 : 1),
+      Math.max(10, context.columns - 12),
+    );
+    const lineNo = String(index + 1).padStart(2, " ");
+    if (marker === "+") return chalk.bgHex("#16a34a").hex("#ffffff")(`${lineNo} + ${content}`);
+    if (marker === "-") return chalk.bgHex("#dc2626").hex("#ffffff")(`${lineNo} - ${content}`);
+    return `${color(context.theme.textDim, `${lineNo}   `)}${colorCode(content, lang, context)}`;
+  });
+}
+
+function langFromFilePath(filePath: string): "ts" | "js" | "json" | "text" {
+  if (/\.tsx?$/.test(filePath)) return "ts";
+  if (/\.jsx?$/.test(filePath)) return "js";
+  if (/\.json$/.test(filePath)) return "json";
+  return "text";
+}
+
+function colorCode(
+  text: string,
+  lang: "ts" | "js" | "json" | "text",
+  context: TerminalHistoryContext,
+): string {
+  if (lang === "text") return color(context.theme.text, text);
+  return color(context.theme.text, text);
+}
+
+function formatCompactTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+function formatTokenCount(n: number): string {
+  if (n >= 1000) {
+    const k = n / 1000;
+    return k >= 10 ? `${Math.round(k)}k` : `${k.toFixed(1)}k`;
+  }
+  return String(n);
+}
+
+function block(lines: readonly string[]): string {
+  return lines.filter((lineText) => lineText.length > 0).join("\n");
+}
+
+function wrapPlain(text: string, width: number): string {
+  return wrapAnsi(text, Math.max(10, width), { hard: true, wordWrap: true });
+}
+
+function wrapBoxLine(text: string, width: number): string[] {
+  if (text.length === 0) return [""];
+  return wrapAnsi(text, Math.max(1, width), { hard: true, wordWrap: true, trim: false }).split(
+    "\n",
+  );
+}
+
+function indent(text: string, prefix: string): string {
+  return text
+    .split("\n")
+    .map((lineText) => `${prefix}${lineText}`)
+    .join("\n");
+}
+
+function truncatePlain(text: string, width: number): string {
+  const max = Math.max(1, width);
+  if (stringWidth(text) <= max) return text;
+  let result = "";
+  for (const char of text) {
+    if (stringWidth(`${result}${char}…`) > max) break;
+    result += char;
+  }
+  return `${result}…`;
+}
+
+function color(hex: string, text: string, bold = false): string {
+  const styled = chalk.hex(hex)(text);
+  return bold ? chalk.bold(styled) : styled;
+}
+
+function userChipSegment(text: string, foregroundHex: string, bold = false): string {
+  const styled = chalk.bgHex(USER_MESSAGE_BACKGROUND).hex(foregroundHex)(text);
+  return bold ? chalk.bold(styled) : styled;
+}
+
+function dim(context: TerminalHistoryContext, text: string): string {
+  return color(context.theme.textDim, text);
+}
+
+function gradientLine(text: string): string {
+  let colorIndex = 0;
+  let result = "";
+  for (const char of text) {
+    if (char === " ") {
+      result += char;
+      continue;
+    }
+    result += chalk.hex(GRADIENT[colorIndex % GRADIENT.length] ?? GRADIENT[0])(char);
+    colorIndex++;
+  }
+  return result;
+}

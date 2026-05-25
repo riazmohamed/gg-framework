@@ -21,13 +21,11 @@ interface BackgroundTasksBarProps {
 export interface FooterStatusLayoutOptions {
   columns: number;
   backgroundTaskCount: number;
-  eyesCount?: number;
   updatePending: boolean;
 }
 
 export interface FooterStatusLayoutDecision {
   hasBackgroundTasks: boolean;
-  hasEyesSignals: boolean;
   hasUpdateNotice: boolean;
   stack: boolean;
   compactBackgroundTasks: boolean;
@@ -36,16 +34,13 @@ export interface FooterStatusLayoutDecision {
 export function getFooterStatusLayoutDecision({
   columns,
   backgroundTaskCount,
-  eyesCount,
   updatePending,
 }: FooterStatusLayoutOptions): FooterStatusLayoutDecision {
   const hasBackgroundTasks = backgroundTaskCount > 0;
-  const hasEyesSignals = eyesCount !== undefined && eyesCount > 0;
   const hasUpdateNotice = updatePending;
-  const visibleCount = [hasBackgroundTasks, hasEyesSignals, hasUpdateNotice].filter(Boolean).length;
+  const visibleCount = [hasBackgroundTasks, hasUpdateNotice].filter(Boolean).length;
   return {
     hasBackgroundTasks,
-    hasEyesSignals,
     hasUpdateNotice,
     stack: visibleCount > 1 && columns < 100,
     compactBackgroundTasks: visibleCount > 1 && columns < 120,

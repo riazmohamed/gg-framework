@@ -19,6 +19,10 @@ export interface GoalTaskStateSnapshot {
   status: GoalRun["tasks"][number]["status"];
   attempts: number;
   workerId?: string;
+  dependsOn?: string[];
+  parallelGroup?: string;
+  expectedChangedScope?: string[];
+  mergeStrategy?: GoalRun["tasks"][number]["mergeStrategy"];
 }
 
 export interface GoalPrerequisiteStateSnapshot {
@@ -52,6 +56,14 @@ export interface GoalEvidenceStateSnapshot {
   path?: string;
 }
 
+export interface GoalReferenceStateSnapshot {
+  id: string;
+  kind: NonNullable<GoalRun["references"]>[number]["kind"];
+  label: string;
+  value?: string;
+  path?: string;
+}
+
 export interface GoalStateSnapshot {
   status: GoalRun["status"];
   userPrerequisites: string;
@@ -59,6 +71,7 @@ export interface GoalStateSnapshot {
   blockers: string[];
   prerequisites: GoalPrerequisiteStateSnapshot[];
   evidencePlan: GoalEvidencePlanStateSnapshot[];
+  references: GoalReferenceStateSnapshot[];
   tasks: GoalTaskStateSnapshot[];
   evidenceCount: number;
   latestEvidence?: GoalEvidenceStateSnapshot;
@@ -72,6 +85,7 @@ export interface GoalSyntheticEventPayloadBase {
   status: string;
   exitCode: number;
   summary: string;
+  summaryRedacted: boolean;
   goalState: GoalStateSnapshot;
 }
 
@@ -120,12 +134,28 @@ export interface GoalSyntheticEventInfo {
 const GOAL_ORCHESTRATOR_INSTRUCTIONS = `coordinator_instructions:
 1. Call goals({ action: "status", run_id }) before deciding.
 2. Briefly say what you are doing as the coordinator so the chat shows progress.
-3. Inspect durable tasks, verifier state, blockers, and evidence.
-4. Take exactly one next control-loop action: add/update the next Goal task, run/record verification, pause/block with evidence, or complete only if verifier evidence proves the success criteria.
+3. Inspect durable tasks, verifier state, blockers, and evidence. Also inspect Goal references.
+4. Take exactly one next control-loop action: add/update the next Goal task, run/record verification, run/record the final completion audit, pause/block with evidence, or complete only if verifier plus final-audit evidence proves the success criteria and mandatory references.
 5. Do not merely narrate and do not ask the user to open the Goal pane.`;
 
 function headerValue(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\s+/g, " ");
+}
+
+const SENSITIVE_GOAL_EVENT_PATTERNS: readonly RegExp[] = [
+  /\b[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|AUTH)[A-Z0-9_]*\s*=\s*[^\s'"]+/gi,
+  /\b(?:sk|pk|ghp|gho|github_pat|glpat|xox[baprs])-[-_A-Za-z0-9]{8,}\b/g,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+];
+
+const REDACTION_MARKER = "[REDACTED_GOAL_EVENT_SECRET]";
+
+export function sanitizeGoalSyntheticEventText(value: string): { text: string; redacted: boolean } {
+  let text = value;
+  for (const pattern of SENSITIVE_GOAL_EVENT_PATTERNS) {
+    text = text.replace(pattern, REDACTION_MARKER);
+  }
+  return { text, redacted: text !== value };
 }
 
 function formatPayloadLine(payload: GoalSyntheticEventPayload): string {
@@ -170,12 +200,25 @@ export function buildGoalStateSnapshot(run: GoalRun): GoalStateSnapshot {
       ...(item.path ? { path: item.path } : {}),
       ...(item.evidence ? { evidence: item.evidence } : {}),
     })),
+    references: (run.references ?? []).map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      label: item.label,
+      ...(item.value ? { value: item.value } : {}),
+      ...(item.path ? { path: item.path } : {}),
+    })),
     tasks: run.tasks.map((task) => ({
       id: task.id,
       title: task.title,
       status: task.status,
       attempts: task.attempts,
       ...(task.workerId ? { workerId: task.workerId } : {}),
+      ...(task.dependsOn?.length ? { dependsOn: task.dependsOn } : {}),
+      ...(task.parallelGroup ? { parallelGroup: task.parallelGroup } : {}),
+      ...(task.expectedChangedScope?.length
+        ? { expectedChangedScope: task.expectedChangedScope }
+        : {}),
+      ...(task.mergeStrategy ? { mergeStrategy: task.mergeStrategy } : {}),
     })),
     evidenceCount: run.evidence.length,
     ...(latestEvidence
@@ -193,7 +236,19 @@ export function buildGoalStateSnapshot(run: GoalRun): GoalStateSnapshot {
 function formatGoalState(snapshot: GoalStateSnapshot): string {
   const tasks =
     snapshot.tasks
-      .map((task) => `- ${task.id}: ${task.status}; attempts=${task.attempts}; title=${task.title}`)
+      .map((task) => {
+        const metadata = [
+          task.dependsOn?.length ? `depends_on=${task.dependsOn.join(",")}` : undefined,
+          task.parallelGroup ? `parallel_group=${task.parallelGroup}` : undefined,
+          task.expectedChangedScope?.length
+            ? `expected_changed_scope=${task.expectedChangedScope.join(",")}`
+            : undefined,
+          task.mergeStrategy ? `merge_strategy=${task.mergeStrategy}` : undefined,
+        ]
+          .filter((item): item is string => item !== undefined)
+          .join("; ");
+        return `- ${task.id}: ${task.status}; attempts=${task.attempts}; title=${task.title}${metadata ? `; ${metadata}` : ""}`;
+      })
       .join("\n") || "(none)";
   const blockers =
     snapshot.blockers.length > 0
@@ -213,10 +268,18 @@ function formatGoalState(snapshot: GoalStateSnapshot): string {
   const evidencePlan = snapshot.evidencePlan.length
     ? snapshot.evidencePlan.map((item) => `- ${item.id}: ${item.status}; ${item.label}`).join("\n")
     : "(none)";
+  const references = snapshot.references.length
+    ? snapshot.references
+        .map(
+          (item) =>
+            `- ${item.id}: ${item.kind}; ${item.label}${item.value ? `; value=${item.value}` : ""}${item.path ? `; path=${item.path}` : ""}`,
+        )
+        .join("\n")
+    : "(none)";
   const latestEvidence = snapshot.latestEvidence
     ? `${snapshot.latestEvidence.label}${snapshot.latestEvidence.path ? ` (${snapshot.latestEvidence.path})` : ""}`
     : "(none)";
-  return `current_goal_state:\nstatus: ${snapshot.status}\nuser_prerequisites: ${snapshot.userPrerequisites}\nverifier: ${verifier}\nevidence_count: ${snapshot.evidenceCount}\nlatest_evidence: ${latestEvidence}\nblockers:\n${blockers}\nprerequisites:\n${prerequisites}\nevidence_plan:\n${evidencePlan}\ntasks:\n${tasks}`;
+  return `current_goal_state:\nstatus: ${snapshot.status}\nuser_prerequisites: ${snapshot.userPrerequisites}\nverifier: ${verifier}\nevidence_count: ${snapshot.evidenceCount}\nlatest_evidence: ${latestEvidence}\nblockers:\n${blockers}\nprerequisites:\n${prerequisites}\nevidence_plan:\n${evidencePlan}\nreferences:\n${references}\ntasks:\n${tasks}`;
 }
 
 export function buildGoalWorkerSyntheticEventPayload(
@@ -224,7 +287,10 @@ export function buildGoalWorkerSyntheticEventPayload(
   taskTitle: string,
   completion: GoalWorkerCompletion,
 ): GoalWorkerSyntheticEventPayload {
-  const summary = completion.summary.trim() || "(empty)";
+  const sanitizedSummary = sanitizeGoalSyntheticEventText(completion.summary.trim() || "(empty)");
+  const stateSnapshot = buildGoalStateSnapshot(run);
+  const stateJson = JSON.stringify(stateSnapshot);
+  const sanitizedStateJson = sanitizeGoalSyntheticEventText(stateJson);
   return {
     version: GOAL_EVENT_PAYLOAD_VERSION,
     kind: "worker",
@@ -237,8 +303,9 @@ export function buildGoalWorkerSyntheticEventPayload(
     status: completion.status,
     exitCode: completion.exitCode,
     toolsUsed: [...completion.toolsUsed],
-    summary,
-    goalState: buildGoalStateSnapshot(run),
+    summary: sanitizedSummary.text,
+    summaryRedacted: sanitizedSummary.redacted || sanitizedStateJson.redacted,
+    goalState: JSON.parse(sanitizedStateJson.text) as GoalStateSnapshot,
     ...(completion.reason ? { reason: completion.reason } : {}),
   };
 }
@@ -254,9 +321,12 @@ export function formatGoalWorkerCompletionEvent(
       ? payload.toolsUsed.map((tool) => `${tool.ok ? "✓" : "✗"}${tool.name}`).join(", ")
       : "(none)";
   const reason = payload.reason ? ` reason=${payload.reason}` : "";
+  const redactionNotice = payload.summaryRedacted
+    ? "\nredaction_notice: summary contained secret-like material and was redacted before synthetic-event handoff"
+    : "";
   return `${GOAL_WORKER_EVENT_PREFIX} run_id="${headerValue(payload.runId)}" goal="${headerValue(payload.goal)}" task_id="${headerValue(payload.taskId)}" task="${headerValue(payload.task)}" worker="${headerValue(payload.worker)}" status=${payload.status} exit_code=${payload.exitCode}${reason}
 ${formatPayloadLine(payload)}
-tools_used: ${toolsUsed}
+tools_used: ${toolsUsed}${redactionNotice}
 ${formatGoalState(payload.goalState)}
 summary:
 ${payload.summary}
@@ -273,6 +343,10 @@ export function buildGoalVerifierSyntheticEventPayload(
 ): GoalVerifierSyntheticEventPayload {
   const fixAttempts = run.tasks.filter((task) => task.title === "Fix verifier failure").length;
   const outputPath = run.verifier?.lastResult?.outputPath;
+  const sanitizedSummary = sanitizeGoalSyntheticEventText(summary.trim() || "(empty)");
+  const stateSnapshot = buildGoalStateSnapshot(run);
+  const stateJson = JSON.stringify(stateSnapshot);
+  const sanitizedStateJson = sanitizeGoalSyntheticEventText(stateJson);
   return {
     version: GOAL_EVENT_PAYLOAD_VERSION,
     kind: "verifier",
@@ -286,10 +360,11 @@ export function buildGoalVerifierSyntheticEventPayload(
     fixLimit: DEFAULT_GOAL_VERIFIER_FIX_LIMIT,
     completionGuidance:
       status === "pass"
-        ? "Complete only if goals(status) shows success criteria, required evidence, and verifier output match the original objective exactly."
+        ? "Complete only if goals(status) shows success criteria, required evidence, verifier output, and final completion audit match the original objective exactly. If the final audit is missing or stale, create/run that audit before completion."
         : "Create one bounded fix task with the verifier command, exit code, output path, and failure summary unless the limit or repeated-failure guard is reached.",
-    summary: summary.trim() || "(empty)",
-    goalState: buildGoalStateSnapshot(run),
+    summary: sanitizedSummary.text,
+    summaryRedacted: sanitizedSummary.redacted || sanitizedStateJson.redacted,
+    goalState: JSON.parse(sanitizedStateJson.text) as GoalStateSnapshot,
   };
 }
 
@@ -359,6 +434,7 @@ function isGoalSyntheticEventPayload(value: unknown): value is GoalSyntheticEven
   if (typeof value.status !== "string") return false;
   if (typeof value.exitCode !== "number") return false;
   if (typeof value.summary !== "string") return false;
+  if (typeof value.summaryRedacted !== "boolean") return false;
   if (!isGoalStateSnapshot(value.goalState)) return false;
 
   if (value.kind === "worker") {
@@ -381,20 +457,44 @@ function isGoalSyntheticEventPayload(value: unknown): value is GoalSyntheticEven
   );
 }
 
+function normalizeParsedGoalStateSnapshot(value: unknown): unknown {
+  if (!isObject(value)) return value;
+  return {
+    references: [],
+    ...value,
+  };
+}
+
+function normalizeParsedGoalSyntheticEventPayload(value: unknown): unknown {
+  if (!isObject(value)) return value;
+  return {
+    ...value,
+    summaryRedacted: typeof value.summaryRedacted === "boolean" ? value.summaryRedacted : false,
+    goalState: normalizeParsedGoalStateSnapshot(value.goalState),
+  };
+}
+
 function parsePayload(text: string): GoalSyntheticEventPayload | null {
   const payloadLine = text.split("\n").find((line) => line.startsWith(GOAL_EVENT_PAYLOAD_PREFIX));
   if (!payloadLine) return null;
   try {
     const parsed: unknown = JSON.parse(payloadLine.slice(GOAL_EVENT_PAYLOAD_PREFIX.length));
-    return isGoalSyntheticEventPayload(parsed) ? parsed : null;
+    const normalized = normalizeParsedGoalSyntheticEventPayload(parsed);
+    return isGoalSyntheticEventPayload(normalized) ? normalized : null;
   } catch {
     return null;
   }
 }
 
 function quotedField(text: string, field: string): string | undefined {
-  const match = new RegExp(`${field}="([^"]*)"`).exec(text);
-  return match?.[1];
+  const match = new RegExp(`${field}="((?:\\\\.|[^"])*)"`).exec(text);
+  if (!match) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(`"${match[1]}"`);
+    return typeof parsed === "string" ? parsed : undefined;
+  } catch {
+    return match[1].replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  }
 }
 
 function tokenField(text: string, field: string): string | undefined {
@@ -470,5 +570,5 @@ export function shouldContinueGoalRun(run: GoalRun): boolean {
     return false;
   }
   if (run.activeWorkerId) return false;
-  return !run.tasks.some((task) => task.status === "running");
+  return !run.tasks.some((task) => task.status === "running" || task.status === "verifying");
 }

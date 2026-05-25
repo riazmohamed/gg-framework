@@ -22,6 +22,8 @@ import { localOperations, type ToolOperations } from "./operations.js";
 import type { ReadTracker } from "./read-tracker.js";
 import type { AgentDefinition } from "../core/agents.js";
 import type { Skill } from "../core/skills.js";
+import type { GoalReference } from "../core/goal-store.js";
+import type { GoalMode } from "../core/runtime-mode.js";
 
 export interface CreateToolsOptions {
   agents?: AgentDefinition[];
@@ -30,16 +32,20 @@ export interface CreateToolsOptions {
   model?: string;
   /** Custom I/O operations for remote execution (SSH, Docker, etc.). Defaults to local filesystem. */
   operations?: ToolOperations;
-  /** Ref for checking plan mode state inside tool execute functions. */
+  /** Ref for checking Goal orchestration mode inside tool execute functions. */
+  goalModeRef?: { current: GoalMode };
+  /** Ref tracking plan-mode state for windows-fork plan-tool gating. */
   planModeRef?: { current: boolean };
-  /** Callback when the LLM enters plan mode. */
+  /** Invoked when the agent calls enter_plan. */
   onEnterPlan?: (reason?: string) => void;
-  /** Callback when the LLM exits plan mode. Returns approval result string. */
+  /** Invoked when the agent calls exit_plan; returns "approved"/"rejected"/"dismissed". */
   onExitPlan?: (planPath: string) => Promise<string>;
   /** Callback after read tool successfully reads a text file. */
   onFileRead?: (filePath: string) => void | Promise<void>;
   /** Callback after write/edit tools successfully mutate a file. */
   onFileMutated?: (filePath: string) => void | Promise<void>;
+  /** Getter for active /goal reference context while setup persists durable Goal state. */
+  getGoalReferences?: () => readonly GoalReference[] | undefined;
   /**
    * Getter for parent's prompt-cache routing key, evaluated lazily at
    * sub-agent spawn time. Returning a stable key from this getter lets every
@@ -60,13 +66,13 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
   const readFiles: ReadTracker = new Map();
   const processManager = new ProcessManager();
   const ops = opts?.operations ?? localOperations;
-  const planModeRef = opts?.planModeRef;
+  const goalModeRef = opts?.goalModeRef;
 
   const tools: AgentTool[] = [
     createReadTool(cwd, readFiles, ops, opts?.onFileRead),
-    createWriteTool(cwd, readFiles, ops, planModeRef, opts?.onFileMutated),
-    createEditTool(cwd, readFiles, ops, planModeRef, opts?.onFileMutated),
-    createBashTool(cwd, processManager, ops, planModeRef),
+    createWriteTool(cwd, readFiles, ops, goalModeRef, opts?.onFileMutated),
+    createEditTool(cwd, readFiles, ops, goalModeRef, opts?.onFileMutated),
+    createBashTool(cwd, processManager, ops, goalModeRef),
     createFindTool(cwd),
     createGrepTool(cwd, ops),
     createLsTool(cwd, ops),
@@ -75,7 +81,7 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
     createTaskOutputTool(processManager),
     createTaskStopTool(processManager),
     createTasksTool(cwd),
-    createGoalsTool(cwd),
+    createGoalsTool(cwd, goalModeRef, opts?.getGoalReferences),
   ];
 
   // Add web search tool for providers without reliable native web search
@@ -90,7 +96,7 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
         opts.agents,
         opts.provider,
         opts.model,
-        planModeRef,
+        goalModeRef,
         opts.getCacheKey,
       ),
     );
@@ -123,10 +129,7 @@ export { createWebSearchTool } from "./web-search.js";
 export { createSourcePathTool } from "./source-path.js";
 export { createTaskOutputTool } from "./task-output.js";
 export { createTaskStopTool } from "./task-stop.js";
-export { createTasksTool } from "./tasks.js";
 export { createGoalsTool } from "./goals.js";
 export { createSkillTool } from "./skill.js";
-export { createEnterPlanTool } from "./enter-plan.js";
-export { createExitPlanTool } from "./exit-plan.js";
 export { ProcessManager } from "../core/process-manager.js";
 export { localOperations, type ToolOperations } from "./operations.js";

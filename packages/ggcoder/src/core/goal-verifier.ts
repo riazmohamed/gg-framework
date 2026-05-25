@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { projectDir, type GoalVerificationResult } from "./goal-store.js";
+import { killProcessTree } from "../utils/process.js";
 
 export const DEFAULT_GOAL_VERIFIER_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_VERIFIER_OUTPUT_CHARS = 20_000;
@@ -87,7 +88,10 @@ export async function runGoalVerifierCommand(
       timeoutMs > 0
         ? setTimeout(() => {
             timedOut = true;
-            if (child.pid) child.kill("SIGTERM");
+            if (child.pid) {
+              killProcessTree(child.pid);
+              child.kill("SIGTERM");
+            }
             const killTimer = setTimeout(() => {
               if (!settled && child.pid) child.kill("SIGKILL");
             }, 5000);

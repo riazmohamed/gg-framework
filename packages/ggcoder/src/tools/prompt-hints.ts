@@ -18,8 +18,8 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
   web_search: "Search the web. Use before web_fetch to find pages.",
   task_output: "Read new output from a background process by id.",
   task_stop: "Stop a background process by id.",
-  tasks:
-    "Manage the Ctrl+T task pane (add/list/done/remove). Only when the user explicitly asks. Do NOT auto-run.",
+  goals:
+    "Manage durable Goal runs for /goal and Ctrl+G workflows. Use for Goal setup, coordinator evidence, worker tasks, verifier records, final completion audits, blockers, and completion state.",
   subagent: "Delegate focused, isolated subtasks (research, parallel exploration).",
   skill: "Invoke a named skill for specialized instructions.",
   "mcp__kencode-search__referenceSources":
@@ -28,8 +28,6 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "Search GitHub repos live by keyword/language/topic/stars/recency. Use for current/top repos or long-tail discovery; returns metadata, not snippets. Follow with docs/source and searchCode.",
   "mcp__kencode-search__searchCode":
     "Verify public GitHub code by literal text or RE2 regex; NOT semantic. Put code/import/API tokens in `query`; `path` is a literal file-path substring, not a concept. Start broad/peek, then narrow by repo/path. RE2 multi-line needs `(?s)`.",
-  enter_plan: "Enter plan mode for read-only research + planning on complex multi-file tasks.",
-  exit_plan: "Submit your plan for user review and exit plan mode.",
 };
 
 /** Tools always rendered when no explicit tool list is provided. */
@@ -45,12 +43,10 @@ export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "web_fetch",
   "task_output",
   "task_stop",
-  "tasks",
+  "goals",
   "subagent",
   "skill",
   "mcp__kencode-search__referenceSources",
   "mcp__kencode-search__discoverRepos",
   "mcp__kencode-search__searchCode",
-  "enter_plan",
-  "exit_plan",
 ];

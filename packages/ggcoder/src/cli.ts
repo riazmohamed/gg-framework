@@ -48,9 +48,10 @@ import { PerformanceObserver, performance } from "node:perf_hooks";
 
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import readline from "node:readline/promises";
-import { execFile, spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import { renderApp } from "./ui/render.js";
 import { runJsonMode } from "./modes/json-mode.js";
@@ -98,9 +99,18 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "./core/oauth/types.j
 import chalk from "chalk";
 import { checkAndAutoUpdate } from "./core/auto-update.js";
 import { parseGoalSyntheticEvent } from "./ui/goal-events.js";
+import type { GoalReference } from "./core/goal-store.js";
+import type { GoalMode } from "./core/runtime-mode.js";
 
 const _require = createRequire(import.meta.url);
 const CLI_VERSION = (_require("../package.json") as { version: string }).version;
+const THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh"]);
+
+export function parseThinkingLevel(value: string | undefined): ThinkingLevel | undefined {
+  if (value === undefined) return undefined;
+  if (THINKING_LEVELS.has(value as ThinkingLevel)) return value as ThinkingLevel;
+  throw new Error(`Invalid --thinking value "${value}". Expected low, medium, high, or xhigh.`);
+}
 
 // ── Logo + gradient (mirrors Banner.tsx) ────────────────────────────
 const LOGO_LINES = ["", "", ""];
@@ -207,6 +217,7 @@ function printHelp(): void {
     ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-5.5)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Override the system prompt"],
+    ["--thinking <level>", "Enable thinking level (low, medium, high, xhigh)"],
     ["--json", "JSON output mode (for sub-agents)"],
     ["--rpc", "JSON-RPC mode (for IDE integrations)"],
   ];
@@ -236,10 +247,8 @@ function printHelp(): void {
   // Keyboard shortcuts
   console.log(primary("Keyboard shortcuts:"));
   const shortcuts: [string, string][] = [
-    ["Ctrl+T", "Toggle task overlay"],
     ["Ctrl+G", "Toggle goal overlay"],
     ["Ctrl+S", "Toggle skills overlay"],
-    ["Ctrl+P", "Toggle plan mode"],
     ["Shift+Tab", "Toggle thinking"],
     ["Shift+Enter", "New line in input"],
   ];
@@ -382,6 +391,7 @@ function main(): void {
       "max-turns": { type: "string" },
       "system-prompt": { type: "string" },
       "prompt-cache-key": { type: "string" },
+      thinking: { type: "string" },
     },
     allowPositionals: true,
     strict: true,
@@ -405,6 +415,7 @@ function main(): void {
     const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
     const systemPrompt = values["system-prompt"];
     const promptCacheKey = values["prompt-cache-key"];
+    const thinkingLevel = parseThinkingLevel(values.thinking);
     const cwd = process.cwd();
     runJsonMode({
       message,
@@ -414,6 +425,7 @@ function main(): void {
       systemPrompt,
       maxTurns,
       promptCacheKey,
+      thinkingLevel,
     }).catch((err: unknown) => {
       process.stderr.write(formatUserError(err) + "\n");
       process.exit(1);
@@ -458,7 +470,7 @@ function main(): void {
 
   const model: string = saved.model ?? getHardcodedDefault(provider);
   const thinkingLevel: ThinkingLevel | undefined = saved.thinkingEnabled
-    ? getMaxThinkingLevel(model)
+    ? (saved.thinkingLevel ?? getMaxThinkingLevel(model))
     : undefined;
 
   // Interactive mode (Ink TUI)
@@ -666,13 +678,17 @@ async function runInkTUI(opts: {
     resumePathPromise,
   ]);
 
-  // Plan mode refs — shared between tools and UI
+  // Runtime mode refs — shared between tools and UI
+  const goalModeRef = { current: "off" as GoalMode };
+  const goalReferencesRef: { current: readonly GoalReference[] | undefined } = {
+    current: undefined,
+  };
   const planModeRef = { current: false };
   const onEnterPlanRef: { current: (reason?: string) => void } = {
     current: () => {},
   };
   const onExitPlanRef: { current: (planPath: string) => Promise<string> } = {
-    current: () => Promise.resolve("cancelled"),
+    current: async () => "rejected",
   };
   const repoMapChangedFilesRef: { current: Set<string> } = { current: new Set() };
   const repoMapReadFilesRef: { current: Set<string> } = { current: new Set() };
@@ -690,11 +706,13 @@ async function runInkTUI(opts: {
   const { tools, processManager } = createTools(cwd, {
     agents,
     skills,
-    provider: provider,
-    model: model,
+    provider,
+    model,
     planModeRef,
     onEnterPlan: (reason) => onEnterPlanRef.current(reason),
     onExitPlan: (planPath) => onExitPlanRef.current(planPath),
+    goalModeRef,
+    getGoalReferences: () => goalReferencesRef.current,
     onFileRead: (filePath) => markRepoMapRead(cwd, filePath),
     onFileMutated: (filePath) => markRepoMapDirty(cwd, filePath),
   });
@@ -721,6 +739,8 @@ async function runInkTUI(opts: {
     false,
     undefined,
     tools.map((tool) => tool.name),
+    undefined,
+    goalModeRef.current,
   );
 
   // Kill all background processes on exit (synchronous — catches all exit paths)
@@ -810,21 +830,6 @@ async function runInkTUI(opts: {
     log("INFO", "session", `New session created`, { path: sessionPath });
   }
 
-  // Eyes startup banner — surface open journal signals from past sessions so the
-  // user isn't relying on reading agent prose to know improvements are pending.
-  if (isEyesActive(cwd)) {
-    const openCount = journalCount({ status: "open" }, cwd);
-    if (openCount > 0) {
-      const s = openCount === 1 ? "" : "s";
-      if (!initialHistory) initialHistory = [];
-      initialHistory.push({
-        kind: "info",
-        text: `👁  Eyes: ${openCount} open improvement signal${s} from recent sessions. Run /eyes-improve to triage.`,
-        id: "eyes-banner",
-      });
-    }
-  }
-
   await renderApp({
     provider: provider,
     model: model,
@@ -848,9 +853,8 @@ async function runInkTUI(opts: {
     settingsFile: paths.settingsFile,
     mcpManager,
     authStorage,
-    planModeRef,
-    onEnterPlanRef,
-    onExitPlanRef,
+    goalModeRef,
+    goalReferencesRef,
     skills,
     pendingMCPTools,
     repoMapChangedFilesRef,
@@ -1276,7 +1280,7 @@ async function runSessions(): Promise<void> {
 
   const model = saved2.model ?? getDefault(provider);
   const thinkingLevel: ThinkingLevel | undefined = saved2.thinkingEnabled
-    ? getMaxThinkingLevel(model)
+    ? (saved2.thinkingLevel ?? getMaxThinkingLevel(model))
     : undefined;
 
   closeLogger();
@@ -1521,7 +1525,7 @@ async function runServe(): Promise<void> {
   );
 
   const thinkingLevel: ThinkingLevel | undefined = saved3.thinkingEnabled
-    ? getMaxThinkingLevel(model)
+    ? (saved3.thinkingLevel ?? getMaxThinkingLevel(model))
     : undefined;
 
   initLogger(paths.logFile, {
@@ -1700,7 +1704,7 @@ async function runAgentHome(): Promise<void> {
   );
 
   const thinkingLevel: ThinkingLevel | undefined = saved4.thinkingEnabled
-    ? getMaxThinkingLevel(model)
+    ? (saved4.thinkingLevel ?? getMaxThinkingLevel(model))
     : undefined;
 
   initLogger(paths.logFile, {

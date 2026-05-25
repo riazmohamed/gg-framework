@@ -14,6 +14,13 @@ import {
 } from "./edit-diff.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import { assertFresh, recordWrite, type ReadTracker } from "./read-tracker.js";
+import { goalModeRestriction, isGoalModeActive, type GoalMode } from "../core/runtime-mode.js";
+
+type MutationCallback = (filePath: string) => void | Promise<void>;
+
+function isMutationCallback(value: unknown): value is MutationCallback {
+  return typeof value === "function";
+}
 
 const EditItem = z.object({
   old_text: z.string().describe("The exact text to find and replace"),
@@ -114,9 +121,15 @@ export function createEditTool(
   cwd: string,
   readFiles?: ReadTracker,
   ops: ToolOperations = localOperations,
-  planModeRef?: { current: boolean },
-  onFileMutated?: (filePath: string) => void | Promise<void>,
+  goalModeRefOrOnFileMutated?: { current: GoalMode } | MutationCallback,
+  onFileMutated?: MutationCallback,
 ): AgentTool<typeof EditParams> {
+  const goalModeRef = isMutationCallback(goalModeRefOrOnFileMutated)
+    ? undefined
+    : goalModeRefOrOnFileMutated;
+  const mutationCallback = isMutationCallback(goalModeRefOrOnFileMutated)
+    ? goalModeRefOrOnFileMutated
+    : onFileMutated;
   return {
     name: "edit",
     description:
@@ -128,8 +141,8 @@ export function createEditTool(
     parameters: EditParams,
     executionMode: "sequential",
     async execute({ file_path, edits, atomic = false }) {
-      if (planModeRef?.current) {
-        return "Error: edit is restricted in plan mode. Use read-only tools to explore the codebase, then write your plan to .gg/plans/.";
+      if (isGoalModeActive(goalModeRef)) {
+        return goalModeRestriction("edit", "Goal metadata, evidence plans, and task creation");
       }
       const resolved = resolvePath(cwd, file_path);
       await rejectSymlink(resolved);
@@ -304,7 +317,7 @@ export function createEditTool(
         const finalContent = hasCRLF ? working.replace(/\n/g, "\r\n") : working;
         await ops.writeFile(resolved, finalContent);
         await recordWrite(readFiles, resolved, finalContent, ops);
-        await onFileMutated?.(resolved);
+        await mutationCallback?.(resolved);
         // Partial-apply with a not_found in the mix: recordWrite just refreshed
         // the tracker, but we still want to force a re-read for the next batch
         // because the model's view of at least one region is wrong.

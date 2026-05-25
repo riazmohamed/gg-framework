@@ -1,7 +1,7 @@
-import React from "react";
+import React, { useMemo } from "react";
 import type { Provider } from "@abukhaled/gg-ai";
 import { MODELS } from "../../core/model-registry.js";
-import { SelectList } from "./SelectList.js";
+import { SlashStyledSelectList } from "./SlashStyledSelectList.js";
 
 interface ModelSelectorProps {
   onSelect: (modelId: string) => void;
@@ -11,6 +11,20 @@ interface ModelSelectorProps {
   currentProvider: Provider;
 }
 
+const MAX_MODELS_TO_SHOW = 6;
+
+const PROVIDER_LABEL: Record<string, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  gemini: "Gemini",
+  glm: "Z.AI",
+  moonshot: "Moonshot",
+  xiaomi: "Xiaomi",
+  minimax: "MiniMax",
+  deepseek: "DeepSeek",
+  openrouter: "OpenRouter",
+};
+
 export function ModelSelector({
   onSelect,
   onCancel,
@@ -18,31 +32,21 @@ export function ModelSelector({
   currentModel,
   currentProvider,
 }: ModelSelectorProps) {
-  const filtered = MODELS.filter((m) => loggedInProviders.includes(m.provider));
-
   const currentValue = `${currentProvider}:${currentModel}`;
 
-  const providerLabel: Record<string, string> = {
-    anthropic: "Anthropic",
-    openai: "OpenAI",
-    gemini: "Gemini",
-    glm: "Z.AI",
-    moonshot: "Moonshot",
-    xiaomi: "Xiaomi",
-    minimax: "MiniMax",
-    deepseek: "DeepSeek",
-    openrouter: "OpenRouter",
-  };
-
-  const items = filtered.map((m) => {
-    const value = `${m.provider}:${m.id}`;
-    const isCurrent = value === currentValue;
-    return {
-      label: `${isCurrent ? "* " : "  "}${m.id}`,
-      value,
-      description: `${providerLabel[m.provider] ?? m.provider}`,
-    };
-  });
+  const items = useMemo(
+    () =>
+      MODELS.filter((m) => loggedInProviders.includes(m.provider)).map((m) => {
+        const value = `${m.provider}:${m.id}`;
+        const isCurrent = value === currentValue;
+        return {
+          label: `${isCurrent ? "* " : "  "}${m.id}`,
+          value,
+          description: PROVIDER_LABEL[m.provider] ?? m.provider,
+        };
+      }),
+    [currentValue, loggedInProviders],
+  );
 
   const initialIndex = Math.max(
     0,
@@ -50,12 +54,12 @@ export function ModelSelector({
   );
 
   return (
-    <SelectList
+    <SlashStyledSelectList
       items={items}
       onSelect={onSelect}
       onCancel={onCancel}
       initialIndex={initialIndex}
-      windowSize={6}
+      maxItemsToShow={MAX_MODELS_TO_SHOW}
     />
   );
 }

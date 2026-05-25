@@ -102,6 +102,21 @@ describe("streamOpenAI request shaping", () => {
     }
   });
 
+  it("passes xhigh reasoning effort through for OpenAI GPT models", async () => {
+    createMock.mockResolvedValueOnce(createStreamingResult(""));
+    const result = streamOpenAI({
+      provider: "openai",
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "token",
+      thinking: "xhigh",
+    });
+    for await (const _event of result) {
+      /* consume */
+    }
+    expect(createMock.mock.calls[0]?.[0]).toMatchObject({ reasoning_effort: "xhigh" });
+  });
+
   it("disables Xiaomi thinking explicitly when thinking is off", async () => {
     createMock.mockResolvedValueOnce(createStreamingResult(""));
     const result = streamOpenAI({

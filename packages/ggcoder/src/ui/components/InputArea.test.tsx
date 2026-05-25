@@ -64,6 +64,10 @@ function pressEnter() {
   inputHandlers.at(-1)?.("", { return: true });
 }
 
+function stripAnsi(value: string): string {
+  return value.replace(new RegExp(String.raw`\u001B\[[0-?]*[ -/]*[@-~]`, "g"), "");
+}
+
 describe("InputArea pasted slash commands", () => {
   it("keeps the slash command prefix styled while a pasted placeholder is displayed and submits the original paste", async () => {
     vi.useFakeTimers();
@@ -88,12 +92,21 @@ describe("InputArea pasted slash commands", () => {
     });
     // ANSI escapes are disabled for this captured Ink stream, but this assertion
     // fails on the original regression where the placeholder dropped the prefix.
-    expect(output()).toMatch(/❯ \/help explain \[Pasted text #33 \+3 lines\]/);
+    expect(stripAnsi(output())).toContain(" > /help explain [Pasted text #33 +3 lines]");
 
     pressEnter();
 
     const expectedPaste: PasteInfo = { offset: prefix.length, length: pasted.length, lineCount: 3 };
     expect(onSubmit).toHaveBeenCalledWith(fullInput, [], expectedPaste);
     vi.useRealTimers();
+  });
+
+  it("paints the Gemini-style input background across the full input height", () => {
+    const { output } = renderInputArea();
+
+    const plain = stripAnsi(output());
+    expect(plain).toContain("▄".repeat(100));
+    expect(plain).toContain("▀".repeat(100));
+    expect(plain).toContain(" >   Type your message or / to run a command");
   });
 });

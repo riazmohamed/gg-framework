@@ -30,12 +30,9 @@ export function TerminalSizeProvider({
 }: React.PropsWithChildren<{
   /**
    * Optional getter — when it returns true, the resize debounce skips its
-   * screen clear and resizeKey bump. The screen clear + remount would force
-   * <Static> to re-print every history item, which (combined with Ink's
-   * stale log-update line count) collides with the live area's erase step
-   * and produces duplicate/missing items. During an agent run, the deferred
-   * resetUI() in App.tsx cleans up reflow drift the moment the agent goes
-   * idle, so the visual cost of skipping here is minimal.
+   * resizeKey bump while the agent is running. The deferred resetUI() in
+   * App.tsx cleans up reflow drift the moment the agent goes idle, so the
+   * visual cost of skipping here is minimal.
    */
   isAgentRunning?: () => boolean;
 }>) {
@@ -62,25 +59,19 @@ export function TerminalSizeProvider({
     debounceRef.current = setTimeout(() => {
       const running = isAgentRunningRef.current?.() ?? false;
       if (running) {
-        // Update dimensions only — skip the screen clear + resizeKey bump.
-        // Re-printing <Static> here collides with the live area's stale
-        // erase step and produces the duplicate/wiped items the user saw.
-        // render.ts flags pendingResetUI; App.tsx fires a clean resetUI()
-        // the moment the agent goes idle, fixing any reflow drift then.
+        // Update dimensions only — skip the resizeKey bump. render.ts flags
+        // pendingResetUI; App.tsx fires a clean resetUI() the moment the agent
+        // goes idle, fixing any reflow drift then.
         setSize({
           columns: Math.max(MIN_COLUMNS, stdout.columns ?? 80),
           rows: Math.max(MIN_ROWS, stdout.rows ?? 24),
         });
         return;
       }
-      // Clear visible screen + scrollback to remove deformed ghost renders
-      // left behind by Ink re-rendering at different terminal widths during
-      // a resize drag.
-      stdout.write(
-        "\x1b[2J" + // clear visible screen
-          "\x1b[3J" + // clear scrollback buffer
-          "\x1b[H", // cursor home
-      );
+      // Clear visible screen only. Completed chat rows are real terminal
+      // scrollback now; preserve them while dropping malformed live frames left
+      // behind by resize reflow.
+      stdout.write("\x1b[2J\x1b[H");
       setSize({
         columns: Math.max(MIN_COLUMNS, stdout.columns ?? 80),
         rows: Math.max(MIN_ROWS, stdout.rows ?? 24),
@@ -111,9 +102,8 @@ export function TerminalSizeProvider({
  * trigger React re-renders on every resize event while Ink's internal
  * line-tracking still assumes the old width, causing ghost/duplicate renders.
  *
- * `resizeKey` can be used as a React `key` to force a full remount — this
- * is the only reliable way to make Ink re-render <Static> content that was
- * already printed to scrollback and got corrupted by terminal text reflow.
+ * `resizeKey` can be used as a React `key` to force live-area remounts after
+ * terminal dimensions settle.
  */
 export function useTerminalSize() {
   const ctx = useContext(TerminalSizeContext);

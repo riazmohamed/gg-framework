@@ -1,12 +1,20 @@
 import {
   formatGoalBlockingPrerequisites,
   goalHasBlockingPrerequisites,
+  type GoalReference,
   type GoalRun,
   type GoalTask,
 } from "./goal-store.js";
+import {
+  formatGoalReferencesForPrompt,
+  referencesRequiringAcknowledgement,
+} from "./goal-references.js";
 
 export const DEFAULT_GOAL_TASK_ATTEMPT_LIMIT = 5;
 export const DEFAULT_GOAL_VERIFIER_FIX_LIMIT = 5;
+
+const FINAL_COMPLETION_AUDIT_TASK_TITLE = "Audit Goal completion evidence";
+const DEFAULT_GOAL_COMPLETION_AUDIT_LIMIT = 3;
 
 export type GoalControllerDecision =
   | {
@@ -65,6 +73,97 @@ function needsHarnessInstrumentation(run: GoalRun): boolean {
   return run.harness.some((item) => !item.command && !item.path);
 }
 
+function referencePromptSection(references: readonly GoalReference[] | undefined): string {
+  const section = formatGoalReferencesForPrompt(references ?? []);
+  return section ? `${section}\n\n` : "";
+}
+
+function referenceMentionTokens(reference: GoalReference): string[] {
+  return [reference.id, reference.label, reference.value, reference.path]
+    .filter((token): token is string => !!token?.trim())
+    .map((token) => token.toLowerCase());
+}
+
+function requiresGoalReliabilityContract(run: GoalRun): boolean {
+  const fields = [
+    run.goal,
+    ...run.successCriteria,
+    ...(run.references ?? []).map(
+      (reference) => `${reference.id} ${reference.label} ${reference.content ?? ""}`,
+    ),
+    ...run.evidence.map((item) => `${item.label}\n${item.path ?? ""}\n${item.content ?? ""}`),
+  ].join("\n");
+  return /GOAL_PLAN/.test(fields);
+}
+
+function hasOriginalGoalPromptReference(run: GoalRun): boolean {
+  return (run.references ?? []).some(
+    (reference) =>
+      reference.id === "original-goal-prompt" &&
+      reference.kind === "prompt" &&
+      reference.content?.trim(),
+  );
+}
+
+function hasDurableGoalPlan(run: GoalRun): boolean {
+  const fields = [
+    run.goal,
+    ...run.evidence.map((item) => `${item.label}\n${item.path ?? ""}\n${item.content ?? ""}`),
+  ].join("\n");
+  return /GOAL_PLAN/.test(fields) && /research=/.test(fields) && /success=/.test(fields);
+}
+
+function goalPromptDurabilityFailure(run: GoalRun): string | undefined {
+  if (!requiresGoalReliabilityContract(run)) return undefined;
+  if (!hasOriginalGoalPromptReference(run)) {
+    return "Goal is missing durable [original-goal-prompt] reference content.";
+  }
+  if (!hasDurableGoalPlan(run)) {
+    return "Goal is missing durable planner GOAL_PLAN evidence/state.";
+  }
+  return undefined;
+}
+
+function fieldContainsReference(reference: GoalReference, fields: readonly string[]): boolean {
+  const haystack = fields.join("\n").toLowerCase();
+  return referenceMentionTokens(reference).some((token) => haystack.includes(token));
+}
+
+function unacknowledgedGoalReferences(run: GoalRun): GoalReference[] {
+  const setupAndWorkFields = [
+    ...run.successCriteria,
+    ...run.evidencePlan.map(
+      (item) =>
+        `${item.id} ${item.label} ${item.description} ${item.command ?? ""} ${item.path ?? ""} ${item.evidence ?? ""}`,
+    ),
+    ...run.tasks.map((task) => `${task.title} ${task.prompt} ${task.lastSummary ?? ""}`),
+    ...run.evidence.map((item) => `${item.label} ${item.path ?? ""} ${item.content ?? ""}`),
+    run.verifier?.description ?? "",
+    run.verifier?.command ?? "",
+    run.verifier?.lastResult?.summary ?? "",
+    run.completionAudit?.summary ?? "",
+  ];
+  const completionFields = [
+    run.verifier?.description ?? "",
+    run.verifier?.command ?? "",
+    run.verifier?.lastResult?.summary ?? "",
+    run.verifier?.lastResult?.outputPath ?? "",
+    run.completionAudit?.summary ?? "",
+    run.completionAudit?.outputPath ?? "",
+  ];
+  return (run.references ?? []).filter((reference) => {
+    if (reference.kind === "prompt") {
+      return (
+        requiresGoalReliabilityContract(run) &&
+        reference.id === "original-goal-prompt" &&
+        !fieldContainsReference(reference, completionFields)
+      );
+    }
+    if (!referencesRequiringAcknowledgement([reference]).length) return false;
+    return !fieldContainsReference(reference, setupAndWorkFields);
+  });
+}
+
 function buildHarnessTaskPrompt(run: GoalRun): string {
   const harnessItems = run.harness
     .filter((item) => !item.command && !item.path)
@@ -72,6 +171,7 @@ function buildHarnessTaskPrompt(run: GoalRun): string {
     .join("\n");
   return (
     `Goal: ${run.goal}\n\n` +
+    referencePromptSection(run.references) +
     `Build only the missing local/free harness instrumentation needed before verification. Start by restating the intended experience, the relevant failure modes, and the senses/signals this harness must observe; do not default to generic tests, scripts, screenshots, benchmarks, or simulations unless that signal is required for this specific goal.\n` +
     `${harnessItems}\n\n` +
     `Inventory available local capabilities just deeply enough to choose a proportional instrument, then build it. Update the Goal harness/verifier metadata with the goals tool and record durable evidence showing the instrument exists and works. Do not require paid services or signups; block only with exact user instructions if a true external prerequisite is missing.`
@@ -85,42 +185,39 @@ function blockedEvidencePlanReason(run: GoalRun): string | undefined {
 }
 
 function needsEvidenceInstrumentation(run: GoalRun): boolean {
-  return run.evidencePlan.some((item) => item.status === "planned");
+  return unsatisfiedGoalEvidencePlanItems(run).some((item) => item.status === "planned");
+}
+
+export function unsatisfiedGoalEvidencePlanItems(run: GoalRun): GoalRun["evidencePlan"] {
+  return run.evidencePlan.filter((item) => !evidencePlanItemSatisfiedByDurableEvidence(run, item));
+}
+
+function exactTokenReferenced(content: string | undefined, token: string | undefined): boolean {
+  return !!content?.trim() && !!token?.trim() && content.includes(token);
 }
 
 function evidencePlanItemSatisfiedByDurableEvidence(
   run: GoalRun,
   item: GoalRun["evidencePlan"][number],
 ): boolean {
-  if (item.status === "ready") return true;
+  if (item.status === "ready" && item.evidence?.trim()) return true;
   if (item.evidence?.trim()) return true;
 
   const verifier = run.verifier?.lastResult;
   if (verifier?.status === "pass") {
     if (item.command && verifier.command === item.command) return true;
     if (item.path && verifier.outputPath === item.path) return true;
-    const haystack =
-      `${verifier.command ?? ""}\n${verifier.outputPath ?? ""}\n${verifier.summary}`.toLowerCase();
-    const needles = [item.label, item.description, item.command, item.path]
-      .filter((value): value is string => !!value?.trim())
-      .map((value) => value.toLowerCase());
-    if (needles.some((needle) => haystack.includes(needle))) return true;
   }
   return run.evidence.some((evidence) => {
     if (item.path && evidence.path === item.path) return true;
-    const haystack =
-      `${evidence.label}\n${evidence.path ?? ""}\n${evidence.content ?? ""}`.toLowerCase();
-    return [item.label, item.description, item.command, item.path]
-      .filter((value): value is string => !!value?.trim())
-      .map((value) => value.toLowerCase())
-      .some((needle) => haystack.includes(needle));
+    if (item.command && exactTokenReferenced(evidence.content, item.command)) return true;
+    if (item.path && exactTokenReferenced(evidence.content, item.path)) return true;
+    return false;
   });
 }
 
 export function hasRequiredGoalEvidence(run: GoalRun): GoalCompletionCheck {
-  const missing = run.evidencePlan.filter(
-    (item) => !evidencePlanItemSatisfiedByDurableEvidence(run, item),
-  );
+  const missing = unsatisfiedGoalEvidencePlanItems(run);
   if (missing.length > 0) {
     return {
       ok: false,
@@ -133,9 +230,130 @@ export function hasRequiredGoalEvidence(run: GoalRun): GoalCompletionCheck {
   };
 }
 
+function finalAuditTaskCount(run: GoalRun): number {
+  return run.tasks.filter((task) => task.title === FINAL_COMPLETION_AUDIT_TASK_TITLE).length;
+}
+
+function shouldCreateFinalAuditTask(
+  run: GoalRun,
+  limit = DEFAULT_GOAL_COMPLETION_AUDIT_LIMIT,
+): boolean {
+  return finalAuditTaskCount(run) < limit;
+}
+
+function isFinalAuditWorkerEvidence(run: GoalRun, label: string): boolean {
+  const match = /^Worker\s+(\S+)\s+/.exec(label);
+  const workerId = match?.[1];
+  if (!workerId) return false;
+  return run.tasks.some(
+    (task) => task.title === FINAL_COMPLETION_AUDIT_TASK_TITLE && task.workerId === workerId,
+  );
+}
+
+function isCompletionAuditDecision(label: string): boolean {
+  return label === "Goal decision: completion_audit";
+}
+
+function latestMatchingEvidence(
+  evidence: readonly GoalRun["evidence"][number][],
+  predicate: (item: GoalRun["evidence"][number]) => boolean,
+): GoalRun["evidence"][number] | undefined {
+  return evidence.filter(predicate).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+}
+
+function latestNonAuditWorkerEvidenceAfterVerifier(
+  run: GoalRun,
+): GoalRun["evidence"][number] | undefined {
+  const verifierCheckedAt = run.verifier?.lastResult?.checkedAt;
+  if (!verifierCheckedAt) return undefined;
+  return latestMatchingEvidence(
+    run.evidence,
+    (item) =>
+      item.createdAt > verifierCheckedAt &&
+      item.label.startsWith("Worker ") &&
+      !isFinalAuditWorkerEvidence(run, item.label),
+  );
+}
+
+function latestCompletionRelevantEvidenceAfterVerifier(
+  run: GoalRun,
+): GoalRun["evidence"][number] | undefined {
+  const verifierCheckedAt = run.verifier?.lastResult?.checkedAt;
+  if (!verifierCheckedAt) return undefined;
+  return latestMatchingEvidence(run.evidence, (item) => {
+    if (item.createdAt <= verifierCheckedAt) return false;
+    if (isFinalAuditWorkerEvidence(run, item.label)) return false;
+    if (isCompletionAuditDecision(item.label)) return false;
+    if (item.label === "Verifier result" || item.label.startsWith("Verifier ")) return false;
+    return item.label.startsWith("Worker ") || item.label.startsWith("Goal decision:");
+  });
+}
+
+export function hasFreshGoalCompletionAudit(run: GoalRun): GoalCompletionCheck {
+  const verifierResult = run.verifier?.lastResult;
+  if (!verifierResult || verifierResult.status !== "pass") {
+    return { ok: false, reason: "Goal has no passing verifier result to audit." };
+  }
+
+  const postVerifierWorkerEvidence = latestNonAuditWorkerEvidenceAfterVerifier(run);
+  if (postVerifierWorkerEvidence) {
+    return {
+      ok: false,
+      reason: `Latest verifier result is stale after later Goal worker evidence: ${postVerifierWorkerEvidence.label}.`,
+    };
+  }
+
+  const audit = run.completionAudit;
+  if (!audit) {
+    return { ok: false, reason: "Goal has no final completion audit." };
+  }
+  if (audit.status !== "pass") {
+    return { ok: false, reason: `Final completion audit status is ${audit.status}.` };
+  }
+  if (!audit.summary.startsWith("FINAL_AUDIT_PASS")) {
+    return {
+      ok: false,
+      reason: "Final completion audit pass summary must start with FINAL_AUDIT_PASS.",
+    };
+  }
+  if (!audit.summary.includes(`verifier_checked_at=${verifierResult.checkedAt}`)) {
+    return {
+      ok: false,
+      reason: "Final completion audit pass summary must include latest verifier_checked_at.",
+    };
+  }
+  if (!audit.outputPath && !audit.summary.match(/(?:output|artifact|log|path)=\S+/)) {
+    return {
+      ok: false,
+      reason: "Final completion audit pass must reference verifier output or artifacts.",
+    };
+  }
+  if (audit.verifierCheckedAt !== verifierResult.checkedAt) {
+    return {
+      ok: false,
+      reason: "Final completion audit does not match the latest verifier result.",
+    };
+  }
+  if (audit.checkedAt < verifierResult.checkedAt) {
+    return {
+      ok: false,
+      reason: "Final completion audit is older than the latest verifier result.",
+    };
+  }
+
+  const newerEvidence = latestCompletionRelevantEvidenceAfterVerifier(run);
+  if (newerEvidence && newerEvidence.createdAt > audit.checkedAt) {
+    return {
+      ok: false,
+      reason: `Final completion audit is stale after later Goal evidence: ${newerEvidence.label}.`,
+    };
+  }
+
+  return { ok: true, reason: "Final completion audit passed after latest verifier evidence." };
+}
+
 function buildEvidencePlanTaskPrompt(run: GoalRun): string {
-  const plannedItems = run.evidencePlan
-    .filter((item) => item.status === "planned")
+  const plannedItems = unsatisfiedGoalEvidencePlanItems(run)
     .map(
       (item) =>
         `- ${item.label} (${item.mechanism}): ${item.description}${item.command ? `; candidate command: ${item.command}` : ""}${item.path ? `; artifact: ${item.path}` : ""}`,
@@ -143,6 +361,7 @@ function buildEvidencePlanTaskPrompt(run: GoalRun): string {
     .join("\n");
   return (
     `Goal: ${run.goal}\n\n` +
+    referencePromptSection(run.references) +
     `Turn the planned proof paths below into real local/free verification capability before the Goal verifier runs. For each path, preserve the orchestrator's goal-specific sensory intent: what experience is being observed, what failure it catches, and what signal proves it.\n` +
     `${plannedItems}\n\n` +
     `Inventory available local capabilities without anchoring on any fixed tool category. Build only the proportional instrument needed for this proof path, update the Goal evidence_plan/harness/verifier metadata with the goals tool, and persist concrete command/file/artifact/log evidence that the instrument works. Do not use narrative-only verification or human visual inspection as completion evidence. Only block with exact user instructions for inputs that cannot be generated or checked locally.`
@@ -152,7 +371,8 @@ function buildEvidencePlanTaskPrompt(run: GoalRun): string {
 function buildVerifierTaskPrompt(run: GoalRun): string {
   return (
     `Goal: ${run.goal}\n\n` +
-    `Define and build a real end-to-end verifier for this Goal. Begin from the intended experience and required senses/signals already implied by the success criteria and evidence plan. Choose a proportional local/free verifier that observes those signals and catches the important goal-specific failures; do not add generic simulations, screenshots, benchmarks, or scripts unless they directly support that proof. Update the Goal with a verifier_command and verifier_description using the goals tool. The verifier must be runnable locally/free and produce durable command or file evidence, not narrative or human visual inspection. If an external prerequisite is missing, mark it missing with exact user instructions.`
+    referencePromptSection(run.references) +
+    `Define and build a real end-to-end verifier for this Goal. Begin from the intended experience and required senses/signals already implied by the success criteria and evidence plan, including mandatory Goal references. Choose a proportional local/free verifier that observes those signals and catches the important goal-specific failures; do not add generic simulations, screenshots, benchmarks, or scripts unless they directly support that proof. Update the Goal with a verifier_command and verifier_description using the goals tool. The verifier must be runnable locally/free and produce durable command or file evidence, not narrative or human visual inspection. If an external prerequisite is missing, mark it missing with exact user instructions.`
   );
 }
 
@@ -164,11 +384,60 @@ function activeTask(run: GoalRun): GoalTask | undefined {
   return run.tasks.find((task) => task.status === "running" || task.status === "verifying");
 }
 
+function recoverableTask(task: GoalTask): boolean {
+  return task.status === "pending" || task.status === "failed";
+}
+
+function taskMatchesDependency(task: GoalTask, dependencyId: string): boolean {
+  return task.id === dependencyId || task.id.startsWith(dependencyId);
+}
+
+function blockedTaskDependencies(run: GoalRun, task: GoalTask): string[] {
+  return (task.dependsOn ?? []).filter((dependencyId) => {
+    const dependency = run.tasks.find((item) => taskMatchesDependency(item, dependencyId));
+    return dependency === undefined || dependency.status !== "done";
+  });
+}
+
 function nextRunnableTask(run: GoalRun): GoalTask | undefined {
-  return run.tasks.find((task) => task.status === "pending" || task.status === "failed");
+  return run.tasks.find(
+    (task) => recoverableTask(task) && blockedTaskDependencies(run, task).length === 0,
+  );
+}
+
+function nextBlockedDependencyTask(
+  run: GoalRun,
+): { task: GoalTask; dependencies: string[] } | undefined {
+  for (const task of run.tasks) {
+    if (!recoverableTask(task)) continue;
+    const dependencies = blockedTaskDependencies(run, task);
+    if (dependencies.length > 0) return { task, dependencies };
+  }
+  return undefined;
 }
 
 export function canCompleteGoalRun(run: GoalRun): GoalCompletionCheck {
+  if (run.status === "draft") {
+    return { ok: false, reason: "Goal setup is incomplete and remains draft." };
+  }
+  if (run.successCriteria.length === 0) {
+    return { ok: false, reason: "Goal setup is incomplete: success criteria are required." };
+  }
+  if (run.evidencePlan.length === 0) {
+    return { ok: false, reason: "Goal setup is incomplete: an evidence plan is required." };
+  }
+  if (!run.verifier?.command) {
+    return { ok: false, reason: "Goal setup is incomplete: verifier command is required." };
+  }
+  const promptDurabilityFailure = goalPromptDurabilityFailure(run);
+  if (promptDurabilityFailure) return { ok: false, reason: promptDurabilityFailure };
+  const unacknowledgedReferences = unacknowledgedGoalReferences(run);
+  if (unacknowledgedReferences.length > 0) {
+    return {
+      ok: false,
+      reason: `Goal references are not covered by criteria/tasks/evidence/verifier/audit: ${unacknowledgedReferences.map((item) => item.label).join(", ")}.`,
+    };
+  }
   if (goalHasBlockingPrerequisites(run)) {
     return { ok: false, reason: formatGoalBlockingPrerequisites(run) };
   }
@@ -192,7 +461,13 @@ export function canCompleteGoalRun(run: GoalRun): GoalCompletionCheck {
     return { ok: false, reason: `Verifier status is ${verifierResult.status}.` };
   }
 
-  return { ok: true, reason: "All tasks are done and verifier evidence passed." };
+  const completionAudit = hasFreshGoalCompletionAudit(run);
+  if (!completionAudit.ok) return completionAudit;
+
+  return {
+    ok: true,
+    reason: "All tasks are done, verifier evidence passed, and final completion audit passed.",
+  };
 }
 
 export function shouldClearGoalContinuation(decision: GoalControllerDecision): boolean {
@@ -220,6 +495,33 @@ export function hasRepeatedVerifierFailure(run: GoalRun, repeatLimit = 2): boole
   return failures.slice(-repeatLimit).every((item) => item === last);
 }
 
+function buildFinalCompletionAuditTaskPrompt(run: GoalRun): string {
+  const verifier = run.verifier?.lastResult;
+  const evidencePlanItems = run.evidencePlan
+    .map(
+      (item) =>
+        `- ${item.id} / ${item.label} (${item.status}, ${item.mechanism}): ${item.description}${item.command ? `; command=${item.command}` : ""}${item.path ? `; path=${item.path}` : ""}${item.evidence ? `; evidence=${item.evidence}` : ""}`,
+    )
+    .join("\n");
+  const recentEvidence = run.evidence
+    .slice(-12)
+    .map(
+      (item) =>
+        `- ${item.createdAt} ${item.label}${item.path ? ` (${item.path})` : ""}: ${(item.content ?? "").slice(0, 320)}`,
+    )
+    .join("\n");
+  return (
+    `Goal: ${run.goal}\n\n` +
+    referencePromptSection(run.references) +
+    `You are the final read-only Goal completion auditor. Do not edit files, do not run broad implementation work, do not mark the Goal complete, and do not trust worker summaries by themselves. Verify the original success criteria and every mandatory Goal reference against actual durable artifacts after the latest verifier pass.\n\n` +
+    `Success criteria:\n${run.successCriteria.map((item) => `- ${item}`).join("\n") || "- none recorded"}\n\n` +
+    `Latest verifier: status=${verifier?.status ?? "unknown"}; checkedAt=${verifier?.checkedAt ?? "unknown"}; command=${verifier?.command ?? run.verifier?.command ?? "not recorded"}; output=${verifier?.outputPath ?? "not recorded"}; summary=${verifier?.summary ?? "not recorded"}\n\n` +
+    `Evidence plan:\n${evidencePlanItems || "- none"}\n\n` +
+    `Recent durable evidence:\n${recentEvidence || "- none"}\n\n` +
+    `Read the referenced report/log/source artifacts and compare them with the latest verifier result. The coordinator schedules and records decisions/state; the verifier path/UI/controller executes the configured verifier command as the final pre-audit gate and records goals verify evidence; this final audit records goals audit only after comparing the latest verifier output and references, including [original-goal-prompt] and durable GOAL_PLAN evidence. If an evidence-plan item is still planned but already matched by durable verifier/source/file evidence, update that evidence_plan item to status=ready with a concise evidence summary before recording the audit; if proof is missing, create a new pending Goal task with exact fix instructions and do not pass the audit. If everything matches, record a passing completion audit with the goals tool by using action=audit, verification_status=pass, output_path matching the verifier output when available, and a summary that starts with "FINAL_AUDIT_PASS" and includes "verifier_checked_at=${verifier?.checkedAt ?? "unknown"}", "original-goal-prompt", and "GOAL_PLAN". If anything is missing, stale, contradictory, or unverified, create a new pending Goal task with exact instructions to fix it, record evidence describing the mismatch, and leave the audit failing or absent so the coordinator resumes a worker until fixed.`
+  );
+}
+
 function buildVerifierFailureTaskPrompt(run: GoalRun): string {
   const result = run.verifier?.lastResult;
   const priorSummaries =
@@ -234,6 +536,7 @@ function buildVerifierFailureTaskPrompt(run: GoalRun): string {
   const attempt = verifierFixTaskCount(run) + 1;
   return (
     `Original objective: ${run.goal}\n\n` +
+    referencePromptSection(run.references) +
     `Success criteria:\n${run.successCriteria.map((item) => `- ${item}`).join("\n") || "- none recorded"}\n\n` +
     `Verifier command: ${run.verifier?.command ?? "(missing)"}\n` +
     `Exit code: ${result?.exitCode ?? "unknown"}\n` +
@@ -257,6 +560,13 @@ export function formatGoalControllerDecision(decision: GoalControllerDecision): 
       `attempts=${decision.attempts}`,
     );
     if (decision.task.workerId) parts.push(`worker=${decision.task.workerId}`);
+    if (decision.task.dependsOn?.length)
+      parts.push(`depends_on=${decision.task.dependsOn.join(",")}`);
+    if (decision.task.parallelGroup) parts.push(`parallel_group=${decision.task.parallelGroup}`);
+    if (decision.task.expectedChangedScope?.length) {
+      parts.push(`expected_changed_scope=${decision.task.expectedChangedScope.join(",")}`);
+    }
+    if (decision.task.mergeStrategy) parts.push(`merge_strategy=${decision.task.mergeStrategy}`);
   }
   if (decision.kind === "wait" && decision.workerId) parts.push(`worker=${decision.workerId}`);
   if (decision.kind === "run_verifier") parts.push(`verifier=${decision.command}`);
@@ -274,17 +584,17 @@ export function decideGoalNextAction(
     return { kind: "complete", reason: completion.reason };
   }
 
+  if (goalHasBlockingPrerequisites(run)) {
+    return { kind: "blocked", reason: formatGoalBlockingPrerequisites(run) };
+  }
+
   if (
-    run.status === "blocked" ||
+    (run.status === "blocked" && run.verifier?.lastResult?.status !== "pass") ||
     run.status === "failed" ||
-    run.status === "passed" ||
+    (run.status === "passed" && run.verifier?.lastResult?.status !== "pass") ||
     (run.status === "paused" && !run.continueRequestedAt)
   ) {
     return { kind: "terminal", status: run.status, reason: `Goal is ${run.status}.` };
-  }
-
-  if (goalHasBlockingPrerequisites(run)) {
-    return { kind: "blocked", reason: formatGoalBlockingPrerequisites(run) };
   }
 
   if (run.activeWorkerId) {
@@ -324,17 +634,55 @@ export function decideGoalNextAction(
     };
   }
 
+  const dependencyBlockedTask = nextBlockedDependencyTask(run);
+  if (dependencyBlockedTask) {
+    const missingDependencies = dependencyBlockedTask.dependencies.filter(
+      (dependencyId) => !run.tasks.some((item) => taskMatchesDependency(item, dependencyId)),
+    );
+    if (missingDependencies.length > 0) {
+      return {
+        kind: "blocked",
+        reason: `Goal task "${dependencyBlockedTask.task.title}" depends on missing task(s): ${missingDependencies.join(", ")}.`,
+      };
+    }
+    return {
+      kind: "wait",
+      reason: `Goal task "${dependencyBlockedTask.task.title}" is waiting for dependency task(s): ${dependencyBlockedTask.dependencies.join(", ")}.`,
+    };
+  }
+
   const blockedEvidence = blockedEvidencePlanReason(run);
   if (blockedEvidence) {
     return { kind: "blocked", reason: blockedEvidence };
   }
 
+  if (
+    run.verifier?.lastResult?.status === "pass" &&
+    latestNonAuditWorkerEvidenceAfterVerifier(run) &&
+    run.verifier?.command
+  ) {
+    return {
+      kind: "run_verifier",
+      command: run.verifier.command,
+      reason:
+        "Latest verifier result is stale after later Goal worker evidence; rerunning configured verifier as the final pre-audit gate.",
+    };
+  }
+
   if (needsEvidenceInstrumentation(run)) {
     if (run.verifier?.lastResult?.status === "pass") {
+      if (shouldCreateFinalAuditTask(run)) {
+        return {
+          kind: "create_task",
+          title: FINAL_COMPLETION_AUDIT_TASK_TITLE,
+          prompt: buildFinalCompletionAuditTaskPrompt(run),
+          reason: `Verifier passed; final read-only audit must reconcile ${unsatisfiedGoalEvidencePlanItems(run).length} evidence-plan item(s) before the Goal can pass (${finalAuditTaskCount(run) + 1}/${DEFAULT_GOAL_COMPLETION_AUDIT_LIMIT}).`,
+        };
+      }
       return {
         kind: "blocked",
         reason:
-          "Verifier passed, but the Goal evidence plan is still not satisfied; blocking instead of creating repeated evidence-path workers.",
+          "Verifier passed, but final completion audit did not reconcile the Goal evidence plan after bounded attempts.",
       };
     }
     return {
@@ -383,6 +731,21 @@ export function decideGoalNextAction(
       },
       attempts: limit,
       reason: `Verifier fix task limit reached (${limit}).`,
+    };
+  }
+
+  if (run.verifier?.lastResult?.status === "pass") {
+    if (shouldCreateFinalAuditTask(run)) {
+      return {
+        kind: "create_task",
+        title: FINAL_COMPLETION_AUDIT_TASK_TITLE,
+        prompt: buildFinalCompletionAuditTaskPrompt(run),
+        reason: `Verifier passed; creating final read-only completion audit before the Goal can pass (${finalAuditTaskCount(run) + 1}/${DEFAULT_GOAL_COMPLETION_AUDIT_LIMIT}).`,
+      };
+    }
+    return {
+      kind: "blocked",
+      reason: "Verifier passed, but final completion audit did not pass after bounded attempts.",
     };
   }
 

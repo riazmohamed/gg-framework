@@ -81,7 +81,21 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 
 ---
 
-## Slash commands
+## ⌨️ Keybindings
+
+| Key | What it does |
+|---|---|
+| <kbd>Ctrl+G</kbd> | Open the Goal pane |
+| <kbd>Ctrl+S</kbd> | Open the Skills pane |
+| <kbd>Shift+Tab</kbd> | Cycle extended thinking (off / low / medium / high / max) |
+| <kbd>Esc</kbd> | Interrupt the agent mid-turn |
+| <kbd>Ctrl+C</kbd> ×2 | Exit |
+| <kbd>↑</kbd> / <kbd>↓</kbd> | Recall previous prompts (when input is empty) |
+| <kbd>Enter</kbd> | Send · <kbd>Shift+Enter</kbd> newline · `/` opens the slash menu |
+
+---
+
+## 💬 Slash commands
 
 Everything runs through slash commands inside the session. Not CLI flags.
 
@@ -91,14 +105,15 @@ Everything runs through slash commands inside the session. Not CLI flags.
 /compact                      # Compress context when it gets long
 
 # Built-in workflows
+/goal          # Set up a durable Goal run
 /scan          # Dead code, bugs, security issues (5 parallel agents)
 /verify        # Verify against docs and best practices (8 parallel agents)
 /research      # Research best tools and patterns for your stack
+/expand        # Compare against current alternatives and report gaps
+/bullet-proof  # Run a defensive security review
 /init          # Generate CLAUDE.md for your project
-/setup-lint    # Generate a /fix command for your stack
 /setup-commit  # Generate a /commit command with quality checks
-/setup-tests   # Set up testing + generate /test
-/setup-update  # Generate an /update command for deps
+/setup-skills  # Audit and recommend reusable skills
 ```
 
 ---

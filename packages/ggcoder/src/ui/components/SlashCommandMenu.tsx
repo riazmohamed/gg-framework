@@ -6,78 +6,96 @@ export interface SlashCommandInfo {
   name: string;
   aliases: string[];
   description: string;
+  sectionTitle?: string;
 }
 
 interface SlashCommandMenuProps {
   commands: SlashCommandInfo[];
-  filter: string;
   selectedIndex: number;
+  width: number;
 }
 
-const WINDOW_SIZE = 6;
+const MAX_SUGGESTIONS_TO_SHOW = 8;
 
-export function SlashCommandMenu({ commands, filter, selectedIndex }: SlashCommandMenuProps) {
+export function SlashCommandMenu({ commands, selectedIndex, width }: SlashCommandMenuProps) {
   const theme = useTheme();
 
-  const filtered = commands.filter((cmd) => {
-    if (!filter) return true;
-    const lower = filter.toLowerCase();
-    return (
-      cmd.name.toLowerCase().startsWith(lower) ||
-      cmd.aliases.some((a) => a.toLowerCase().startsWith(lower))
-    );
-  });
+  if (commands.length === 0) return null;
 
-  if (filtered.length === 0) return null;
-
-  const total = filtered.length;
+  const total = commands.length;
   const idx = Math.min(Math.max(selectedIndex, 0), total - 1);
-
-  // Sliding window keeps the selected item visible without dumping the
-  // whole list (which gets clipped on short terminals).
   const start =
-    total <= WINDOW_SIZE
+    total <= MAX_SUGGESTIONS_TO_SHOW
       ? 0
-      : Math.max(0, Math.min(idx - Math.floor(WINDOW_SIZE / 2), total - WINDOW_SIZE));
-  const end = Math.min(start + WINDOW_SIZE, total);
-  const visible = filtered.slice(start, end);
-
-  const hasAbove = start > 0;
-  const hasBelow = end < total;
+      : Math.max(
+          0,
+          Math.min(idx - Math.floor(MAX_SUGGESTIONS_TO_SHOW / 2), total - MAX_SUGGESTIONS_TO_SHOW),
+        );
+  const end = Math.min(start + MAX_SUGGESTIONS_TO_SHOW, total);
+  const visible = commands.slice(start, end);
+  const maxLabelLength = Math.max(...commands.map((cmd) => cmd.name.length));
+  const commandColumnWidth = Math.min(maxLabelLength, Math.floor(width * 0.5));
 
   return (
-    <Box flexDirection="column" paddingLeft={2} paddingRight={1} marginBottom={0}>
-      {hasAbove && <Text color={theme.border}> ↑ {start} more</Text>}
+    <Box flexDirection="column" paddingX={1} width={width}>
+      {start > 0 && <Text color={theme.text}>▲</Text>}
       {visible.map((cmd, i) => {
         const actualIndex = start + i;
+        const previousSectionTitle = commands[actualIndex - 1]?.sectionTitle;
+        const shouldRenderSectionHeader =
+          !!cmd.sectionTitle && cmd.sectionTitle !== previousSectionTitle;
         const isSelected = actualIndex === idx;
+        const textColor = isSelected ? theme.commandColor : theme.textDim;
+
         return (
-          <Box key={cmd.name}>
-            <Text color={isSelected ? theme.commandColor : theme.textDim}>
-              {isSelected ? "› " : "  "}
-            </Text>
-            <Text color={isSelected ? theme.commandColor : theme.text} bold={isSelected}>
-              /{cmd.name}
-            </Text>
-            <Text color={theme.textDim}> — {cmd.description}</Text>
+          <Box key={cmd.name} flexDirection="column">
+            {shouldRenderSectionHeader && (
+              <Text color={theme.textDim}>-- {cmd.sectionTitle} --</Text>
+            )}
+            <Box flexDirection="row" backgroundColor={isSelected ? theme.border : undefined}>
+              <Box width={commandColumnWidth} flexShrink={0}>
+                <Text color={textColor}>{cmd.name}</Text>
+              </Box>
+              <Box flexGrow={1} paddingLeft={3}>
+                <Text color={textColor} wrap="truncate">
+                  {cmd.description.slice(0, 100)}
+                </Text>
+              </Box>
+            </Box>
           </Box>
         );
       })}
-      {hasBelow && <Text color={theme.border}> ↓ {total - end} more</Text>}
-      <Box>
-        <Text color={theme.border}> ↑↓ navigate · Enter select · Esc cancel</Text>
-      </Box>
+      {end < total && <Text color={theme.textDim}>▼</Text>}
+      {total > MAX_SUGGESTIONS_TO_SHOW && (
+        <Text color={theme.textDim}>
+          ({idx + 1}/{total})
+        </Text>
+      )}
     </Box>
   );
 }
 
-/** Filter commands by partial name/alias match */
+/** Filter commands by partial name/alias fuzzy-ish prefix priority. */
 export function filterCommands(commands: SlashCommandInfo[], filter: string): SlashCommandInfo[] {
   if (!filter) return commands;
   const lower = filter.toLowerCase();
-  return commands.filter(
-    (cmd) =>
-      cmd.name.toLowerCase().startsWith(lower) ||
-      cmd.aliases.some((a) => a.toLowerCase().startsWith(lower)),
-  );
+  return commands
+    .filter(
+      (cmd) =>
+        cmd.name.toLowerCase().includes(lower) ||
+        cmd.aliases.some((a) => a.toLowerCase().includes(lower)),
+    )
+    .sort((a, b) => {
+      const aName = a.name.toLowerCase();
+      const bName = b.name.toLowerCase();
+      const aExact = aName === lower;
+      const bExact = bName === lower;
+      if (aExact && !bExact) return -1;
+      if (!aExact && bExact) return 1;
+      const aPrefix = aName.startsWith(lower);
+      const bPrefix = bName.startsWith(lower);
+      if (aPrefix && !bPrefix) return -1;
+      if (!aPrefix && bPrefix) return 1;
+      return 0;
+    });
 }

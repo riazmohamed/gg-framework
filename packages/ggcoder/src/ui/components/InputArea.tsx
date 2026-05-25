@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
-import { Text, Box, useInput, useStdin } from "ink";
+import { Text, Box, useInput, useStdin, useIsScreenReaderEnabled } from "ink";
 import type { EventEmitter } from "events";
 import { useTheme } from "../theme/theme.js";
 import { useFocusedAnimation, deriveFrame } from "./AnimationContext.js";
@@ -22,7 +22,11 @@ import {
 } from "node:fs";
 
 const MAX_VISIBLE_LINES = 12;
-const PROMPT = "❯ ";
+const PROMPT = "> ";
+const PLACEHOLDER = "  Type your message or / to run a command";
+const INPUT_BACKGROUND = "#374151";
+const INPUT_TOP_FILL = "▄";
+const INPUT_BOTTOM_FILL = "▀";
 
 // SGR mouse sequence: ESC [ < button ; col ; row M/m
 // M = press, m = release. Coordinates are 1-based.
@@ -203,16 +207,12 @@ interface InputAreaProps {
   isActive?: boolean;
   onDownAtEnd?: () => void;
   onShiftTab?: () => void;
-  onToggleTasks?: () => void;
   onToggleGoal?: () => void;
   onToggleSkills?: () => void;
-  onTogglePixel?: () => void;
-  onTogglePlanMode?: () => void;
+  onToggleTasks?: () => void;
+  onToggleMarkdown?: () => void;
   cwd: string;
   commands?: SlashCommandInfo[];
-  /** Number of open eyes-journal signals. `undefined` when eyes is inactive in
-   * this project (hides the badge entirely). Zero hides it too. */
-  eyesCount?: number;
   /**
    * Locked badge rendered before the prompt arrow on the first visual line.
    * The user cannot delete or edit it — typed text always follows. Used by
@@ -237,8 +237,9 @@ interface InputAreaProps {
   onTab?: () => void;
 }
 
-// Border (1 each side) + padding (1 each side) = 4 characters of overhead
-const BOX_OVERHEAD = 4;
+// Padding (1 each side) = 2 characters of overhead. Gemini's composer is borderless
+// except for a zero-height top rule, so wrapping should not reserve border columns.
+const INPUT_HORIZONTAL_OVERHEAD = 2;
 // Minimum content width to prevent zero/negative values that cause infinite
 // re-render loops when Ink tries to wrap text wider than available space.
 const MIN_CONTENT_WIDTH = 10;
@@ -273,7 +274,10 @@ function wrapLine(text: string, contentWidth: number): string[] {
 }
 
 function getVisualLines(text: string, columns: number): string[] {
-  const contentWidth = Math.max(MIN_CONTENT_WIDTH, columns - PROMPT.length - BOX_OVERHEAD);
+  const contentWidth = Math.max(
+    MIN_CONTENT_WIDTH,
+    columns - PROMPT.length - INPUT_HORIZONTAL_OVERHEAD,
+  );
   if (text.length === 0) return [""];
 
   // Split on real newlines first, then wrap each
@@ -292,25 +296,18 @@ export function InputArea({
   isActive = true,
   onDownAtEnd,
   onShiftTab,
-  onToggleTasks,
   onToggleGoal,
   onToggleSkills,
-  onTogglePixel,
-  onTogglePlanMode,
+  onToggleTasks,
+  onToggleMarkdown,
   cwd,
   commands = [],
-  eyesCount,
   scopeBadge,
   disableMouseTracking,
   onTab,
 }: InputAreaProps) {
   const theme = useTheme();
-  const eyesBadge =
-    eyesCount && eyesCount > 0 ? (
-      <Text color={theme.accent} bold>
-        {`[eyes: ${eyesCount}↗] `}
-      </Text>
-    ) : null;
+  const isScreenReaderEnabled = useIsScreenReaderEnabled();
   const [value, setValue] = useState("");
   const [cursor, setCursor] = useState(0);
   const cursorRef = useRef(cursor);
@@ -840,12 +837,6 @@ export function InputArea({
         return; // absorb all other keys during search
       }
 
-      // Ctrl+T toggles task overlay — works even while agent is running
-      if (key.ctrl && input === "t") {
-        onToggleTasks?.();
-        return;
-      }
-
       // Ctrl+G toggles goal overlay in normal input mode. In search mode it cancels search above.
       if (key.ctrl && input === "g") {
         onToggleGoal?.();
@@ -858,15 +849,15 @@ export function InputArea({
         return;
       }
 
-      // Ctrl+E toggles pixel (errors) overlay
-      if (key.ctrl && input === "e") {
-        onTogglePixel?.();
+      // Ctrl+T toggles tasks overlay
+      if (key.ctrl && input === "t") {
+        onToggleTasks?.();
         return;
       }
 
-      // Ctrl+P toggles plan mode
-      if (key.ctrl && input === "p") {
-        onTogglePlanMode?.();
+      // Ctrl+M toggles rendered/raw markdown mode, matching Gemini's raw markdown affordance.
+      if (key.ctrl && input === "m") {
+        onToggleMarkdown?.();
         return;
       }
 
@@ -1289,7 +1280,10 @@ export function InputArea({
 
   // Calculate visual lines and cap at MAX_VISIBLE_LINES (scroll to cursor)
   const visualLines = getVisualLines(value, columns);
-  const contentWidth = Math.max(MIN_CONTENT_WIDTH, columns - PROMPT.length - BOX_OVERHEAD);
+  const contentWidth = Math.max(
+    MIN_CONTENT_WIDTH,
+    columns - PROMPT.length - INPUT_HORIZONTAL_OVERHEAD,
+  );
 
   // Find which visual line and column the cursor is on
   const cursorLineInfo = useMemo(() => {
@@ -1361,21 +1355,33 @@ export function InputArea({
   // Active selection range (absolute character offsets)
   const selection = getSelectionRange(selectionAnchor, cursor);
 
+  const promptColor = disabled ? theme.textDim : theme.commandColor;
+  const borderColor = disabled ? theme.textDim : borderPulseColors[borderFrame];
+  const backgroundColor = isScreenReaderEnabled ? undefined : INPUT_BACKGROUND;
+  const renderInputEdge = (fill: string): React.ReactNode => (
+    <Box width={columns}>
+      <Text color={backgroundColor ?? borderColor}>{fill.repeat(columns)}</Text>
+    </Box>
+  );
+
+  const renderPromptPrefix = (text: string): React.ReactNode => (
+    <Text color={promptColor} bold backgroundColor={backgroundColor}>
+      {text}
+    </Text>
+  );
+
   return (
-    <Box flexDirection="column" width={columns}>
+    <Box flexDirection="column" width={columns} flexGrow={0} flexShrink={0}>
+      {renderInputEdge(backgroundColor ? INPUT_TOP_FILL : "─")}
       <Box
         flexDirection="column"
-        borderStyle="round"
-        borderColor={disabled ? theme.textDim : borderPulseColors[borderFrame]}
         paddingLeft={1}
         paddingRight={1}
+        flexGrow={0}
+        flexShrink={0}
+        backgroundColor={backgroundColor}
+        width={columns}
       >
-        {/* Scope badge as a HEADER row inside the bordered box, left-aligned
-            on its own line. Previously the badge sat inline before the prompt
-            arrow on line 1 — but as soon as the input wrapped, the prompt's
-            two-space continuation indent was narrower than the badge, leaving
-            a visible gap on line 2. Putting the badge on its own line keeps
-            the input column flush with the prompt arrow on every line. */}
         {scopeBadge && <Box marginBottom={0}>{scopeBadge}</Box>}
         {images.length > 0 && (
           <Box>
@@ -1408,21 +1414,18 @@ export function InputArea({
             }
 
             return (
-              <Box>
+              <Box backgroundColor={backgroundColor} width="100%">
                 {searchMode ? (
-                  <Text color={searchFailed ? theme.error : theme.inputPrompt} bold>
+                  <Text
+                    color={searchFailed ? theme.error : theme.inputPrompt}
+                    bold
+                    backgroundColor={backgroundColor}
+                  >
                     {searchFailed ? "(fail)" : "(i-search)"}
                     {`'${searchQuery}': `}
                   </Text>
                 ) : (
-                  <>
-                    {/* scopeBadge lives in the header row above (see top of
-                        bordered box). Only the smaller eyesBadge stays inline. */}
-                    {eyesBadge}
-                    <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
-                      {PROMPT}
-                    </Text>
-                  </>
+                  renderPromptPrefix(PROMPT)
                 )}
                 {(() => {
                   const beforeCursor = displayStr.slice(0, cursorInDisplay);
@@ -1434,7 +1437,7 @@ export function InputArea({
                       : 0;
                     if (cmdChars >= text.length) {
                       return (
-                        <Text color={theme.commandColor} bold>
+                        <Text color={theme.commandColor} bold backgroundColor={backgroundColor}>
                           {text}
                         </Text>
                       );
@@ -1442,14 +1445,20 @@ export function InputArea({
                     if (cmdChars > 0) {
                       return (
                         <>
-                          <Text color={theme.commandColor} bold>
+                          <Text color={theme.commandColor} bold backgroundColor={backgroundColor}>
                             {text.slice(0, cmdChars)}
                           </Text>
-                          <Text color={theme.text}>{text.slice(cmdChars)}</Text>
+                          <Text color={theme.commandColor} backgroundColor={backgroundColor}>
+                            {text.slice(cmdChars)}
+                          </Text>
                         </>
                       );
                     }
-                    return <Text color={theme.text}>{text}</Text>;
+                    return (
+                      <Text color={theme.commandColor} backgroundColor={backgroundColor}>
+                        {text}
+                      </Text>
+                    );
                   };
                   return renderDisplaySegment(beforeCursor, 0);
                 })()}
@@ -1459,9 +1468,10 @@ export function InputArea({
                   const cursorInCmd = isCommand && cursorInDisplay < commandEndIndex;
                   return (
                     <Text
-                      color={cursorInCmd ? theme.commandColor : theme.text}
+                      color={theme.commandColor}
                       bold={cursorInCmd || undefined}
                       inverse={cursorVisible}
+                      backgroundColor={backgroundColor}
                     >
                       {cursorChar}
                     </Text>
@@ -1488,12 +1498,36 @@ export function InputArea({
                           <Text color={theme.commandColor} bold>
                             {afterCursor.slice(0, cmdChars)}
                           </Text>
-                          <Text color={theme.text}>{afterCursor.slice(cmdChars)}</Text>
+                          <Text color={theme.commandColor} backgroundColor={backgroundColor}>
+                            {afterCursor.slice(cmdChars)}
+                          </Text>
                         </>
                       );
                     }
-                    return <Text color={theme.text}>{afterCursor}</Text>;
+                    return (
+                      <Text color={theme.commandColor} backgroundColor={backgroundColor}>
+                        {afterCursor}
+                      </Text>
+                    );
                   })()}
+              </Box>
+            );
+          }
+
+          if (value.length === 0) {
+            return (
+              <Box backgroundColor={backgroundColor} width="100%">
+                {renderPromptPrefix(PROMPT)}
+                <Text
+                  color={theme.textDim}
+                  inverse={cursorVisible}
+                  backgroundColor={backgroundColor}
+                >
+                  {PLACEHOLDER.slice(0, 1)}
+                </Text>
+                <Text color={theme.textDim} backgroundColor={backgroundColor}>
+                  {PLACEHOLDER.slice(1)}
+                </Text>
               </Box>
             );
           }
@@ -1547,7 +1581,12 @@ export function InputArea({
 
               if (cmdChars >= text.length) {
                 return (
-                  <Text color={theme.commandColor} bold inverse={inv}>
+                  <Text
+                    color={theme.commandColor}
+                    bold
+                    inverse={inv}
+                    backgroundColor={backgroundColor}
+                  >
                     {text}
                   </Text>
                 );
@@ -1555,17 +1594,26 @@ export function InputArea({
               if (cmdChars > 0) {
                 return (
                   <>
-                    <Text color={theme.commandColor} bold inverse={inv}>
+                    <Text
+                      color={theme.commandColor}
+                      bold
+                      inverse={inv}
+                      backgroundColor={backgroundColor}
+                    >
                       {text.slice(0, cmdChars)}
                     </Text>
-                    <Text color={theme.text} inverse={inv}>
+                    <Text
+                      color={theme.commandColor}
+                      inverse={inv}
+                      backgroundColor={backgroundColor}
+                    >
                       {text.slice(cmdChars)}
                     </Text>
                   </>
                 );
               }
               return (
-                <Text color={theme.text} inverse={inv}>
+                <Text color={theme.commandColor} inverse={inv} backgroundColor={backgroundColor}>
                   {text}
                 </Text>
               );
@@ -1616,9 +1664,10 @@ export function InputArea({
                 segments.push(
                   <Text
                     key="cursor"
-                    color={curInCmd ? theme.commandColor : theme.text}
+                    color={theme.commandColor}
                     bold={curInCmd}
                     inverse={cursorVisible}
+                    backgroundColor={backgroundColor}
                   >
                     {cursorChar}
                   </Text>,
@@ -1664,9 +1713,10 @@ export function InputArea({
                 segments.push(
                   <Text
                     key="cursor"
-                    color={curInCmd ? theme.commandColor : theme.text}
+                    color={theme.commandColor}
                     bold={curInCmd}
                     inverse={cursorVisible}
+                    backgroundColor={backgroundColor}
                   >
                     {cursorChar}
                   </Text>,
@@ -1699,9 +1749,10 @@ export function InputArea({
                 segments.push(
                   <Text
                     key="cursor"
-                    color={cursorInCommand ? theme.commandColor : theme.text}
+                    color={theme.commandColor}
                     bold={cursorInCommand}
                     inverse={cursorVisible}
+                    backgroundColor={backgroundColor}
                   >
                     {charUnderCursor}
                   </Text>,
@@ -1717,22 +1768,23 @@ export function InputArea({
             }
 
             return (
-              <Box key={i}>
-                {/* scopeBadge moved to header row above the bordered box's
-                    input area — keeps continuation lines flush. */}
-                {i === 0 ? eyesBadge : null}
-                <Text color={disabled ? theme.textDim : theme.inputPrompt} bold>
-                  {i === 0 ? PROMPT : "  "}
-                </Text>
+              <Box key={i} backgroundColor={backgroundColor} width="100%">
+                {renderPromptPrefix(i === 0 ? PROMPT : "  ")}
                 {segments}
               </Box>
             );
           });
         })()}
       </Box>
-      {/* Slash command menu — shown below the input box */}
+      {renderInputEdge(backgroundColor ? INPUT_BOTTOM_FILL : "─")}
       {isSlashMode && filteredCommands.length > 0 && (
-        <SlashCommandMenu commands={commands} filter={slashFilter} selectedIndex={menuIndex} />
+        <Box paddingRight={2}>
+          <SlashCommandMenu
+            commands={filteredCommands}
+            selectedIndex={menuIndex}
+            width={Math.max(20, columns)}
+          />
+        </Box>
       )}
     </Box>
   );

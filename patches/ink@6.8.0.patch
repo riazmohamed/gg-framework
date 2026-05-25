@@ -1,8 +1,8 @@
 diff --git a/build/ink.js b/build/ink.js
-index 98ba6eff90db503fbd82fca6a19ef8d82d07ed8e..c1455c776da1f283ddfce7e0068c25e206d2f298 100644
+index 30019a0..1410e74 100644
 --- a/build/ink.js
 +++ b/build/ink.js
-@@ -702,7 +702,7 @@ export default class Ink {
+@@ -324,7 +324,7 @@ export default class Ink {
              if (sync) {
                  this.options.stdout.write(bsu);
              }

@@ -7,9 +7,12 @@ import type { MCPClientManager } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
 import type { Skill } from "../core/skills.js";
 import { App, type CompletedItem, type DoneStatus } from "./App.js";
+import { createTerminalHistoryPrinter } from "./terminal-history.js";
 import type { GoalStatusEntry } from "./components/GoalStatusBar.js";
 import { shutdownGoalWorkers } from "../core/goal-worker.js";
 import type { PlanStep } from "../utils/plan-steps.js";
+import type { GoalReference, GoalRun } from "../core/goal-store.js";
+import type { GoalMode } from "../core/runtime-mode.js";
 import { ThemeContext, SetThemeContext, loadTheme, type ThemeName } from "./theme/theme.js";
 import { detectTheme } from "./theme/detect-theme.js";
 import { AnimationProvider } from "./components/AnimationContext.js";
@@ -46,14 +49,13 @@ export interface RenderAppConfig {
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
-  planModeRef?: { current: boolean };
-  onEnterPlanRef?: { current: (reason?: string) => void };
-  onExitPlanRef?: { current: (planPath: string) => Promise<string> };
+  goalModeRef?: { current: GoalMode };
   skills?: Skill[];
   /** Deferred MCP tools — resolved after UI renders to avoid blocking startup. */
   pendingMCPTools?: Promise<AgentTool[]>;
   initialOverlay?: "goal";
   rebuildToolsForCwd?: (cwd: string) => AgentTool[];
+  goalReferencesRef?: { current: readonly GoalReference[] | undefined };
   repoMapChangedFilesRef?: { current: Set<string> };
   repoMapReadFilesRef?: { current: Set<string> };
 }
@@ -103,7 +105,7 @@ export interface SessionStore {
   /**
    * Action to run on the next mount (consumed once). Used by paths that
    * remount AND immediately drive the agent — plan accept / reject,
-   * startTask, etc. The new App reads this on mount, fires the agent,
+   * pixel fix, etc. The new App reads this on mount, fires the agent,
    * and clears the field.
    */
   pendingAction?: {
@@ -113,6 +115,8 @@ export interface SessionStore {
      *  plan_event item instead of the bland info row. */
     planEvent?: { event: "approved" | "rejected" | "dismissed"; detail?: string };
   };
+  /** Goal run to activate immediately after a visual remount clears review scrollback. */
+  pendingGoalRun?: GoalRun;
   /**
    * True while the agent loop is running. Mirrored by App.tsx so renderApp's
    * resize handler can skip the unmount/remount that would abort the agent
@@ -129,22 +133,15 @@ export interface SessionStore {
    */
   pendingResetUI?: boolean;
   /**
-   * "Run All" task chaining flag. startTask() calls resetUI() between tasks
-   * (wipeSession + new pendingAction), which unmounts App. Without
-   * mirroring this through sessionStore, the new mount loses the flag and
-   * the onDone callback's auto-chain check (`if (runAllTasksRef.current)`)
-   * is always false on the second task onward.
-   */
-  runAllTasks?: boolean;
-  /**
-   * Same pattern as `runAllTasks` — pixel fix auto-chaining flag. Survives
-   * the deferred resetUI() that may fire when the agent goes idle (e.g.
-   * after a pane was toggled mid-fix). Without this, the second fix
-   * onward loses the chaining intent.
+   * Pixel fix auto-chaining flag. Survives the deferred resetUI() that may
+   * fire when the agent goes idle (e.g. after a pane was toggled mid-fix).
+   * Without this, the second fix onward loses the chaining intent.
    */
   runAllPixel?: boolean;
   /** Active goal status bar entries. Preserved across Goal pane open/close remounts. */
   goalStatusEntries?: GoalStatusEntry[];
+  /** Goal orchestration mode display state. */
+  goalMode?: GoalMode;
 }
 
 export interface ResetUIOptions {
@@ -160,6 +157,8 @@ export interface ResetUIOptions {
   planSteps?: PlanStep[];
   /** Override session path (e.g. plan accept creates a new session file). */
   sessionPath?: string;
+  /** Clear malformed live frames after terminal resize and redraw durable history. */
+  resizeRedraw?: boolean;
   /** Action to fire on the new mount (info banner + agent prompt). */
   pendingAction?: {
     prompt: string;
@@ -216,6 +215,13 @@ const INK_OPTIONS = {
 const DISABLE_MODIFY_OTHER_KEYS = "\x1b[>4;0m";
 const DISABLE_FOCUS_REPORTING = "\x1b[?1004l";
 const SCREEN_CLEAR = DISABLE_MODIFY_OTHER_KEYS + "\x1b[2J\x1b[3J\x1b[H";
+const VIEWPORT_CLEAR = DISABLE_MODIFY_OTHER_KEYS + "\x1b[2J\x1b[H";
+
+export function getResetClearMode(
+  options: Pick<ResetUIOptions, "wipeSession" | "history" | "resizeRedraw"> | undefined,
+): "screen" | "viewport" {
+  return options?.wipeSession || options?.history || options?.resizeRedraw ? "screen" : "viewport";
+}
 
 export async function renderApp(config: RenderAppConfig): Promise<void> {
   const themeSetting = config.theme ?? "auto";
@@ -267,9 +273,12 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     overlay: null,
     planAutoExpand: false,
     pendingAction: undefined,
+    pendingGoalRun: undefined,
     goalStatusEntries: [],
+    goalMode: config.goalModeRef?.current ?? "off",
   };
 
+  const terminalHistoryPrinter = createTerminalHistoryPrinter();
   const ref: { instance: InkInstance | null } = { instance: null };
 
   const buildElement = (): React.ReactElement =>
@@ -307,15 +316,15 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             settingsFile: config.settingsFile,
             mcpManager: config.mcpManager,
             authStorage: config.authStorage,
-            planModeRef: config.planModeRef,
-            onEnterPlanRef: config.onEnterPlanRef,
-            onExitPlanRef: config.onExitPlanRef,
+            goalModeRef: config.goalModeRef,
             skills: config.skills,
             pendingMCPTools: config.pendingMCPTools,
             initialOverlay: config.initialOverlay,
             rebuildToolsForCwd: config.rebuildToolsForCwd,
+            goalReferencesRef: config.goalReferencesRef,
             repoMapChangedFilesRef: config.repoMapChangedFilesRef,
             repoMapReadFilesRef: config.repoMapReadFilesRef,
+            terminalHistoryPrinter,
             resetUI,
             onRuntimeStateChange,
             sessionStore,
@@ -324,13 +333,9 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       ),
     );
 
-  // Nuke-and-rebuild for every path that clears the screen. Patching Ink's
-  // internal frame tracking (log-update reset, lastOutput cleared,
-  // fullStaticOutput dropped) looks correct for one frame but the live area
-  // drifts on subsequent streaming responses — Ink's cursor math depends on
-  // terminal-state assumptions that ANSI clearing breaks. The only RELIABLE
-  // reset is to tear down the React tree entirely, clear after Ink has flushed
-  // its teardown frame, and then render a fresh Ink instance.
+  // Nuke-and-rebuild paths tear down the React tree and render a fresh Ink
+  // instance. Non-wipe remounts clear only the live viewport while preserving
+  // real terminal scrollback; fresh sessions clear screen + scrollback intentionally.
   function resetUI(options?: ResetUIOptions): void {
     const old = ref.instance;
     if (!old) return;
@@ -339,6 +344,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       // Wipe everything session-scoped FIRST. Other options below can then
       // re-seed specific fields (e.g. plan accept wipes the chat then sets
       // approvedPlanPath + planSteps for the implementation phase).
+      terminalHistoryPrinter.clear();
       sessionStore.history = [{ kind: "banner", id: "banner" }];
       sessionStore.liveItems = [];
       sessionStore.doneStatus = null;
@@ -347,9 +353,13 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       sessionStore.sessionTitle = undefined;
       sessionStore.sessionTitleGenerated = false;
       sessionStore.goalStatusEntries = [];
+      if (config.goalReferencesRef) config.goalReferencesRef.current = undefined;
     }
     if (options?.messages) sessionStore.messages = options.messages;
-    if (options?.history) sessionStore.history = options.history;
+    if (options?.history) {
+      terminalHistoryPrinter.clear();
+      sessionStore.history = options.history;
+    }
     if (options?.approvedPlanPath !== undefined) {
       sessionStore.approvedPlanPath = options.approvedPlanPath;
     }
@@ -358,22 +368,34 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     if (options?.pendingAction) sessionStore.pendingAction = options.pendingAction;
 
     old.unmount();
-    process.stdout.write(SCREEN_CLEAR);
+    if (options?.resizeRedraw) {
+      terminalHistoryPrinter.resetPrinted();
+    }
+    // Resize can leave log-update frames at the old width in the visible viewport.
+    // Repaint the durable transcript after a full clear so messages don't appear
+    // to vanish on maximize and old input/status frames don't stack as duplicates.
+    // Other non-wipe remounts keep scrollback and only clear the live viewport.
+    process.stdout.write(getResetClearMode(options) === "screen" ? SCREEN_CLEAR : VIEWPORT_CLEAR);
+    if (options?.resizeRedraw && sessionStore.history.length > 0) {
+      terminalHistoryPrinter.print(sessionStore.history, {
+        theme: loadTheme(resolvedTheme),
+        columns: Math.max(40, process.stdout.columns ?? 80),
+        version: config.version,
+        model: runtimeState.model,
+        provider: runtimeState.provider,
+        cwd: config.cwd,
+      });
+    }
     ref.instance = render(buildElement(), INK_OPTIONS);
   }
 
   ref.instance = render(buildElement(), INK_OPTIONS);
 
-  // Terminal resize → full unmount/remount. The TerminalSizeProvider hook
-  // already debounces resize and writes a screen clear at the end of a
-  // drag, but that doesn't reset Ink's log-update internal line-count
-  // tracking — so on the very next render the live area is positioned
-  // against stale cursor state and the input box ends up pinned to the top
-  // of the viewport with new chat lines disappearing off-screen. Same
-  // symptom /clear hit; same fix — tear down the React tree and start
-  // fresh. Debounced 250ms (shorter than the hook's 300ms) so resetUI wins
-  // the race; the hook's pending timer is cancelled by its own useEffect
-  // cleanup when the old instance unmounts.
+  // Terminal resize → full unmount/remount. Completed transcript rows are real
+  // terminal output now, so resetUI() only rebuilds the live Ink controls unless
+  // a fresh-session path asked to wipe scrollback. Debounced 250ms (shorter than
+  // the hook's 300ms) so resetUI wins the race; the hook's pending timer is
+  // cancelled by its own useEffect cleanup when the old instance unmounts.
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
   const onTerminalResize = (): void => {
     if (resizeTimer) clearTimeout(resizeTimer);
@@ -381,16 +403,14 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       resizeTimer = null;
       // While the agent is running, the full unmount/remount would fire
       // useAgentLoop's cleanup and abort the in-flight request — so the
-      // agent dies on maximize. Skip the unmount in that case;
-      // useTerminalSize already clears the screen and bumps resizeKey so
-      // <Static> remounts and re-prints the full history. Flag
+      // agent dies on maximize. Skip the unmount in that case. Flag
       // pendingResetUI so App.tsx fires a deferred resetUI the moment the
-      // agent goes idle, fixing any log-update drift that accumulated.
+      // agent goes idle, fixing any live-area drift that accumulated.
       if (sessionStore.isAgentRunning) {
         sessionStore.pendingResetUI = true;
         return;
       }
-      resetUI();
+      resetUI({ resizeRedraw: true });
     }, 250);
   };
   process.stdout.on("resize", onTerminalResize);

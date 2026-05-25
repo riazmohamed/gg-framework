@@ -81,12 +81,6 @@ function formatArgs(name: string, args: Record<string, unknown>): string {
     case "task_output":
     case "task_stop":
       return args.id ? ` ${chalk.dim(String(args.id))}` : "";
-    case "tasks":
-      return args.action ? ` ${chalk.dim(String(args.action))}` : "";
-    case "enter_plan":
-      return args.reason ? ` ${chalk.dim(String(args.reason))}` : "";
-    case "exit_plan":
-      return args.plan_path ? ` ${chalk.dim(String(args.plan_path))}` : "";
     case "web_fetch":
       return args.url ? ` ${chalk.dim(String(args.url))}` : "";
     case "web_search":
@@ -144,9 +138,6 @@ function summarizeResult(name: string, result: string, isError: boolean): string
       return lines[0] ?? "no output";
     }
     case "task_stop":
-    case "tasks":
-    case "enter_plan":
-    case "exit_plan":
     case "skill":
       return result.split("\n")[0] || "done";
     case "web_fetch": {

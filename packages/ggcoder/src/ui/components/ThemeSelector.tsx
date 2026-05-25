@@ -1,6 +1,6 @@
 import React from "react";
 import type { ThemeName } from "../theme/theme.js";
-import { SelectList } from "./SelectList.js";
+import { SlashStyledSelectList } from "./SlashStyledSelectList.js";
 
 interface ThemeSelectorProps {
   onSelect: (themeName: ThemeName) => void;
@@ -34,7 +34,7 @@ export function ThemeSelector({ onSelect, onCancel, currentTheme }: ThemeSelecto
   );
 
   return (
-    <SelectList
+    <SlashStyledSelectList
       items={items}
       onSelect={(value) => onSelect(value as ThemeName)}
       onCancel={onCancel}

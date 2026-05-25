@@ -93,7 +93,7 @@ describe("getScrollStabilizationDecision", () => {
       true,
     );
     expect(shouldStabilizeOverlayPaneRerender({ overlayPane: "plan", isAgentRunning: true })).toBe(
-      true,
+      false,
     );
     expect(
       shouldStabilizeOverlayPaneRerender({ overlayPane: "skills", isAgentRunning: true }),

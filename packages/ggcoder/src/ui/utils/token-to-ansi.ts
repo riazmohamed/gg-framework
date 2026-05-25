@@ -118,14 +118,16 @@ function tokenToAnsi(
       const inline = inlineToAnsi(heading.tokens ?? [], theme);
       switch (heading.depth) {
         case 1:
-          return gap + chalk.bold.italic.underline(inline) + "\n\n";
+          return gap + chalk.bold.italic.underline(inline);
         default:
-          return gap + chalk.bold(inline) + "\n\n";
+          return gap + chalk.bold(inline);
       }
     }
 
-    case "paragraph":
-      return gap + inlineToAnsi((token as Tokens.Paragraph).tokens ?? [], theme) + "\n";
+    case "paragraph": {
+      const inline = inlineToAnsi((token as Tokens.Paragraph).tokens ?? [], theme);
+      return gap + wrapAnsi(inline, Math.max(10, columns), { hard: true, wordWrap: true });
+    }
 
     case "list": {
       const list = token as Tokens.List;
@@ -149,7 +151,16 @@ function tokenToAnsi(
           })
           .join("");
 
-        return indent + bullet + content;
+        const prefix = indent + bullet;
+        const continuationPrefix = " ".repeat(prefix.length);
+        const wrapped = wrapAnsi(content, Math.max(10, columns - prefix.length), {
+          hard: true,
+          wordWrap: true,
+        });
+        return wrapped
+          .split("\n")
+          .map((line, lineIndex) => `${lineIndex === 0 ? prefix : continuationPrefix}${line}`)
+          .join("\n");
       });
       return gap + items.join("\n");
     }
@@ -172,9 +183,8 @@ function tokenToAnsi(
     case "blockquote": {
       const bq = token as Tokens.Blockquote;
       // Pre-wrap paragraph content to fit `columns - 2` (accounting for the
-      // "\u2502 " gutter). Without this, long one-line blockquotes (e.g. the
-      // restart notice emitted by /eyes) get truncated by Ink's Text wrap
-      // when nested ANSI codes confuse its width calculation.
+      // "\u2502 " gutter). Without this, long one-line blockquotes get truncated by
+      // Ink's Text wrap when nested ANSI codes confuse its width calculation.
       const barWidth = 2;
       const wrapWidth = Math.max(20, columns - barWidth);
       const inner = (bq.tokens ?? [])
@@ -300,7 +310,7 @@ function tokenToAnsi(
       return gap + "---";
 
     case "space":
-      return "\n";
+      return "";
 
     case "html":
     case "def":
