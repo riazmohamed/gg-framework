@@ -1,10 +1,15 @@
-import path from "node:path";
-import fs from "node:fs/promises";
 import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { resolvePath, rejectSymlink } from "./path-utils.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import { assertFresh, recordWrite, type ReadTracker } from "./read-tracker.js";
+import { goalModeRestriction, isGoalModeActive, type GoalMode } from "../core/runtime-mode.js";
+
+type MutationCallback = (filePath: string) => void | Promise<void>;
+
+function isMutationCallback(value: unknown): value is MutationCallback {
+  return typeof value === "function";
+}
 
 const WriteParams = z.object({
   file_path: z.string().describe("The file path to write to"),
@@ -15,9 +20,15 @@ export function createWriteTool(
   cwd: string,
   readFiles?: ReadTracker,
   ops: ToolOperations = localOperations,
-  planModeRef?: { current: boolean },
-  onFileMutated?: (filePath: string) => void | Promise<void>,
+  goalModeRefOrOnFileMutated?: { current: GoalMode } | MutationCallback,
+  onFileMutated?: MutationCallback,
 ): AgentTool<typeof WriteParams> {
+  const goalModeRef = isMutationCallback(goalModeRefOrOnFileMutated)
+    ? undefined
+    : goalModeRefOrOnFileMutated;
+  const mutationCallback = isMutationCallback(goalModeRefOrOnFileMutated)
+    ? goalModeRefOrOnFileMutated
+    : onFileMutated;
   return {
     name: "write",
     description:
@@ -29,17 +40,8 @@ export function createWriteTool(
       const resolved = resolvePath(cwd, file_path);
       await rejectSymlink(resolved);
 
-      // In plan mode, only allow writing to .gg/plans/
-      if (planModeRef?.current) {
-        const plansDir = path.join(cwd, ".gg", "plans");
-        if (!resolved.startsWith(plansDir)) {
-          return (
-            "Error: write is restricted in plan mode. You can only write to .gg/plans/. Got: " +
-            file_path
-          );
-        }
-        // Ensure .gg/plans/ directory exists
-        await fs.mkdir(plansDir, { recursive: true });
+      if (isGoalModeActive(goalModeRef)) {
+        return goalModeRestriction("write", "Goal metadata, evidence plans, and task creation");
       }
 
       // Block overwriting existing files that haven't been read, or that
@@ -55,7 +57,7 @@ export function createWriteTool(
       }
       await ops.writeFile(resolved, content);
       await recordWrite(readFiles, resolved, content, ops);
-      await onFileMutated?.(resolved);
+      await mutationCallback?.(resolved);
       const lines = content.split("\n").length;
       return `Wrote ${lines} lines to ${resolved}`;
     },

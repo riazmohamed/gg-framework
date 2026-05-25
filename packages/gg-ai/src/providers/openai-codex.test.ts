@@ -111,6 +111,43 @@ describe("streamOpenAICodex", () => {
     });
   });
 
+  it.each(["medium", "high", "xhigh"] as const)(
+    "sends %s reasoning effort through Codex transport",
+    async (thinking) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          createSseResponse([
+            {
+              type: "response.completed",
+              response: { usage: { input_tokens: 1, output_tokens: 1 } },
+            },
+          ]),
+        ),
+      );
+
+      const fetchMock = vi.mocked(fetch);
+      const result = streamOpenAICodex({
+        provider: "openai",
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "hi" }],
+        apiKey: "token",
+        accountId: "acct",
+        thinking,
+      });
+
+      for await (const _event of result) {
+        /* consume */
+      }
+
+      const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string) as Record<
+        string,
+        { effort?: string }
+      >;
+      expect(body.reasoning).toMatchObject({ effort: thinking });
+    },
+  );
+
   it("shapes Codex transport request with endpoint, cache headers, reasoning include, and no rejected token caps", async () => {
     vi.stubGlobal(
       "fetch",
@@ -302,6 +339,73 @@ describe("streamOpenAICodex", () => {
     expect(events).toContainEqual({ type: "text_delta", text: "visible answer" });
     await expect(result.response).resolves.toMatchObject({
       message: { content: [{ type: "text", text: "visible answer" }] },
+    });
+  });
+
+  it("buffers output text until Codex identifies whether the item is visible", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createSseResponse([
+          {
+            type: "response.output_text.delta",
+            item_id: "rs_1",
+            delta: "private reasoning before item metadata",
+          },
+          {
+            type: "response.output_item.added",
+            item: { type: "reasoning", id: "rs_1" },
+          },
+          {
+            type: "response.output_text.delta",
+            item_id: "msg_1",
+            delta: "visible before item metadata",
+          },
+          {
+            type: "response.output_item.added",
+            item: { type: "message", id: "msg_1" },
+          },
+          {
+            type: "response.output_text.delta",
+            item_id: "msg_1",
+            delta: " plus visible after metadata",
+          },
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 10, output_tokens: 5 } },
+          },
+        ]),
+      ),
+    );
+
+    const result = streamOpenAICodex({
+      provider: "openai",
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "token",
+      accountId: "acct",
+      thinking: "high",
+    });
+
+    const events = [];
+    for await (const event of result) events.push(event);
+
+    expect(events).toContainEqual({
+      type: "thinking_delta",
+      text: "private reasoning before item metadata",
+    });
+    expect(events).not.toContainEqual({
+      type: "text_delta",
+      text: "private reasoning before item metadata",
+    });
+    expect(events).toContainEqual({ type: "text_delta", text: "visible before item metadata" });
+    expect(events).toContainEqual({ type: "text_delta", text: " plus visible after metadata" });
+    await expect(result.response).resolves.toMatchObject({
+      message: {
+        content: [
+          { type: "text", text: "visible before item metadata plus visible after metadata" },
+        ],
+      },
     });
   });
 

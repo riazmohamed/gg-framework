@@ -1,28 +1,25 @@
 import { describe, expect, it } from "vitest";
 import type { GoalRun } from "../core/goal-store.js";
 import {
-  clampGoalDetailScrollOffset,
   clampGoalScrollOffset,
   clampGoalSelectedIndex,
+  createGoalReviewSnapshot,
+  formatGoalPlanMarkdown,
+  formatGoalPrerequisiteSummary,
+  formatGoalProgressText,
+  formatGoalTaskSummary,
+  formatGoalVerifierSummary,
+  getGoalAutoExpandedState,
   getGoalCardExtraRowCount,
-  getGoalDetailRowCount,
-  getGoalDetailScrollWindow,
-  getGoalExpandedDetailViewportRows,
+  getGoalExpandedDetailViewModel,
+  getGoalCardStatusColor,
+  getGoalCardTitleColor,
   getGoalListCardRowCount,
   getGoalListWindow,
   getGoalOverlayViewportRows,
-  getGoalScrollOffsetForSelection,
-  formatGoalPrerequisiteSummary,
-  formatGoalProgressText,
-  formatGoalTaskDetailSummary,
-  formatGoalTaskSummary,
-  formatGoalVerifierSummary,
   getGoalReadinessText,
-  getGoalCardStatusColor,
-  getGoalCardTitleColor,
-  getGoalDetailTaskHeading,
+  getGoalScrollOffsetForSelection,
   getGoalStatusCountsText,
-  getGoalUserPrerequisiteHeading,
   shouldPersistGoalOverlayRuns,
   sortGoalRunsForOverlay,
 } from "./components/GoalOverlay.js";
@@ -53,6 +50,36 @@ describe("goal overlay helpers", () => {
     const newRun = goalRun({ id: "new", updatedAt: "2024-02-01T00:00:00.000Z" });
 
     expect(sortGoalRunsForOverlay([oldRun, newRun]).map((run) => run.id)).toEqual(["new", "old"]);
+  });
+
+  it("auto-expands the newest Goal exactly like plan review after setup", () => {
+    const newest = goalRun({ id: "newest", updatedAt: "2024-02-01T00:00:00.000Z" });
+    const older = goalRun({ id: "older", updatedAt: "2024-01-01T00:00:00.000Z" });
+
+    expect(
+      getGoalAutoExpandedState({
+        autoExpandNewest: true,
+        loaded: true,
+        runs: [newest, older],
+        alreadyExpanded: false,
+      }),
+    ).toEqual({ selectedIndex: 0, expandedRunId: "newest" });
+    expect(
+      getGoalAutoExpandedState({
+        autoExpandNewest: true,
+        loaded: true,
+        runs: [newest],
+        alreadyExpanded: true,
+      }),
+    ).toBeNull();
+    expect(
+      getGoalAutoExpandedState({
+        autoExpandNewest: false,
+        loaded: true,
+        runs: [newest],
+        alreadyExpanded: false,
+      }),
+    ).toBeNull();
   });
 
   it("clamps selected index", () => {
@@ -131,8 +158,10 @@ describe("goal overlay helpers", () => {
     ).toBe(8);
   });
 
-  it("counts and clamps expanded detail rows for an internal detail viewport", () => {
+  it("formats the full expanded Goal plan as markdown for dynamic detail rendering", () => {
     const run = goalRun({
+      goal: "Long objective",
+      successCriteria: ["criterion one", "criterion two"],
       prerequisites: [
         { id: "cli", label: "CLI", status: "met", evidence: "available" },
         { id: "token", label: "Token", status: "missing", instructions: "Provide token." },
@@ -148,19 +177,6 @@ describe("goal overlay helpers", () => {
         },
         { id: "task-b", title: "Task B", prompt: "Do B", status: "pending", attempts: 0 },
       ],
-      verifier: { description: "Run tests", command: "pnpm test" },
-    });
-
-    expect(getGoalDetailRowCount(run)).toBe(15);
-    expect(clampGoalDetailScrollOffset(-1, 15, 5)).toBe(0);
-    expect(clampGoalDetailScrollOffset(99, 15, 5)).toBe(11);
-    expect(clampGoalDetailScrollOffset(Number.NaN, 15, 5)).toBe(0);
-  });
-
-  it("counts full Goal metadata in expanded details", () => {
-    const run = goalRun({
-      goal: "Long objective",
-      successCriteria: ["criterion one", "criterion two"],
       harness: [{ id: "harness", label: "Harness", command: "pnpm test" }],
       evidencePlan: [
         {
@@ -172,21 +188,125 @@ describe("goal overlay helpers", () => {
           command: "pnpm test",
         },
       ],
+      verifier: { description: "Run tests", command: "pnpm test" },
       blockers: ["Needs user input"],
       evidence: [
         {
           id: "evidence",
           kind: "command",
           label: "Verifier result",
+          content: "Verifier output",
           createdAt: "2024-01-01T00:00:00.000Z",
         },
       ],
     });
 
-    expect(getGoalDetailRowCount(run)).toBe(15);
+    const markdown = formatGoalPlanMarkdown(run);
+
+    expect(markdown).toContain("# Goal");
+    expect(markdown).toContain("## Goal\n\nLong objective");
+    expect(markdown).toContain("## Success criteria");
+    expect(markdown).toContain("- criterion one");
+    expect(markdown).toContain("## User prerequisites");
+    expect(markdown).toContain("- **missing** Token");
+    expect(markdown).toContain("User action required: Provide token.");
+    expect(markdown).toContain("## Worker tasks");
+    expect(markdown).toContain("Prompt: Do A");
+    expect(markdown).toContain("## Harness");
+    expect(markdown).toContain("Command: `pnpm test`");
+    expect(markdown).toContain("## Evidence plan");
+    expect(markdown).toContain("- **planned** Proof path (test)");
+    expect(markdown).toContain("## Verifier");
+    expect(markdown).toContain("## Evidence");
+    expect(markdown).toContain("Content: Verifier output");
+    expect(markdown).toContain("## Blockers");
   });
 
-  it("reserves expanded detail space without showing other goals", () => {
+  it("recomputes expanded Goal detail content from the latest run snapshot", () => {
+    const initial = goalRun({ title: "Mutable detail", tasks: [] });
+    const updated = goalRun({
+      ...initial,
+      updatedAt: "2024-01-01T00:00:01.000Z",
+      tasks: [{ id: "task-a", title: "Task A", prompt: "Do A", status: "done", attempts: 1 }],
+    });
+
+    const before = getGoalExpandedDetailViewModel({ run: initial, markdownWidth: 80 });
+    const after = getGoalExpandedDetailViewModel({ run: updated, markdownWidth: 80 });
+
+    expect(before.content).toContain("No worker tasks yet");
+    expect(after.content).toContain("Task A");
+    expect(after.content).not.toEqual(before.content);
+  });
+
+  it("creates immutable review snapshots for scrollback-friendly Goal plan review", () => {
+    const run = goalRun({
+      id: "review-goal",
+      updatedAt: "2024-01-01T00:00:00.000Z",
+      title: "Review me",
+      successCriteria: ["User can read the whole plan with terminal scrollback"],
+    });
+    const snapshot = createGoalReviewSnapshot({ run, markdownWidth: 100.8 });
+    const updated = goalRun({
+      ...run,
+      updatedAt: "2024-01-01T00:00:01.000Z",
+      successCriteria: ["Different content after polling"],
+    });
+
+    expect(snapshot.id).toBe("review-goal:2024-01-01T00:00:00.000Z:100");
+    expect(snapshot.markdownWidth).toBe(100);
+    expect(snapshot.content).toContain("User can read the whole plan with terminal scrollback");
+    expect(snapshot.content).not.toContain("Different content after polling");
+    expect(createGoalReviewSnapshot({ run: updated, markdownWidth: 100 }).id).not.toBe(snapshot.id);
+  });
+
+  it("updates expanded Goal detail width without relying on append-only Static state", () => {
+    const run = goalRun({ title: "Responsive detail" });
+
+    expect(getGoalExpandedDetailViewModel({ run, markdownWidth: 80 }).markdownWidth).toBe(80);
+    expect(getGoalExpandedDetailViewModel({ run, markdownWidth: 120 }).markdownWidth).toBe(120);
+  });
+
+  it("includes the human final summary in passed Goal markdown", () => {
+    const run = goalRun({
+      status: "passed",
+      tasks: [
+        {
+          id: "task-a",
+          title: "Task A",
+          prompt: "Do A",
+          status: "done",
+          attempts: 1,
+          lastSummary: "Implemented A and verified it.",
+        },
+      ],
+      verifier: {
+        description: "Run tests",
+        command: "pnpm test",
+        lastResult: {
+          status: "pass",
+          summary: "passed",
+          checkedAt: "2024-01-01T00:00:00.000Z",
+          outputPath: "artifacts/goal-pass.log",
+        },
+      },
+      completionAudit: {
+        status: "pass",
+        summary: "FINAL_AUDIT_PASS original-goal-prompt GOAL_PLAN All findings fixed.",
+        checkedAt: "2024-01-01T00:00:01.000Z",
+        verifierCheckedAt: "2024-01-01T00:00:00.000Z",
+      },
+    });
+
+    const markdown = formatGoalPlanMarkdown(run);
+
+    expect(markdown).toContain("## Final summary");
+    expect(markdown).toContain("### Outcome");
+    expect(markdown).toContain("All findings fixed.");
+    expect(markdown).toContain("## Final audit");
+    expect(markdown).toContain("Verifier checked at: 2024-01-01T00:00:00.000Z");
+  });
+
+  it("counts extra rows for list cards only", () => {
     expect(getGoalCardExtraRowCount(goalRun({}))).toBe(0);
     expect(
       getGoalCardExtraRowCount(
@@ -194,20 +314,6 @@ describe("goal overlay helpers", () => {
       ),
     ).toBe(1);
     expect(getGoalCardExtraRowCount(goalRun({ blockers: ["Blocked"] }))).toBe(1);
-    expect(getGoalExpandedDetailViewportRows({ viewportRows: 20, cardExtraRows: 0 })).toBe(14);
-    expect(getGoalExpandedDetailViewportRows({ viewportRows: 20, cardExtraRows: 2 })).toBe(12);
-  });
-
-  it("reserves fixed rows for detail scroll indicators instead of growing terminal scrollback", () => {
-    expect(
-      getGoalDetailScrollWindow({ detailRowCount: 12, scrollOffset: 0, viewportRows: 5 }),
-    ).toEqual({ start: 0, end: 4, hiddenBefore: 0, hiddenAfter: 8 });
-    expect(
-      getGoalDetailScrollWindow({ detailRowCount: 12, scrollOffset: 4, viewportRows: 5 }),
-    ).toEqual({ start: 4, end: 7, hiddenBefore: 4, hiddenAfter: 5 });
-    expect(
-      getGoalDetailScrollWindow({ detailRowCount: 12, scrollOffset: 99, viewportRows: 5 }),
-    ).toEqual({ start: 8, end: 12, hiddenBefore: 8, hiddenAfter: 0 });
   });
 
   it("summarizes prerequisites including blocking states", () => {
@@ -222,24 +328,6 @@ describe("goal overlay helpers", () => {
     expect(formatGoalPrerequisiteSummary(run)).toBe("1/3 prereqs met (1 missing, 1 unknown)");
   });
 
-  it("puts user prerequisites before worker tasks in detail headings", () => {
-    const run = goalRun({
-      prerequisites: [
-        {
-          id: "supabase-token",
-          label: "Supabase token",
-          status: "missing",
-          instructions: "Provide SUPABASE_ACCESS_TOKEN.",
-        },
-      ],
-    });
-
-    expect(getGoalUserPrerequisiteHeading(run)).toBe("1. User prerequisites");
-    expect(getGoalDetailTaskHeading(run)).toBe("2. Worker tasks");
-    expect(getGoalUserPrerequisiteHeading(goalRun({}))).toBeNull();
-    expect(getGoalDetailTaskHeading(goalRun({}))).toBe("Worker tasks");
-  });
-
   it("summarizes task states", () => {
     const run = goalRun({
       tasks: [
@@ -251,14 +339,6 @@ describe("goal overlay helpers", () => {
     });
 
     expect(formatGoalTaskSummary(run)).toBe("1/4 tasks done (1 running, 1 failed, 1 blocked)");
-  });
-
-  it("summarizes task detail with only the first concise line", () => {
-    expect(formatGoalTaskDetailSummary("\nChanged the harness.\nVerified tests.")).toBe(
-      "Changed the harness.",
-    );
-    expect(formatGoalTaskDetailSummary("\n\n")).toBe("");
-    expect(formatGoalTaskDetailSummary("x".repeat(220))).toBe(`${"x".repeat(177)}…`);
   });
 
   it("formats concise progress and readiness affordances", () => {

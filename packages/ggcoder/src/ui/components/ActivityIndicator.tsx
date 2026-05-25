@@ -3,8 +3,7 @@ import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import type { ActivityPhase, RetryInfo } from "../hooks/useAgentLoop.js";
 
-import { SPINNER_FRAMES, SPINNER_INTERVAL, REDUCED_MOTION_DOT } from "../spinner-frames.js";
-import { PLANNING_PHRASES, selectPhrases, shuffleArray } from "../activity-phrases.js";
+import { REDUCED_MOTION_DOT } from "../spinner-frames.js";
 import {
   useFocusedAnimation,
   deriveFrame,
@@ -12,47 +11,55 @@ import {
   useTerminalFocus,
 } from "./AnimationContext.js";
 
-// ── Color pulse cycle ─────────────────────────────────────
+// ── Gemini spinner style ──────────────────────────────────
 
-const PULSE_COLORS = [
-  "#60a5fa", // blue
-  "#818cf8", // indigo
-  "#a78bfa", // violet
-  "#818cf8", // indigo (back)
-  "#60a5fa", // blue (back)
-  "#38bdf8", // sky
-  "#60a5fa", // blue (back)
-];
+const GEMINI_DOTS_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const GEMINI_DOTS_INTERVAL = 80;
+const GEMINI_COLOR_CYCLE_DURATION_MS = 4000;
+const GEMINI_COLOR_CYCLE = [
+  "#D7AFFF", // AccentPurple
+  "#87AFFF", // AccentBlue
+  "#87D7D7", // AccentCyan
+  "#D7FFD7", // AccentGreen
+  "#FFFFAF", // AccentYellow
+  "#FF87AF", // AccentRed
+] as const;
 
-const PLAN_PULSE_COLORS = [
-  "#f59e0b", // amber
-  "#fbbf24", // amber light
-  "#f59e0b", // amber
-  "#d97706", // amber dark
-  "#f59e0b", // amber
-  "#fbbf24", // amber light
-  "#d97706", // amber dark
-];
-const PULSE_INTERVAL = 400;
+function interpolateHexChannel(start: number, end: number, amount: number): number {
+  return Math.round(start + (end - start) * amount);
+}
+
+function parseHexColor(color: string): [number, number, number] {
+  return [
+    parseInt(color.slice(1, 3), 16),
+    parseInt(color.slice(3, 5), 16),
+    parseInt(color.slice(5, 7), 16),
+  ];
+}
+
+function toHexChannel(value: number): string {
+  return value.toString(16).padStart(2, "0");
+}
+
+function getGeminiSpinnerColor(elapsedMs: number): string {
+  const progress =
+    ((elapsedMs % GEMINI_COLOR_CYCLE_DURATION_MS) + GEMINI_COLOR_CYCLE_DURATION_MS) %
+    GEMINI_COLOR_CYCLE_DURATION_MS;
+  const scaled = (progress / GEMINI_COLOR_CYCLE_DURATION_MS) * GEMINI_COLOR_CYCLE.length;
+  const startIndex = Math.floor(scaled) % GEMINI_COLOR_CYCLE.length;
+  const endIndex = (startIndex + 1) % GEMINI_COLOR_CYCLE.length;
+  const amount = scaled - Math.floor(scaled);
+  const start = parseHexColor(GEMINI_COLOR_CYCLE[startIndex]);
+  const end = parseHexColor(GEMINI_COLOR_CYCLE[endIndex]);
+  return `#${toHexChannel(interpolateHexChannel(start[0], end[0], amount))}${toHexChannel(
+    interpolateHexChannel(start[1], end[1], amount),
+  )}${toHexChannel(interpolateHexChannel(start[2], end[2], amount))}`;
+}
 
 // ── Low-churn liveness ────────────────────────────────────
 
-const LOW_CHURN_INTERVAL = 1000;
-const LOW_CHURN_PHRASE_INTERVAL = 10_000;
+const LOW_CHURN_INTERVAL = 80;
 const LOW_CHURN_COLOR_INTERVAL = 2000;
-const HEARTBEAT_DOT_COUNT = 3;
-const HEARTBEAT_ACTIVE_INDEXES = [0, 1, 2, 1] as const;
-
-// ── Ellipsis animation ────────────────────────────────────
-
-const ELLIPSIS_FRAMES = ["", ".", "..", "..."];
-const ELLIPSIS_INTERVAL = 500;
-
-// ── Phrase rotation ───────────────────────────────────────
-
-const WAITING_PHRASE_INTERVAL = 3000;
-const OTHER_PHRASE_INTERVAL = 4000;
-
 // ── Formatting helpers ────────────────────────────────────
 
 type ActivityAccentColors = {
@@ -64,24 +71,24 @@ type ActivityAccentColors = {
 export function getActivityAccentColors(themeName: string): ActivityAccentColors {
   if (themeName.includes("ansi")) {
     return {
-      duration: "#55ffff",
+      duration: "#aaaaaa",
       tokens: "#ff55ff",
-      thinking: "#55ff55",
+      thinking: "#55ffff",
     };
   }
 
   if (themeName.startsWith("light")) {
     return {
-      duration: "#2563eb",
-      tokens: "#c026d3",
-      thinking: "#16a34a",
+      duration: "#6b7280",
+      tokens: "#7c3aed",
+      thinking: "#0891b2",
     };
   }
 
   return {
-    duration: "#38bdf8",
-    tokens: "#f472b6",
-    thinking: "#4ade80",
+    duration: "#9ca3af",
+    tokens: "#a78bfa",
+    thinking: "#67e8f9",
   };
 }
 
@@ -144,7 +151,6 @@ function buildStructuredMetaParts(
 // ── Shimmer effect ────────────────────────────────────────
 
 const SHIMMER_WIDTH = 3;
-const SHIMMER_INTERVAL = 100;
 
 export function getThinkingShimmerColor(themeName: string): string {
   if (themeName.includes("ansi")) return "#55ff55";
@@ -161,7 +167,7 @@ const ShimmerText: React.FC<{ text: string; color: string; shimmerPos: number }>
     {text.split("").map((char, i) => {
       const isBright = Math.abs(i - shimmerPos) <= SHIMMER_WIDTH;
       return (
-        <Text bold={isBright} color={color} dimColor={!isBright} key={i}>
+        <Text color={color} dimColor={!isBright} key={i}>
           {char}
         </Text>
       );
@@ -185,21 +191,6 @@ function useLowChurnFrame(enabled: boolean): number {
   return enabled ? frame : 0;
 }
 
-function HeartbeatGlyph({ activeIndex, color }: { activeIndex: number; color: string }) {
-  return (
-    <Text>
-      {Array.from({ length: HEARTBEAT_DOT_COUNT }, (_, index) => {
-        const active = index === activeIndex;
-        return (
-          <Text bold={active} color={color} dimColor={!active} key={index}>
-            {active ? "●" : "·"}
-          </Text>
-        );
-      })}{" "}
-    </Text>
-  );
-}
-
 function ActivityMetaText({
   colors,
   isThinking,
@@ -219,22 +210,12 @@ function ActivityMetaText({
   return (
     <Text>
       <Text color={mutedColor}>{"  ("}</Text>
-      {meta.duration && (
-        <Text color={colors.duration} bold>
-          {meta.duration}
-        </Text>
-      )}
+      {meta.duration && <Text color={colors.duration}>{meta.duration}</Text>}
       {hasTokenSeparator && <Text color={mutedColor}>{" · "}</Text>}
-      {meta.tokens && (
-        <Text color={colors.tokens} bold>
-          {meta.tokens}
-        </Text>
-      )}
+      {meta.tokens && <Text color={colors.tokens}>{meta.tokens}</Text>}
       {hasThinkingSeparator && <Text color={mutedColor}>{" · "}</Text>}
       {meta.thinking && (
-        <Text color={isThinking ? colors.thinking : mutedColor} bold={isThinking}>
-          {meta.thinking}
-        </Text>
+        <Text color={isThinking ? colors.thinking : mutedColor}>{meta.thinking}</Text>
       )}
       <Text color={mutedColor}>{")"}</Text>
     </Text>
@@ -258,7 +239,6 @@ interface ActivityIndicatorProps {
   realTokensAccumRef?: React.RefObject<number>;
   userMessage?: string;
   activeToolNames?: string[];
-  planMode?: boolean;
   retryInfo?: RetryInfo | null;
   planDone?: number;
   planTotal?: number;
@@ -294,17 +274,12 @@ export function ActivityIndicator({
   runStartRef,
   thinkingMs,
   isThinking,
-  thinkingEnabled = false,
   tokenEstimate,
   charCountRef: charCountRefProp,
   realTokensAccumRef: realTokensAccumRefProp,
-  userMessage = "",
-  activeToolNames = [],
-  planMode,
   retryInfo,
   planDone = 0,
   planTotal = 0,
-  phrases: phrasesByPhase,
   pulseColors: pulseColorsOverride,
   staticDisplay = false,
 }: ActivityIndicatorProps) {
@@ -368,67 +343,26 @@ export function ActivityIndicator({
   const smoothTokenEstimate = displayedTokensRef.current;
 
   // Derive all animation frames from the single tick counter.
-  const spinnerFrame = fullAnimationActive
-    ? deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length)
-    : 0;
   const pulseColors =
-    planMode || !pulseColorsOverride || pulseColorsOverride.length === 0
-      ? planMode
-        ? PLAN_PULSE_COLORS
-        : PULSE_COLORS
-      : pulseColorsOverride;
-  const colorFrame = fullAnimationActive
-    ? deriveFrame(tick, PULSE_INTERVAL, pulseColors.length)
-    : lowChurnActive
+    pulseColorsOverride && pulseColorsOverride.length > 0 ? pulseColorsOverride : null;
+  const colorFrame =
+    pulseColors && lowChurnActive
       ? Math.floor((lowChurnFrame * LOW_CHURN_INTERVAL) / LOW_CHURN_COLOR_INTERVAL) %
         pulseColors.length
       : 0;
-  const ellipsisFrame = fullAnimationActive
-    ? deriveFrame(tick, ELLIPSIS_INTERVAL, ELLIPSIS_FRAMES.length)
+  const geminiElapsedMs = fullAnimationActive
+    ? tick * 30
     : lowChurnActive
-      ? lowChurnFrame % ELLIPSIS_FRAMES.length
+      ? lowChurnFrame * LOW_CHURN_INTERVAL
       : 0;
-  const heartbeatFrame = lowChurnActive ? lowChurnFrame % HEARTBEAT_ACTIVE_INDEXES.length : 0;
-
-  // Phrase rotation — pick phrases based on phase + user message + active tools, shuffle, rotate
-  const sortedActiveToolNames = [...activeToolNames].sort();
-  const toolNamesKey = sortedActiveToolNames.join(",");
-  const overridePhrases = phrasesByPhase?.[phase];
-  const phrases = useMemo(
-    () =>
-      shuffleArray(
-        overridePhrases && overridePhrases.length > 0
-          ? overridePhrases
-          : planMode && phase === "waiting"
-            ? PLANNING_PHRASES
-            : selectPhrases(phase, userMessage, activeToolNames, thinkingEnabled),
-      ),
-    [phase, userMessage, toolNamesKey, planMode, overridePhrases, thinkingEnabled], // activeToolNames captured via stable string key
-  );
-  const phraseInterval = lowChurnActive
-    ? LOW_CHURN_PHRASE_INTERVAL
-    : phase === "waiting"
-      ? WAITING_PHRASE_INTERVAL
-      : OTHER_PHRASE_INTERVAL;
-  const phraseIndex = fullAnimationActive
-    ? Math.floor((tick * SHIMMER_INTERVAL) / phraseInterval) % phrases.length
+  const spinnerColor = pulseColors
+    ? (pulseColors[colorFrame] ?? pulseColors[0] ?? theme.spinnerColor)
+    : getGeminiSpinnerColor(geminiElapsedMs);
+  const geminiSpinnerFrame = fullAnimationActive
+    ? deriveFrame(tick, GEMINI_DOTS_INTERVAL, GEMINI_DOTS_FRAMES.length)
     : lowChurnActive
-      ? Math.floor((lowChurnFrame * LOW_CHURN_INTERVAL) / phraseInterval) % phrases.length
+      ? lowChurnFrame % GEMINI_DOTS_FRAMES.length
       : 0;
-
-  const spinnerColor = pulseColors[colorFrame] ?? pulseColors[0] ?? theme.spinnerColor;
-  const heartbeatIndex = HEARTBEAT_ACTIVE_INDEXES[heartbeatFrame] ?? HEARTBEAT_ACTIVE_INDEXES[0];
-  const phrase = phrases[phraseIndex] ?? phrases[0];
-  const ellipsis = ELLIPSIS_FRAMES[ellipsisFrame];
-
-  // Shimmer — derive position from tick, wrapping across phrase length
-  const shimmerCycle = phrase.length + SHIMMER_WIDTH * 2;
-  const shimmerPos = fullAnimationActive ? (tick % shimmerCycle) - SHIMMER_WIDTH : -SHIMMER_WIDTH;
-
-  // Pad ellipsis to prevent text from shifting
-  const paddedEllipsis =
-    fullAnimationActive || lowChurnActive ? ellipsis + " ".repeat(3 - ellipsis.length) : "...";
-
   const structuredMeta = buildStructuredMetaParts(
     elapsedMs,
     thinkingMs,
@@ -457,13 +391,9 @@ export function ActivityIndicator({
       retryInfo.delayMs > 0 ? ` waiting ${Math.round(retryInfo.delayMs / 1000)}s` : "";
     return (
       <Box>
-        {lowChurnActive ? (
-          <HeartbeatGlyph activeIndex={heartbeatIndex} color={retryColor} />
-        ) : (
-          <Text color={retryColor} bold>
-            {reducedMotion ? REDUCED_MOTION_DOT : SPINNER_FRAMES[spinnerFrame]}{" "}
-          </Text>
-        )}
+        <Text color={retryColor}>
+          {reducedMotion ? REDUCED_MOTION_DOT : GEMINI_DOTS_FRAMES[geminiSpinnerFrame]}{" "}
+        </Text>
         <Text color={retryColor}>
           {retryLabel} — retrying ({retryInfo.attempt}/{retryInfo.maxAttempts})
         </Text>
@@ -480,21 +410,12 @@ export function ActivityIndicator({
 
   return (
     <Box>
-      {lowChurnActive ? (
-        <HeartbeatGlyph activeIndex={heartbeatIndex} color={spinnerColor} />
-      ) : (
-        <Text color={spinnerColor} bold>
-          {reducedMotion ? REDUCED_MOTION_DOT : SPINNER_FRAMES[spinnerFrame]}{" "}
-        </Text>
-      )}
-      {fullAnimationActive ? (
-        <ShimmerText text={phrase} color={spinnerColor} shimmerPos={shimmerPos} />
-      ) : (
-        <Text color={spinnerColor} bold={canAnimate && (fullAnimationActive || lowChurnActive)}>
-          {phrase}
-        </Text>
-      )}
-      <Text color={theme.textDim}>{reducedMotion ? "..." : paddedEllipsis}</Text>
+      <Text color={spinnerColor}>
+        {reducedMotion ? REDUCED_MOTION_DOT : GEMINI_DOTS_FRAMES[geminiSpinnerFrame]}{" "}
+      </Text>
+      <Text color={theme.text} italic wrap="truncate-end">
+        {"Working..."}
+      </Text>
       {fullAnimationActive && isThinking && legacyMeta.thinking ? (
         <Text>
           <Text color={theme.textDim}>{"  ("}</Text>

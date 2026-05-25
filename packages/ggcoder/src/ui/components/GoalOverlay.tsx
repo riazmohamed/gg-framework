@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Static, Text, useInput, useStdout } from "ink";
 import { basename } from "node:path";
 import {
   formatGoalPrerequisiteInstruction,
@@ -8,12 +8,12 @@ import {
   loadGoalRuns,
   saveGoalRuns,
   summarizeGoalCountsFromRuns,
-  type GoalPrerequisite,
   type GoalRun,
   type GoalRunStatus,
-  type GoalTask,
 } from "../../core/goal-store.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
+import { buildGoalFinalSummarySections } from "../goal-summary.js";
+import { Markdown } from "./Markdown.js";
 import { useTheme } from "../theme/theme.js";
 
 const GOAL_LOGO = [" ▄▀▀▀ ▄▀▀▀", " █ ▀█ █ ▀█", " ▀▄▄▀ ▀▄▄▀"];
@@ -32,6 +32,7 @@ const GOAL_ACTIVE = "#fbbf24";
 const GAP = "   ";
 const LOGO_WIDTH = 9;
 const SIDE_BY_SIDE_MIN = LOGO_WIDTH + GAP.length + 20;
+const PREFIX_WIDTH = 2;
 
 export interface GoalOverlayProps {
   cwd: string;
@@ -39,7 +40,9 @@ export interface GoalOverlayProps {
   onRunGoal: (run: GoalRun) => void;
   onVerifyGoal: (run: GoalRun) => void;
   onPauseGoal: (run: GoalRun) => void;
+  onRefineGoal?: (run: GoalRun, feedback: string) => void;
   agentRunning?: boolean;
+  autoExpandNewest?: boolean;
 }
 
 export function clampGoalSelectedIndex(index: number, length: number): number {
@@ -140,37 +143,6 @@ export function getGoalScrollOffsetForSelection({
   if (selected < offset) return selected;
   if (selected >= offset + rows) return clampGoalScrollOffset(selected - rows + 1, itemCount, rows);
   return offset;
-}
-
-export function getGoalDetailRowCount(run: GoalRun): number {
-  let count = 2;
-
-  count += 1 + Math.max(1, run.successCriteria.length);
-
-  if (run.prerequisites.length > 0) {
-    count += 1;
-    for (const prerequisite of run.prerequisites) {
-      count += 1;
-      if (isBlockingGoalPrerequisite(prerequisite) || prerequisite.evidence) count += 1;
-    }
-  }
-
-  count += 1;
-  if (run.tasks.length === 0) {
-    count += 1;
-  } else {
-    for (const task of run.tasks) {
-      count += 1;
-      if (task.lastSummary) count += 1;
-    }
-  }
-
-  if (run.harness.length > 0) count += 1 + run.harness.length;
-  if (run.evidencePlan.length > 0) count += 1 + run.evidencePlan.length;
-  if (run.verifier) count += 2;
-  if (run.blockers.length > 0) count += 1 + run.blockers.length;
-  if (run.evidence.length > 0) count += 1 + Math.min(5, run.evidence.length);
-  return count;
 }
 
 export function getGoalCardExtraRowCount(run: GoalRun): number {
@@ -283,65 +255,25 @@ export function getGoalListWindow({
   };
 }
 
-export function getGoalExpandedDetailViewportRows({
-  viewportRows,
-  cardExtraRows,
-}: {
-  viewportRows: number;
-  cardExtraRows: number;
-}): number {
-  const rows = Number.isFinite(viewportRows) ? Math.max(1, Math.floor(viewportRows)) : 8;
-  const selectedCardRows = 1 + Math.max(0, Math.floor(cardExtraRows));
-  const fixedRows =
-    1 + // Goals heading
-    selectedCardRows +
-    2 + // selected card border
-    1 + // detail top margin
-    1; // selected card bottom margin
-  return Math.max(1, rows - fixedRows);
-}
-
-export function clampGoalDetailScrollOffset(
-  offset: number,
-  detailRowCount: number,
-  viewportRows: number,
-): number {
-  const visibleRows = Math.max(1, Math.floor(viewportRows));
-  const scrolledBodyRows = Math.max(1, visibleRows - 1);
-  const maxOffset = Math.max(0, detailRowCount - scrolledBodyRows);
-  if (!Number.isFinite(offset)) return 0;
-  return Math.min(Math.max(0, Math.floor(offset)), maxOffset);
-}
-
-export function getGoalDetailScrollWindow({
-  detailRowCount,
-  scrollOffset,
-  viewportRows,
-}: {
-  detailRowCount: number;
-  scrollOffset: number;
-  viewportRows: number;
-}): { start: number; end: number; hiddenBefore: number; hiddenAfter: number } {
-  const rows = Math.max(1, Math.floor(viewportRows));
-  const start = clampGoalDetailScrollOffset(scrollOffset, detailRowCount, rows);
-  const topIndicatorRows = start > 0 && rows > 2 ? 1 : 0;
-  let bodyRows = Math.max(1, rows - topIndicatorRows);
-  let hiddenAfter = Math.max(0, detailRowCount - start - bodyRows);
-  if (hiddenAfter > 0 && bodyRows > 1) {
-    bodyRows -= 1;
-    hiddenAfter = Math.max(0, detailRowCount - start - bodyRows);
-  }
-
-  return {
-    start,
-    end: Math.min(detailRowCount, start + bodyRows),
-    hiddenBefore: start,
-    hiddenAfter,
-  };
-}
-
 export function sortGoalRunsForOverlay(runs: readonly GoalRun[]): GoalRun[] {
   return [...runs].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+export function getGoalAutoExpandedState({
+  autoExpandNewest,
+  loaded,
+  runs,
+  alreadyExpanded,
+}: {
+  autoExpandNewest: boolean | undefined;
+  loaded: boolean;
+  runs: readonly GoalRun[];
+  alreadyExpanded: boolean;
+}): { selectedIndex: number; expandedRunId: string } | null {
+  if (!autoExpandNewest || !loaded || runs.length === 0 || alreadyExpanded) return null;
+  const newestRun = runs[0];
+  if (!newestRun) return null;
+  return { selectedIndex: 0, expandedRunId: newestRun.id };
 }
 
 export function shouldPersistGoalOverlayRuns(
@@ -434,44 +366,6 @@ function verifierSummaryColor(run: GoalRun, fallbackColor: string): string {
   return fallbackColor;
 }
 
-function taskStatusColor(status: GoalTask["status"]): string {
-  switch (status) {
-    case "done":
-      return "green";
-    case "failed":
-      return "red";
-    case "blocked":
-      return "yellow";
-    case "running":
-    case "verifying":
-      return "cyan";
-    case "pending":
-      return "blue";
-  }
-}
-
-function prerequisiteStatusColor(status: GoalPrerequisite["status"]): string {
-  switch (status) {
-    case "met":
-      return "green";
-    case "missing":
-      return "yellow";
-    case "unknown":
-      return "cyan";
-  }
-}
-
-function evidencePlanStatusColor(status: GoalRun["evidencePlan"][number]["status"]): string {
-  switch (status) {
-    case "ready":
-      return "green";
-    case "blocked":
-      return "yellow";
-    case "planned":
-      return "cyan";
-  }
-}
-
 function verifierStatusColor(
   status: NonNullable<NonNullable<GoalRun["verifier"]>["lastResult"]>["status"],
 ): string {
@@ -485,41 +379,203 @@ function verifierStatusColor(
   }
 }
 
-function evidenceKindColor(kind: GoalRun["evidence"][number]["kind"]): string {
-  switch (kind) {
-    case "command":
-      return "cyan";
-    case "file":
-      return "blue";
-    case "log":
-      return "yellow";
-    case "screenshot":
-      return "magenta";
-    case "summary":
-      return "green";
+function normalizeGoalPlanText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function markdownListItem(text: string): string {
+  const normalized = normalizeGoalPlanText(text);
+  return `- ${normalized || "not recorded"}`;
+}
+
+function markdownCode(value: string): string {
+  return `\`${value.replace(/`/g, "\\`")}\``;
+}
+
+function appendGoalMetadataLine(lines: string[], label: string, value: string | undefined): void {
+  if (!value) return;
+  lines.push(`  - ${label}: ${value}`);
+}
+
+export function formatGoalPlanMarkdown(run: GoalRun): string {
+  const lines: string[] = [
+    `# ${run.title}`,
+    "",
+    `**Status:** ${run.status}`,
+    `**Readiness:** ${getGoalReadinessText(run)}`,
+    `**Progress:** ${formatGoalProgressText(run)}`,
+    `**Verifier:** ${formatGoalVerifierSummary(run)}`,
+    `**Goal ID:** ${run.id}`,
+    `**Project:** ${run.projectPath}`,
+    `**Updated:** ${run.updatedAt}`,
+    "",
+    "## Goal",
+    "",
+    run.goal || run.title,
+    "",
+    "## Success criteria",
+    "",
+  ];
+
+  if (run.successCriteria.length === 0) {
+    lines.push("- none recorded");
+  } else {
+    lines.push(...run.successCriteria.map(markdownListItem));
   }
-}
 
-export function getGoalDetailTaskHeading(run: GoalRun): string {
-  return run.prerequisites.length > 0 ? "2. Worker tasks" : "Worker tasks";
-}
+  const finalSummarySections = buildGoalFinalSummarySections(run);
+  if (finalSummarySections.length > 0) {
+    lines.push("", "## Final summary", "");
+    for (const section of finalSummarySections) {
+      lines.push(`### ${section.title}`, "", ...section.lines.map(markdownListItem), "");
+    }
+  }
 
-export function getGoalUserPrerequisiteHeading(run: GoalRun): string | null {
-  return run.prerequisites.length > 0 ? "1. User prerequisites" : null;
-}
+  lines.push("", "## User prerequisites", "");
+  if (run.prerequisites.length === 0) {
+    lines.push("- none recorded");
+  } else {
+    for (const prerequisite of run.prerequisites) {
+      lines.push(`- **${prerequisite.status}** ${prerequisite.label}`);
+      appendGoalMetadataLine(lines, "ID", markdownCode(prerequisite.id));
+      appendGoalMetadataLine(
+        lines,
+        "Check",
+        prerequisite.checkCommand ? markdownCode(prerequisite.checkCommand) : undefined,
+      );
+      appendGoalMetadataLine(lines, "Instructions", prerequisite.instructions);
+      appendGoalMetadataLine(lines, "Evidence", prerequisite.evidence);
+      if (isBlockingGoalPrerequisite(prerequisite)) {
+        appendGoalMetadataLine(
+          lines,
+          "User action required",
+          formatGoalPrerequisiteInstruction(prerequisite),
+        );
+      }
+    }
+  }
 
-export function formatGoalTaskDetailSummary(summary: string): string {
-  const firstLine = summary
-    .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  if (!firstLine) return "";
-  return firstLine.length > 180 ? `${firstLine.slice(0, 177)}…` : firstLine;
-}
+  lines.push("", "## Worker tasks", "");
+  if (run.tasks.length === 0) {
+    lines.push(
+      goalHasBlockingPrerequisites(run)
+        ? "- Waiting for prerequisites before workers can start."
+        : "- No worker tasks yet — run the goal to generate focused work.",
+    );
+  } else {
+    for (const task of run.tasks) {
+      lines.push(`- **${task.status}** ${task.title}`);
+      appendGoalMetadataLine(lines, "ID", markdownCode(task.id));
+      appendGoalMetadataLine(lines, "Attempts", String(task.attempts));
+      appendGoalMetadataLine(
+        lines,
+        "Worker",
+        task.workerId ? markdownCode(task.workerId) : undefined,
+      );
+      appendGoalMetadataLine(lines, "Prompt", task.prompt);
+      if (task.verification) {
+        appendGoalMetadataLine(lines, "Verification", task.verification.status);
+        appendGoalMetadataLine(lines, "Verification summary", task.verification.summary);
+        appendGoalMetadataLine(
+          lines,
+          "Verification command",
+          task.verification.command ? markdownCode(task.verification.command) : undefined,
+        );
+        appendGoalMetadataLine(lines, "Verification output", task.verification.outputPath);
+      }
+      appendGoalMetadataLine(lines, "Last summary", task.lastSummary);
+    }
+  }
 
-function truncateGoalDetailText(text: string, maxLength = 220): string {
-  const collapsed = text.replace(/\s+/g, " ").trim();
-  return collapsed.length > maxLength ? `${collapsed.slice(0, maxLength - 1)}…` : collapsed;
+  lines.push("", "## Harness", "");
+  if (run.harness.length === 0) {
+    lines.push("- none recorded");
+  } else {
+    for (const item of run.harness) {
+      lines.push(`- ${item.label}`);
+      appendGoalMetadataLine(lines, "ID", markdownCode(item.id));
+      appendGoalMetadataLine(
+        lines,
+        "Command",
+        item.command ? markdownCode(item.command) : undefined,
+      );
+      appendGoalMetadataLine(lines, "Path", item.path ? markdownCode(item.path) : undefined);
+      appendGoalMetadataLine(lines, "Description", item.description);
+    }
+  }
+
+  lines.push("", "## Evidence plan", "");
+  if (run.evidencePlan.length === 0) {
+    lines.push("- none recorded");
+  } else {
+    for (const item of run.evidencePlan) {
+      lines.push(`- **${item.status}** ${item.label} (${item.mechanism})`);
+      appendGoalMetadataLine(lines, "ID", markdownCode(item.id));
+      appendGoalMetadataLine(lines, "Description", item.description);
+      appendGoalMetadataLine(
+        lines,
+        "Command",
+        item.command ? markdownCode(item.command) : undefined,
+      );
+      appendGoalMetadataLine(lines, "Path", item.path ? markdownCode(item.path) : undefined);
+      appendGoalMetadataLine(lines, "Instructions", item.instructions);
+      appendGoalMetadataLine(lines, "Evidence", item.evidence);
+    }
+  }
+
+  lines.push("", "## Verifier", "");
+  if (!run.verifier) {
+    lines.push("- none recorded");
+  } else {
+    lines.push(markdownListItem(run.verifier.description));
+    appendGoalMetadataLine(
+      lines,
+      "Command",
+      run.verifier.command ? markdownCode(run.verifier.command) : undefined,
+    );
+    if (run.verifier.lastResult) {
+      appendGoalMetadataLine(lines, "Last result", run.verifier.lastResult.status);
+      appendGoalMetadataLine(lines, "Summary", run.verifier.lastResult.summary);
+      appendGoalMetadataLine(lines, "Exit code", run.verifier.lastResult.exitCode?.toString());
+      appendGoalMetadataLine(lines, "Output", run.verifier.lastResult.outputPath);
+      appendGoalMetadataLine(lines, "Checked at", run.verifier.lastResult.checkedAt);
+    }
+  }
+
+  lines.push("", "## Final audit", "");
+  if (!run.completionAudit) {
+    lines.push("- none recorded");
+  } else {
+    lines.push(`- **${run.completionAudit.status}** ${run.completionAudit.summary}`);
+    appendGoalMetadataLine(lines, "Checked at", run.completionAudit.checkedAt);
+    appendGoalMetadataLine(lines, "Verifier checked at", run.completionAudit.verifierCheckedAt);
+    appendGoalMetadataLine(lines, "Output", run.completionAudit.outputPath);
+  }
+
+  lines.push("", "## Evidence", "");
+  if (run.evidence.length === 0) {
+    lines.push("- none recorded");
+  } else {
+    for (const item of run.evidence) {
+      lines.push(`- **${item.kind}** ${item.label}`);
+      appendGoalMetadataLine(lines, "ID", markdownCode(item.id));
+      appendGoalMetadataLine(lines, "Path", item.path ? markdownCode(item.path) : undefined);
+      appendGoalMetadataLine(lines, "Content", item.content);
+      appendGoalMetadataLine(lines, "Created", item.createdAt);
+    }
+  }
+
+  lines.push("", "## Blockers", "");
+  if (run.blockers.length === 0) {
+    lines.push("- none recorded");
+  } else {
+    lines.push(...run.blockers.map(markdownListItem));
+  }
+
+  return lines
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function GoalHeader({
@@ -607,223 +663,68 @@ function StatusChip({ label, color }: { label: string; color: string }) {
   );
 }
 
-function GoalDetail({
+export interface GoalReviewSnapshot {
+  id: string;
+  run: GoalRun;
+  content: string;
+  markdownWidth: number;
+}
+
+export function createGoalReviewSnapshot({
   run,
-  maxRows,
-  scrollOffset,
+  markdownWidth,
 }: {
   run: GoalRun;
-  maxRows: number;
-  scrollOffset: number;
-}) {
+  markdownWidth: number;
+}): GoalReviewSnapshot {
+  const safeMarkdownWidth = Number.isFinite(markdownWidth)
+    ? Math.max(40, Math.floor(markdownWidth))
+    : 80;
+  return {
+    id: `${run.id}:${run.updatedAt}:${safeMarkdownWidth}`,
+    run,
+    content: formatGoalPlanMarkdown(run),
+    markdownWidth: safeMarkdownWidth,
+  };
+}
+
+export type GoalExpandedDetailViewModel = GoalReviewSnapshot;
+
+export function getGoalExpandedDetailViewModel({
+  run,
+  markdownWidth,
+}: {
+  run: GoalRun;
+  markdownWidth: number;
+}): GoalExpandedDetailViewModel {
+  return createGoalReviewSnapshot({ run, markdownWidth });
+}
+
+function GoalReviewDocument({ snapshot }: { snapshot: GoalReviewSnapshot }) {
   const theme = useTheme();
-  const rows: React.ReactNode[] = [
-    <Text key="goal-heading">
-      <Text color={theme.primary} bold>
-        Goal
-      </Text>
-      <Text color={theme.textDim}> · </Text>
-      <Text color={statusColor(run.status) || theme.secondary}>{getGoalReadinessText(run)}</Text>
-      <Text color={theme.textDim}> · {formatGoalProgressText(run)}</Text>
-    </Text>,
-    <Text key="goal-text" color={theme.text}>
-      {truncateGoalDetailText(run.goal || run.title)}
-    </Text>,
-    <Text key="success-heading" color={theme.primary} bold>
-      Success criteria
-    </Text>,
-  ];
-
-  if (run.successCriteria.length === 0) {
-    rows.push(
-      <Text key="success-none" color={theme.textDim}>
-        - none recorded
-      </Text>,
-    );
-  } else {
-    for (const [index, criterion] of run.successCriteria.entries()) {
-      rows.push(
-        <Text key={`success-${index}`}>
-          <Text color="green">✓ </Text>
-          <Text color={theme.text}>{truncateGoalDetailText(criterion)}</Text>
-        </Text>,
-      );
-    }
-  }
-
-  if (run.prerequisites.length > 0) {
-    rows.push(
-      <Text key="prereq-heading" color={theme.primary} bold>
-        {getGoalUserPrerequisiteHeading(run)}
-      </Text>,
-    );
-    for (const prerequisite of run.prerequisites) {
-      rows.push(
-        <Text key={`prereq-${prerequisite.id}`}>
-          <Text color={prerequisiteStatusColor(prerequisite.status)}>● {prerequisite.status}</Text>
-          <Text color={theme.text} bold={isBlockingGoalPrerequisite(prerequisite)}>
-            {" "}
-            {prerequisite.label}
-          </Text>
-          {isBlockingGoalPrerequisite(prerequisite) ? (
-            <Text color={theme.warning}> · user action required</Text>
-          ) : null}
-        </Text>,
-      );
-      if (isBlockingGoalPrerequisite(prerequisite)) {
-        rows.push(
-          <Text key={`prereq-${prerequisite.id}-instruction`} color={theme.textDim} wrap="truncate">
-            └─ {formatGoalPrerequisiteInstruction(prerequisite)}
-          </Text>,
-        );
-      } else if (prerequisite.evidence) {
-        rows.push(
-          <Text key={`prereq-${prerequisite.id}-evidence`} color={theme.textDim} wrap="truncate">
-            └─ {prerequisite.evidence}
-          </Text>,
-        );
-      }
-    }
-  }
-
-  rows.push(
-    <Text key="task-heading" color={theme.primary} bold>
-      {getGoalDetailTaskHeading(run)}
-    </Text>,
-  );
-  if (run.tasks.length === 0) {
-    rows.push(
-      <Text key="no-tasks" color={theme.textDim}>
-        {goalHasBlockingPrerequisites(run)
-          ? "⏸ Waiting for prerequisites before workers can start."
-          : "✨ No worker tasks yet — run the goal to generate focused work."}
-      </Text>,
-    );
-  } else {
-    for (const task of run.tasks) {
-      rows.push(
-        <Text key={`task-${task.id}`}>
-          <Text color={taskStatusColor(task.status)}>● {task.status}</Text>
-          <Text color={theme.text}> {task.title}</Text>
-          <Text color={theme.textDim}> · try {task.attempts}</Text>
-          {task.workerId ? <Text color={theme.textDim}> · {task.workerId}</Text> : null}
-        </Text>,
-      );
-      if (task.lastSummary) {
-        rows.push(
-          <Text key={`task-${task.id}-summary`} color={theme.textDim} wrap="truncate">
-            └─ {formatGoalTaskDetailSummary(task.lastSummary)}
-          </Text>,
-        );
-      }
-    }
-  }
-
-  if (run.harness.length > 0) {
-    rows.push(
-      <Text key="harness-heading" color={theme.primary} bold>
-        Harness
-      </Text>,
-    );
-    for (const item of run.harness) {
-      rows.push(
-        <Text key={`harness-${item.id}`}>
-          <Text color="cyan">◦ </Text>
-          <Text color={theme.text}>{item.label}</Text>
-          {item.command ? <Text color={theme.secondary}> · {item.command}</Text> : null}
-          {!item.command && item.path ? <Text color={theme.secondary}> · {item.path}</Text> : null}
-        </Text>,
-      );
-    }
-  }
-
-  if (run.evidencePlan.length > 0) {
-    rows.push(
-      <Text key="evidence-plan-heading" color={theme.primary} bold>
-        Evidence plan
-      </Text>,
-    );
-    for (const item of run.evidencePlan) {
-      rows.push(
-        <Text key={`evidence-plan-${item.id}`}>
-          <Text color={evidencePlanStatusColor(item.status)}>● {item.status}</Text>
-          <Text color={theme.text}> · {item.label}</Text>
-          {item.command ? <Text color={theme.secondary}> · {item.command}</Text> : null}
-          {!item.command && item.path ? <Text color={theme.secondary}> · {item.path}</Text> : null}
-        </Text>,
-      );
-    }
-  }
-
-  if (run.verifier) {
-    rows.push(
-      <Text key="verifier-heading" color={theme.primary} bold>
-        Verifier
-      </Text>,
-      <Text key="verifier-summary" wrap="truncate">
-        {run.verifier.lastResult ? (
-          <Text color={verifierStatusColor(run.verifier.lastResult.status)}>
-            ● {formatGoalVerifierSummary(run)}
-          </Text>
-        ) : (
-          <Text color={run.verifier.command ? "cyan" : theme.textDim}>
-            ● {formatGoalVerifierSummary(run)}
-          </Text>
-        )}
-        {run.verifier.command ? (
-          <Text color={theme.secondary}> · {run.verifier.command}</Text>
-        ) : null}
-      </Text>,
-    );
-  }
-
-  if (run.blockers.length > 0) {
-    rows.push(
-      <Text key="blockers-heading" color={theme.warning} bold>
-        Blockers
-      </Text>,
-    );
-    for (const [index, blocker] of run.blockers.entries()) {
-      rows.push(
-        <Text key={`blocker-${index}`} color={theme.warning}>
-          - {truncateGoalDetailText(blocker)}
-        </Text>,
-      );
-    }
-  }
-
-  if (run.evidence.length > 0) {
-    rows.push(
-      <Text key="evidence-heading" color={theme.primary} bold>
-        Recent evidence
-      </Text>,
-    );
-    for (const item of run.evidence.slice(-5)) {
-      rows.push(
-        <Text key={`evidence-${item.id}`}>
-          <Text color={evidenceKindColor(item.kind)}>[{item.kind}]</Text>
-          <Text color={theme.text}> {item.label}</Text>
-          {item.path ? <Text color={theme.secondary}> · {item.path}</Text> : null}
-        </Text>,
-      );
-    }
-  }
-
-  const window = getGoalDetailScrollWindow({
-    detailRowCount: rows.length,
-    scrollOffset,
-    viewportRows: maxRows,
-  });
-
   return (
-    <Box flexDirection="column" marginTop={1} paddingLeft={2} height={maxRows} overflowY="hidden">
-      {window.hiddenBefore > 0 ? (
-        <Text color={theme.secondary}>↑ {window.hiddenBefore} detail row(s) above · PgUp</Text>
-      ) : null}
-      {rows.slice(window.start, window.end)}
-      {window.hiddenAfter > 0 ? (
-        <Text color={theme.secondary}>↓ {window.hiddenAfter} more detail row(s) · PgDn</Text>
-      ) : null}
+    <Box flexDirection="column" paddingRight={1}>
+      <GoalHeader cwd={snapshot.run.projectPath} runs={[snapshot.run]} agentRunning={false} />
+      <Box marginBottom={1}>
+        <Text color={GOAL_SUCCESS} bold>
+          {"◆ "}
+          {snapshot.run.title}
+        </Text>
+        <Text color={theme.textDim}> · {snapshot.run.status}</Text>
+      </Box>
+      <Box flexDirection="row" marginTop={1} paddingRight={1}>
+        <Box width={PREFIX_WIDTH} flexShrink={0}>
+          <Text color={GOAL_SUCCESS}>{"◇ "}</Text>
+        </Box>
+        <Box flexDirection="column" flexGrow={1} width={snapshot.markdownWidth}>
+          <Markdown width={snapshot.markdownWidth}>{snapshot.content}</Markdown>
+        </Box>
+      </Box>
+      <Box marginTop={1} marginBottom={1}>
+        <Text color={theme.textDim}>
+          Mouse-wheel scroll this terminal output to review the full Goal plan.
+        </Text>
+      </Box>
     </Box>
   );
 }
@@ -834,19 +735,40 @@ export function GoalOverlay({
   onRunGoal,
   onVerifyGoal,
   onPauseGoal,
+  onRefineGoal,
   agentRunning,
+  autoExpandNewest,
 }: GoalOverlayProps) {
   const theme = useTheme();
   const [runs, setRuns] = useState<GoalRun[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
-  const [mode, setMode] = useState<"normal" | "confirmDelete">("normal");
+  const [reviewSnapshot, setReviewSnapshot] = useState<GoalReviewSnapshot | null>(null);
+  const [mode, setMode] = useState<"normal" | "confirmDelete" | "refine">("normal");
+  const [refineFeedback, setRefineFeedback] = useState("");
   const [status, setStatus] = useState("");
-  const [detailScrollOffset, setDetailScrollOffset] = useState(0);
+  const autoExpandedRef = useRef(false);
   const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastPersistedRunsRef = useRef<GoalRun[]>([]);
+  const { stdout } = useStdout();
+  const { rows, columns } = useTerminalSize();
+  const markdownWidth = Math.max(40, columns - PREFIX_WIDTH);
+
+  function expandGoal(run: GoalRun) {
+    setExpandedRunId(run.id);
+    setReviewSnapshot(createGoalReviewSnapshot({ run, markdownWidth }));
+  }
+
+  function collapseGoal() {
+    stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+    setExpandedRunId(null);
+    setReviewSnapshot(null);
+    setMode("normal");
+    setRefineFeedback("");
+    autoExpandedRef.current = true;
+  }
 
   const showStatus = useCallback((message: string) => {
     setStatus(message);
@@ -884,7 +806,26 @@ export function GoalOverlay({
 
   useEffect(() => {
     setSelectedIndex((index) => clampGoalSelectedIndex(index, runs.length));
-  }, [runs.length]);
+    if (expandedRunId && !runs.some((run) => run.id === expandedRunId)) {
+      setExpandedRunId(null);
+      setReviewSnapshot(null);
+    }
+  }, [expandedRunId, runs]);
+
+  useEffect(() => {
+    const nextState = getGoalAutoExpandedState({
+      autoExpandNewest,
+      loaded,
+      runs,
+      alreadyExpanded: autoExpandedRef.current,
+    });
+    if (!nextState) return;
+    const run = runs[nextState.selectedIndex];
+    if (!run) return;
+    autoExpandedRef.current = true;
+    setSelectedIndex(nextState.selectedIndex);
+    expandGoal(run);
+  }, [autoExpandNewest, loaded, runs, markdownWidth]);
 
   useEffect(() => {
     if (!loaded) return;
@@ -899,44 +840,44 @@ export function GoalOverlay({
     }, 100);
   }, [cwd, loaded, runs]);
 
-  const { rows } = useTerminalSize();
   const viewportRows = getGoalOverlayViewportRows(rows);
   const selectedRun = runs[selectedIndex];
-  const expandedRun = selectedRun && selectedRun.id === expandedRunId ? selectedRun : null;
-  const selectedCardExtraRows = selectedRun ? getGoalCardExtraRowCount(selectedRun) : 0;
-  const expandedCardExtraRows = expandedRun ? selectedCardExtraRows : 0;
-  const detailViewportRows = expandedRun
-    ? getGoalExpandedDetailViewportRows({
-        viewportRows,
-        cardExtraRows: expandedCardExtraRows,
-      })
-    : 0;
-  const listWindow = expandedRun
-    ? null
-    : getGoalListWindow({
-        runs,
-        selectedIndex,
-        viewportRows,
-      });
-  const scrollOffset = expandedRun ? selectedIndex : (listWindow?.start ?? 0);
-  const visibleRuns = expandedRun
-    ? [expandedRun]
-    : runs.slice(listWindow?.start ?? 0, listWindow?.end ?? 0);
-  const hiddenBefore = expandedRun ? 0 : (listWindow?.hiddenBefore ?? 0);
-  const hiddenAfter = expandedRun ? 0 : (listWindow?.hiddenAfter ?? 0);
-  const detailRowCount = expandedRun ? getGoalDetailRowCount(expandedRun) : 0;
-
-  useEffect(() => {
-    setDetailScrollOffset(0);
-  }, [expandedRunId]);
-
-  useEffect(() => {
-    setDetailScrollOffset((offset) =>
-      clampGoalDetailScrollOffset(offset, detailRowCount, detailViewportRows),
-    );
-  }, [detailRowCount, detailViewportRows]);
+  const expandedRun = runs.find((run) => run.id === expandedRunId) ?? reviewSnapshot?.run ?? null;
+  const listWindow = getGoalListWindow({
+    runs,
+    selectedIndex,
+    viewportRows,
+  });
+  const scrollOffset = listWindow.start;
+  const visibleRuns = runs.slice(listWindow.start, listWindow.end);
+  const hiddenBefore = listWindow.hiddenBefore;
+  const hiddenAfter = listWindow.hiddenAfter;
 
   useInput((input, key) => {
+    if (mode === "refine") {
+      if (key.return) {
+        if (expandedRun) {
+          onRefineGoal?.(expandedRun, refineFeedback || "Please refine this Goal setup.");
+        }
+        setMode("normal");
+        setRefineFeedback("");
+        return;
+      }
+      if (key.escape) {
+        setMode("normal");
+        setRefineFeedback("");
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setRefineFeedback((previous) => previous.slice(0, -1));
+        return;
+      }
+      if (input && !key.ctrl && !key.meta) {
+        setRefineFeedback((previous) => previous + input);
+      }
+      return;
+    }
+
     if (mode === "confirmDelete") {
       if (key.escape || input === "n") {
         setMode("normal");
@@ -946,6 +887,7 @@ export function GoalOverlay({
       if (input === "y" && selectedRun) {
         setRuns((previousRuns) => previousRuns.filter((run) => run.id !== selectedRun.id));
         setExpandedRunId(null);
+        setReviewSnapshot(null);
         setMode("normal");
         showStatus("Goal archived");
       }
@@ -953,51 +895,27 @@ export function GoalOverlay({
     }
 
     if (key.escape) {
-      onClose();
+      if (expandedRun) {
+        collapseGoal();
+      } else {
+        onClose();
+      }
       return;
     }
-    if (expandedRun && (key.pageUp || input === "[")) {
-      setDetailScrollOffset((offset) =>
-        clampGoalDetailScrollOffset(
-          offset - Math.max(1, detailViewportRows - 1),
-          detailRowCount,
-          detailViewportRows,
-        ),
-      );
+    if (expandedRun && input === "a") {
+      onRunGoal(expandedRun);
       return;
     }
-    if (expandedRun && (key.pageDown || input === "]")) {
-      setDetailScrollOffset((offset) =>
-        clampGoalDetailScrollOffset(
-          offset + Math.max(1, detailViewportRows - 1),
-          detailRowCount,
-          detailViewportRows,
-        ),
-      );
+    if (expandedRun && input === "r") {
+      setMode("refine");
+      setRefineFeedback("");
       return;
     }
-    if (expandedRun && key.home) {
-      setDetailScrollOffset(0);
+    if (expandedRun && (input === "q" || key.return)) {
+      collapseGoal();
       return;
     }
-    if (expandedRun && key.end) {
-      setDetailScrollOffset(
-        clampGoalDetailScrollOffset(detailRowCount, detailRowCount, detailViewportRows),
-      );
-      return;
-    }
-    if (expandedRun && (key.upArrow || input === "k")) {
-      setDetailScrollOffset((offset) =>
-        clampGoalDetailScrollOffset(offset - 1, detailRowCount, detailViewportRows),
-      );
-      return;
-    }
-    if (expandedRun && (key.downArrow || input === "j")) {
-      setDetailScrollOffset((offset) =>
-        clampGoalDetailScrollOffset(offset + 1, detailRowCount, detailViewportRows),
-      );
-      return;
-    }
+    if (expandedRun) return;
     if (key.upArrow || input === "k") {
       setSelectedIndex((index) => clampGoalSelectedIndex(index - 1, runs.length));
       return;
@@ -1007,11 +925,20 @@ export function GoalOverlay({
       return;
     }
     if ((key.return || input === "d") && selectedRun) {
-      setExpandedRunId((current) => (current === selectedRun.id ? null : selectedRun.id));
+      expandGoal(selectedRun);
+      return;
+    }
+    if (input === "a" && selectedRun) {
+      onRunGoal(selectedRun);
       return;
     }
     if (input === "r" && selectedRun) {
-      onRunGoal(selectedRun);
+      if (expandedRun) {
+        setMode("refine");
+        setRefineFeedback("");
+      } else {
+        expandGoal(selectedRun);
+      }
       return;
     }
     if (input === "v" && selectedRun) {
@@ -1027,6 +954,47 @@ export function GoalOverlay({
       showStatus("Archive goal? y/n");
     }
   });
+
+  if (expandedRun && reviewSnapshot) {
+    return (
+      <Box flexDirection="column">
+        <Static key={reviewSnapshot.id} items={[reviewSnapshot]} style={{ width: "100%" }}>
+          {(snapshot) => <GoalReviewDocument key={snapshot.id} snapshot={snapshot} />}
+        </Static>
+
+        <Box marginTop={1}>
+          {mode === "confirmDelete" ? (
+            <Text color={theme.warning}>Confirm archive selected goal: y/n</Text>
+          ) : mode === "refine" ? (
+            <Box flexDirection="column">
+              <Text color={theme.primary}>Feedback (Enter to submit, Esc to cancel):</Text>
+              <Text color={theme.text}>
+                {"> "}
+                {refineFeedback}
+                {"▍"}
+              </Text>
+            </Box>
+          ) : (
+            <Text color={theme.textDim}>
+              <Text color={theme.success}>a</Text>
+              {" approve/run · "}
+              <Text color={theme.error}>r</Text>
+              {" refine · "}
+              <Text color={theme.primary}>q</Text>
+              {" back · "}
+              <Text color={theme.primary}>ESC</Text>
+              {" close"}
+            </Text>
+          )}
+        </Box>
+        {status ? (
+          <Box>
+            <Text color={theme.secondary}>{status}</Text>
+          </Box>
+        ) : null}
+      </Box>
+    );
+  }
 
   return (
     <Box flexDirection="column" height={rows} overflow="hidden">
@@ -1076,14 +1044,7 @@ export function GoalOverlay({
             const selected = index === selectedIndex;
             const blocked = goalHasBlockingPrerequisites(run);
             return (
-              <Box
-                key={run.id}
-                flexDirection="column"
-                marginBottom={1}
-                borderStyle={expandedRun?.id === run.id ? "round" : undefined}
-                borderColor={expandedRun?.id === run.id ? theme.primary : undefined}
-                paddingX={expandedRun?.id === run.id ? 1 : 0}
-              >
+              <Box key={run.id} flexDirection="column" marginBottom={1}>
                 <Text wrap="truncate">
                   <Text color={selected ? theme.primary : theme.textDim}>
                     {selected ? "❯ " : "  "}
@@ -1110,34 +1071,28 @@ export function GoalOverlay({
                   </Text>
                   <Text color={theme.textDim}> · {run.id.slice(0, 8)}</Text>
                 </Text>
-                {expandedRun?.id === run.id ? null : (
-                  <>
-                    <Text wrap="truncate">
-                      <Text color={theme.textDim}>{selected ? "  " : "    "}</Text>
-                      <Text color={statusColor(run.status) || theme.secondary}>
-                        {getGoalReadinessText(run)}
-                      </Text>
-                      <Text color={theme.textDim}> · </Text>
-                      <Text color={theme.text}>{formatGoalProgressText(run)}</Text>
-                      <Text color={theme.textDim}> · </Text>
-                      <Text color={verifierSummaryColor(run, theme.textDim)}>
-                        {formatGoalVerifierSummary(run)}
-                      </Text>
-                    </Text>
-                    <Text wrap="truncate">
-                      <Text color={theme.textDim}>{selected ? "  " : "    "}</Text>
-                      <Text
-                        color={goalHasBlockingPrerequisites(run) ? theme.warning : GOAL_SUCCESS}
-                      >
-                        {formatGoalPrerequisiteSummary(run)}
-                      </Text>
-                      <Text color={theme.textDim}> · </Text>
-                      <Text color={run.tasks.length > 0 ? GOAL_SUCCESS : theme.text}>
-                        {formatGoalTaskSummary(run)}
-                      </Text>
-                    </Text>
-                  </>
-                )}
+                <Text wrap="truncate">
+                  <Text color={theme.textDim}>{selected ? "  " : "    "}</Text>
+                  <Text color={statusColor(run.status) || theme.secondary}>
+                    {getGoalReadinessText(run)}
+                  </Text>
+                  <Text color={theme.textDim}> · </Text>
+                  <Text color={theme.text}>{formatGoalProgressText(run)}</Text>
+                  <Text color={theme.textDim}> · </Text>
+                  <Text color={verifierSummaryColor(run, theme.textDim)}>
+                    {formatGoalVerifierSummary(run)}
+                  </Text>
+                </Text>
+                <Text wrap="truncate">
+                  <Text color={theme.textDim}>{selected ? "  " : "    "}</Text>
+                  <Text color={goalHasBlockingPrerequisites(run) ? theme.warning : GOAL_SUCCESS}>
+                    {formatGoalPrerequisiteSummary(run)}
+                  </Text>
+                  <Text color={theme.textDim}> · </Text>
+                  <Text color={run.tasks.length > 0 ? GOAL_SUCCESS : theme.text}>
+                    {formatGoalTaskSummary(run)}
+                  </Text>
+                </Text>
                 {blocked ? (
                   <Text color={theme.warning} wrap="truncate">
                     {selected ? "  " : "    "}⚠ prerequisite needed before workers continue
@@ -1151,13 +1106,6 @@ export function GoalOverlay({
                   <Text color={theme.warning} wrap="truncate">
                     {selected ? "  " : "    "}blocker: {run.blockers[0]}
                   </Text>
-                ) : null}
-                {expandedRun?.id === run.id ? (
-                  <GoalDetail
-                    run={run}
-                    maxRows={detailViewportRows}
-                    scrollOffset={detailScrollOffset}
-                  />
                 ) : null}
               </Box>
             );
@@ -1173,19 +1121,22 @@ export function GoalOverlay({
       <Box marginTop={1}>
         {mode === "confirmDelete" ? (
           <Text color={theme.warning}>Confirm archive selected goal: y/n</Text>
+        ) : mode === "refine" ? (
+          <Box flexDirection="column">
+            <Text color={theme.primary}>Feedback (Enter to submit, Esc to cancel):</Text>
+            <Text color={theme.text}>
+              {"> "}
+              {refineFeedback}
+              {"▍"}
+            </Text>
+          </Box>
         ) : (
           <Text color={theme.textDim}>
             <Text color={theme.primary}>↑↓/jk</Text>
-            {expandedRun ? " scroll detail · " : " select · "}
+            {" select · "}
             <Text color={theme.primary}>Enter/d</Text>
-            {expandedRun ? " close detail · " : " detail · "}
-            {expandedRun ? (
-              <>
-                <Text color={theme.primary}>PgUp/PgDn</Text>
-                {" page detail · "}
-              </>
-            ) : null}
-            <Text color={theme.primary}>r</Text>
+            {" detail · "}
+            <Text color={theme.primary}>a</Text>
             {" run · "}
             <Text color={theme.primary}>v</Text>
             {" verify · "}

@@ -6,6 +6,7 @@ import { truncateTail } from "./truncate.js";
 import { writeOverflow } from "./overflow.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import { getSafeToolEnv } from "./safe-env.js";
+import { getActiveGoalMode, type GoalMode } from "../core/runtime-mode.js";
 
 const DEFAULT_TIMEOUT = 120_000; // 120 seconds
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB — cap buffered output to prevent OOM
@@ -31,7 +32,7 @@ export function createBashTool(
   cwd: string,
   processManager: ProcessManager,
   ops: ToolOperations = localOperations,
-  planModeRef?: { current: boolean },
+  goalModeRef?: { current: GoalMode },
 ): AgentTool<typeof BashParams> {
   return {
     name: "bash",
@@ -46,8 +47,12 @@ export function createBashTool(
     parameters: BashParams,
     executionMode: "sequential",
     async execute({ command, timeout: timeoutMs, run_in_background }, context) {
-      if (planModeRef?.current) {
-        return "Error: bash is restricted in plan mode. Use read-only tools (read, grep, find, ls) to explore the codebase.";
+      const goalMode = getActiveGoalMode(goalModeRef);
+      if (goalMode === "coordinator") {
+        return "Error: bash is restricted in Goal coordinator mode. Verifier execution is driven by the Goal UI; use goals to persist decisions, evidence, blockers, or next tasks.";
+      }
+      if ((goalMode === "planner" || goalMode === "setup") && run_in_background) {
+        return `Error: background bash is restricted in Goal ${goalMode} mode. Run only cheap foreground non-mutating checks, or record needed work for setup/workers.`;
       }
       if (run_in_background) {
         const result = await processManager.start(command, cwd);
@@ -60,7 +65,10 @@ export function createBashTool(
         );
       }
 
-      const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT;
+      const effectiveTimeout =
+        goalMode === "planner" || goalMode === "setup"
+          ? Math.min(timeoutMs ?? DEFAULT_TIMEOUT, 30_000)
+          : (timeoutMs ?? DEFAULT_TIMEOUT);
 
       return new Promise<string>((resolve) => {
         const child = ops.spawn("bash", ["-c", command], {

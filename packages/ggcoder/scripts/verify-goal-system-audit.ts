@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S pnpm exec tsx
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
@@ -31,23 +31,23 @@ const verifier = read("packages/ggcoder/src/core/goal-verifier.ts");
 check(
   "end-to-end surface map exists",
   hasAll(map, [
-    "User invocation",
-    "System prompt support",
-    "Goals tool actions",
+    "Invocation and runtime modes",
+    "Setup and coordinator system prompts",
+    "Goals tool A-Z",
     "Goal-store persistence",
-    "Controller decisions",
-    "UI and Goal pane integration",
-    "Worker semantics",
-    "Resume and synthetic-event semantics",
-    "Verification and completion",
-    "Tests covering the system",
+    "Controller decision engine",
+    "UI overlay, status bar, start and continue flow",
+    "Worker lifecycle",
+    "Synthetic Goal events and session recovery",
+    "Verifier behavior and final completion",
+    "Test coverage map",
   ]),
   "packages/ggcoder/docs/goal-system-map.md must map invocation, persistence, UI, workers, verifier, completion, and tests",
 );
 
 check(
   "audit artifact captures findings and recommendations",
-  hasAll(audit, ["## Evidence sources", "## Findings", "Confidence:", "Recommendation:", "Action status"]),
+  hasAll(audit, ["## Evidence and commands used", "## Findings", "Confidence:", "Recommendation:", "Action status"]),
   "packages/ggcoder/docs/goal-quality-audit.md must provide source-backed findings/recommendations rather than narrative-only proof",
 );
 
@@ -99,12 +99,18 @@ const targeted = spawnSync(
     "--filter",
     "@kenkaiiii/ggcoder",
     "test",
-    "--",
+    "--run",
     "src/core/goal-controller.test.ts",
+    "src/core/goal-prerequisites.test.ts",
+    "src/core/goal-store.test.ts",
+    "src/core/goal-worker.test.ts",
+    "src/core/goal-verifier.test.ts",
     "src/tools/goals.test.ts",
+    "src/tools/goal-mode.test.ts",
     "src/core/prompt-commands.test.ts",
     "src/system-prompt.test.ts",
     "src/core/goal-lifecycle-smoke.test.ts",
+    "src/ui/goal-events.test.ts",
     "src/ui/goal-lifecycle-orchestration.test.ts",
     "--reporter=dot",
   ],
@@ -113,7 +119,7 @@ const targeted = spawnSync(
 check(
   "targeted /goal behavior tests pass",
   targeted.status === 0,
-  `command: pnpm --filter @kenkaiiii/ggcoder test -- src/core/goal-controller.test.ts src/tools/goals.test.ts src/core/prompt-commands.test.ts src/system-prompt.test.ts src/core/goal-lifecycle-smoke.test.ts src/ui/goal-lifecycle-orchestration.test.ts --reporter=dot\nexit=${targeted.status}\n${(targeted.stdout + targeted.stderr).slice(-4000)}`,
+  `command: pnpm --filter @kenkaiiii/ggcoder test -- src/core/goal-controller.test.ts src/core/goal-prerequisites.test.ts src/core/goal-store.test.ts src/core/goal-worker.test.ts src/core/goal-verifier.test.ts src/tools/goals.test.ts src/tools/goal-mode.test.ts src/core/prompt-commands.test.ts src/system-prompt.test.ts src/core/goal-lifecycle-smoke.test.ts src/ui/goal-events.test.ts src/ui/goal-lifecycle-orchestration.test.ts --reporter=dot\nexit=${targeted.status}\n${(targeted.stdout + targeted.stderr).slice(-4000)}`,
 );
 
 const typecheck = spawnSync("pnpm", ["--filter", "@kenkaiiii/ggcoder", "check"], {
@@ -132,7 +138,7 @@ for (const item of checks) {
   output += `${item.ok ? "PASS" : "FAIL"} ${item.label}\n`;
   if (!item.ok) output += `  ${item.detail.replace(/\n/g, "\n  ")}\n`;
 }
-output += "\nSignals checked: source map coverage, contradiction/gap audit artifact, setup-only /goal contract, durable goals tool/store/controller/UI/worker/verifier plumbing, targeted unit smoke tests, and TypeScript check.\n";
+output += "\nSignals checked: source map coverage, contradiction/gap audit artifact, setup-only /goal contract, durable goals tool/store/controller/UI/worker/verifier plumbing, prerequisite/evidence-plan/worker/verifier/synthetic-event/pause-resume/final-audit tests, and TypeScript check.\n";
 writeFileSync(logPath, output);
 console.log(output);
 process.exit(checks.every((item) => item.ok) ? 0 : 1);

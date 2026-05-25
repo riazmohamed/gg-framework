@@ -256,6 +256,53 @@ describe("goal event formatting", () => {
     });
   });
 
+  it("does not leak secret-looking values into synthetic payloads", () => {
+    const secret = "sk-test-1234567890abcdef";
+    const envSecret = "API_TOKEN=super-secret-local-value";
+    const event = formatGoalWorkerCompletionEvent(
+      goalRun({
+        prerequisites: [
+          {
+            id: "api-token",
+            label: "API token",
+            status: "missing",
+            instructions: "Provide API_TOKEN locally; do not paste secret values.",
+          },
+        ],
+        evidencePlan: [
+          {
+            id: "secret-proof",
+            label: "Secret proof",
+            mechanism: "log",
+            description: "Synthetic state must redact evidence-plan secret content.",
+            status: "ready",
+            evidence: `token ${secret} must not appear in synthetic evidence_plan state`,
+          },
+        ],
+        evidence: [
+          {
+            id: "safe-evidence",
+            kind: "summary",
+            label: "Token check",
+            content: `token ${secret} must not appear in synthetic state`,
+            createdAt: "2024-01-01T00:00:00.000Z",
+          },
+        ],
+      }),
+      "Check leakage",
+      workerCompletion({ summary: `Recorded non-secret evidence only. ${secret} ${envSecret}` }),
+    );
+
+    expect(event).not.toContain(secret);
+    expect(event).not.toContain(envSecret);
+    expect(event).toContain("[REDACTED_GOAL_EVENT_SECRET]");
+    expect(event).toContain("redaction_notice:");
+    expect(parseGoalSyntheticEvent(event)?.payload).toMatchObject({ summaryRedacted: true });
+    expect(JSON.stringify(parseGoalSyntheticEvent(event)?.goalState)).not.toContain(secret);
+    expect(parseGoalSyntheticEvent(event)?.payload).toMatchObject({ summaryRedacted: true });
+    expect(event).toContain("Provide API_TOKEN locally; do not paste secret values.");
+  });
+
   it("round-trips structured payloads containing quotes and newlines", () => {
     const run = goalRun({
       title: 'Fix "quoted" output',
@@ -266,6 +313,10 @@ describe("goal event formatting", () => {
           prompt: "Do work",
           status: "done",
           attempts: 1,
+          dependsOn: ["task-setup"],
+          parallelGroup: "frontend",
+          expectedChangedScope: ["packages/ggcoder/src/ui/**"],
+          mergeStrategy: "after_dependencies",
         },
       ],
       evidence: [
@@ -295,6 +346,15 @@ describe("goal event formatting", () => {
       goalState: expect.objectContaining({
         evidenceCount: 1,
         latestEvidence: expect.objectContaining({ path: "artifacts/goal.log" }),
+        tasks: [
+          expect.objectContaining({
+            id: "task-a",
+            dependsOn: ["task-setup"],
+            parallelGroup: "frontend",
+            expectedChangedScope: ["packages/ggcoder/src/ui/**"],
+            mergeStrategy: "after_dependencies",
+          }),
+        ],
       }),
     });
     expect(parsed?.payload?.kind).toBe("worker");
@@ -380,6 +440,35 @@ describe("goal event formatting", () => {
     });
   });
 
+  it("parses persisted legacy payloads that predate summary redaction fields", () => {
+    const parsed = parseGoalSyntheticEvent(
+      `${GOAL_WORKER_EVENT_PREFIX} run_id="run-legacy" goal="Legacy Goal" task_id="task-1" task="Legacy Task" worker="worker-1" status=done exit_code=0\n${GOAL_EVENT_PAYLOAD_PREFIX}{"version":1,"kind":"worker","runId":"run-legacy","goal":"Legacy Goal","status":"done","exitCode":0,"summary":"done","goalState":{"status":"running","userPrerequisites":"(none)","verifier":null,"blockers":[],"prerequisites":[],"evidencePlan":[],"tasks":[],"evidenceCount":0},"taskId":"task-1","task":"Legacy Task","worker":"worker-1","workerLogFile":"/tmp/worker.log","toolsUsed":[]}`,
+    );
+
+    expect(parsed).toMatchObject({
+      kind: "worker",
+      summary: "done",
+      goalState: expect.objectContaining({ references: [] }),
+      payload: expect.objectContaining({ summaryRedacted: false }),
+    });
+  });
+
+  it("unescapes quoted fallback headers when structured payloads are missing or corrupt", () => {
+    const parsed = parseGoalSyntheticEvent(
+      `${GOAL_WORKER_EVENT_PREFIX} run_id="run-quoted" goal="Goal with \\ slashes" task_id="task-1" task="Task A" worker="worker-1" status=done exit_code=0\n${GOAL_EVENT_PAYLOAD_PREFIX}{not-json}`,
+    );
+
+    expect(parsed).toMatchObject({
+      kind: "worker",
+      runId: "run-quoted",
+      goal: "Goal with \\ slashes",
+      task: "Task A",
+      status: "done",
+      exitCode: 0,
+    });
+    expect(parsed?.payload).toBeUndefined();
+  });
+
   it("continues non-terminal goals that have no active worker or running task", () => {
     expect(shouldContinueGoalRun(goalRun({ status: "ready" }))).toBe(true);
     expect(shouldContinueGoalRun(goalRun({ status: "running" }))).toBe(true);
@@ -401,6 +490,21 @@ describe("goal event formatting", () => {
               title: "Running task",
               prompt: "Do work",
               status: "running",
+              attempts: 1,
+            },
+          ],
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      shouldContinueGoalRun(
+        goalRun({
+          tasks: [
+            {
+              id: "task-a",
+              title: "Verifier task",
+              prompt: "Run verifier",
+              status: "verifying",
               attempts: 1,
             },
           ],

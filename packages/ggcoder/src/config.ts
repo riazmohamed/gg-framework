@@ -2,10 +2,10 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
-import type { Provider } from "@abukhaled/gg-ai";
+import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { ThemeName } from "./ui/theme/theme.js";
 
-export const APP_NAME = "ogcoder";
+export const APP_NAME = "ggcoder";
 export const VERSION = "0.0.1";
 
 export interface AppPaths {
@@ -53,6 +53,7 @@ export interface SavedSettings {
   provider?: Provider;
   model?: string;
   thinkingEnabled: boolean;
+  thinkingLevel?: ThinkingLevel;
   theme: "auto" | ThemeName;
 }
 
@@ -88,11 +89,18 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
       if (typeof raw.defaultModel === "string") result.model = raw.defaultModel;
     }
     if (raw.thinkingEnabled === true) result.thinkingEnabled = true;
+    if (isValidThinkingLevel(raw.thinkingLevel)) result.thinkingLevel = raw.thinkingLevel;
     if (typeof raw.theme === "string" && isValidThemeSetting(raw.theme)) result.theme = raw.theme;
   } catch {
     // No settings file or invalid JSON — use defaults
   }
   return result;
+}
+
+const VALID_THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh"]);
+
+function isValidThinkingLevel(value: unknown): value is ThinkingLevel {
+  return typeof value === "string" && VALID_THINKING_LEVELS.has(value as ThinkingLevel);
 }
 
 const VALID_THEME_SETTINGS = new Set<string>([

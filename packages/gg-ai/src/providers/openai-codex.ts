@@ -39,6 +39,10 @@ function outputTextKey(itemId: string | undefined, contentIndex: number | undefi
   return `${itemId ?? ""}:${contentIndex ?? 0}`;
 }
 
+function isVisibleOutputItem(itemType: string | undefined): boolean {
+  return itemType === "message";
+}
+
 export function streamOpenAICodex(options: StreamOptions): StreamResult {
   return new StreamResult(runStream(options));
 }
@@ -156,6 +160,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const toolCalls = new Map<string, { id: string; name: string; argsJson: string }>();
   const outputItemTypes = new Map<string, string>();
   const outputTextByPart = new Map<string, string>();
+  const pendingOutputTextByPart = new Map<
+    string,
+    { itemId: string; contentIndex: number; text: string }
+  >();
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheRead = 0;
@@ -210,20 +218,29 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       });
     }
 
-    // Text delta. Some Codex streams attach output_text deltas to a reasoning
-    // item; route those through thinking_delta so model reasoning never leaks
-    // into the assistant's visible text transcript.
+    // Text delta. Codex mostly sends response.output_item.added before
+    // output_text, but the ordering is not guaranteed. Treat unknown item IDs
+    // as hidden until metadata proves they belong to a visible message item;
+    // otherwise reasoning summaries can intermittently leak as assistant text.
     if (type === "response.output_text.delta") {
       const delta = event.delta as string;
       const itemId = event.item_id as string | undefined;
       const contentIndex = event.content_index as number | undefined;
       const key = outputTextKey(itemId, contentIndex);
       outputTextByPart.set(key, `${outputTextByPart.get(key) ?? ""}${delta}`);
-      if (itemId && outputItemTypes.get(itemId) === "reasoning") {
-        if (options.thinking) yield { type: "thinking_delta", text: delta };
-      } else {
+      const itemType = itemId ? outputItemTypes.get(itemId) : undefined;
+      if (itemId && isVisibleOutputItem(itemType)) {
         textAccum += delta;
         yield { type: "text_delta", text: delta };
+      } else if (itemId && itemType == null) {
+        const pending = pendingOutputTextByPart.get(key);
+        pendingOutputTextByPart.set(key, {
+          itemId,
+          contentIndex: contentIndex ?? 0,
+          text: `${pending?.text ?? ""}${delta}`,
+        });
+      } else if (options.thinking) {
+        yield { type: "thinking_delta", text: delta };
       }
     }
 
@@ -239,11 +256,19 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         const missingText = streamedText ? fullText.slice(streamedText.length) : fullText;
         outputTextByPart.set(key, fullText);
         if (missingText && fullText.startsWith(streamedText)) {
-          if (itemId && outputItemTypes.get(itemId) === "reasoning") {
-            if (options.thinking) yield { type: "thinking_delta", text: missingText };
-          } else {
+          const itemType = itemId ? outputItemTypes.get(itemId) : undefined;
+          if (itemId && isVisibleOutputItem(itemType)) {
             textAccum += missingText;
             yield { type: "text_delta", text: missingText };
+          } else if (itemId && itemType == null) {
+            const pending = pendingOutputTextByPart.get(key);
+            pendingOutputTextByPart.set(key, {
+              itemId,
+              contentIndex: contentIndex ?? 0,
+              text: `${pending?.text ?? ""}${missingText}`,
+            });
+          } else if (options.thinking) {
+            yield { type: "thinking_delta", text: missingText };
           }
         }
       }
@@ -273,6 +298,21 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       }
       if (itemType === "reasoning" && options.thinking) {
         yield { type: "thinking_delta", text: "" };
+      }
+      if (itemId && itemType) {
+        const pending = [...pendingOutputTextByPart.entries()]
+          .filter(([, pendingPart]) => pendingPart.itemId === itemId)
+          .sort(([, a], [, b]) => a.contentIndex - b.contentIndex);
+        for (const [key, pendingPart] of pending) {
+          pendingOutputTextByPart.delete(key);
+          if (!pendingPart.text) continue;
+          if (isVisibleOutputItem(itemType)) {
+            textAccum += pendingPart.text;
+            yield { type: "text_delta", text: pendingPart.text };
+          } else if (options.thinking) {
+            yield { type: "thinking_delta", text: pendingPart.text };
+          }
+        }
       }
     }
 

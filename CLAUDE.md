@@ -146,6 +146,15 @@ Two kinds — UI-handled take precedence over registry:
 To add a UI command: add a condition in `handleSubmit` before the registry check.
 To add a registry command: add an entry in `createBuiltinCommands()` array. If it needs new capabilities, extend `SlashCommandContext` and wire it in `AgentSession.createSlashCommandContext()`.
 
+## Code Quality
+
+After code changes that need compiled outputs, also run `pnpm build`.
+
+Fix errors from checks you do run before continuing. Quick fixes:
+- `pnpm lint:fix` — auto-fix ESLint issues
+- `pnpm format` — auto-fix Prettier formatting
+- Use `/fix` to run all checks and spawn parallel agents to fix issues
+
 ## Key Patterns
 
 - **StreamResult/AgentStream**: dual-nature objects — async iterable (`for await`) + thenable (`await`)

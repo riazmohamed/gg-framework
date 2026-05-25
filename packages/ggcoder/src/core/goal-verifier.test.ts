@@ -10,7 +10,9 @@ import type * as FsPromises from "node:fs/promises";
 import { projectDir } from "./goal-store.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
+const killProcessTreeMock = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({ spawn: spawnMock }));
+vi.mock("../utils/process.js", () => ({ killProcessTree: killProcessTreeMock }));
 vi.mock("node:fs/promises", async () => {
   const actual = await vi.importActual<typeof FsPromises>("node:fs/promises");
   const writeFile = vi.fn(
@@ -42,6 +44,7 @@ beforeEach(async () => {
   process.env.GG_GOALS_BASE = tmpBase;
   child = new FakeChild();
   spawnMock.mockReturnValue(child as unknown as ChildProcess);
+  killProcessTreeMock.mockResolvedValue(undefined);
 });
 
 afterEach(async () => {
@@ -101,6 +104,7 @@ describe("runGoalVerifierCommand", () => {
     child.emit("close", 124);
     const result = await resultPromise;
 
+    expect(killProcessTreeMock).toHaveBeenCalledWith(4242);
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     expect(result.failureClass).toBe("verifier_timeout");
     expect(result.verification).toMatchObject({ status: "fail", exitCode: 124 });
@@ -110,6 +114,49 @@ describe("runGoalVerifierCommand", () => {
     );
     await expect(fs.readFile(result.verification.outputPath!, "utf-8")).resolves.toContain(
       "Verifier timed out after 25ms",
+    );
+  });
+
+  it("records pass/fail output artifacts with stable failure classes", async () => {
+    const { runGoalVerifierCommand } = await import("./goal-verifier.js");
+    const passPromise = runGoalVerifierCommand({
+      cwd: tmpProject,
+      runId: "goal-a",
+      command: "pnpm test",
+      now: () => 3000,
+    });
+    await vi.waitFor(() => expect(child.stdout.listenerCount("data")).toBeGreaterThan(0));
+    child.stdout
+      .listeners("data")
+      .forEach((listener) => listener.call(child.stdout, Buffer.from("ok")));
+    child.emit("close", 0);
+    const pass = await passPromise;
+    expect(pass.failureClass).toBe("verifier_pass");
+    expect(pass.verification).toMatchObject({ status: "pass", exitCode: 0, summary: "ok" });
+    await expect(fs.readFile(pass.verification.outputPath!, "utf-8")).resolves.toBe("ok\n");
+
+    child = new FakeChild();
+    spawnMock.mockReturnValue(child as unknown as ChildProcess);
+    const failPromise = runGoalVerifierCommand({
+      cwd: tmpProject,
+      runId: "goal-a",
+      command: "pnpm test",
+      now: () => 4000,
+    });
+    await vi.waitFor(() => expect(child.stderr.listenerCount("data")).toBeGreaterThan(0));
+    child.stderr
+      .listeners("data")
+      .forEach((listener) => listener.call(child.stderr, Buffer.from("assertion failed")));
+    child.emit("close", 1);
+    const fail = await failPromise;
+    expect(fail.failureClass).toBe("verifier_failure");
+    expect(fail.verification).toMatchObject({
+      status: "fail",
+      exitCode: 1,
+      summary: "assertion failed",
+    });
+    await expect(fs.readFile(fail.verification.outputPath!, "utf-8")).resolves.toBe(
+      "assertion failed\n",
     );
   });
 });

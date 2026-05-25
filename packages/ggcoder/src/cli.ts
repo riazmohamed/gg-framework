@@ -50,7 +50,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import fs from "node:fs";
 import readline from "node:readline/promises";
-import { execFile, spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import { renderApp } from "./ui/render.js";
 import { runJsonMode } from "./modes/json-mode.js";
@@ -62,16 +62,15 @@ import { renderSessionSelector } from "./ui/sessions.js";
 import type { CompletedItem, GoalProgressDraft } from "./ui/App.js";
 import { segmentDisplayText, stripDoneMarkers } from "./utils/plan-steps.js";
 import { formatUserError } from "./utils/error-handler.js";
-import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
+import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { ThemeName } from "./ui/theme/theme.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import { SessionManager } from "./core/session-manager.js";
 import { ensureAppDirs, getAppPaths, loadSavedSettings } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
-import { setStreamDiagnostic } from "@abukhaled/gg-agent";
-import { setProviderDiagnostic } from "@abukhaled/gg-ai";
+import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
+import { setProviderDiagnostic } from "@kenkaiiii/gg-ai";
 import { buildSystemPrompt } from "./system-prompt.js";
-import { isEyesActive, journalCount } from "@abukhaled/ggcoder-eyes";
 import { createTools } from "./tools/index.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import {
@@ -97,12 +96,25 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "./core/oauth/types.j
 import chalk from "chalk";
 import { checkAndAutoUpdate } from "./core/auto-update.js";
 import { parseGoalSyntheticEvent } from "./ui/goal-events.js";
+import type { GoalReference } from "./core/goal-store.js";
+import type { GoalMode } from "./core/runtime-mode.js";
 
 const _require = createRequire(import.meta.url);
 const CLI_VERSION = (_require("../package.json") as { version: string }).version;
+const THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh"]);
+
+export function parseThinkingLevel(value: string | undefined): ThinkingLevel | undefined {
+  if (value === undefined) return undefined;
+  if (THINKING_LEVELS.has(value as ThinkingLevel)) return value as ThinkingLevel;
+  throw new Error(`Invalid --thinking value "${value}". Expected low, medium, high, or xhigh.`);
+}
 
 // ── Logo + gradient (mirrors Banner.tsx) ────────────────────────────
-const LOGO_LINES = ["", "", ""];
+const LOGO_LINES = [
+  " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
+  " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
+  " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
+];
 const GRADIENT = [
   "#60a5fa",
   "#6da1f9",
@@ -151,17 +163,17 @@ function printHelp(): void {
   console.log(
     gradientLine(LOGO_LINES[0]) +
       gap +
-      primary.bold("OG Coder") +
+      primary.bold("GG Coder") +
       dim(` v${CLI_VERSION}`) +
       dim(" · By ") +
-      bold("Abu Khaled"),
+      bold("Ken Kai"),
   );
   console.log(gradientLine(LOGO_LINES[1]) + gap + dim("AI coding agent"));
   console.log(gradientLine(LOGO_LINES[2]));
   console.log();
 
   // Usage
-  console.log(primary("Usage:") + "  ogcoder " + dim("[options]") + " " + dim("[prompt]"));
+  console.log(primary("Usage:") + "  ggcoder " + dim("[options]") + " " + dim("[prompt]"));
   console.log();
 
   // Commands
@@ -194,6 +206,7 @@ function printHelp(): void {
     ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-5.5)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Override the system prompt"],
+    ["--thinking <level>", "Enable thinking level (low, medium, high, xhigh)"],
     ["--json", "JSON output mode (for sub-agents)"],
     ["--rpc", "JSON-RPC mode (for IDE integrations)"],
   ];
@@ -213,7 +226,7 @@ function printHelp(): void {
     ["/session", "Switch or create sessions"],
     ["/new", "Start a new session"],
     ["/settings", "Open settings"],
-    ["/quit", "Exit OG Coder"],
+    ["/quit", "Exit ggcoder"],
   ];
   for (const [name, desc] of slashCmds) {
     console.log(`  ${accent(name.padEnd(20))} ${dim(desc)}`);
@@ -223,10 +236,8 @@ function printHelp(): void {
   // Keyboard shortcuts
   console.log(primary("Keyboard shortcuts:"));
   const shortcuts: [string, string][] = [
-    ["Ctrl+T", "Toggle task overlay"],
     ["Ctrl+G", "Toggle goal overlay"],
     ["Ctrl+S", "Toggle skills overlay"],
-    ["Ctrl+P", "Toggle plan mode"],
     ["Shift+Tab", "Toggle thinking"],
     ["Shift+Enter", "New line in input"],
   ];
@@ -244,7 +255,7 @@ function main(): void {
   }
 
   // Intercept --help / -h before anything else so it works with subcommands
-  // (e.g. `ogcoder login --help` or `ogcoder --help`)
+  // (e.g. `ggcoder login --help` or `ggcoder --help`)
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
     printHelp();
     process.exit(0);
@@ -252,24 +263,6 @@ function main(): void {
 
   // Handle subcommands before parseArgs
   const subcommand = process.argv[2];
-
-  // Passthrough to @abukhaled/ggcoder-eyes CLI. Agents call this from bash as
-  // `ogcoder eyes log rough "..."` etc. — `ogcoder` is guaranteed on PATH
-  // (user launched it), so this avoids depending on nested bin visibility in
-  // global npm/pnpm installs.
-  if (subcommand === "eyes") {
-    let cliPath: string;
-    try {
-      cliPath = _require.resolve("@abukhaled/ggcoder-eyes/cli");
-    } catch {
-      process.stderr.write("ggcoder-eyes package not installed\n");
-      process.exit(1);
-    }
-    const r = spawnSync(process.execPath, [cliPath, ...process.argv.slice(3)], {
-      stdio: "inherit",
-    });
-    process.exit(r.status ?? 0);
-  }
 
   if (subcommand === "pixel") {
     runPixel().catch((err) => {
@@ -380,6 +373,7 @@ function main(): void {
       "max-turns": { type: "string" },
       "system-prompt": { type: "string" },
       "prompt-cache-key": { type: "string" },
+      thinking: { type: "string" },
     },
     allowPositionals: true,
     strict: true,
@@ -403,6 +397,7 @@ function main(): void {
     const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
     const systemPrompt = values["system-prompt"];
     const promptCacheKey = values["prompt-cache-key"];
+    const thinkingLevel = parseThinkingLevel(values.thinking);
     const cwd = process.cwd();
     runJsonMode({
       message,
@@ -412,6 +407,7 @@ function main(): void {
       systemPrompt,
       maxTurns,
       promptCacheKey,
+      thinkingLevel,
     }).catch((err: unknown) => {
       process.stderr.write(formatUserError(err) + "\n");
       process.exit(1);
@@ -456,7 +452,7 @@ function main(): void {
 
   const model: string = saved.model ?? getHardcodedDefault(provider);
   const thinkingLevel: ThinkingLevel | undefined = saved.thinkingEnabled
-    ? getMaxThinkingLevel(model)
+    ? (saved.thinkingLevel ?? getMaxThinkingLevel(model))
     : undefined;
 
   // Interactive mode (Ink TUI)
@@ -624,13 +620,10 @@ async function runInkTUI(opts: {
     projectDir: cwd,
   });
 
-  // Plan mode refs — shared between tools and UI
-  const planModeRef = { current: false };
-  const onEnterPlanRef: { current: (reason?: string) => void } = {
-    current: () => {},
-  };
-  const onExitPlanRef: { current: (planPath: string) => Promise<string> } = {
-    current: () => Promise.resolve("cancelled"),
+  // Runtime mode refs — shared between tools and UI
+  const goalModeRef = { current: "off" as GoalMode };
+  const goalReferencesRef: { current: readonly GoalReference[] | undefined } = {
+    current: undefined,
   };
   const repoMapChangedFilesRef: { current: Set<string> } = { current: new Set() };
   const repoMapReadFilesRef: { current: Set<string> } = { current: new Set() };
@@ -648,11 +641,10 @@ async function runInkTUI(opts: {
   const { tools, processManager } = createTools(cwd, {
     agents,
     skills,
-    provider: provider,
-    model: model,
-    planModeRef,
-    onEnterPlan: (reason) => onEnterPlanRef.current(reason),
-    onExitPlan: (planPath) => onExitPlanRef.current(planPath),
+    provider,
+    model,
+    goalModeRef,
+    getGoalReferences: () => goalReferencesRef.current,
     onFileRead: (filePath) => markRepoMapRead(cwd, filePath),
     onFileMutated: (filePath) => markRepoMapDirty(cwd, filePath),
   });
@@ -666,9 +658,8 @@ async function runInkTUI(opts: {
       skills,
       provider,
       model,
-      planModeRef,
-      onEnterPlan: (reason) => onEnterPlanRef.current(reason),
-      onExitPlan: (planPath) => onExitPlanRef.current(planPath),
+      goalModeRef,
+      getGoalReferences: () => goalReferencesRef.current,
       onFileRead: (filePath) => markRepoMapRead(newCwd, filePath),
       onFileMutated: (filePath) => markRepoMapDirty(newCwd, filePath),
     });
@@ -696,6 +687,8 @@ async function runInkTUI(opts: {
     false,
     undefined,
     tools.map((tool) => tool.name),
+    undefined,
+    goalModeRef.current,
   );
 
   // Kill all background processes on exit (synchronous — catches all exit paths)
@@ -791,24 +784,9 @@ async function runInkTUI(opts: {
     log("INFO", "session", `New session created`, { path: sessionPath });
   }
 
-  // Eyes startup banner — surface open journal signals from past sessions so the
-  // user isn't relying on reading agent prose to know improvements are pending.
-  if (isEyesActive(cwd)) {
-    const openCount = journalCount({ status: "open" }, cwd);
-    if (openCount > 0) {
-      const s = openCount === 1 ? "" : "s";
-      if (!initialHistory) initialHistory = [];
-      initialHistory.push({
-        kind: "info",
-        text: `👁  Eyes: ${openCount} open improvement signal${s} from recent sessions. Run /eyes-improve to triage.`,
-        id: "eyes-banner",
-      });
-    }
-  }
-
   await renderApp({
-    provider: provider,
-    model: model,
+    provider,
+    model,
     tools,
     webSearch: true,
     messages,
@@ -829,9 +807,8 @@ async function runInkTUI(opts: {
     settingsFile: paths.settingsFile,
     mcpManager,
     authStorage,
-    planModeRef,
-    onEnterPlanRef,
-    onExitPlanRef,
+    goalModeRef,
+    goalReferencesRef,
     skills,
     initialOverlay: opts.initialOverlay,
     rebuildToolsForCwd,
@@ -960,10 +937,10 @@ async function runDoctor(): Promise<void> {
   console.log();
   console.log(
     `  ${gradientLine(LOGO[0]!)}${GAP}` +
-      primary.bold("OG Coder") +
+      primary.bold("GG Coder") +
       dim(` v${CLI_VERSION}`) +
       dim(" · By ") +
-      chalk.white.bold("Abu Khaled"),
+      chalk.white.bold("Ken Kai"),
   );
   console.log(`  ${gradientLine(LOGO[1]!)}${GAP}` + accent("Doctor"));
   console.log(`  ${gradientLine(LOGO[2]!)}${GAP}` + dim("Diagnose & Fix"));
@@ -989,7 +966,7 @@ async function runDoctor(): Promise<void> {
   }
   if (myUid !== process.geteuid!()) {
     console.log(warn("    ⚠ uid ≠ euid — running with elevated privileges (sudo?)"));
-    console.log(dim("      Running ogcoder with sudo can cause ownership issues."));
+    console.log(dim("      Running ggcoder with sudo can cause ownership issues."));
     console.log(dim("      Use without sudo, or fix after: sudo chown -R $(whoami) ~/.gg"));
   }
   console.log();
@@ -1103,7 +1080,7 @@ async function runDoctor(): Promise<void> {
         await fsP.copyFile(authFile, path.join(ggDir, backupName));
         await fsP.writeFile(authFile, "{}", { encoding: "utf-8", mode: 0o600 });
         console.log(good(`    ✓ Corrupt file backed up as ${backupName}`));
-        console.log(dim('      Run "ogcoder login" to re-authenticate'));
+        console.log(dim('      Run "ggcoder login" to re-authenticate'));
         authData = {};
         fixed++;
       }
@@ -1120,7 +1097,7 @@ async function runDoctor(): Promise<void> {
     }
   } catch {
     console.log(dim(`    Path:  ${authFile}`));
-    console.log(warn('    Not found — run "ogcoder login" to authenticate'));
+    console.log(warn('    Not found — run "ggcoder login" to authenticate'));
   }
   console.log();
 
@@ -1246,7 +1223,7 @@ async function runSessions(): Promise<void> {
 
   const model = saved2.model ?? getDefault(provider);
   const thinkingLevel: ThinkingLevel | undefined = saved2.thinkingEnabled
-    ? getMaxThinkingLevel(model)
+    ? (saved2.thinkingLevel ?? getMaxThinkingLevel(model))
     : undefined;
 
   closeLogger();
@@ -1297,8 +1274,8 @@ async function runTelegramSetup(): Promise<void> {
 
   // Banner (matches Banner.tsx)
   const LOGO = [
-    " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
-    " \u2588  \u2588 \u2588 \u2580\u2588",
+    " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
+    " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
     " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
   ];
   const GRADIENT = [
@@ -1330,10 +1307,10 @@ async function runTelegramSetup(): Promise<void> {
   console.log();
   console.log(
     `  ${gradientText(LOGO[0]!)}${GAP}` +
-      chalk.hex("#60a5fa").bold("OG Coder") +
+      chalk.hex("#60a5fa").bold("GG Coder") +
       chalk.hex("#6b7280")(` v${CLI_VERSION}`) +
       chalk.hex("#6b7280")(" · By ") +
-      chalk.white.bold("Abu Khaled"),
+      chalk.white.bold("Ken Kai"),
   );
   console.log(`  ${gradientText(LOGO[1]!)}${GAP}` + chalk.hex("#a78bfa")("Telegram Setup"));
   console.log(`  ${gradientText(LOGO[2]!)}${GAP}` + chalk.hex("#6b7280")("Remote Control"));
@@ -1437,7 +1414,7 @@ async function runTelegramSetup(): Promise<void> {
         chalk.hex("#6b7280")("    2. Add the bot to your group\n") +
         chalk.hex("#6b7280")("    3. Send /link in the group to connect it to a project\n\n") +
         chalk.hex("#60a5fa")("  To start:\n") +
-        chalk.hex("#6b7280")("    cd your-project && ogcoder serve\n"),
+        chalk.hex("#6b7280")("    cd your-project && ggcoder serve\n"),
     );
   } finally {
     rl.close();
@@ -1468,10 +1445,10 @@ async function runServe(): Promise<void> {
     console.error(
       chalk.hex("#ef4444")("Telegram not configured.\n\n") +
         "Run " +
-        chalk.hex("#60a5fa").bold("ogcoder telegram") +
+        chalk.hex("#60a5fa").bold("ggcoder telegram") +
         " to set up your bot token and user ID.\n\n" +
         chalk.hex("#6b7280")("Or provide manually:\n") +
-        chalk.hex("#6b7280")("  ogcoder serve --bot-token TOKEN --user-id ID"),
+        chalk.hex("#6b7280")("  ggcoder serve --bot-token TOKEN --user-id ID"),
     );
     process.exit(1);
   }
@@ -1491,7 +1468,7 @@ async function runServe(): Promise<void> {
   );
 
   const thinkingLevel: ThinkingLevel | undefined = saved3.thinkingEnabled
-    ? getMaxThinkingLevel(model)
+    ? (saved3.thinkingLevel ?? getMaxThinkingLevel(model))
     : undefined;
 
   initLogger(paths.logFile, {
@@ -1566,10 +1543,10 @@ async function runAgentHomeLogin(): Promise<void> {
   console.log();
   console.log(
     `  ${gradientTextLocal(LOGO[0]!)}${GAP}` +
-      chalk.hex("#60a5fa").bold("OG Coder") +
+      chalk.hex("#60a5fa").bold("GG Coder") +
       chalk.hex("#6b7280")(` v${CLI_VERSION}`) +
       chalk.hex("#6b7280")(" \u00b7 By ") +
-      chalk.white.bold("Abu Khaled"),
+      chalk.white.bold("Ken Kai"),
   );
   console.log(`  ${gradientTextLocal(LOGO[1]!)}${GAP}` + chalk.hex("#a78bfa")("Agent Home Setup"));
   console.log(
@@ -1619,7 +1596,7 @@ async function runAgentHomeLogin(): Promise<void> {
         chalk.hex("#4ade80")(`  \u2713 Config saved to ${paths.agentHomeFile}`) +
         "\n\n" +
         chalk.hex("#60a5fa")("  To start:\n") +
-        chalk.hex("#6b7280")("    cd your-project && ogcoder agent-home\n"),
+        chalk.hex("#6b7280")("    cd your-project && ggcoder agent-home\n"),
     );
   } finally {
     rl.close();
@@ -1647,10 +1624,10 @@ async function runAgentHome(): Promise<void> {
     console.error(
       chalk.hex("#ef4444")("Agent Home not configured.\n\n") +
         "Run " +
-        chalk.hex("#60a5fa").bold("ogcoder agent-home-login") +
+        chalk.hex("#60a5fa").bold("ggcoder agent-home-login") +
         " to set up your token.\n\n" +
         chalk.hex("#6b7280")("Or provide manually:\n") +
-        chalk.hex("#6b7280")("  ogcoder agent-home --token TOKEN"),
+        chalk.hex("#6b7280")("  ggcoder agent-home --token TOKEN"),
     );
     process.exit(1);
   }
@@ -1670,7 +1647,7 @@ async function runAgentHome(): Promise<void> {
   );
 
   const thinkingLevel: ThinkingLevel | undefined = saved4.thinkingEnabled
-    ? getMaxThinkingLevel(model)
+    ? (saved4.thinkingLevel ?? getMaxThinkingLevel(model))
     : undefined;
 
   initLogger(paths.logFile, {
@@ -1749,8 +1726,8 @@ async function runPixel(): Promise<void> {
   }
 
   // No subcommand → launch the Ink TUI with the pixel overlay open. The fix
-  // flow runs through the same agent loop as a Task, streaming live in the
-  // chat instead of spawning a subprocess.
+  // flow runs through the same agent loop, streaming live in the chat instead
+  // of spawning a subprocess.
   // Non-TTY (CI, piped) → fall back to text list.
   if (!process.stdin.isTTY) {
     const { listAllErrors } = await import("./core/pixel.js");
@@ -1765,7 +1742,7 @@ async function runPixel(): Promise<void> {
     provider,
     model,
     cwd: process.cwd(),
-    thinkingLevel: saved.thinkingEnabled ? "medium" : undefined,
+    thinkingLevel: saved.thinkingEnabled ? (saved.thinkingLevel ?? "medium") : undefined,
     theme: saved.theme,
     initialOverlay: "pixel",
   });
@@ -1839,7 +1816,7 @@ async function resolveActiveProvider(
   }
 
   if (loggedInProviders.length === 0) {
-    throw new Error('Not logged in to any provider. Run "ogcoder login" to authenticate.');
+    throw new Error('Not logged in to any provider. Run "ggcoder login" to authenticate.');
   }
 
   if (loggedInProviders.includes(preferred)) {
@@ -1866,7 +1843,6 @@ function displayName(provider: Provider): string {
   if (provider === "glm") return "Z.AI (GLM)";
   if (provider === "moonshot") return "Moonshot";
   if (provider === "minimax") return "MiniMax";
-  if (provider === "ollama") return "Ollama";
   if (provider === "deepseek") return "DeepSeek";
   if (provider === "openrouter") return "OpenRouter";
   return "OpenAI";

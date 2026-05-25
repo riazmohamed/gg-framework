@@ -179,11 +179,9 @@ export function useAnimationActive(enabled = true): void {
 }
 
 export function useFocusedAnimation(enabled = true): { active: boolean; tick: number } {
-  const focused = useTerminalFocus(enabled);
-  const active = enabled && focused;
-  useAnimationActive(active);
-  const tick = useAnimationTick(active);
-  return { active, tick };
+  useAnimationActive(enabled);
+  const tick = useAnimationTick(enabled);
+  return { active: enabled, tick };
 }
 
 /** Derive a frame index from the global tick for a given interval and frame count. */

@@ -122,23 +122,6 @@ describe("createEditTool", () => {
     expect(written).toBe("one two three\n");
   });
 
-  it("returns error string in plan mode", async () => {
-    const filePath = path.join(tmpDir, "plan.txt");
-    await fs.writeFile(filePath, "original\n");
-
-    const planModeRef = { current: true };
-    const tool = createEditTool(tmpDir, undefined, undefined, planModeRef);
-    const result = await tool.execute(
-      { file_path: "plan.txt", edits: [{ old_text: "original", new_text: "modified" }] },
-      { signal: new AbortController().signal, toolCallId: "test-2" },
-    );
-
-    expect(result).toContain("Error: edit is restricted in plan mode");
-
-    const content = await fs.readFile(filePath, "utf-8");
-    expect(content).toBe("original\n");
-  });
-
   it("throws when file hasn't been read with readFiles tracking", async () => {
     const filePath = path.join(tmpDir, "unread.txt");
     await fs.writeFile(filePath, "content\n");

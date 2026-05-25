@@ -47,10 +47,10 @@ async function loadPlanEntries(cwd: string): Promise<PlanEntry[]> {
 // ── State helpers (avoid lint issues with bare let reassignments) ──
 
 interface AppState {
-  overlay: "model" | "tasks" | "skills" | "plan" | null;
+  overlay: "model" | "goal" | "skills" | "plan" | null;
   planAutoExpand: boolean;
-  planMode: boolean;
   pending: boolean;
+  pendingResetUI: boolean;
   doneStatus: DoneStatus | null;
 }
 
@@ -58,8 +58,8 @@ function createAppState(overrides?: Partial<AppState>): AppState {
   return {
     overlay: null,
     planAutoExpand: false,
-    planMode: false,
     pending: false,
+    pendingResetUI: false,
     doneStatus: null,
     ...overrides,
   };
@@ -222,8 +222,8 @@ describe("planOverlayPending guard (onDone suppression)", () => {
 // ── Plan overlay pending race condition simulation ──────────
 
 describe("planOverlayPending race condition", () => {
-  it("onDone fires BEFORE setTimeout — done status suppressed", () => {
-    // Step 1: exit_plan tool finishes → pending = true
+  it("onDone fires BEFORE delayed pane transition — done status suppressed", () => {
+    // Step 1: approved-plan pane transition is pending
     const state = createAppState({ pending: true });
 
     // Step 2: onDone fires immediately (agent loop finishes)
@@ -238,8 +238,8 @@ describe("planOverlayPending race condition", () => {
     expect(state.pending).toBe(false);
   });
 
-  it("onDone fires AFTER setTimeout — done status shows (edge case)", () => {
-    // Step 1: exit_plan → pending = true
+  it("onDone fires AFTER delayed pane transition — done status shows (edge case)", () => {
+    // Step 1: approved-plan pane transition is pending
     const state = createAppState({ pending: true });
 
     // Step 2: setTimeout fires first
@@ -253,22 +253,6 @@ describe("planOverlayPending race condition", () => {
     // This is the race condition: done status leaks through while overlay is open
     expect(state.overlay).toBe("plan");
     expect(state.doneStatus).toEqual({ durationMs: 2000, toolsUsed: ["write"], verb: "done" });
-  });
-
-  it("multiple rapid plan mode toggles don't cause inconsistent state", () => {
-    const state = createAppState();
-    const stateLog: boolean[] = [];
-
-    for (let i = 0; i < 10; i++) {
-      state.planMode = !state.planMode;
-      stateLog.push(state.planMode);
-    }
-
-    // After even number of toggles, should be back to false
-    expect(state.planMode).toBe(false);
-    expect(stateLog).toHaveLength(10);
-    expect(stateLog.filter(Boolean)).toHaveLength(5);
-    expect(stateLog.filter((v) => !v)).toHaveLength(5);
   });
 });
 
@@ -361,7 +345,7 @@ describe("plan file reading edge cases", () => {
 
 describe("overlay state transitions", () => {
   it("opening plan overlay replaces any existing overlay", () => {
-    const state = createAppState({ overlay: "tasks" });
+    const state = createAppState({ overlay: "goal" });
     state.overlay = "plan";
     expect(state.overlay).toBe("plan");
   });
@@ -381,22 +365,12 @@ describe("overlay state transitions", () => {
     expect(state.planAutoExpand).toBe(false);
   });
 
-  it("plan overlay from exit_plan uses autoExpand", () => {
+  it("approved-plan review overlay can auto-expand", () => {
     const state = createAppState();
-    // Simulates the setTimeout in onExitPlan
     state.planAutoExpand = true;
     state.overlay = "plan";
     expect(state.overlay).toBe("plan");
     expect(state.planAutoExpand).toBe(true);
-  });
-
-  it("/plans command does NOT set autoExpand", () => {
-    const state = createAppState({ planAutoExpand: true });
-    // Simulates /plans handler
-    state.planAutoExpand = false;
-    state.overlay = "plan";
-    expect(state.overlay).toBe("plan");
-    expect(state.planAutoExpand).toBe(false);
   });
 });
 

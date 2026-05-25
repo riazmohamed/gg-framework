@@ -1,12 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import {
-  agentLoop,
-  type AgentEvent,
-  type AgentTool,
-  type ModelRouterResult,
-} from "@abukhaled/gg-agent";
-import { ProviderError } from "@abukhaled/gg-ai";
-import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from "@abukhaled/gg-ai";
+import { agentLoop, type AgentEvent, type AgentTool } from "@kenkaiiii/gg-agent";
+import { ProviderError } from "@kenkaiiii/gg-ai";
+import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from "@kenkaiiii/gg-ai";
 import { getClaudeCliUserAgent } from "../../core/claude-code-version.js";
 import { log } from "../../core/logger.js";
 
@@ -54,6 +49,10 @@ function mergeUserContent(items: UserContent[]): UserContent {
   return parts;
 }
 
+export function shouldRetainThinkingDelta(): boolean {
+  return false;
+}
+
 export interface ActiveToolCall {
   toolCallId: string;
   name: string;
@@ -82,12 +81,6 @@ export interface AgentLoopOptions {
     messages: Message[],
     options?: { force?: boolean },
   ) => Message[] | Promise<Message[]>;
-  /** Per-turn model/provider router (e.g. auto-switch to vision model). */
-  modelRouter?: (
-    messages: Message[],
-    currentModel: string,
-    currentProvider: string,
-  ) => ModelRouterResult | null | Promise<ModelRouterResult | null>;
 }
 
 export type ActivityPhase = "waiting" | "thinking" | "generating" | "tools" | "retrying" | "idle";
@@ -106,6 +99,12 @@ export interface RetryInfo {
 }
 
 export type UserContent = string | (TextContent | ImageContent)[];
+
+export interface StreamSnapshot {
+  text: string;
+  thinking: string;
+  thinkingMs: number;
+}
 
 export interface UseAgentLoopReturn {
   run: (userContent: UserContent) => Promise<void>;
@@ -148,7 +147,12 @@ export function useAgentLoop(
   callbacks?: {
     onComplete?: (newMessages: Message[]) => void;
     onTurnText?: (text: string, thinking: string, thinkingMs: number) => void;
-    onToolStart?: (toolCallId: string, name: string, args: Record<string, unknown>) => void;
+    onToolStart?: (
+      toolCallId: string,
+      name: string,
+      args: Record<string, unknown>,
+      stream: StreamSnapshot,
+    ) => void;
     onToolUpdate?: (toolCallId: string, update: unknown) => void;
     onToolEnd?: (
       toolCallId: string,
@@ -164,8 +168,7 @@ export function useAgentLoop(
       // tool-result rendering always has the original args available.
       args?: Record<string, unknown>,
     ) => void;
-    onModelSwitch?: (fromModel: string, toModel: string, reason: string) => void;
-    onServerToolCall?: (id: string, name: string, input: unknown) => void;
+    onServerToolCall?: (id: string, name: string, input: unknown, stream: StreamSnapshot) => void;
     onServerToolResult?: (toolUseId: string, resultType: string, data: unknown) => void;
     onTurnEnd?: (
       turn: number,
@@ -191,7 +194,6 @@ export function useAgentLoop(
   const onToolStart = callbacks?.onToolStart;
   const onToolUpdate = callbacks?.onToolUpdate;
   const onToolEnd = callbacks?.onToolEnd;
-  const onModelSwitch = callbacks?.onModelSwitch;
   const onServerToolCall = callbacks?.onServerToolCall;
   const onServerToolResult = callbacks?.onServerToolResult;
   const onTurnEnd = callbacks?.onTurnEnd;
@@ -231,7 +233,6 @@ export function useAgentLoop(
   const realTokensAccumRef = useRef(0);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const doneCalledRef = useRef(false);
-  const lastRoutedModelRef = useRef<string | undefined>(undefined);
   // Diagnostic: log when streamingThinking first becomes non-empty for a run,
   // so we can measure the React → Ink commit time on top of the flush throttle.
   const thinkingCommitLoggedRef = useRef(false);
@@ -413,16 +414,6 @@ export function useAgentLoop(
           }
         };
 
-        // Emit switch-back cue if previous run used a different model
-        if (lastRoutedModelRef.current && lastRoutedModelRef.current !== options.model) {
-          onModelSwitch?.(
-            lastRoutedModelRef.current,
-            options.model,
-            `Returning to ${options.model}`,
-          );
-          lastRoutedModelRef.current = undefined;
-        }
-
         // Push user message
         const userMsg: Message = { role: "user", content: content };
         messages.current.push(userMsg);
@@ -491,7 +482,6 @@ export function useAgentLoop(
             // clearToolUses disabled — causes model to output unsolicited context
             // summaries ("KEY CONTEXT TO REMEMBER") when it sees gaps from stripped
             // tool blocks. Normal client-side compaction handles context management.
-            modelRouter: options.modelRouter,
           });
 
           log("INFO", "ui", "iter_start", {
@@ -527,13 +517,12 @@ export function useAgentLoop(
                     sinceRunStartMs: String(firstThinkingArrivedMs),
                   });
                 }
-                thinkingBufferRef.current += event.text;
-                // Stream live to the visible ref so the user sees reasoning as
-                // it generates instead of waiting until text or tool calls
-                // arrive. Buffer is kept separately for persistence at turn_end.
-                thinkingVisibleRef.current += event.text;
-                streamThinkingDirty = true;
-                scheduleStreamFlush();
+                if (shouldRetainThinkingDelta()) {
+                  thinkingBufferRef.current += event.text;
+                  thinkingVisibleRef.current += event.text;
+                  streamThinkingDirty = true;
+                  scheduleStreamFlush();
+                }
                 charCountRef.current += event.text.length;
                 if (phaseRef.current !== "thinking") {
                   thinkingStartRef.current = Date.now();
@@ -581,7 +570,11 @@ export function useAgentLoop(
                   startTime: Date.now(),
                   updates: [],
                 };
-                onToolStart?.(event.toolCallId, event.name, event.args);
+                onToolStart?.(event.toolCallId, event.name, event.args, {
+                  text: textVisibleRef.current,
+                  thinking: thinkingBufferRef.current,
+                  thinkingMs: thinkingAccumRef.current,
+                });
                 toolsUsedRef.current.add(event.name);
                 activeToolCallsRef.current = [...activeToolCallsRef.current, newTc];
                 setActiveToolCalls(activeToolCallsRef.current);
@@ -643,13 +636,13 @@ export function useAgentLoop(
                 break;
               }
 
-              case "model_switch":
-                lastRoutedModelRef.current = event.toModel;
-                onModelSwitch?.(event.fromModel, event.toModel, event.reason);
-                break;
-
               case "server_tool_call":
-                onServerToolCall?.(event.id, event.name, event.input);
+                flushStreamState();
+                onServerToolCall?.(event.id, event.name, event.input, {
+                  text: textVisibleRef.current,
+                  thinking: thinkingBufferRef.current,
+                  thinkingMs: thinkingAccumRef.current,
+                });
                 break;
 
               case "server_tool_result":
@@ -856,7 +849,6 @@ export function useAgentLoop(
       onToolStart,
       onToolUpdate,
       onToolEnd,
-      onModelSwitch,
       onServerToolCall,
       onServerToolResult,
       onTurnEnd,

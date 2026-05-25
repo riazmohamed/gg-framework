@@ -470,13 +470,7 @@ export function PlanOverlay({
             {"  No plans found. Plans are written to "}
             <Text color={theme.planPrimary}>.gg/plans/</Text>
           </Text>
-          <Text color={theme.textDim}>
-            {"  Use "}
-            <Text color={theme.planPrimary}>/plan</Text>
-            {" or let the agent call "}
-            <Text color={theme.planPrimary}>enter_plan</Text>
-            {" to start planning."}
-          </Text>
+          <Text color={theme.textDim}>{"  No pending plans are available for review."}</Text>
         </Box>
       )}
 

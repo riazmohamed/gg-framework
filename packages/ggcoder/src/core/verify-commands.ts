@@ -224,10 +224,10 @@ export function renderVerifySection(cmds: readonly VerifyCommand[]): string {
   }
   return (
     `## Verification\n\n` +
-    `After meaningful edits, run the relevant verification commands below to ` +
-    `confirm pack compliance. Pick only the commands matching the language(s) ` +
-    `you actually touched. If a command fails, fix the issues before reporting ` +
-    `the task complete \u2014 never claim success on unverified output.\n\n` +
+    `When verification is needed, choose the smallest relevant command(s) below. ` +
+    `Pick only the commands matching the language(s) you actually touched; do not ` +
+    `run the full list by default after every edit. If a command fails, fix the ` +
+    `issues before reporting the task complete \u2014 never claim success on unverified output.\n\n` +
     lines.join("\n")
   );
 }

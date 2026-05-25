@@ -9,6 +9,11 @@ export interface GoalPrerequisiteCheckResult {
   evidence: string;
 }
 
+export interface PrerequisiteCommandSafetyResult {
+  safe: boolean;
+  reason?: string;
+}
+
 export interface RunGoalPrerequisiteChecksResult {
   run: GoalRun;
   checkedCount: number;
@@ -27,6 +32,37 @@ function summarizePrerequisiteCheck(command: string, exitCode: number, output: s
   return `Checked locally: \`${command}\` exited ${exitCode}${suffix}`;
 }
 
+export function validateGoalPrerequisiteCheckCommand(
+  command: string,
+): PrerequisiteCommandSafetyResult {
+  const normalized = command.trim();
+  if (!normalized) return { safe: false, reason: "empty prerequisite check command" };
+  const checks: Array<[RegExp, string]> = [
+    [/\brm\s+(?:-[^\s]*r[^\s]*f|-f[^\s]*r|-rf|-fr)\b/i, "destructive rm -rf command"],
+    [
+      /\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add|remove|uninstall|update|upgrade)\b/i,
+      "package mutation command",
+    ],
+    [
+      /\b(?:apt|apt-get|brew|pip|pip3|gem|cargo)\s+(?:install|add|remove|uninstall|update|upgrade)\b/i,
+      "system/package mutation command",
+    ],
+    [/(^|[^<])>>?\s*[^\s&|;]/, "shell redirection that writes files"],
+    [/\b(?:tee)\b(?!\s+-a?\s*\/dev\/null)/i, "tee file write command"],
+    [/\b(?:touch|mkdir|mv|cp|chmod|chown|truncate)\b/i, "file mutation command"],
+    [
+      /\b(?:serve|vite|next\s+dev|npm\s+run\s+dev|pnpm\s+dev|yarn\s+dev)\b/i,
+      "background/dev server command",
+    ],
+    [/[;&|]\s*$/, "trailing shell control operator"],
+    [/&\s*(?:$|[#;])/, "background command"],
+  ];
+  for (const [pattern, reason] of checks) {
+    if (pattern.test(normalized)) return { safe: false, reason };
+  }
+  return { safe: true };
+}
+
 export async function runGoalPrerequisiteCheckCommand({
   cwd,
   command,
@@ -36,6 +72,13 @@ export async function runGoalPrerequisiteCheckCommand({
   command: string;
   timeoutMs?: number;
 }): Promise<GoalPrerequisiteCheckResult> {
+  const safety = validateGoalPrerequisiteCheckCommand(command);
+  if (!safety.safe) {
+    return {
+      status: "missing",
+      evidence: `Prerequisite check rejected as unsafe: ${safety.reason}. Command was not executed: \`${command}\``,
+    };
+  }
   return await new Promise<GoalPrerequisiteCheckResult>((resolve) => {
     const child = spawn(command, {
       cwd,

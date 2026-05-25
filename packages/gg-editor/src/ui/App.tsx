@@ -653,7 +653,6 @@ export function App(props: AppProps) {
           tokensIn={agentLoop.contextUsed}
           cwd={props.cwd}
           thinkingLevel={thinkingEnabled ? getMaxThinkingLevel(currentModel) : undefined}
-          hidePlan
           hideCwd
           hideGitBranch
           exitPending={exitPending}

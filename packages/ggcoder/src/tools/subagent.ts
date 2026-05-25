@@ -5,6 +5,7 @@ import type { AgentTool } from "@abukhaled/gg-agent";
 import type { AgentDefinition } from "../core/agents.js";
 import { log } from "../core/logger.js";
 import { truncateTail } from "./truncate.js";
+import { goalModeRestriction, isGoalModeActive, type GoalMode } from "../core/runtime-mode.js";
 
 const SUB_AGENT_MAX_TURNS = 10;
 const SUB_AGENT_MAX_OUTPUT_CHARS = 100_000; // ~25k tokens, matches other tool limits
@@ -37,7 +38,7 @@ export function createSubAgentTool(
   agents: AgentDefinition[],
   parentProvider: string,
   parentModel: string,
-  planModeRef?: { current: boolean },
+  goalModeRef?: { current: GoalMode },
   getParentCacheKey?: () => string | undefined,
 ): AgentTool<typeof SubAgentParams> {
   const agentList = agents.map((a) => `- ${a.name}: ${a.description}`).join("\n");
@@ -53,8 +54,8 @@ export function createSubAgentTool(
     parameters: SubAgentParams,
     executionMode: "sequential",
     async execute(args, context) {
-      if (planModeRef?.current) {
-        return "Error: subagent is restricted in plan mode. Use read-only tools to explore the codebase.";
+      if (isGoalModeActive(goalModeRef)) {
+        return goalModeRestriction("subagent", "Goal task creation through the goals tool");
       }
 
       const startTime = Date.now();
@@ -320,12 +321,6 @@ function formatToolActivity(name: string, args: Record<string, unknown>): string
       return `Reading task output ${truncateStr(String(args.id ?? ""), 20)}`;
     case "task_stop":
       return `Stopping task ${truncateStr(String(args.id ?? ""), 20)}`;
-    case "tasks":
-      return `Managing tasks: ${truncateStr(String(args.action ?? ""), 20)}`;
-    case "enter_plan":
-      return "Entering plan mode";
-    case "exit_plan":
-      return `Submitting plan ${shortenPath(String(args.plan_path ?? ""))}`;
     case "web_search":
       return `Searching web for ${truncateStr(String(args.query ?? ""), 30)}`;
     case "skill":

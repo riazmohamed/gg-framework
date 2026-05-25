@@ -1,0 +1,13 @@
+diff --git a/build/ink.js b/build/ink.js
+index 30019a0..1410e74 100644
+--- a/build/ink.js
++++ b/build/ink.js
+@@ -324,7 +324,7 @@ export default class Ink {
+             if (sync) {
+                 this.options.stdout.write(bsu);
+             }
+-            this.options.stdout.write(ansiEscapes.clearTerminal + this.fullStaticOutput + output);
++            this.options.stdout.write(ansiEscapes.eraseScreen + ansiEscapes.cursorTo(0, 0) + this.fullStaticOutput + output);
+             this.lastOutput = output;
+             this.lastOutputToRender = outputToRender;
+             this.lastOutputHeight = outputHeight;

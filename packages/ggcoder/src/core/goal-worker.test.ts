@@ -95,21 +95,92 @@ afterEach(async () => {
 });
 
 describe("goal worker failure propagation", () => {
+  it("times out hanging workers, kills the process tree, and records timeout evidence", async () => {
+    vi.useFakeTimers();
+    const onComplete = vi.fn();
+    const mod = await import("./goal-worker.js");
+    const record = await mod.startGoalWorker({
+      cwd: tmpProject,
+      provider: "anthropic",
+      model: "claude-test",
+      goalRunId: "goal-a",
+      goalTaskId: "task-a",
+      prompt: "Hang forever",
+      timeoutMs: 10,
+      onComplete,
+    });
+
+    await vi.advanceTimersByTimeAsync(11);
+    child.emit("close", null);
+    await vi.runOnlyPendingTimersAsync();
+    vi.useRealTimers();
+    await flushUntil(() => expect(onComplete).toHaveBeenCalled());
+
+    const run = await getGoalRun(tmpProject, "goal-a");
+    expect(killProcessTreeMock).toHaveBeenCalledWith(4242);
+    expect(record.status).toBe("failed");
+    expect(run?.activeWorkerId).toBeUndefined();
+    expect(run?.tasks[0]).toMatchObject({
+      status: "failed",
+      workerId: record.id,
+      lastSummary: expect.stringContaining("timed out after 10ms"),
+    });
+    expect(run?.evidence.some((item) => item.label === `Worker ${record.id} timeout`)).toBe(true);
+    expect(onComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "failed", exitCode: 124, reason: "timeout" }),
+    );
+  });
+
   it("prompts workers with explicit durable Goal context before claiming verification", async () => {
     await start();
     const args = spawnMock.mock.calls[0]?.[1] as string[];
     const systemPromptIndex = args.indexOf("--system-prompt") + 1;
     const prompt = args[systemPromptIndex];
 
+    expect(args).not.toContain("--thinking");
     expect(prompt).toContain(`cwd=${tmpProject}`);
     expect(prompt).toContain("run_id=goal-a");
     expect(prompt).toContain("task_id=task-a");
-    expect(prompt).toContain("create needed scripts/fixtures/harnesses");
+    expect(prompt).toContain("model the intended experience");
+    expect(prompt).toContain("choose the required senses/signals");
+    expect(prompt).toContain(
+      "Create needed scripts/fixtures/harnesses only when they directly observe those signals",
+    );
     expect(prompt).toContain("source_path/docs/kencode real-code research when relevant");
+    expect(prompt).toContain(
+      "do not default to generic tests, scripts, screenshots, benchmarks, or simulations",
+    );
     expect(prompt).toContain("command/file evidence");
+    expect(prompt).toContain("isolated git worktree");
+    expect(prompt).toContain("Do not merge or touch the main checkout");
+    expect(prompt).toContain("candidate packet");
+    expect(prompt).toContain("base SHA");
+    expect(prompt).toContain("diffstat");
+    expect(prompt).toContain("patch path");
+    expect(prompt).toContain("depends_on");
+    expect(prompt).toContain("parallel_group");
+    expect(prompt).toContain("expected_changed_scope");
+    expect(prompt).toContain("merge_strategy");
     expect(prompt).toContain(
       'goals({ action: "evidence" | "task", run_id: "goal-a", task_id: "task-a"',
     );
+  });
+
+  it("passes the active thinking level to the worker CLI when enabled", async () => {
+    const mod = await import("./goal-worker.js");
+
+    await mod.startGoalWorker({
+      cwd: tmpProject,
+      provider: "anthropic",
+      model: "claude-test",
+      thinkingLevel: "xhigh",
+      goalRunId: "goal-a",
+      goalTaskId: "task-a",
+      prompt: "Do deterministic work",
+    });
+
+    const args = spawnMock.mock.calls[0]?.[1] as string[];
+    expect(args).toEqual(expect.arrayContaining(["--thinking", "xhigh"]));
   });
 
   it("exports a testable worker system prompt/context helper", async () => {
@@ -127,6 +198,27 @@ describe("goal worker failure propagation", () => {
     expect(prompt).toContain("task_id=task-456");
     expect(prompt).toContain("Implement typed handoff");
     expect(prompt).toContain("Do not mark the whole goal complete");
+    expect(prompt).toContain("do not rely on narrative or human visual inspection");
+    expect(prompt).toContain("isolated git worktree");
+    expect(prompt).toContain("candidate packet");
+    expect(prompt).toContain("depends_on");
+    expect(prompt).toContain("parallel_group");
+  });
+
+  it("does not mark empty successful process exit as durable task completion", async () => {
+    const { record, onComplete } = await start();
+
+    child.emit("close", 0);
+    await flushUntil(() => expect(onComplete).toHaveBeenCalled());
+
+    const run = await getGoalRun(tmpProject, "goal-a");
+    expect(record.status).toBe("failed");
+    expect(run?.tasks[0]).toMatchObject({
+      status: "failed",
+      workerId: record.id,
+      lastSummary: expect.stringContaining("without durable proof evidence"),
+    });
+    expect(run?.evidence.some((item) => item.label === `Worker ${record.id} failed`)).toBe(true);
   });
 
   it("marks the task done, persists evidence, and notifies callbacks/subscribers for worker success", async () => {

@@ -7,6 +7,7 @@ import {
   runGoalPrerequisiteCheckCommand,
   runGoalPrerequisiteChecks,
   shouldRunGoalPrerequisiteCheck,
+  validateGoalPrerequisiteCheckCommand,
 } from "./goal-prerequisites.js";
 
 function goalRun(overrides: Partial<GoalRun> = {}): GoalRun {
@@ -30,6 +31,35 @@ function goalRun(overrides: Partial<GoalRun> = {}): GoalRun {
 }
 
 describe("goal prerequisite checks", () => {
+  it("rejects unsafe prerequisite commands without executing mutations", async () => {
+    expect(validateGoalPrerequisiteCheckCommand("rm -rf .goal-evidence")).toEqual({
+      safe: false,
+      reason: "destructive rm -rf command",
+    });
+    expect(validateGoalPrerequisiteCheckCommand("pnpm install left-pad")).toEqual({
+      safe: false,
+      reason: "package mutation command",
+    });
+    expect(validateGoalPrerequisiteCheckCommand("echo secret > leaked.txt")).toEqual({
+      safe: false,
+      reason: "shell redirection that writes files",
+    });
+    expect(validateGoalPrerequisiteCheckCommand("test -f package.json")).toEqual({ safe: true });
+
+    const tmpProject = await fs.mkdtemp(path.join(os.tmpdir(), "goal-prereq-safety-project-"));
+    try {
+      const result = await runGoalPrerequisiteCheckCommand({
+        cwd: tmpProject,
+        command: "echo unsafe > should-not-exist.txt",
+      });
+      expect(result.status).toBe("missing");
+      expect(result.evidence).toContain("rejected as unsafe");
+      await expect(fs.access(path.join(tmpProject, "should-not-exist.txt"))).rejects.toThrow();
+    } finally {
+      await fs.rm(tmpProject, { recursive: true, force: true });
+    }
+  });
+
   it("runs cheap local check commands and records non-secret evidence", async () => {
     const tmpProject = await fs.mkdtemp(path.join(os.tmpdir(), "goal-prereq-test-project-"));
     try {

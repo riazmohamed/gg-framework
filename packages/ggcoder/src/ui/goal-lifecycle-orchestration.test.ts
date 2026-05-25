@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { GoalRun, GoalTask } from "../core/goal-store.js";
 import { canCompleteGoalRun, decideGoalNextAction } from "../core/goal-controller.js";
 import {
+  appendGoalProgressDraft,
   completedItemsWithDurableGoalTerminalProgress,
   formatGoalTerminalProgress,
+  nextGoalModeAfterAgentDone,
+  truncateGoalProgressText,
   type CompletedItem,
 } from "./App.js";
 
@@ -70,41 +73,39 @@ function applyVerifierResult(
   status: "pass" | "fail",
   summary = `${status} summary`,
 ): GoalRun {
-  const completion =
-    status === "pass"
-      ? canCompleteGoalRun({
-          ...run,
-          verifier: {
-            description: "Full check",
-            command: "pnpm test",
-            ...run.verifier,
-            lastResult: {
-              status,
-              summary,
-              command: "pnpm test",
-              checkedAt: "2024-01-01T00:00:00.000Z",
-              exitCode: 0,
-            },
-          },
-        })
-      : { ok: false };
-  return {
+  const lastResult = {
+    status,
+    summary,
+    command: "pnpm test",
+    checkedAt: "2024-01-01T00:00:00.000Z",
+    exitCode: status === "pass" ? 0 : 1,
+    outputPath: ".goal-evidence/verifier.log",
+  };
+  const runWithVerifier: GoalRun = {
     ...run,
-    status: status === "pass" && completion.ok ? "passed" : "ready",
-    continueRequestedAt: status === "pass" && completion.ok ? undefined : run.continueRequestedAt,
     verifier: {
       description: "Full check",
       command: "pnpm test",
       ...run.verifier,
-      lastResult: {
-        status,
-        summary,
-        command: "pnpm test",
-        checkedAt: "2024-01-01T00:00:00.000Z",
-        exitCode: status === "pass" ? 0 : 1,
-        outputPath: ".goal-evidence/verifier.log",
-      },
+      lastResult,
     },
+    ...(status === "pass"
+      ? {
+          completionAudit: {
+            status: "unknown",
+            summary: "Final completion audit pending for latest verifier result.",
+            checkedAt: lastResult.checkedAt,
+            verifierCheckedAt: lastResult.checkedAt,
+            outputPath: lastResult.outputPath,
+          },
+        }
+      : {}),
+  };
+  const completion = status === "pass" ? canCompleteGoalRun(runWithVerifier) : { ok: false };
+  return {
+    ...runWithVerifier,
+    status: status === "pass" && completion.ok ? "passed" : "ready",
+    continueRequestedAt: run.continueRequestedAt,
     evidence: [
       ...run.evidence,
       {
@@ -119,7 +120,109 @@ function applyVerifierResult(
   };
 }
 
+function applyCompletionAudit(run: GoalRun): GoalRun {
+  const verifier = run.verifier?.lastResult;
+  if (!verifier) throw new Error("expected verifier result");
+  return {
+    ...run,
+    status: "passed",
+    completionAudit: {
+      status: "pass",
+      summary: `FINAL_AUDIT_PASS verifier_checked_at=${verifier.checkedAt} original-goal-prompt GOAL_PLAN`,
+      checkedAt: "2024-01-01T00:00:01.000Z",
+      verifierCheckedAt: verifier.checkedAt,
+      ...(verifier.outputPath ? { outputPath: verifier.outputPath } : {}),
+    },
+    tasks: [
+      ...run.tasks,
+      task({
+        id: "final-audit",
+        title: "Audit Goal completion evidence",
+        status: "done",
+        attempts: 1,
+      }),
+    ],
+  };
+}
+
 describe("/goal UI orchestration lifecycle", () => {
+  it("truncates long Goal progress text before it wraps across the TUI", () => {
+    const text =
+      "Choosing next Goal step: A-Z /goal system test, refinement, leak-safety, and report";
+
+    expect(truncateGoalProgressText(text)).toBe(
+      "Choosing next Goal step: A-Z /goal system test, refinement, leak-safety…",
+    );
+  });
+
+  it("dedupes adjacent identical Goal progress rows", () => {
+    const draft = {
+      kind: "goal_progress" as const,
+      phase: "continuing" as const,
+      title: "Choosing next Goal step: Close remaining /goal reliability gaps",
+      detail: "Latest result is recorded; starting the next worker task or verifier automatically.",
+      status: "ready" as const,
+    };
+    let nextId = 0;
+    const makeId = () => `goal-progress-${nextId++}`;
+
+    const once = appendGoalProgressDraft([], draft, makeId);
+    const twice = appendGoalProgressDraft(once, draft, makeId);
+    const afterDifferentRow = appendGoalProgressDraft(
+      [...twice, { kind: "assistant", id: "assistant-1", text: "Recorded verifier pass." }],
+      draft,
+      makeId,
+    );
+
+    expect(once).toHaveLength(1);
+    expect(twice).toHaveLength(1);
+    expect(afterDifferentRow).toHaveLength(3);
+  });
+
+  it("keeps coordinator mode only while Goal continuation work remains", () => {
+    expect(
+      nextGoalModeAfterAgentDone({
+        currentMode: "setup",
+        runningGoalIds: 1,
+        queuedSyntheticEvents: 0,
+        wasGoalSetupTurn: true,
+      }),
+    ).toBe("off");
+
+    expect(
+      nextGoalModeAfterAgentDone({
+        currentMode: "coordinator",
+        runningGoalIds: 0,
+        queuedSyntheticEvents: 1,
+      }),
+    ).toBe("coordinator");
+
+    expect(
+      nextGoalModeAfterAgentDone({
+        currentMode: "coordinator",
+        runningGoalIds: 1,
+        queuedSyntheticEvents: 0,
+      }),
+    ).toBe("coordinator");
+
+    expect(
+      nextGoalModeAfterAgentDone({
+        currentMode: "coordinator",
+        runningGoalIds: 0,
+        queuedSyntheticEvents: 0,
+        activeContinuationFlights: 1,
+      }),
+    ).toBe("coordinator");
+
+    expect(
+      nextGoalModeAfterAgentDone({
+        currentMode: "coordinator",
+        runningGoalIds: 0,
+        queuedSyntheticEvents: 0,
+      }),
+    ).toBe("off");
+  });
+
   it("reconstructs a visible blocker/verification terminal message from durable Goal state", () => {
     const blocked = goalRun({
       status: "blocked",
@@ -262,10 +365,23 @@ describe("/goal UI orchestration lifecycle", () => {
     expect(staleOverwrite.tasks[0]).toMatchObject({ status: "pending", attempts: 0 });
   });
 
-  it("worker completion drives verifier and verifier pass gates passed status", () => {
+  it("worker completion drives verifier, final audit, and passed status", () => {
     const done = applyWorkerDone(
       applyStartWorker(
-        goalRun({ tasks: [task()], verifier: { description: "Full check", command: "pnpm test" } }),
+        goalRun({
+          tasks: [task()],
+          verifier: { description: "Full check", command: "pnpm test" },
+          evidencePlan: [
+            {
+              id: "proof-log",
+              label: "Verifier log",
+              mechanism: "command",
+              description: "Verifier output log",
+              status: "ready",
+              path: ".goal-evidence/verifier.log",
+            },
+          ],
+        }),
       ),
     );
 
@@ -275,15 +391,26 @@ describe("/goal UI orchestration lifecycle", () => {
       reason: "All Goal tasks are done; running configured verifier for real completion evidence.",
     });
 
-    const passed = applyVerifierResult(done, "pass", "mock verifier passed");
+    const verified = applyVerifierResult(done, "pass", "mock verifier passed");
+    expect(verified.status).toBe("ready");
+    expect(canCompleteGoalRun(verified)).toEqual({
+      ok: false,
+      reason: "Final completion audit status is unknown.",
+    });
+    expect(decideGoalNextAction(verified)).toMatchObject({
+      kind: "create_task",
+      title: "Audit Goal completion evidence",
+    });
+
+    const passed = applyCompletionAudit(verified);
     expect(passed.status).toBe("passed");
     expect(canCompleteGoalRun(passed)).toEqual({
       ok: true,
-      reason: "All tasks are done and verifier evidence passed.",
+      reason: "All tasks are done, verifier evidence passed, and final completion audit passed.",
     });
     expect(decideGoalNextAction(passed)).toEqual({
       kind: "complete",
-      reason: "All tasks are done and verifier evidence passed.",
+      reason: "All tasks are done, verifier evidence passed, and final completion audit passed.",
     });
   });
 

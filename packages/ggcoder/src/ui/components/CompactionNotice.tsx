@@ -27,7 +27,7 @@ export function CompactionSpinner({ staticDisplay = false }: CompactionSpinnerPr
   const frame = animationActive ? deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length) : 0;
 
   return (
-    <Box marginTop={1}>
+    <Box paddingLeft={1} marginTop={1}>
       <Box
         borderStyle="single"
         borderLeft
@@ -35,7 +35,7 @@ export function CompactionSpinner({ staticDisplay = false }: CompactionSpinnerPr
         borderTop={false}
         borderBottom={false}
         borderLeftColor={ACCENT_COLOR}
-        paddingLeft={1}
+        paddingLeft={2}
       >
         <Text color={ACCENT_COLOR}>{SPINNER_FRAMES[frame]} </Text>
         <Text color={theme.textMuted} italic>
@@ -66,7 +66,7 @@ export function CompactionDone({
   const reduction = tokensBefore > 0 ? Math.round((1 - tokensAfter / tokensBefore) * 100) : 0;
 
   return (
-    <Box marginTop={1}>
+    <Box paddingLeft={1} marginTop={1}>
       <Box
         borderStyle="single"
         borderLeft

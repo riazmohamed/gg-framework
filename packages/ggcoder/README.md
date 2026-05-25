@@ -114,9 +114,8 @@ Run `ggcoder` directly when you're heads-down on one project. Switch to `ggboss`
 
 | Key | What it does |
 |---|---|
-| <kbd>Ctrl+T</kbd> | Open the Tasks pane |
+| <kbd>Ctrl+G</kbd> | Open the Goal pane |
 | <kbd>Ctrl+S</kbd> | Open the Skills pane |
-| <kbd>Ctrl+P</kbd> | Toggle Plan mode |
 | <kbd>Shift+Tab</kbd> | Cycle extended thinking (off / low / medium / high / max) |
 | <kbd>Esc</kbd> | Interrupt the agent mid-turn |
 | <kbd>Ctrl+C</kbd> ×2 | Exit |
@@ -145,14 +144,12 @@ Everything runs through slash commands inside the session. Not CLI flags.
 Plus built-in workflows that ship with the binary:
 
 ```bash
-/scan          # Dead code, bugs, security issues (5 parallel agents)
-/verify        # Verify against docs and best practices (8 parallel agents)
-/research      # Research best tools and patterns for your stack
+/goal          # Set up a durable Goal run
+/expand        # Compare against current alternatives and report gaps
+/bullet-proof  # Run a defensive security review
 /init          # Generate CLAUDE.md for your project
-/setup-lint    # Generate a /fix command for your stack
 /setup-commit  # Generate a /commit command with quality checks
-/setup-tests   # Set up testing + generate /test
-/setup-update  # Generate an /update command for deps
+/setup-skills  # Audit and recommend reusable skills
 ```
 
 ---

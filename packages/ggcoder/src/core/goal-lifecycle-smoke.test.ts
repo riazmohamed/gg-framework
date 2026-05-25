@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ToolExecuteResult } from "@abukhaled/gg-agent";
+import type { ToolExecuteResult } from "@kenkaiiii/gg-agent";
 import { decideGoalNextAction, canCompleteGoalRun } from "./goal-controller.js";
 import { getGoalRun, loadGoalRuns } from "./goal-store.js";
 import { createGoalsTool } from "../tools/goals.js";
@@ -67,13 +67,12 @@ describe("goal lifecycle smoke", () => {
           label: "Persisted state proof",
           mechanism: "test",
           description: "Vitest asserts transitions and JSON persistence",
-          status: "ready",
-          command: "pnpm --filter @abukhaled/ggcoder test -- goal-lifecycle-smoke",
+          status: "planned",
+          command: "pnpm --filter @kenkaiiii/ggcoder test -- goal-lifecycle-smoke",
           path: "packages/ggcoder/src/core/goal-lifecycle-smoke.test.ts",
-          evidence: "This test inspects persisted Goal state after each tool call.",
         },
       ],
-      verifier_command: "pnpm --filter @abukhaled/ggcoder test -- goal-lifecycle-smoke",
+      verifier_command: "pnpm --filter @kenkaiiii/ggcoder test -- goal-lifecycle-smoke",
       verifier_description: "Focused local Vitest lifecycle smoke",
     });
     await goals({
@@ -91,7 +90,7 @@ describe("goal lifecycle smoke", () => {
       expect.objectContaining({ id: "local-harness", command: expect.any(String) }),
     ]);
     expect(persisted.evidencePlan).toEqual([
-      expect.objectContaining({ id: "state-proof", status: "ready" }),
+      expect.objectContaining({ id: "state-proof", status: "planned" }),
     ]);
     expect((await loadGoalRuns(tmpProject)).map((item) => item.id)).toContain("smoke-goal");
 
@@ -115,9 +114,24 @@ describe("goal lifecycle smoke", () => {
     });
 
     persisted = await run();
+    expect(decideGoalNextAction(persisted)).toMatchObject({
+      kind: "create_task",
+      title: "Build Goal evidence path",
+      reason:
+        "Goal evidence plan requires local instrumentation or exact prerequisite handling before verification.",
+    });
+    await goals({
+      action: "evidence_plan",
+      run_id: "smoke-goal",
+      evidence_plan_item_id: "state-proof",
+      evidence_plan_status: "ready",
+      evidence_content: "This test inspects persisted Goal state after each tool call.",
+    });
+
+    persisted = await run();
     expect(decideGoalNextAction(persisted)).toEqual({
       kind: "run_verifier",
-      command: "pnpm --filter @abukhaled/ggcoder test -- goal-lifecycle-smoke",
+      command: "pnpm --filter @kenkaiiii/ggcoder test -- goal-lifecycle-smoke",
       reason: "All Goal tasks are done; running configured verifier for real completion evidence.",
     });
     expect(persisted.tasks).toEqual([
@@ -196,12 +210,44 @@ describe("goal lifecycle smoke", () => {
 
     persisted = await run();
     expect(canCompleteGoalRun(persisted)).toEqual({
+      ok: false,
+      reason: "Final completion audit status is unknown.",
+    });
+    const auditDecision = decideGoalNextAction({ ...persisted, status: "ready" });
+    expect(auditDecision).toMatchObject({
+      kind: "create_task",
+      title: "Audit Goal completion evidence",
+    });
+    await goals({
+      action: "task",
+      run_id: "smoke-goal",
+      task_id: "final-audit",
+      task_title: "Audit Goal completion evidence",
+      task_prompt:
+        auditDecision.kind === "create_task" ? auditDecision.prompt : "Audit completion.",
+      task_status: "done",
+      attempts: 1,
+      summary: "Final audit compared persisted artifacts and verifier output.",
+    });
+    persisted = await run();
+    const verifierCheckedAt = persisted.verifier?.lastResult?.checkedAt;
+    expect(verifierCheckedAt).toBeTruthy();
+    await goals({
+      action: "audit",
+      run_id: "smoke-goal",
+      verification_status: "pass",
+      summary: `FINAL_AUDIT_PASS verifier_checked_at=${verifierCheckedAt}; artifact=artifacts/goal-lifecycle-smoke-pass.log matches the latest smoke verifier pass.`,
+      output_path: "artifacts/goal-lifecycle-smoke-pass.log",
+    });
+
+    persisted = await run();
+    expect(canCompleteGoalRun(persisted)).toEqual({
       ok: true,
-      reason: "All tasks are done and verifier evidence passed.",
+      reason: "All tasks are done, verifier evidence passed, and final completion audit passed.",
     });
     expect(decideGoalNextAction({ ...persisted, status: "ready" })).toEqual({
       kind: "complete",
-      reason: "All tasks are done and verifier evidence passed.",
+      reason: "All tasks are done, verifier evidence passed, and final completion audit passed.",
     });
     expect(await goals({ action: "complete", run_id: "smoke-goal" })).toBe(
       'Goal "Lifecycle smoke" is now passed.',
@@ -211,7 +257,7 @@ describe("goal lifecycle smoke", () => {
     expect(persisted.status).toBe("passed");
     expect(decideGoalNextAction(persisted)).toEqual({
       kind: "complete",
-      reason: "All tasks are done and verifier evidence passed.",
+      reason: "All tasks are done, verifier evidence passed, and final completion audit passed.",
     });
     expect(persisted.evidence).toEqual(
       expect.arrayContaining([

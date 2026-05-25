@@ -150,8 +150,6 @@ export const TOOL_PHRASES: Record<string, string[]> = {
   tasks: ["Wrangling", "Herding", "Corralling"],
   task_output: ["Eavesdropping", "Intercepting"],
   task_stop: ["Guillotining", "Tranquilizing"],
-  enter_plan: ["Blueprinting", "Scheming", "Plotting"],
-  exit_plan: ["Submitting", "Presenting", "Handing over"],
 };
 
 function selectToolPhrases(activeToolNames: string[]): string[] {
