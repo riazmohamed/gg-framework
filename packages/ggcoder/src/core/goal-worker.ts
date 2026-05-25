@@ -4,7 +4,7 @@ import { createWriteStream, existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { killProcessTree } from "../utils/process.js";
 import { log } from "./logger.js";
 import {

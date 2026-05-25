@@ -1,7 +1,7 @@
 import chalk from "chalk";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
-import type { Provider } from "@kenkaiiii/gg-ai";
+import type { Provider } from "@abukhaled/gg-ai";
 import { getModel } from "../core/model-registry.js";
 import { LANGUAGE_DISPLAY_NAMES, type LanguageId } from "../core/language-detector.js";
 import type { CompletedItem } from "./App.js";

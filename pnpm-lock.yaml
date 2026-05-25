@@ -158,7 +158,7 @@ importers:
       '@abukhaled/gg-ai':
         specifier: workspace:*
         version: link:../gg-ai
-      '@abukhaled/ggcoder':
+      '@abukhaled/ogcoder':
         specifier: workspace:*
         version: link:../ggcoder
       '@types/node':
@@ -204,7 +204,7 @@ importers:
       '@abukhaled/gg-ai':
         specifier: workspace:*
         version: link:../gg-ai
-      '@abukhaled/ggcoder':
+      '@abukhaled/ogcoder':
         specifier: workspace:*
         version: link:../ggcoder
       chalk:

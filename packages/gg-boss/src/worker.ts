@@ -1,4 +1,4 @@
-import { AgentSession } from "@abukhaled/ggcoder";
+import { AgentSession } from "@kenkaiiii/ggcoder";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { EventQueue } from "./event-queue.js";
 import type { ToolUseSummary, WorkerStatus, WorkerTurnSummary } from "./types.js";

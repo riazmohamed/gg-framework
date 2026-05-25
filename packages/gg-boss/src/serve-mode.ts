@@ -1,7 +1,7 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import chalk from "chalk";
-import { getAppPaths, MODELS, type ModelInfo } from "@abukhaled/ggcoder";
+import { getAppPaths, MODELS, type ModelInfo } from "@kenkaiiii/ggcoder";
 import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { setStreamDiagnostic } from "@abukhaled/gg-agent";
 import { GGBoss } from "./orchestrator.js";

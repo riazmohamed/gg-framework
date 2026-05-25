@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Static, Text, render, useApp, useInput, useStdout } from "ink";
-import { ThemeContext, loadTheme, useTheme } from "@abukhaled/ggcoder/ui/theme";
+import { ThemeContext, loadTheme, useTheme } from "@kenkaiiii/ggcoder/ui/theme";
 import {
   ActivityIndicator,
   AnimationProvider,
@@ -16,10 +16,10 @@ import {
   UserMessage,
   useAnimationActive,
   useAnimationTick,
-} from "@abukhaled/ggcoder/ui";
-import { useDoublePress } from "@abukhaled/ggcoder/ui/hooks/double-press";
+} from "@kenkaiiii/ggcoder/ui";
+import { useDoublePress } from "@kenkaiiii/ggcoder/ui/hooks/double-press";
 import type { Provider } from "@abukhaled/gg-ai";
-import { TerminalSizeProvider, useTerminalSize } from "@abukhaled/ggcoder/ui/hooks/terminal-size";
+import { TerminalSizeProvider, useTerminalSize } from "@kenkaiiii/ggcoder/ui/hooks/terminal-size";
 import { BossFooter } from "./boss-footer.js";
 import { BossBanner } from "./banner.js";
 import { bossStore, useBossState } from "./boss-store.js";

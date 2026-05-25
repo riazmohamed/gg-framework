@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { agentLoop, type AgentEvent, type AgentTool } from "@kenkaiiii/gg-agent";
-import { ProviderError } from "@kenkaiiii/gg-ai";
-import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from "@kenkaiiii/gg-ai";
+import { agentLoop, type AgentEvent, type AgentTool } from "@abukhaled/gg-agent";
+import { ProviderError } from "@abukhaled/gg-ai";
+import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from "@abukhaled/gg-ai";
 import { getClaudeCliUserAgent } from "../../core/claude-code-version.js";
 import { log } from "../../core/logger.js";
 

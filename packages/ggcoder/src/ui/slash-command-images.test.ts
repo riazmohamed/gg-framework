@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Message } from "@kenkaiiii/gg-ai";
+import type { Message } from "@abukhaled/gg-ai";
 import type { ImageAttachment } from "../utils/image.js";
 import {
   buildGoalSetupPromptFromPlanner,

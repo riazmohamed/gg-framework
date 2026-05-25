@@ -5,7 +5,7 @@ import {
   estimateConversationTokens,
   getContextWindow,
   shouldCompact,
-} from "@abukhaled/ggcoder";
+} from "@kenkaiiii/ggcoder";
 import {
   formatError,
   type Message,

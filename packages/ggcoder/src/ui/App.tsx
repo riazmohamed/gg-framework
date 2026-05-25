@@ -21,13 +21,13 @@ import {
   type ThinkingLevel,
   type TextContent,
   type ImageContent,
-} from "@kenkaiiii/gg-ai";
+} from "@abukhaled/gg-ai";
 import { extractImagePaths, type ImageAttachment } from "../utils/image.js";
 import {
   buildGoalReferenceContext,
   formatGoalReferencesForPrompt,
 } from "../core/goal-references.js";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool } from "@abukhaled/gg-agent";
 import { useAgentLoop, type StreamSnapshot, type UserContent } from "./hooks/useAgentLoop.js";
 import { UserMessage } from "./components/UserMessage.js";
 import type { PasteInfo } from "./components/InputArea.js";

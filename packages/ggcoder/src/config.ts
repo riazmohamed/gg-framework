@@ -2,7 +2,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
-import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { ThemeName } from "./ui/theme/theme.js";
 
 export const APP_NAME = "ggcoder";

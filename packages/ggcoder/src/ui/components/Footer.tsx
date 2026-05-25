@@ -1,6 +1,6 @@
 import React from "react";
 import { Text, Box } from "ink";
-import type { ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { ThinkingLevel } from "@abukhaled/gg-ai";
 import type { GoalMode } from "../../core/runtime-mode.js";
 import { useTheme } from "../theme/theme.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
