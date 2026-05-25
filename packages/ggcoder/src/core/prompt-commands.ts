@@ -330,6 +330,8 @@ Cite these as needed per audit. Do not dump them into the report — use them to
     description: "Generate or update CLAUDE.md for this project",
     prompt: `Generate or update a minimal CLAUDE.md with project-specific context only: what this project is, how it is structured, and commands/workflows that are unique to it.
 
+The target is the user's currently-open project (the cwd ogcoder was launched in), NOT ogcoder/this CLI itself. If the cwd happens to be a fork of ogcoder, treat it as you would any other project.
+
 Do NOT add generic agent behavior already covered by the system prompt, including: read before edit/write, re-read after formatters, ask before destructive actions, no fake verification, generic code-quality advice, single-responsibility rules, one-file-per-component rules, or language-style conventions. Never add guidance that requires running checks, builds, or the full quality suite after every edit or every file change. Include only project-specific overrides or stricter local requirements.
 
 ## Step 1: Check if CLAUDE.md Exists
@@ -385,7 +387,7 @@ Keep total file under 100 lines. If updating, preserve any custom sections the u
 
 End your reply with this exact notice so the user doesn't miss it:
 
-> ⚠️ CLAUDE.md was created/updated. ggcoder loads it at startup, so **exit and restart ggcoder** (\`/quit\` then run \`ggcoder\` again) before continuing. Without a restart, I won't see the new context.`,
+> ⚠️ CLAUDE.md was created/updated. ogcoder loads it at startup, so **exit and restart ogcoder** (\`/quit\` then run \`ogcoder\` again) before continuing. Without a restart, I won't see the new context.`,
   },
   {
     name: "setup-commit",
