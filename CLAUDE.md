@@ -21,7 +21,7 @@ This windows fork is a slimmer subset of the upstream `kenkaiiii/gg-framework`: 
 
 ### Brand
 
-User-visible name is **"OG Coder by abukhaled"**, rendered with the "OG" ASCII logo in `terminal-history.ts`. The Goal-mode system prompts and the default agent identity in `system-prompt.ts` use **"OG Coder by Abu Khaled"** (title-case attribution) — keep both forms consistent if you touch them.
+User-visible name is **"OG Coder by abukhaled"** — rendered with the "OG" ASCII logo by the TUI banner in `terminal-history.ts` and by the duplicate help-screen banner in `cli.ts` (printed for `ogcoder --help`). The Goal-mode system prompts and the default agent identity in `system-prompt.ts` use **"OG Coder by Abu Khaled"** (title-case attribution) — that form is reserved for prompts the agent reads about itself; everything the human sees uses lowercase "abukhaled".
 
 The literal string `"ggcoder"` is still load-bearing in several internal places and must NOT be rebranded:
 

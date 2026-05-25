@@ -177,7 +177,7 @@ function printHelp(): void {
       primary.bold("OG Coder") +
       dim(` v${CLI_VERSION}`) +
       dim(" · By ") +
-      bold("Abu Khaled"),
+      bold("abukhaled"),
   );
   console.log(gradientLine(LOGO_LINES[1]) + gap + dim("AI coding agent"));
   console.log(gradientLine(LOGO_LINES[2]));
