@@ -19,6 +19,20 @@ Current published version: **4.3.217** (last app-update sync: 2026-05-25 from `m
 
 This windows fork is a slimmer subset of the upstream `kenkaiiii/gg-framework`: it keeps only `gg-ai`, `gg-agent`, `ggcoder` (binary `ogcoder`), and `ggcoder-eyes`. Upstream packages introduced after the previous sync (`gg-boss`, `gg-pixel`, `gg-pixel-server`, `gg-editor`, `gg-editor-premiere-panel`, and pixel-language variants `gg-pixel-go`/`-py`/`-rb`/`-rs`/`-swift`, `gg-voice`) and the in-app Pixel error-tracking flow (`pixel.ts`, `pixel-fix.ts`, `PixelOverlay.tsx`, `core/auth/index.ts`, `utils/open-browser.ts`) are intentionally excluded. When merging from upstream, drop those packages/files and rewrite any `@kenkaiiii/*` workspace imports to `@abukhaled/*`. Prefer merging from `rebrand/abukhaled` over `main` — it already carries the `@abukhaled` scope rewrites.
 
+### Brand
+
+User-visible name is **"OG Coder by abukhaled"**, rendered with the "OG" ASCII logo in `terminal-history.ts`. The Goal-mode system prompts and the default agent identity in `system-prompt.ts` use **"OG Coder by Abu Khaled"** (title-case attribution) — keep both forms consistent if you touch them.
+
+The literal string `"ggcoder"` is still load-bearing in several internal places and must NOT be rebranded:
+
+- `ErrorSource` discriminator in `packages/gg-ai/src/errors.ts` and the `f.source === "ggcoder"` comparison in `App.tsx`
+- Default `promptCacheKey` in the OpenAI / OpenAI-Codex providers (stable cache routing)
+- `/tmp/ggcoder-img-*` temp-file naming
+- The `@abukhaled/ggcoder-eyes` package import and the `packages/ggcoder/` directory name
+- `GGCODER_BUG_REPORT_URL` in `App.tsx` (still points at the upstream issue tracker — no fork-owned tracker has been set up)
+
+When upstream merges reintroduce "GG Coder" / "Ken Kai" / "ggcoder" in user-visible strings, rebrand only those — leave the internal IDs alone.
+
 ## Commands
 
 ```bash

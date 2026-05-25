@@ -13,7 +13,7 @@ import { getUserMessageDisplayParts } from "./utils/user-message-display.js";
 import { buildToolGroupSummary, segmentsToPlainText } from "./tool-group-summary.js";
 import { renderMarkdownToAnsiLines } from "./utils/markdown-renderer.js";
 
-const LOGO_LINES = [" ▄▀▀▀ ▄▀▀▀", " █ ▀█ █ ▀█", " ▀▄▄▀ ▀▄▄▀"];
+const LOGO_LINES = [" ▄▀▀▄ ▄▀▀▀", " █  █ █ ▀█", " ▀▄▄▀ ▀▄▄▀"];
 const GRADIENT = [
   "#60a5fa",
   "#6da1f9",
@@ -343,7 +343,7 @@ function renderBanner(context: TerminalHistoryContext): string {
       "",
       ...logo,
       "",
-      `${color(context.theme.primary, "GG Coder", true)}${dim(context, ` v${context.version}`)}`,
+      `${color(context.theme.primary, "OG Coder", true)}${dim(context, ` v${context.version}`)}`,
       `${color(context.theme.secondary, modelName)}  ${dim(context, truncatePlain(displayPath, context.columns))}`,
       `${color(context.theme.primary, "/goal")} ${dim(context, "start goal · ")}${color(context.theme.primary, "Shift+Tab")} ${dim(context, "toggle thinking")}`,
       "",
@@ -352,7 +352,7 @@ function renderBanner(context: TerminalHistoryContext): string {
 
   return block([
     "",
-    `${logo[0]}${GAP}${color(context.theme.primary, "GG Coder", true)}${dim(context, ` v${context.version} · By `)}${color(context.theme.text, "Ken Kai", true)}`,
+    `${logo[0]}${GAP}${color(context.theme.primary, "OG Coder", true)}${dim(context, ` v${context.version} · By `)}${color(context.theme.text, "abukhaled", true)}`,
     `${logo[1]}${GAP}${color(context.theme.secondary, modelName)}  ${dim(context, truncatePlain(displayPath, Math.max(10, context.columns - LOGO_WIDTH - GAP.length - stringWidth(modelName) - 2)))}`,
     `${logo[2]}${GAP}${color(context.theme.primary, "/goal")} ${dim(context, "start goal · ")}${color(context.theme.primary, "Shift+Tab")} ${dim(context, "toggle thinking")}`,
     "",

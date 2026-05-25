@@ -238,11 +238,11 @@ Prefer publishers with track record (vercel-labs, anthropics) and repos with sta
 3. **Shortlist 2–3 candidates.** Present each with: name, one-line description, source repo URL, why it fits. Don't just install the first hit.
 4. **Confirm scope** with the user: project (default) or global.
 5. **Install** using the \`bash\` tool (see below).
-6. **Verify** the file landed and tell the user to start a new gg-coder session so the loader picks it up.
+6. **Verify** the file landed and tell the user to start a new ogcoder session so the loader picks it up.
 
 ## How to install
 
-Skills come in two shapes. gg-coder's loader handles both.
+Skills come in two shapes. ogcoder's loader handles both.
 
 ### Shape A — single file
 

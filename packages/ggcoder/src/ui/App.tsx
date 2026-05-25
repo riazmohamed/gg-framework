@@ -196,7 +196,7 @@ function toErrorItem(err: unknown, id: string, contextPrefix?: string): ErrorIte
   // so users have a clear place to send the report.
   const guidance =
     f.source === "ggcoder"
-      ? `This looks like a ggcoder bug — please send it to the dev at ${GGCODER_BUG_REPORT_URL}.`
+      ? `This looks like an ogcoder bug — please send it to the dev at ${GGCODER_BUG_REPORT_URL}.`
       : f.guidance;
   // Mirror every user-visible error into ~/.gg/debug.log so reports can be
   // diagnosed even after the terminal scrollback is gone.
@@ -3962,7 +3962,7 @@ export function App(props: AppProps) {
       {
         name: "quit",
         aliases: ["q", "exit"],
-        description: "Exit ggcoder",
+        description: "Exit ogcoder",
         sectionTitle: "built-in",
       },
     ];
