@@ -1,21 +1,19 @@
 import { describe, expect, it } from "vitest";
+import type { CompletedItem, GoalProgressItem } from "./app-items.js";
+import { routePromptCommandInput } from "./prompt-routing.js";
+import { formatGoalTerminalProgress, getGoalContinuationChoiceKey } from "./goal-progress.js";
+import { getNextGeneratedItemId, removeItemsWithIds, uniqueItemsById } from "./item-helpers.js";
 import {
-  formatGoalTerminalProgress,
   getDoneFlushDecision,
   getGoalActivationPaneTransition,
-  getGoalContinuationChoiceKey,
   getGoalSetupFinishedPaneTransition,
   getGoalSetupPaneTransitionAfterRun,
-  getNextGeneratedItemId,
   nextGoalModeAfterAgentDone,
-  routePromptCommandInput,
   shouldHideHistoryForOverlayView,
   shouldHideStaticItemsForOverlayView,
   shouldResetUIForGoalSetupPaneTransition,
   shouldStabilizeOverlayPaneRerender,
-  type CompletedItem,
-  type GoalProgressItem,
-} from "./App.js";
+} from "./layout-decisions.js";
 import { buildGoalSummaryRows } from "./goal-summary.js";
 import type { GoalRun } from "../core/goal-store.js";
 
@@ -185,6 +183,28 @@ describe("App TUI state persistence helpers", () => {
     expect(firstFreshItem).toBe("ui-0");
   });
 
+  it("dedupes restored live rows by id before rendering", () => {
+    const restoredLiveItems: CompletedItem[] = [
+      { kind: "info", text: "first", id: "ui-0" },
+      { kind: "info", text: "duplicate", id: "ui-0" },
+      { kind: "info", text: "second", id: "ui-1" },
+    ];
+
+    expect(uniqueItemsById(restoredLiveItems).map((item) => item.id)).toEqual(["ui-0", "ui-1"]);
+  });
+
+  it("drops restored live rows that were already finalized into history", () => {
+    const restoredLiveItems: CompletedItem[] = [
+      { kind: "info", text: "already printed", id: "ui-0" },
+      { kind: "info", text: "still live", id: "ui-1" },
+    ];
+    const historyIds = new Set(["banner", "ui-0"]);
+
+    expect(removeItemsWithIds(restoredLiveItems, historyIds).map((item) => item.id)).toEqual([
+      "ui-1",
+    ]);
+  });
+
   it("models the regression: goal progress history is hidden while a pane is open", () => {
     const goalProgress: GoalProgressItem = {
       kind: "goal_progress",
@@ -253,14 +273,25 @@ describe("App TUI state persistence helpers", () => {
       title: "Goal passed: Persist goal output",
       detail: "Final audit passed; verifier log: artifacts/goal-pass.log",
       status: "passed",
-      summaryRows: [
-        { label: "Work", value: "Implement" },
-        { label: "Tasks", value: "1/1 done" },
-        { label: "Verifier", value: "pass", detail: "artifacts/goal-pass.log" },
-        { label: "Evidence", value: "1 recorded", detail: "artifacts/goal-pass.log" },
-        { label: "Criteria", value: "1 checked" },
-      ],
     });
+    expect(
+      formatGoalTerminalProgress(
+        goalRun({
+          status: "passed",
+          tasks: [
+            { id: "task-1", title: "Implement", prompt: "Do it", status: "done", attempts: 1 },
+          ],
+          verifier: {
+            description: "Goal verifier",
+            lastResult: {
+              status: "pass",
+              summary: "passed",
+              checkedAt: "2024-01-01T00:00:00.000Z",
+            },
+          },
+        }),
+      ),
+    ).not.toHaveProperty("summaryRows");
     expect(formatGoalTerminalProgress(goalRun({ status: "running" }))).toBeNull();
   });
 
@@ -300,7 +331,7 @@ describe("App TUI state persistence helpers", () => {
     ]);
   });
 
-  it("surfaces findings, work, residual risk, verifier, and audit outcome for passed Goals", () => {
+  it("surfaces only the compact audit outcome for passed terminal Goal progress", () => {
     const progress = formatGoalTerminalProgress(
       goalRun({
         status: "passed",
@@ -365,19 +396,12 @@ describe("App TUI state persistence helpers", () => {
     expect(progress).toMatchObject({
       title: "Goal passed: Persist goal output",
       detail: "original-goal-prompt GOAL_PLAN All findings fixed and residual risks accepted.",
-      summaryRows: expect.arrayContaining([
-        { label: "Findings", value: "Fixed setup completeness and verifier gaps." },
-        { label: "Work", value: "Audit findings; Fix production gaps" },
-        {
-          label: "Residual",
-          value: "Optional provider-backed canary accepted as residual risk pending user approval.",
-        },
-        { label: "Verifier", value: "pass", detail: "artifacts/goal-pass.log" },
-      ]),
     });
+    expect(progress).not.toHaveProperty("summaryRows");
+    expect(progress).not.toHaveProperty("summarySections");
   });
 
-  it("formats every terminal Goal status label with stable summary rows", () => {
+  it("formats every terminal Goal status label as compact one-line progress", () => {
     const failed = formatGoalTerminalProgress(
       goalRun({ status: "failed", title: "Failing verifier", blockers: ["Tests still fail"] }),
     );
@@ -390,22 +414,22 @@ describe("App TUI state persistence helpers", () => {
 
     expect(failed).toMatchObject({
       title: "Goal failed: Failing verifier",
-      detail: "Auto-continuation stopped. Check Goal tasks for the failing step.",
+      detail: "Auto-continuation stopped.",
       status: "failed",
-      summaryRows: expect.any(Array),
     });
+    expect(failed).not.toHaveProperty("summaryRows");
     expect(blocked).toMatchObject({
       title: "Goal blocked: Missing phone",
       detail: "Attach device",
       status: "blocked",
-      summaryRows: expect.any(Array),
     });
+    expect(blocked).not.toHaveProperty("summaryRows");
     expect(paused).toMatchObject({
       title: "Goal paused: Paused review",
       detail: "User paused",
       status: "paused",
-      summaryRows: expect.any(Array),
     });
+    expect(paused).not.toHaveProperty("summaryRows");
     expect(formatGoalTerminalProgress(goalRun({ status: "ready" }))).toBeNull();
     expect(formatGoalTerminalProgress(goalRun({ status: "verifying" }))).toBeNull();
   });

@@ -34,9 +34,10 @@ export function formatGoalElapsed(ms: number): string {
 }
 
 function truncateLabel(label: string, maxLength: number): string {
-  if (label.length <= maxLength) return label;
+  const normalized = label.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
   if (maxLength <= 1) return "…";
-  return `${label.slice(0, maxLength - 1)}…`;
+  return `${normalized.slice(0, maxLength - 1)}…`;
 }
 
 function GoalAnimationSentinel(): null {
@@ -76,7 +77,7 @@ function getPhaseColor(phase: GoalStatusPhase, theme: ReturnType<typeof useTheme
 }
 
 export function formatGoalStatusActiveText(entry: GoalStatusEntry): string {
-  return `Goal ${PHASE_LABELS[entry.phase]} · ${truncateLabel(entry.label, 42)}`;
+  return `Goal ${PHASE_LABELS[entry.phase]} · ${truncateLabel(entry.label, 24)}`;
 }
 
 export function syncGoalStatusEntries(
@@ -135,17 +136,27 @@ export function reconcileGoalStatusEntriesWithRuns(
   return next.length === previous.length ? (previous as GoalStatusEntry[]) : next;
 }
 
-function GoalStatusSlot({ entry, tick }: { entry: GoalStatusEntry; tick: number }) {
+function GoalStatusSlot({
+  entry,
+  tick,
+  maxWidth,
+}: {
+  entry: GoalStatusEntry;
+  tick: number;
+  maxWidth: number;
+}) {
   const theme = useTheme();
   const phaseColor = getPhaseColor(entry.phase, theme);
   const phaseLabel = PHASE_LABELS[entry.phase];
   const elapsed = formatGoalElapsed(Date.now() - entry.startedAt);
-  const label = truncateLabel(entry.label, 42);
+  const prefix = entry.phase === "failed" ? `✗ Goal ${phaseLabel}` : `Goal ${phaseLabel}`;
+  const reserved = prefix.length + elapsed.length + 4;
+  const label = truncateLabel(entry.label, Math.max(1, maxWidth - reserved));
 
   if (entry.phase === "failed") {
     return (
       <Text>
-        <Text color={phaseColor}>✗ Goal {phaseLabel}</Text>
+        <Text color={phaseColor}>{prefix}</Text>
         <Text color={theme.textDim}> · {label}</Text>
         <Text color={theme.textDim}> {elapsed}</Text>
       </Text>
@@ -154,7 +165,7 @@ function GoalStatusSlot({ entry, tick }: { entry: GoalStatusEntry; tick: number 
 
   return (
     <Text>
-      <ShimmerText text={`Goal ${phaseLabel}`} color={phaseColor} tick={tick} />
+      <ShimmerText text={prefix} color={phaseColor} tick={tick} />
       <Text color={theme.textDim}> · </Text>
       <Text color={theme.text}>{label}</Text>
       <Text color={theme.textDim}> {elapsed}</Text>
@@ -171,8 +182,10 @@ export function GoalStatusBar({ entries }: { entries: readonly GoalStatusEntry[]
 
   const activeEntries = entries.filter((entry) => entry.phase !== "failed");
   const failedEntries = entries.filter((entry) => entry.phase === "failed");
-  const visibleEntries = [...activeEntries, ...failedEntries].slice(0, 3);
+  const visibleEntries = [...activeEntries, ...failedEntries].slice(0, 1);
   const hiddenCount = entries.length - visibleEntries.length;
+  const hiddenSuffix = hiddenCount > 0 ? ` │ +${hiddenCount} more` : "";
+  const slotWidth = Math.max(8, columns - 2 - hiddenSuffix.length);
 
   return (
     <Box paddingX={1} width={columns} flexShrink={1}>
@@ -181,10 +194,10 @@ export function GoalStatusBar({ entries }: { entries: readonly GoalStatusEntry[]
         {visibleEntries.map((entry, index) => (
           <React.Fragment key={entry.runId}>
             {index > 0 ? <Text color={theme.border}>{" │ "}</Text> : null}
-            <GoalStatusSlot entry={entry} tick={tick} />
+            <GoalStatusSlot entry={entry} tick={tick} maxWidth={slotWidth} />
           </React.Fragment>
         ))}
-        {hiddenCount > 0 ? <Text color={theme.textDim}> │ +{hiddenCount} more</Text> : null}
+        {hiddenCount > 0 ? <Text color={theme.textDim}>{hiddenSuffix}</Text> : null}
       </Text>
     </Box>
   );

@@ -59,7 +59,8 @@ import { runServeMode } from "./modes/serve-mode.js";
 import { runAgentHomeMode } from "./modes/agent-home-mode.js";
 import { renderLoginSelector } from "./ui/login.js";
 import { renderSessionSelector } from "./ui/sessions.js";
-import type { CompletedItem, GoalProgressDraft } from "./ui/App.js";
+import type { CompletedItem, GoalProgressDraft } from "./ui/app-items.js";
+import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { segmentDisplayText, stripDoneMarkers } from "./utils/plan-steps.js";
 import { formatUserError } from "./utils/error-handler.js";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
@@ -98,6 +99,7 @@ import { checkAndAutoUpdate } from "./core/auto-update.js";
 import { parseGoalSyntheticEvent } from "./ui/goal-events.js";
 import type { GoalReference } from "./core/goal-store.js";
 import type { GoalMode } from "./core/runtime-mode.js";
+import { routeCliCommandInput, type CliSubcommandName } from "./cli/command-routing.js";
 
 const _require = createRequire(import.meta.url);
 const CLI_VERSION = (_require("../package.json") as { version: string }).version;
@@ -247,6 +249,38 @@ function printHelp(): void {
   console.log();
 }
 
+function createCliSubcommandHandlers(): Record<CliSubcommandName, () => void> {
+  const runWithStandardErrorHandling = (operation: () => Promise<void>, logStack = false): void => {
+    operation().catch((err) => {
+      log(
+        "ERROR",
+        "fatal",
+        err instanceof Error ? (logStack ? (err.stack ?? err.message) : err.message) : String(err),
+      );
+      closeLogger();
+      process.stderr.write(formatUserError(err) + "\n");
+      process.exit(1);
+    });
+  };
+
+  return {
+    pixel: () => runWithStandardErrorHandling(runPixel, true),
+    login: () => runWithStandardErrorHandling(runLogin),
+    logout: () => runWithStandardErrorHandling(runLogout),
+    sessions: () => runWithStandardErrorHandling(runSessions),
+    telegram: () => runWithStandardErrorHandling(runTelegramSetup),
+    serve: () => runWithStandardErrorHandling(runServe),
+    doctor: () => {
+      runDoctor().catch((err) => {
+        process.stderr.write(formatUserError(err) + "\n");
+        process.exit(1);
+      });
+    },
+    "agent-home-login": () => runWithStandardErrorHandling(runAgentHomeLogin),
+    "agent-home": () => runWithStandardErrorHandling(runAgentHome),
+  };
+}
+
 function main(): void {
   // Silent auto-update check (throttled, non-blocking on failure)
   const updateMessage = checkAndAutoUpdate(CLI_VERSION);
@@ -254,113 +288,18 @@ function main(): void {
     console.error(chalk.bold.hex("#4ade80")(`✨ ${updateMessage}`));
   }
 
-  // Intercept --help / -h before anything else so it works with subcommands
-  // (e.g. `ggcoder login --help` or `ggcoder --help`)
-  if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    printHelp();
-    process.exit(0);
-  }
+  const commandRoute = routeCliCommandInput({
+    argv: process.argv,
+    printHelp,
+    exit: process.exit,
+    handlers: createCliSubcommandHandlers(),
+  });
 
-  // Handle subcommands before parseArgs
-  const subcommand = process.argv[2];
-
-  if (subcommand === "pixel") {
-    runPixel().catch((err) => {
-      // Log the full stack — `pixel install` failures are usually bugs in our
-      // own AST/wiring code, and the stack is the only useful diagnostic.
-      log("ERROR", "fatal", err instanceof Error ? (err.stack ?? err.message) : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
+  if (commandRoute.kind === "handled") {
     return;
   }
 
-  if (subcommand === "login") {
-    runLogin().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "logout") {
-    runLogout().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "sessions") {
-    process.argv.splice(2, 1);
-    runSessions().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "telegram") {
-    runTelegramSetup().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "serve") {
-    process.argv.splice(2, 1);
-    runServe().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "doctor") {
-    runDoctor().catch((err) => {
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "agent-home-login") {
-    runAgentHomeLogin().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "agent-home") {
-    process.argv.splice(2, 1);
-    runAgentHome().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "continue") {
-    // Remove "continue" so parseArgs handles remaining flags
-    process.argv.splice(2, 1);
-  }
+  const subcommand = commandRoute.kind === "continue" ? "continue" : commandRoute.subcommand;
 
   const { values, positionals } = parseArgs({
     options: {
@@ -666,20 +605,18 @@ async function runInkTUI(opts: {
     return rebuilt;
   };
 
-  // Connect MCP servers
+  // MCP startup can involve `npx` installing/booting servers. Do it after the
+  // TUI paints so a slow network or npm cache never looks like "nothing happens".
   const mcpManager = new MCPClientManager();
-  try {
-    const providerApiKey =
-      provider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
-    const mcpTools = await mcpManager.connectAll(getMCPServers(provider, providerApiKey));
-    tools.push(...mcpTools);
-  } catch (err) {
-    log(
-      "WARN",
-      "mcp",
-      `MCP initialization failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+  let initialMcpConnectPromise: Promise<AgentTool[]> | undefined;
+  const connectInitialMcpTools = async (): Promise<AgentTool[]> => {
+    initialMcpConnectPromise ??= (async () => {
+      const providerApiKey =
+        provider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
+      return mcpManager.connectAll(getMCPServers(provider, providerApiKey));
+    })();
+    return initialMcpConnectPromise;
+  };
 
   const systemPrompt = await buildSystemPrompt(
     cwd,
@@ -814,6 +751,7 @@ async function runInkTUI(opts: {
     rebuildToolsForCwd,
     repoMapChangedFilesRef,
     repoMapReadFilesRef,
+    connectInitialMcpTools,
   });
 
   closeLogger();
@@ -2071,6 +2009,9 @@ function openBrowser(url: string): void {
   });
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+if (
+  process.argv[1] &&
+  fileURLToPath(import.meta.url) === fs.realpathSync(path.resolve(process.argv[1]))
+) {
   main();
 }

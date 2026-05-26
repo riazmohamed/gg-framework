@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import { mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -102,6 +103,14 @@ export interface GoalReference {
   source?: string;
 }
 
+export interface GoalTaskWorktree {
+  baseRef: string;
+  branchName: string;
+  path: string;
+  status: "planned" | "created" | "failed";
+  error?: string;
+}
+
 export interface GoalTask {
   id: string;
   title: string;
@@ -113,6 +122,7 @@ export interface GoalTask {
   parallelGroup?: string;
   expectedChangedScope?: string[];
   mergeStrategy?: GoalTaskMergeStrategy;
+  worktree?: GoalTaskWorktree;
   verification?: GoalVerificationResult;
   lastSummary?: string;
 }
@@ -205,6 +215,7 @@ export interface GoalTaskInput {
   parallelGroup?: string;
   expectedChangedScope?: string[];
   mergeStrategy?: GoalTaskMergeStrategy;
+  worktree?: GoalTaskWorktree;
   verification?: GoalVerificationResult;
   lastSummary?: string;
 }
@@ -477,6 +488,26 @@ function normalizeReference(value: unknown): GoalReference | null {
   };
 }
 
+function normalizeTaskWorktree(value: unknown): GoalTaskWorktree | undefined {
+  if (!isObject(value)) return undefined;
+  const baseRef = optionalString(value.baseRef);
+  const branchName = optionalString(value.branchName);
+  const worktreePath = optionalString(value.path);
+  const rawStatus = value.status;
+  const status =
+    rawStatus === "planned" || rawStatus === "created" || rawStatus === "failed"
+      ? rawStatus
+      : undefined;
+  if (!baseRef || !branchName || !worktreePath || !status) return undefined;
+  return {
+    baseRef,
+    branchName,
+    path: worktreePath,
+    status,
+    ...(optionalString(value.error) ? { error: optionalString(value.error) } : {}),
+  };
+}
+
 function normalizeTask(value: unknown): GoalTask | null {
   if (!isObject(value)) return null;
   const title = typeof value.title === "string" ? value.title : "Goal task";
@@ -496,6 +527,9 @@ function normalizeTask(value: unknown): GoalTask | null {
       ? { expectedChangedScope: stringArray(value.expectedChangedScope) }
       : {}),
     ...(isTaskMergeStrategy(value.mergeStrategy) ? { mergeStrategy: value.mergeStrategy } : {}),
+    ...(normalizeTaskWorktree(value.worktree)
+      ? { worktree: normalizeTaskWorktree(value.worktree) }
+      : {}),
     ...(normalizeVerification(value.verification)
       ? { verification: normalizeVerification(value.verification) }
       : {}),
@@ -807,6 +841,7 @@ export function createGoalTask(input: GoalTaskInput): GoalTask {
       ? { expectedChangedScope: input.expectedChangedScope }
       : {}),
     ...(input.mergeStrategy ? { mergeStrategy: input.mergeStrategy } : {}),
+    ...(input.worktree ? { worktree: input.worktree } : {}),
     ...(input.verification ? { verification: input.verification } : {}),
     ...(input.lastSummary ? { lastSummary: input.lastSummary } : {}),
   };
@@ -855,8 +890,34 @@ export async function loadGoalRuns(cwd: string): Promise<GoalRun[]> {
   return readGoalRunsFile(cwd);
 }
 
+export function loadGoalRunsSync(cwd: string): GoalRun[] {
+  const normalizedCwd = normalizeProjectPath(cwd);
+  try {
+    const data = readFileSync(join(projectDir(normalizedCwd), "goals.json"), "utf-8");
+    const parsed: unknown = JSON.parse(data);
+    if (!Array.isArray(parsed)) return [];
+    return sortNewestFirst(
+      parsed
+        .map((item) => normalizeRun(item, normalizedCwd))
+        .filter((run): run is GoalRun => run !== null),
+    );
+  } catch {
+    return [];
+  }
+}
+
 export async function saveGoalRuns(cwd: string, runs: readonly GoalRun[]): Promise<void> {
   return enqueueWrite(() => writeGoalRunsFile(cwd, runs));
+}
+
+export function saveGoalRunsSync(cwd: string, runs: readonly GoalRun[]): void {
+  const normalizedCwd = normalizeProjectPath(cwd);
+  const sorted = sortNewestFirst([...runs]);
+  writeFileSync(
+    join(projectDir(normalizedCwd), "goals.json"),
+    JSON.stringify(sorted, null, 2) + "\n",
+    "utf-8",
+  );
 }
 
 export async function reconcileActiveGoalRuns(
