@@ -52,6 +52,10 @@ pnpm check && pnpm lint && pnpm format:check
 pnpm --filter @abukhaled/gg-ai test          # Test one package
 pnpm --filter @abukhaled/ogcoder test -- src/tools/read.test.ts  # Single test file
 pnpm test -- -t "should read files"          # Test by name pattern
+
+# Goal system tests (in ggcoder)
+pnpm --filter @abukhaled/ogcoder verify:goal:tests   # Test goal store, worker, lifecycle
+pnpm --filter @abukhaled/ogcoder verify:goal:e2e     # End-to-end goal execution
 ```
 
 ## Architecture
@@ -91,7 +95,7 @@ pnpm test -- -t "should read files"          # Test by name pattern
 - **Sessions** (`core/session-manager.ts`): Append-only JSONL with DAG structure (leafId for branching). Streams line-by-line for large files. `repairToolPairs()` fixes interrupted sessions on restore.
 - **Auth** (`core/auth-storage.ts`, `core/oauth/`): OAuth PKCE for Anthropic and OpenAI (with token refresh + 401 retry); static API keys for GLM, Moonshot, Xiaomi, MiniMax, DeepSeek, Ollama, and OpenRouter. All credentials stored in `~/.gg/auth.json`. Provider selection at startup uses `resolveActiveProvider()` in `cli.ts` — falls back to the first authenticated provider if the saved one isn't logged in.
 - **Themes** (`ui/theme/`): Six themes — `dark`, `light`, `dark-ansi`, `light-ansi`, `dark-daltonized`, `light-daltonized` — plus `auto` (detects from terminal). ANSI variants use 16-color palette for limited terminals; daltonized variants are color-blind friendly. `loadTheme(name)` in `theme.ts` returns the JSON config; `ThemeContext` + `useTheme()` for read, `SetThemeContext` + `useSetTheme()` for runtime switching.
-- **UI**: Ink 6 + React 19. `useAgentLoop` hook drives the agent and surfaces events to React state. Throttled streaming flush at ~16ms intervals to avoid saturating renders. Markdown rendering uses `utils/token-to-ansi.ts` (custom tokenizer → ANSI) instead of marked-terminal for theme-aware output. Terminal hyperlinks via `utils/hyperlink.ts` (gated by `supports-hyperlinks.ts`). Cross-component state (taskbar, etc.) lives in `ui/stores/` using a tiny `create-store` pattern.
+- **UI**: Ink 6 + React 19. `useAgentLoop` hook drives the agent and surfaces events to React state. Throttled streaming flush at ~16ms intervals to avoid saturating renders. Markdown rendering uses `utils/token-to-ansi.ts` (custom tokenizer → ANSI) instead of marked-terminal for theme-aware output. Terminal hyperlinks via `utils/hyperlink.ts` (gated by `supports-hyperlinks.ts`). Cross-component state (taskbar, etc.) lives in `ui/stores/` using a tiny `create-store` pattern. **Recent refactoring** splits rendering logic into focused modules: `app-items.ts` (unified item types), `layout-decisions.ts` (layout routing per state), `item-helpers.ts` (item transforms), `terminal-history-format.ts`/`terminal-history-spacing.ts`/`terminal-history-status-renderers.ts` (separated terminal rendering concerns). `ui/thinking-level.ts` manages thinking level cycling per model.
 - **Live item flushing** (`ui/live-item-flush.ts`): Ink re-renders all live items on every state change, so unbounded growth causes expensive cursor math and visible jank. Items are flushed to `Static` history when safe — after turns complete, on overflow, or when tool-only turns finish. The `liveItems` state array is kept under ~8 items by aggressive overflow flushing. Flushed items' large payloads (tool results, server data) are trimmed to prevent multi-GB memory retention.
 - **Ink layout pitfalls**: Avoid `flexShrink={1}` on small status message items (info, error, plan_transition, etc.) — when combined with parent `flexGrow={1}`, it causes Ink's layout calculator to miscalculate available space, clipping subsequent items. These resolve only on window resize. Status messages should have no shrink directive.
 - **Static + history**: The `<Static>` component (Ink's write-once history area) is keyed with `resizeKey` and `staticKey` to handle terminal resize and overlay transitions. When overlays open, history is hidden by rendering an empty items array. Use `setStaticKey((k) => k + 1)` to force a Static re-mount (used when closing overlays or handling pixel fix transitions).
@@ -99,9 +103,13 @@ pnpm test -- -t "should read files"          # Test by name pattern
 - **Tasks run-all**: Ctrl+T → r spawns tasks sequentially. The `runAllTasks` state flag must be persisted via sessionStore so it survives the component remount after the first task completes (see pattern above). Without this, only the first task would run.
 - **Debug logging**: `~/.gg/debug.log` — timestamped log of startup, auth, tool calls, turn completions, errors. Truncated on each CLI restart. Singleton logger in `src/core/logger.ts`.
 
+### CLI Command Routing
+
+`cli/command-routing.ts` abstracts execution mode dispatch logic — routes arguments like `json`, `serve`, `agent-home`, `rpc`, `pixel`, and default `interactive` mode. Tests in `cli/command-routing.test.ts` ensure arguments are parsed correctly for each mode.
+
 ### Execution Modes
 
-All modes live in `ggcoder/src/modes/` and are dispatched from `cli.ts`:
+All modes live in `ggcoder/src/modes/` and are dispatched via command routing:
 
 - **interactive** (default): Ink/React terminal UI, full session management.
 - **print**: Single-turn, streams output to stdout, no UI.
@@ -137,6 +145,25 @@ Project-agnostic probes that let the agent *see* what's happening in the running
 - **Journal**: `readJournal({ status, order, limit }, cwd)` / `journalCount(...)` over `.gg/eyes/journal.jsonl`. Open entries surface in the startup banner ("👁 Eyes: N open improvement signals — run /eyes-improve to triage") and in the `EyesOverlay` UI component.
 - **Probes** (each is a self-contained shell module with `install.sh` / `detect.sh` / `test.sh` and platform impls under `impl/`): `visual` (simctl / adb / window / playwright / generic), `runtime_logs` (tail / docker / simctl / adb-logcat), `http` (curl), `capture_email` (mailpit). Add a probe by dropping a new directory under `packages/ggcoder-eyes/probes/`.
 - **Slash commands**: `/setup-eyes` (install probes for the current project) and `/eyes-improve` (triage open journal signals into actionable improvements). Both are loaded from `core/prompt-commands.ts`.
+
+### Goals System
+
+A hierarchical goal execution engine for multi-step, long-running work with state tracking, prerequisite checks, and worktree isolation.
+
+- **Goal Store** (`core/goal-store.ts`): Persists goals with rich metadata. Goal has `id`, `title`, `description`, `status` (draft/blocked/ready/running/verifying/passed/failed/paused), `runId`, and `tasks[]`. Each task tracks merge strategy (parallel_candidate/after_dependencies/serial/manual), status, and evidence. Stored per-project in `~/.gg/projects/{hash}/goals/`.
+- **Goal Worker** (`core/goal-worker.ts`): Spawns isolated agent subprocesses (via `ogcoder` in json-mode) to execute a goal task. Enforces `maxTurns` (default 12) and `timeoutMs` (default 30 min). Streams tool use and delta events to a log file. Completion includes summary, exit code, and tools used. Workers emit completion events on finish/timeout/spawn error.
+- **Goal Worktree** (`core/goal-worktree.ts`): Creates isolated git worktrees for candidate goals, runs them in `fix/{goalId}` branches, then tries merging back to the original branch (with conflict resolution strategies). Prevents goal work from polluting the main worktree.
+- **Goal Prerequisites** (`core/goal-prerequisites.ts`): Checks (via shell commands or fixture existence) are run before task execution. Prerequisites have `status` (unknown/met/missing) and optional `checkCommand`, `instructions`, `evidence`.
+- **Goal Verification** (`core/goal-verifier.ts`): After a goal task completes, runs verification commands to confirm the goal was actually met. Returns `GoalVerificationResult` with status (pass/fail/unknown), summary, and optional output path.
+- **UI Integration**: Goal status bar shows run progress, merge status, and verification results. Slash commands: `/goals list`, `/goals run <goalId>`, `/goals verify <goalId>`. Goal lifecycle emits events (started, task_done, verified, merged) that the UI renders in real time.
+
+### Task Management System
+
+A lightweight persistent task queue for agents to manage work items within a session.
+
+- **Task Store** (`core/tasks-store.ts`): Persists tasks in `~/.gg-tasks/projects/{hash}/tasks.json`. Each task has `id`, `title`, `prompt`, `status` (pending/in-progress/done), `createdAt`. The prompt is the standalone instruction sent to a task agent — it should be complete and context-free.
+- **Tasks Tool** (`tools/tasks.ts`): Agent tool with actions: `add` (title + prompt), `list`, `done` (mark complete), `remove`. Tasks are stored per-project and persist across sessions. The UI renders pending tasks in the task pane; agents see them via the tool.
+- **Task Execution**: When a task is picked via UI (Ctrl+T), a new agent session opens with the task prompt as input. On completion, the task is marked done and the next one can be picked. Tasks are NOT related to goals — they're for ad-hoc work queuing within a session.
 
 ### Slash Commands
 
