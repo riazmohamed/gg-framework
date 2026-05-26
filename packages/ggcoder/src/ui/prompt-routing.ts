@@ -1,5 +1,5 @@
 import { writeFileSync } from "node:fs";
-import type { Message, TextContent, ImageContent } from "@kenkaiiii/gg-ai";
+import type { Message, TextContent, ImageContent } from "@abukhaled/gg-ai";
 import type { ImageAttachment } from "../utils/image.js";
 import { PROMPT_COMMANDS, getPromptCommand } from "../core/prompt-commands.js";
 import type { CustomCommand } from "../core/custom-commands.js";

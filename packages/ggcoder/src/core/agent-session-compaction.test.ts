@@ -2,10 +2,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Message } from "@kenkaiiii/gg-ai";
+import type { Message } from "@abukhaled/gg-ai";
 import type * as CompactorModule from "./compaction/compactor.js";
 import type * as RepoMapModule from "./repomap.js";
-import type * as GgAgentModule from "@kenkaiiii/gg-agent";
+import type * as GgAgentModule from "@abukhaled/gg-agent";
 import type * as McpModule from "./mcp/index.js";
 
 const shouldCompactMock = vi.hoisted(() => vi.fn());
@@ -29,8 +29,8 @@ vi.mock("./repomap.js", async () => {
   };
 });
 
-vi.mock("@kenkaiiii/gg-agent", async () => {
-  const actual = await vi.importActual<typeof GgAgentModule>("@kenkaiiii/gg-agent");
+vi.mock("@abukhaled/gg-agent", async () => {
+  const actual = await vi.importActual<typeof GgAgentModule>("@abukhaled/gg-agent");
   return {
     ...actual,
     agentLoop: agentLoopMock,

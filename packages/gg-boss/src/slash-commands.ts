@@ -1,4 +1,4 @@
-import type { SlashCommandInfo } from "@kenkaiiii/ggcoder/ui";
+import type { SlashCommandInfo } from "@abukhaled/ogcoder/ui";
 
 /**
  * Slash commands the boss CLI recognizes. Shape matches ggcoder's

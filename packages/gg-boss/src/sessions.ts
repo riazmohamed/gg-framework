@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
-import { getAppPaths } from "@kenkaiiii/ggcoder";
+import { getAppPaths } from "@abukhaled/ogcoder";
 import type { Message } from "@abukhaled/gg-ai";
 
 /**

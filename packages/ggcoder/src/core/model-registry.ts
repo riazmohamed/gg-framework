@@ -231,7 +231,7 @@ export const MODELS: ModelInfo[] = [
     supportsThinking: false,
     supportsImages: true,
     costTier: "low",
-    maxThinkingLevel: "high",
+    maxThinkingLevel: "low",
   },
   // ── MiniMax ───────────────────────────────────────────────
   // Note: MiniMax's Anthropic-compatible endpoint does NOT support image
@@ -254,18 +254,6 @@ export const MODELS: ModelInfo[] = [
     name: "MiniMax M2.7 Highspeed",
     provider: "minimax",
     contextWindow: 204_800,
-    maxOutputTokens: 131_072,
-    supportsThinking: true,
-    supportsImages: false,
-    costTier: "medium",
-    maxThinkingLevel: "high",
-  },
-  // ── Xiaomi (MiMo) ──────────────────────────────────────
-  {
-    id: "mimo-v2-pro",
-    name: "MiMo-V2-Pro",
-    provider: "xiaomi",
-    contextWindow: 1_000_000,
     maxOutputTokens: 131_072,
     supportsThinking: true,
     supportsImages: false,

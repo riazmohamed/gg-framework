@@ -15,14 +15,8 @@ import { SessionManager, type MessageEntry, type BranchInfo } from "./session-ma
 import { ExtensionLoader } from "./extensions/loader.js";
 import type { ExtensionContext } from "./extensions/types.js";
 import { shouldCompact, compact } from "./compaction/compactor.js";
-import {
-  getContextWindow,
-  getExecutorModel,
-  getModel,
-  getVisionModel,
-  MODELS,
-} from "./model-registry.js";
-import { createModelRouter, type RouterMode } from "./model-router.js";
+import { getContextWindow, getModel, MODELS } from "./model-registry.js";
+import type { RouterMode } from "./model-router.js";
 import { discoverSkills, type Skill } from "./skills.js";
 import { ensureAppDirs } from "../config.js";
 import { buildSystemPrompt } from "../system-prompt.js";

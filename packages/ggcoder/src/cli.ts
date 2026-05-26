@@ -60,7 +60,7 @@ import { runAgentHomeMode } from "./modes/agent-home-mode.js";
 import { renderLoginSelector } from "./ui/login.js";
 import { renderSessionSelector } from "./ui/sessions.js";
 import type { CompletedItem, GoalProgressDraft } from "./ui/app-items.js";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool } from "@abukhaled/gg-agent";
 import { segmentDisplayText, stripDoneMarkers } from "./utils/plan-steps.js";
 import { formatUserError } from "./utils/error-handler.js";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";

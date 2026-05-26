@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { getAppPaths } from "@kenkaiiii/ggcoder";
+import { getAppPaths } from "@abukhaled/ogcoder";
 
 /**
  * Boss debug log — mirrors ggcoder's logger pattern so the format is grep-

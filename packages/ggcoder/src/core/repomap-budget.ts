@@ -1,4 +1,4 @@
-import type { Message } from "@kenkaiiii/gg-ai";
+import type { Message } from "@abukhaled/gg-ai";
 import { FOCUSED_REPO_MAP_MAX_CHARS, FIRST_TURN_REPO_MAP_MAX_CHARS } from "./repomap.js";
 
 export interface RepoMapBudgetSignals {
