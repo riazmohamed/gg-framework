@@ -1,4 +1,4 @@
-import { formatError } from "@kenkaiiii/gg-ai";
+import { formatError } from "@abukhaled/gg-ai";
 import { log } from "../core/logger.js";
 import type { ErrorItem } from "./app-items.js";
 

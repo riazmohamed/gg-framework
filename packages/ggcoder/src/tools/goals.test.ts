@@ -928,7 +928,7 @@ describe("goals tool state guards", () => {
           mechanism: "test",
           description: "Prompt command tests prove slash wrapper behavior.",
           status: "planned",
-          command: "pnpm --filter @kenkaiiii/ggcoder test -- prompt-commands.test.ts",
+          command: "pnpm --filter @abukhaled/ogcoder test -- prompt-commands.test.ts",
         },
       ],
       verifier_command: "pnpm test",

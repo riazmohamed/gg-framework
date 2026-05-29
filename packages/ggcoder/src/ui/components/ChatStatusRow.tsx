@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { ThinkingLevel } from "@abukhaled/gg-ai";
 import { ActivityIndicator } from "./ActivityIndicator.js";
 import type { ActivityPhase, RetryInfo } from "../hooks/useAgentLoop.js";
 import type { useTheme } from "../theme/theme.js";

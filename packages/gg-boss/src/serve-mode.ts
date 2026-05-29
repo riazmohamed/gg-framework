@@ -540,7 +540,7 @@ export async function runBossServeMode(options: BossServeOptions): Promise<void>
       log("ERROR", "voice", message);
       // Common failure: optional dep missing on user's install.
       const hint = /Cannot find module|Cannot resolve|MODULE_NOT_FOUND/.test(message)
-        ? "\n\nVoice transcription needs the optional `@huggingface/transformers` and `ogg-opus-decoder` packages. Reinstall with `npm i -g @kenkaiiii/gg-boss` and ensure optional deps installed."
+        ? "\n\nVoice transcription needs the optional `@huggingface/transformers` and `ogg-opus-decoder` packages. Reinstall with `npm i -g @abukhaled/gg-boss` and ensure optional deps installed."
         : "";
       await bot.send(chatId, `_Voice transcription failed: ${message}_${hint}`);
     }

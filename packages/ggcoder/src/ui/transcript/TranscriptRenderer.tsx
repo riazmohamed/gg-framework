@@ -1,5 +1,5 @@
 import React from "react";
-import type { Provider } from "@kenkaiiii/gg-ai";
+import type { Provider } from "@abukhaled/gg-ai";
 import { UserMessage } from "../components/UserMessage.js";
 import { AssistantMessage } from "../components/AssistantMessage.js";
 import { CompactionDone, CompactionSpinner } from "../components/CompactionNotice.js";

@@ -1,4 +1,4 @@
-import type { Provider, Usage } from "@kenkaiiii/gg-ai";
+import type { Provider, Usage } from "@abukhaled/gg-ai";
 
 export interface ToolSessionStats {
   totalCalls: number;

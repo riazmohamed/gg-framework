@@ -1,6 +1,6 @@
 import React from "react";
 import type { DOMElement } from "ink";
-import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { ContextWindowOptions } from "../../core/model-registry.js";
 import type { GoalMode } from "../../core/runtime-mode.js";
 import type { TaskRecord } from "../../core/tasks-store.js";

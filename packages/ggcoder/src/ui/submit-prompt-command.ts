@@ -1,5 +1,5 @@
 import type React from "react";
-import type { Message } from "@kenkaiiii/gg-ai";
+import type { Message } from "@abukhaled/gg-ai";
 import type { ImageAttachment } from "../utils/image.js";
 import { getModel } from "../core/model-registry.js";
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";

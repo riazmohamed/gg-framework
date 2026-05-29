@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import { execFile } from "node:child_process";
 import chalk from "chalk";
-import type { Provider } from "@kenkaiiii/gg-ai";
+import type { Provider } from "@abukhaled/gg-ai";
 
 const _require = createRequire(import.meta.url);
 // This module lives one directory deeper than cli.ts (src/cli/ → dist/cli/),

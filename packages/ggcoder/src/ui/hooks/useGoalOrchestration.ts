@@ -5,7 +5,7 @@ import {
   type MutableRefObject,
   type SetStateAction,
 } from "react";
-import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { log } from "../../core/logger.js";
 import {
   appendGoalDecision,

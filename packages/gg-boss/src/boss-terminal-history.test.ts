@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { stripAnsi } from "@kenkaiiii/ggcoder/ui/terminal-history-format";
-import { loadTheme } from "@kenkaiiii/ggcoder/ui/theme";
+import { stripAnsi } from "@abukhaled/ogcoder/ui/terminal-history-format";
+import { loadTheme } from "@abukhaled/ogcoder/ui/theme";
 import {
   createBossTerminalHistoryPrinter,
   serializeBossItemToTerminalHistory,

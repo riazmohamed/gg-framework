@@ -1,9 +1,9 @@
 import React, { useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import type { Provider } from "@kenkaiiii/gg-ai";
-import { MODELS } from "@kenkaiiii/ggcoder";
-import { useTerminalSize } from "@kenkaiiii/ggcoder/ui/hooks/terminal-size";
-import { useTheme } from "@kenkaiiii/ggcoder/ui/theme";
+import type { Provider } from "@abukhaled/gg-ai";
+import { MODELS } from "@abukhaled/ogcoder";
+import { useTerminalSize } from "@abukhaled/ogcoder/ui/hooks/terminal-size";
+import { useTheme } from "@abukhaled/ogcoder/ui/theme";
 
 interface BossModelSelectorProps {
   onSelect: (modelId: string) => void;

@@ -551,7 +551,7 @@ describe("goal controller", () => {
               "Assertions prove /goal prompt is short and delegates deep policy to active Goal setup system instructions.",
             status: "planned",
             command:
-              "pnpm --filter @kenkaiiii/ggcoder test -- prompt-commands.test.ts slash-command-images.test.ts",
+              "pnpm --filter @abukhaled/ogcoder test -- prompt-commands.test.ts slash-command-images.test.ts",
           },
           {
             id: "context-wiring-evidence",
@@ -569,7 +569,7 @@ describe("goal controller", () => {
             kind: "command",
             label: "Focused Goal-mode test coverage command",
             content:
-              "Command passed: pnpm --filter @kenkaiiii/ggcoder test -- system-prompt.test.ts prompt-commands.test.ts goal-mode.test.ts slash-command-images.test.ts footer-status-layout.test.ts goal-lifecycle-orchestration.test.ts",
+              "Command passed: pnpm --filter @abukhaled/ogcoder test -- system-prompt.test.ts prompt-commands.test.ts goal-mode.test.ts slash-command-images.test.ts footer-status-layout.test.ts goal-lifecycle-orchestration.test.ts",
             createdAt: "2024-01-01T00:00:00.000Z",
           },
           {

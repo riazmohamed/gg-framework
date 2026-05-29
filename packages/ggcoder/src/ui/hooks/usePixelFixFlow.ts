@@ -6,8 +6,8 @@ import {
   type MutableRefObject,
   type SetStateAction,
 } from "react";
-import type { Message, Provider } from "@kenkaiiii/gg-ai";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { Message, Provider } from "@abukhaled/gg-ai";
+import type { AgentTool } from "@abukhaled/gg-agent";
 import { log } from "../../core/logger.js";
 import { detectLanguages, type LanguageId } from "../../core/language-detector.js";
 import type { PreparedPixelFix } from "../../core/pixel-fix.js";

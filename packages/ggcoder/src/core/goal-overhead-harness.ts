@@ -6,7 +6,7 @@ import {
   collectAssistantTextSince,
 } from "../ui/prompt-routing.js";
 import { buildSystemPrompt } from "../system-prompt.js";
-import type { Message } from "@kenkaiiii/gg-ai";
+import type { Message } from "@abukhaled/gg-ai";
 
 export interface GoalOverheadStageMeasurement {
   stage: string;

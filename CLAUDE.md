@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Last updated:** 2026-05-26 — Synced from main with @abukhaled namespace preservation. Major changes: new goal/task system components, refactored CLI command routing, enhanced UI layout and rendering abstractions.
+**Last updated:** 2026-05-29 — Latest sync from main (main@bcec2b0) with @abukhaled namespace preservation. Major upstream additions: refactored App.tsx component structure, new goal overhead harness testing, thinking-level core extraction, enter/exit-plan tools, chat layout/state management hooks, transcript rendering improvements, gg-boss orchestrator refactoring, and new CLI auth/pixel modules.
 
 ## Project
 

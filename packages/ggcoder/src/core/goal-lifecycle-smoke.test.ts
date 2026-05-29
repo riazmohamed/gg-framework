@@ -68,11 +68,11 @@ describe("goal lifecycle smoke", () => {
           mechanism: "test",
           description: "Vitest asserts transitions and JSON persistence",
           status: "planned",
-          command: "pnpm --filter @kenkaiiii/ggcoder test -- goal-lifecycle-smoke",
+          command: "pnpm --filter @abukhaled/ogcoder test -- goal-lifecycle-smoke",
           path: "packages/ggcoder/src/core/goal-lifecycle-smoke.test.ts",
         },
       ],
-      verifier_command: "pnpm --filter @kenkaiiii/ggcoder test -- goal-lifecycle-smoke",
+      verifier_command: "pnpm --filter @abukhaled/ogcoder test -- goal-lifecycle-smoke",
       verifier_description: "Focused local Vitest lifecycle smoke",
     });
     await goals({
@@ -131,7 +131,7 @@ describe("goal lifecycle smoke", () => {
     persisted = await run();
     expect(decideGoalNextAction(persisted)).toEqual({
       kind: "run_verifier",
-      command: "pnpm --filter @kenkaiiii/ggcoder test -- goal-lifecycle-smoke",
+      command: "pnpm --filter @abukhaled/ogcoder test -- goal-lifecycle-smoke",
       reason: "All Goal tasks are done; running configured verifier for real completion evidence.",
     });
     expect(persisted.tasks).toEqual([

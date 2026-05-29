@@ -1,8 +1,8 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { useAnimationActive, useAnimationTick } from "@kenkaiiii/ggcoder/ui";
-import { useTerminalSize } from "@kenkaiiii/ggcoder/ui/hooks/terminal-size";
-import { useTheme } from "@kenkaiiii/ggcoder/ui/theme";
+import { useAnimationActive, useAnimationTick } from "@abukhaled/ogcoder/ui";
+import { useTerminalSize } from "@abukhaled/ogcoder/ui/hooks/terminal-size";
+import { useTheme } from "@abukhaled/ogcoder/ui/theme";
 import type { WorkerView } from "./boss-store.js";
 import { projectColor } from "./colors.js";
 

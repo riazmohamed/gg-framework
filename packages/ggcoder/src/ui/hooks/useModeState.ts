@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
-import type { Message, Provider } from "@kenkaiiii/gg-ai";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { Message, Provider } from "@abukhaled/gg-ai";
+import type { AgentTool } from "@abukhaled/gg-agent";
 import { buildSystemPrompt } from "../../system-prompt.js";
 import type { GoalMode } from "../../core/runtime-mode.js";
 import type { LanguageId } from "../../core/language-detector.js";
