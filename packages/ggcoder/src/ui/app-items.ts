@@ -2,6 +2,7 @@ import type { PasteInfo } from "./components/InputArea.js";
 import type { SubAgentInfo } from "./components/SubAgentPanel.js";
 import type { GoalSummaryRow, GoalSummarySection } from "./goal-summary.js";
 import type { LanguageId } from "../core/language-detector.js";
+import type { SessionSummary } from "./session-summary.js";
 
 export interface UserItem {
   kind: "user";
@@ -114,6 +115,8 @@ export interface SetupHintItem {
   id: string;
 }
 
+export const UPDATE_NOTICE_TEXT = "KEN HAS PUSHED A NEW GG CODER UPDATE";
+
 export interface UpdateNoticeItem {
   kind: "update_notice";
   text: string;
@@ -146,6 +149,12 @@ export interface DurationItem {
   durationMs: number;
   toolsUsed: string[];
   verb: string;
+  id: string;
+}
+
+export interface SessionSummaryItem {
+  kind: "session_summary";
+  summary: SessionSummary;
   id: string;
 }
 
@@ -267,6 +276,7 @@ export type CompletedItem =
   | CompactingItem
   | CompactedItem
   | DurationItem
+  | SessionSummaryItem
   | BannerItem
   | SubAgentGroupItem
   | ToolGroupItem

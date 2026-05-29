@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { Message, Provider } from "@abukhaled/gg-ai";
+import type { CompletedItem } from "../ui/app-items.js";
 
 // ── Entry Types ────────────────────────────────────────────
 
@@ -47,6 +48,13 @@ export interface CustomEntry extends BaseEntry {
   data: unknown;
 }
 
+export const DISPLAY_ITEM_CUSTOM_KIND = "display_item";
+
+interface DisplayItemPayload {
+  version: 1;
+  item: CompletedItem;
+}
+
 export type SessionEntry =
   | MessageEntry
   | ModelChangeEntry
@@ -54,6 +62,15 @@ export type SessionEntry =
   | CompactionEntry
   | LabelEntry
   | CustomEntry;
+
+function isCompletedItemLike(value: unknown): value is CompletedItem {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { kind?: unknown }).kind === "string" &&
+    typeof (value as { id?: unknown }).id === "string"
+  );
+}
 
 // ── Session Header ─────────────────────────────────────────
 
@@ -277,6 +294,11 @@ export class SessionManager {
     return withMessages?.path ?? null;
   }
 
+  async findById(cwd: string, sessionId: string): Promise<string | null> {
+    const sessions = await this.list(cwd);
+    return sessions.find((session) => session.id === sessionId)?.path ?? null;
+  }
+
   async appendEntry(sessionPath: string, entry: SessionEntry): Promise<void> {
     await fs.appendFile(sessionPath, JSON.stringify(entry) + "\n", "utf-8");
   }
@@ -332,6 +354,15 @@ export class SessionManager {
     // Repair orphaned tool_use blocks that lack matching tool_result messages.
     // This can happen when a session is interrupted mid-tool-execution.
     return SessionManager.repairToolPairs(messages);
+  }
+
+  getDisplayItems(entries: SessionEntry[], _leafId?: string | null): CompletedItem[] {
+    return entries.flatMap((entry): CompletedItem[] => {
+      if (entry.type !== "custom" || entry.kind !== DISPLAY_ITEM_CUSTOM_KIND) return [];
+      const payload = entry.data as Partial<DisplayItemPayload> | undefined;
+      const item = payload?.version === 1 ? payload.item : undefined;
+      return isCompletedItemLike(item) ? [item] : [];
+    });
   }
 
   /**

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Message } from "@abukhaled/gg-ai";
 import { messagesToHistoryItems } from "../cli.js";
+import { PROMPT_COMMANDS } from "./prompt-commands.js";
+import { DISPLAY_ITEM_CUSTOM_KIND, SessionManager, type SessionEntry } from "./session-manager.js";
 import { getRestoredMessagesForDisplay } from "./session-compaction.js";
 import {
   GOAL_EVENT_PAYLOAD_PREFIX,
@@ -28,6 +30,79 @@ function replayHistory(messages: Message[]) {
 }
 
 describe("continued session replay display filtering", () => {
+  it("prefers persisted display items for exact continued-session replay", () => {
+    const sessionManager = new SessionManager("/tmp/unused");
+    const persisted: SessionEntry[] = [
+      {
+        type: "message",
+        id: "msg-1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        message: { role: "assistant", content: "message fallback" },
+      },
+      {
+        type: "custom",
+        kind: DISPLAY_ITEM_CUSTOM_KIND,
+        data: {
+          version: 1,
+          item: {
+            kind: "goal_agent_transition",
+            text: "Planning Goal setup",
+            id: "display-goal-stage",
+          },
+        },
+        id: "display-1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:01.000Z",
+      },
+    ];
+
+    expect(sessionManager.getDisplayItems(persisted, "msg-1")).toEqual([
+      { kind: "goal_agent_transition", text: "Planning Goal setup", id: "display-goal-stage" },
+    ]);
+  });
+
+  it("replays the typed /goal display row instead of persisted internal goal prompts", () => {
+    const sessionManager = new SessionManager("/tmp/unused");
+    const goalCommand = PROMPT_COMMANDS.find((command) => command.name === "goal");
+    if (!goalCommand) throw new Error("missing /goal command");
+    const persisted: SessionEntry[] = [
+      {
+        type: "custom",
+        kind: DISPLAY_ITEM_CUSTOM_KIND,
+        data: { version: 1, item: { kind: "user", text: "/goal hey", id: "display-user" } },
+        id: "display-user-entry",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        type: "message",
+        id: "msg-1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:01.000Z",
+        message: {
+          role: "user",
+          content: `${goalCommand.prompt}\n\n## User Instructions\n\nhey\n\n## Goal References (MANDATORY)\n\n- [original-goal-prompt] kind=prompt`,
+        },
+      },
+      {
+        type: "message",
+        id: "msg-2",
+        parentId: "msg-1",
+        timestamp: "2026-01-01T00:00:02.000Z",
+        message: {
+          role: "user",
+          content:
+            "## Original Goal Objective\n\nhey\n\n## Goal Planner Output\n\nGOAL_PLAN\nresearch=none\nEND_GOAL_PLAN",
+        },
+      },
+    ];
+
+    expect(sessionManager.getDisplayItems(persisted, "msg-2")).toEqual([
+      { kind: "user", text: "/goal hey", id: "display-user" },
+    ]);
+  });
+
   it("does not replay raw persisted goal worker synthetic events as chat", () => {
     const persisted: Message[] = [
       { role: "user", content: "please keep this normal user prompt" },
@@ -101,6 +176,21 @@ describe("continued session replay display filtering", () => {
     ]);
     expect(replayedText).not.toContain(GOAL_VERIFIER_EVENT_PREFIX);
     expect(replayedText).not.toContain(GOAL_EVENT_PAYLOAD_PREFIX);
+  });
+
+  it("restores every built-in prompt-template slash command as typed command text", () => {
+    for (const command of PROMPT_COMMANDS) {
+      const persisted: Message[] = [
+        {
+          role: "user",
+          content: `${command.prompt}\n\n## User Instructions\n\nship the feature`,
+        },
+      ];
+
+      expect(replayHistory(persisted)).toMatchObject([
+        { kind: "user", text: `/${command.name} ship the feature` },
+      ]);
+    }
   });
 
   it("keeps compact restore/system control out of display but preserves normal slash-command text", () => {

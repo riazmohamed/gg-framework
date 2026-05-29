@@ -7,7 +7,7 @@
     "check": "pnpm -r check",
     "lint": "eslint 'packages/*/src/**/*.{ts,tsx}' && pnpm --filter matey lint",
     "lint:fix": "eslint 'packages/*/src/**/*.{ts,tsx}' --fix && pnpm --filter matey lint:fix",
-    "format": "prettier --write 'packages/*/src/**/*.{ts,tsx,py}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}'",
+    "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}'",
     "format:check": "prettier --check 'packages/*/src/**/*.{ts,tsx}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}'",
     "test": "pnpm -r test",
     "prepare": "pnpm build"

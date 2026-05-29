@@ -45,18 +45,22 @@ export interface RenderAppConfig {
   initialHistory?: CompletedItem[];
   sessionsDir?: string;
   sessionPath?: string;
+  sessionId?: string;
   processManager?: ProcessManager;
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
   goalModeRef?: { current: GoalMode };
+  planModeRef?: { current: boolean };
   skills?: Skill[];
   initialOverlay?: "pixel" | "goal";
   rebuildToolsForCwd?: (cwd: string) => AgentTool[];
   goalReferencesRef?: { current: readonly GoalReference[] | undefined };
-  repoMapChangedFilesRef?: { current: Set<string> };
-  repoMapReadFilesRef?: { current: Set<string> };
   connectInitialMcpTools?: () => Promise<AgentTool[]>;
+  planCallbacks?: {
+    onEnterPlan?: (reason?: string) => void | Promise<void>;
+    onExitPlan?: (planPath: string) => Promise<string>;
+  };
 }
 
 /**
@@ -95,6 +99,7 @@ export interface SessionStore {
   approvedPlanPath?: string;
   planSteps: PlanStep[];
   sessionPath?: string;
+  sessionId?: string;
   sessionTitle?: string;
   sessionTitleGenerated: boolean;
   /** Which overlay (Goal, Skills, Plan, Pixel, Theme, Model) is open. */
@@ -141,6 +146,8 @@ export interface SessionStore {
   goalStatusEntries?: GoalStatusEntry[];
   /** Goal orchestration mode display state. */
   goalMode?: GoalMode;
+  /** Plan mode display/restriction state. */
+  planMode?: boolean;
 }
 
 export interface ResetUIOptions {
@@ -267,6 +274,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     approvedPlanPath: undefined,
     planSteps: [],
     sessionPath: config.sessionPath,
+    sessionId: config.sessionId,
     sessionTitle: undefined,
     sessionTitleGenerated: false,
     overlay: config.initialOverlay ?? null,
@@ -275,6 +283,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     pendingGoalRun: undefined,
     goalStatusEntries: [],
     goalMode: config.goalModeRef?.current ?? "off",
+    planMode: config.planModeRef?.current ?? false,
   };
 
   const terminalHistoryPrinter = createTerminalHistoryPrinter();
@@ -311,18 +320,19 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             initialHistory: sessionStore.history,
             sessionsDir: config.sessionsDir,
             sessionPath: sessionStore.sessionPath,
+            sessionId: sessionStore.sessionId,
             processManager: config.processManager,
             settingsFile: config.settingsFile,
             mcpManager: config.mcpManager,
             authStorage: config.authStorage,
             goalModeRef: config.goalModeRef,
+            planModeRef: config.planModeRef,
             skills: config.skills,
             initialOverlay: config.initialOverlay,
             rebuildToolsForCwd: config.rebuildToolsForCwd,
             goalReferencesRef: config.goalReferencesRef,
-            repoMapChangedFilesRef: config.repoMapChangedFilesRef,
-            repoMapReadFilesRef: config.repoMapReadFilesRef,
             connectInitialMcpTools: config.connectInitialMcpTools,
+            planCallbacks: config.planCallbacks,
             terminalHistoryPrinter,
             resetUI,
             onRuntimeStateChange,
@@ -364,6 +374,9 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     }
     if (options?.planSteps !== undefined) sessionStore.planSteps = options.planSteps;
     if (options?.sessionPath !== undefined) sessionStore.sessionPath = options.sessionPath;
+    if (options?.sessionPath !== undefined && !sessionStore.sessionId) {
+      sessionStore.sessionId = config.sessionId;
+    }
     if (options?.pendingAction) sessionStore.pendingAction = options.pendingAction;
 
     old.unmount();

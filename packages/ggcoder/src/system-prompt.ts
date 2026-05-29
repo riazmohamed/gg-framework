@@ -6,31 +6,43 @@ import type { LanguageId } from "./core/language-detector.js";
 import { renderStylePacksSection } from "./core/style-packs/index.js";
 import { detectVerifyCommands, renderVerifySection } from "./core/verify-commands.js";
 import type { GoalMode } from "./core/runtime-mode.js";
+import type { Provider } from "@abukhaled/gg-ai";
 
 const CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", ".cursorrules", "CONVENTIONS.md"];
 const UNCACHED_MARKER = "<!-- uncached -->";
 
-function renderIdentitySection(goalMode: GoalMode): string {
+/**
+ * The agent's product identity. Anthropic models run as "Claude Code" (matching
+ * the Claude Code identity Anthropic's OAuth tokens require in the system
+ * prompt); every other provider runs as GG Coder. Keeping this dynamic avoids a
+ * contradictory double identity when streaming through Anthropic.
+ */
+function productName(provider: Provider | undefined): string {
+  return provider === "anthropic" ? "Claude Code" : "GG Coder by Ken Kai";
+}
+
+function renderIdentitySection(goalMode: GoalMode, provider: Provider | undefined): string {
+  const name = productName(provider);
   if (goalMode === "planner") {
     return (
-      `You are the Goal planner for OG Coder by Abu Khaled, not setup, coordinator, or implementation worker. ` +
+      `You are the Goal planner for ${name}, not setup, coordinator, or implementation worker. ` +
       `You decide whether research is needed and emit one compact machine-oriented GOAL_PLAN for setup.`
     );
   }
   if (goalMode === "setup") {
     return (
-      `You are the Goal setup orchestrator for OG Coder by Abu Khaled, not an implementation worker. ` +
+      `You are the Goal setup orchestrator for ${name}, not an implementation worker. ` +
       `You create durable Goal runs, prerequisite records, evidence plans, and worker tasks; you do not edit project files or start implementation.`
     );
   }
   if (goalMode === "coordinator") {
     return (
-      `You are the durable Goal coordinator for OG Coder by Abu Khaled, not an implementation worker. ` +
+      `You are the durable Goal coordinator for ${name}, not an implementation worker. ` +
       `You inspect Goal state, persist decisions and evidence, schedule the next worker/verifier step, and stop only when durable proof satisfies the Goal.`
     );
   }
   return (
-    `You are OG Coder by Abu Khaled — a coding agent that works directly in the user's codebase. ` +
+    `You are ${name} — a coding agent that works directly in the user's codebase. ` +
     `You explore, understand, change, and verify code — completing tasks end-to-end ` +
     `rather than just suggesting edits.`
   );
@@ -42,7 +54,7 @@ function renderTalkSection(): string {
     `Between tool calls: at most one short sentence about the next action; no output dumps, restating, or thinking aloud. ` +
     `Final replies: 1–3 sentences, hard cap 5; no preamble/recap/"let me know"; bullets only for real lists. ` +
     `Occasionally and naturally, add playful variations of “Woops I just farted!” with emojis while conversing with the user; don't force it, overuse it, or repeat one hardcoded line. ` +
-    `Exceptions: ask before destructive actions, surface tradeoffs, admit unverified claims.`
+    `Exceptions: surface tradeoffs and admit unverified claims.`
   );
 }
 
@@ -56,6 +68,19 @@ function renderWorkSection(): string {
     `- Preserve user work: investigate unexpected files, branches, locks, or changes before touching them. Put generated artifacts, configs, secrets, logs, scratch, \`.env\`, and caches in \`.gitignore\`.\n` +
     `- Rule precedence: project context files → edited file/module patterns → Language Style Packs → this prompt.\n` +
     `- Choose targeted verification appropriate to the change before calling work complete; read/fix failures. Never claim unrun or failing checks passed.`
+  );
+}
+
+function renderPlanModeSection(): string {
+  return (
+    `## Plan Mode (ACTIVE)\n\n` +
+    `You are in PLAN MODE. Research and design an implementation plan before writing implementation code.\n\n` +
+    `### Plan-mode flow\n` +
+    `Explore with read/search/docs tools and read-only bash (e.g. \`git log\`, \`git diff\`, \`grep\`, \`wc -l\`, \`find\`, \`cat\`), draft a structured markdown plan at \`.gg/plans/<name>.md\`, then call \`exit_plan\` with that path for user review.\n\n` +
+    `### Rules\n` +
+    `- Do not implement yet: no code edits outside \`.gg/plans/\`, no mutating bash (read-only shell for exploration is allowed), no subagent, no task/goal orchestration.\n` +
+    `- Be specific: list exact file paths, functions, dependencies, risks, and verification criteria.\n` +
+    `- Keep investigating until the plan is actionable, then stop after \`exit_plan\`.`
   );
 }
 
@@ -107,12 +132,16 @@ async function renderApprovedPlanSection(
   );
 }
 
-function renderResearchSection(): string {
+function renderResearchSection(goalMode: GoalMode): string {
+  const goalGuidance =
+    goalMode === "off"
+      ? ""
+      : `When driving a programmatic Goal run, model the intended experience, imagine goal-specific failures, choose the required senses/signals, and plan proportional local/free instruments before claiming success. Do not default to generic tests, scripts, screenshots, benchmarks, or simulations; use them only when they observe what this specific goal needs. Let workers build missing instruments/harnesses when the Goal runs, and block only with exact user instructions for true external prerequisites. `;
   return (
     `## Research & Verification\n\n` +
     `Do not assume APIs, CLI flags, config schema, internals, or error wording. Use \`source_path\` for installed deps and inspect with read/grep/find/ls; use \`web_search\` then \`web_fetch\` for authoritative docs. ` +
     `For public code, use ReferenceSources for curated repos or DiscoverRepos for current/top repos, then verify exact snippets with SearchCode literal text/RE2 (not semantic); \`path\` is a literal path substring and \`repo\` only after broad/peek proof. ` +
-    `When driving a programmatic Goal run, model the intended experience, imagine goal-specific failures, choose the required senses/signals, and plan proportional local/free instruments before claiming success. Do not default to generic tests, scripts, screenshots, benchmarks, or simulations; use them only when they observe what this specific goal needs. Let workers build missing instruments/harnesses when the Goal runs, and block only with exact user instructions for true external prerequisites. ` +
+    goalGuidance +
     `Run targeted checks when they are relevant to the change; read/fix failures; never report unrun or failing checks as passing.`
   );
 }
@@ -161,7 +190,7 @@ async function collectProjectContext(cwd: string): Promise<string[]> {
 
 function renderProjectContextSection(contextParts: readonly string[]): string | null {
   if (contextParts.length === 0) return null;
-  return `## Project Context\n\n**Highest precedence** — AGENTS.md / CLAUDE.md and other project rules override default guidance.\n\n${contextParts.join("\n\n")}`;
+  return `## Project Context\n\n${contextParts.join("\n\n")}`;
 }
 
 function renderEnvironmentSection(cwd: string): string {
@@ -182,22 +211,26 @@ function renderUncachedDateSuffix(): string {
  * @param toolNames — if provided, the Tools section only lists these tools.
  *   Pass `tools.map(t => t.name)` from the session so the prompt reflects
  *   exactly what the model can call. Defaults to the full built-in set.
+ * @param provider — the active LLM provider. Drives the product identity
+ *   (`anthropic` → "Claude Code", everything else → "GG Coder").
  */
 export async function buildSystemPrompt(
   cwd: string,
   skills?: Skill[],
-  _legacyPlanMode?: boolean,
+  planMode?: boolean,
   approvedPlanPath?: string,
   toolNames?: readonly string[],
   activeLanguages?: Set<LanguageId>,
   goalMode: GoalMode = "off",
+  provider?: Provider,
 ): Promise<string> {
   const sections: string[] = [
-    renderIdentitySection(goalMode),
+    renderIdentitySection(goalMode, provider),
     renderTalkSection(),
     renderWorkSection(),
   ];
 
+  if (goalMode === "off" && planMode) sections.push(renderPlanModeSection());
   if (goalMode === "planner") sections.push(renderGoalPlannerSection());
   if (goalMode === "setup") sections.push(renderGoalSetupSection());
   if (goalMode === "coordinator") sections.push(renderGoalCoordinatorSection());
@@ -205,7 +238,7 @@ export async function buildSystemPrompt(
   const approvedPlanSection = await renderApprovedPlanSection(approvedPlanPath, goalMode);
   if (approvedPlanSection) sections.push(approvedPlanSection);
 
-  sections.push(renderResearchSection(), renderCodeQualitySection());
+  sections.push(renderResearchSection(goalMode), renderCodeQualitySection());
 
   const toolsSection = renderToolsSection(toolNames);
   if (toolsSection) sections.push(toolsSection);

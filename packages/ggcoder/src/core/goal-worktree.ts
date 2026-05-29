@@ -2,9 +2,26 @@ import { execFile } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import type { GoalRun } from "./goal-store.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 2000;
+
+export class GoalWorktreeDirtyError extends Error {
+  readonly dirtyStatus: string;
+
+  constructor(dirtyStatus: string) {
+    super(
+      `Goal workers need a clean working tree before they can start in an isolated worktree. Commit or stash the current changes first. Dirty files:\n${dirtyStatus.slice(0, MAX_GIT_OUTPUT)}`,
+    );
+    this.name = "GoalWorktreeDirtyError";
+    this.dirtyStatus = dirtyStatus;
+  }
+}
+
+export function isGoalWorktreeDirtyError(error: unknown): error is GoalWorktreeDirtyError {
+  return error instanceof GoalWorktreeDirtyError;
+}
 
 export interface GoalWorktreeCommandRunner {
   execFile(
@@ -28,6 +45,22 @@ export interface GoalWorktreeCandidate {
   baseRef: string;
   branchName: string;
   path: string;
+}
+
+export interface GoalWorktreeIntegrationIssue {
+  taskId: string;
+  taskTitle: string;
+  workerId?: string;
+  worktreePath: string;
+  baseRef: string;
+  branchName: string;
+  files: string[];
+}
+
+export interface GoalWorktreeIntegrationCheck {
+  ok: boolean;
+  issues: GoalWorktreeIntegrationIssue[];
+  summary: string;
 }
 
 export async function defaultGoalWorktreeCommandRunner(
@@ -58,6 +91,78 @@ export function sanitizeWorktreeToken(value: string): string {
       .replace(/^-+|-+$/gu, "")
       .slice(0, 80) || "item"
   );
+}
+
+function parseChangedFiles(status: string): string[] {
+  return status
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => line.slice(3).trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+export async function checkGoalWorktreeIntegration(
+  projectPath: string,
+  run: GoalRun,
+  commandRunner?: GoalWorktreeCommandRunner,
+): Promise<GoalWorktreeIntegrationCheck> {
+  const runner = commandRunner ?? { execFile: defaultGoalWorktreeCommandRunner };
+  const issues: GoalWorktreeIntegrationIssue[] = [];
+
+  for (const task of run.tasks) {
+    if (task.status !== "done" || !task.worktree || task.mergeStrategy === "manual") continue;
+    let status: string;
+    try {
+      status = await gitStdout(runner, task.worktree.path, ["status", "--porcelain"]);
+    } catch (error) {
+      issues.push({
+        taskId: task.id,
+        taskTitle: task.title,
+        ...(task.workerId ? { workerId: task.workerId } : {}),
+        worktreePath: task.worktree.path,
+        baseRef: task.worktree.baseRef,
+        branchName: task.worktree.branchName,
+        files: [`Unable to inspect worktree: ${formatGitError(error)}`],
+      });
+      continue;
+    }
+    const files = parseChangedFiles(status);
+    if (files.length === 0) continue;
+    issues.push({
+      taskId: task.id,
+      taskTitle: task.title,
+      ...(task.workerId ? { workerId: task.workerId } : {}),
+      worktreePath: task.worktree.path,
+      baseRef: task.worktree.baseRef,
+      branchName: task.worktree.branchName,
+      files,
+    });
+  }
+
+  if (issues.length === 0) {
+    return {
+      ok: true,
+      issues,
+      summary: "All completed Goal worktree tasks are integrated or clean.",
+    };
+  }
+
+  const issueSummary = issues
+    .map(
+      (issue) =>
+        `${issue.taskTitle} (${issue.taskId}) has unintegrated files in ${issue.worktreePath}: ${issue.files.join(", ")}`,
+    )
+    .join("\n");
+  return {
+    ok: false,
+    issues,
+    summary:
+      `Completed Goal worker artifacts are still stranded in isolated worktrees; integrate or reject them before verifier.\n${issueSummary}`.slice(
+        0,
+        MAX_GIT_OUTPUT,
+      ),
+  };
 }
 
 export async function createGoalWorkerWorktree({
@@ -92,9 +197,7 @@ export async function createGoalWorkerWorktree({
 async function assertCleanProject(runner: GoalWorktreeCommandRunner, cwd: string): Promise<void> {
   const status = await gitStdout(runner, cwd, ["status", "--porcelain"]);
   if (status.length > 0) {
-    throw new Error(
-      `Cannot launch isolated Goal worker from a dirty checkout. Commit or stash integration changes first. Dirty files:\n${status.slice(0, MAX_GIT_OUTPUT)}`,
-    );
+    throw new GoalWorktreeDirtyError(status);
   }
 }
 

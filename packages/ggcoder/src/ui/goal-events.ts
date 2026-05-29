@@ -46,6 +46,7 @@ export interface GoalEvidencePlanStateSnapshot {
 export interface GoalVerifierStateSnapshot {
   description: string;
   command?: string;
+  cwd?: string;
   lastStatus?: NonNullable<NonNullable<GoalRun["verifier"]>["lastResult"]>["status"];
   outputPath?: string;
 }
@@ -173,6 +174,7 @@ export function buildGoalStateSnapshot(run: GoalRun): GoalStateSnapshot {
       ? {
           description: run.verifier.description,
           ...(run.verifier.command ? { command: run.verifier.command } : {}),
+          ...(run.verifier.cwd ? { cwd: run.verifier.cwd } : {}),
           ...(run.verifier.lastResult
             ? {
                 lastStatus: run.verifier.lastResult.status,
@@ -255,7 +257,7 @@ function formatGoalState(snapshot: GoalStateSnapshot): string {
       ? snapshot.blockers.map((blocker) => `- ${blocker}`).join("\n")
       : "(none)";
   const verifier = snapshot.verifier?.command
-    ? `${snapshot.verifier.command}; last=${snapshot.verifier.lastStatus ?? "none"}; output=${snapshot.verifier.outputPath ?? "none"}`
+    ? `${snapshot.verifier.command}; cwd=${snapshot.verifier.cwd ?? "main"}; last=${snapshot.verifier.lastStatus ?? "none"}; output=${snapshot.verifier.outputPath ?? "none"}`
     : "(none - define an exact verifier before completion)";
   const prerequisites = snapshot.prerequisites.length
     ? snapshot.prerequisites

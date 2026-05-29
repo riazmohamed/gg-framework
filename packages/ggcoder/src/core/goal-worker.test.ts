@@ -146,14 +146,11 @@ describe("goal worker failure propagation", () => {
     expect(prompt).toContain("task_id=task-a");
     expect(prompt).toContain("model the intended experience");
     expect(prompt).toContain("choose the required senses/signals");
-    expect(prompt).toContain(
-      "Create needed scripts/fixtures/harnesses only when they directly observe those signals",
-    );
-    expect(prompt).toContain("source_path/docs/kencode real-code research when relevant");
-    expect(prompt).toContain(
-      "do not default to generic tests, scripts, screenshots, benchmarks, or simulations",
-    );
-    expect(prompt).toContain("command/file evidence");
+    expect(prompt).toContain("simplest local/free proof path");
+    expect(prompt).toContain("when they directly observe those signals");
+    expect(prompt).toContain("source_path/docs/kencode research when relevant");
+    expect(prompt).toContain("do not default to generic artifacts");
+    expect(prompt).toContain("command/file/screenshot/log evidence");
     expect(prompt).toContain("isolated git worktree");
     expect(prompt).toContain("do not merge or touch the main checkout");
     expect(prompt).toContain("candidate packet");
@@ -259,7 +256,42 @@ describe("goal worker failure propagation", () => {
     ).toBe(true);
   });
 
-  it("blocks a task instead of launching when isolated worktree creation is unsafe", async () => {
+  it("launches the apply-integration task in the main checkout", async () => {
+    const worktreeCalls: Array<readonly string[]> = [];
+    const runner: GoalWorktreeCommandRunner = {
+      execFile: vi.fn(async (_file, args) => {
+        worktreeCalls.push(args);
+        return { stdout: "", stderr: "" };
+      }),
+    };
+    const mod = await import("./goal-worker.js");
+
+    const record = await mod.startGoalWorker({
+      cwd: tmpProject,
+      provider: "anthropic",
+      model: "claude-test",
+      goalRunId: "goal-a",
+      goalTaskId: "task-a",
+      taskTitle: "Apply integrated worktree to main",
+      prompt: "Apply accepted integration worktree changes",
+      isolateWorktree: false,
+      worktreeCommandRunner: runner,
+    });
+
+    const spawnOptions = spawnMock.mock.calls[0]?.[2] as { cwd: string };
+    const args = spawnMock.mock.calls[0]?.[1] as string[];
+    const systemPrompt = args[args.indexOf("--system-prompt") + 1];
+    const run = await getGoalRun(tmpProject, "goal-a");
+    expect(record.cwd).toBe(tmpProject);
+    expect(record.worktree).toBeUndefined();
+    expect(spawnOptions.cwd).toBe(tmpProject);
+    expect(worktreeCalls).toEqual([]);
+    expect(run?.tasks[0]?.worktree).toBeUndefined();
+    expect(systemPrompt).toContain("controlled exception to worker isolation");
+    expect(systemPrompt).toContain("main checkout");
+  });
+
+  it("leaves a task retryable when isolated worktree creation only needs a clean checkout", async () => {
     const runner: GoalWorktreeCommandRunner = {
       execFile: vi.fn(async (_file, args) =>
         args[0] === "status"
@@ -279,13 +311,13 @@ describe("goal worker failure propagation", () => {
         prompt: "Do deterministic work",
         worktreeCommandRunner: runner,
       }),
-    ).rejects.toThrow("Cannot launch isolated Goal worker from a dirty checkout");
+    ).rejects.toThrow("Goal workers need a clean working tree");
 
     const run = await getGoalRun(tmpProject, "goal-a");
     expect(spawnMock).not.toHaveBeenCalled();
     expect(run?.tasks[0]).toMatchObject({
-      status: "blocked",
-      lastSummary: expect.stringContaining("dirty checkout"),
+      status: "pending",
+      lastSummary: expect.stringContaining("clean working tree"),
     });
     expect(run?.evidence).toEqual(
       expect.arrayContaining([

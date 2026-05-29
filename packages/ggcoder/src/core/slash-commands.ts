@@ -18,8 +18,6 @@ export interface SlashCommandContext {
   branch: (stepsBack?: number) => Promise<string>;
   /** List all branches in the current session. */
   listBranches: () => Promise<string>;
-  /** Show or refresh the dynamic repo map. */
-  repoMap: (action?: "show" | "refresh" | "on" | "off") => Promise<string>;
 }
 
 export interface SlashCommand {
@@ -171,20 +169,6 @@ export function createBuiltinCommands(): SlashCommand[] {
       async execute(_args, ctx) {
         await ctx.newSession();
         return "New session created.";
-      },
-    },
-    {
-      name: "map",
-      aliases: [],
-      description: "Show, refresh, or toggle the dynamic repo map",
-      usage: "/map [refresh|on|off]",
-      async execute(args, ctx) {
-        const normalized = args.trim().toLowerCase();
-        if (normalized === "refresh" || normalized === "on" || normalized === "off") {
-          return ctx.repoMap(normalized);
-        }
-        if (normalized.length > 0) return "Usage: /map [refresh|on|off]";
-        return ctx.repoMap("show");
       },
     },
     {

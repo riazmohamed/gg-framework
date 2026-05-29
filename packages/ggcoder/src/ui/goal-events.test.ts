@@ -104,6 +104,27 @@ describe("goal event formatting", () => {
     });
   });
 
+  it("includes worker-worktree verifier cwd in synthetic state", () => {
+    const run = goalRun({
+      verifier: {
+        description: "Worker-built verifier",
+        command: ".goal-evidence/noop/audit.sh",
+        cwd: "/tmp/project-goal-worktrees/task-worker",
+      },
+    });
+
+    const snapshot = buildGoalStateSnapshot(run);
+    const event = formatGoalWorkerCompletionEvent(run, "Build verifier", workerCompletion());
+
+    expect(snapshot.verifier).toMatchObject({
+      command: ".goal-evidence/noop/audit.sh",
+      cwd: "/tmp/project-goal-worktrees/task-worker",
+    });
+    expect(event).toContain(
+      "verifier: .goal-evidence/noop/audit.sh; cwd=/tmp/project-goal-worktrees/task-worker",
+    );
+  });
+
   it("includes exact user prerequisite instructions in synthetic state", () => {
     const event = formatGoalWorkerCompletionEvent(
       goalRun({

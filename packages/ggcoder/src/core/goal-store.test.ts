@@ -336,6 +336,27 @@ describe("goal store persistence", () => {
     await expect(loadGoalRuns(tmpProject)).resolves.toEqual([]);
   });
 
+  it("recovers stale goal store locks left by exited processes", async () => {
+    await fs.mkdir(projectDir(tmpProject), { recursive: true });
+    const stalePid = 999_999_999;
+    await fs.writeFile(
+      path.join(projectDir(tmpProject), "goals.lock"),
+      `${stalePid}\n2024-01-01T00:00:00.000Z\n`,
+      "utf-8",
+    );
+
+    await expect(
+      upsertGoalRun(tmpProject, {
+        id: "after-stale-lock",
+        title: "After stale lock",
+        goal: "Writes can recover stale locks",
+      }),
+    ).resolves.toMatchObject({ id: "after-stale-lock" });
+    await expect(fs.stat(path.join(projectDir(tmpProject), "goals.lock"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("reconciles stale running workers and verifier state", async () => {
     const run = await upsertGoalRun(tmpProject, {
       id: "stale-run",

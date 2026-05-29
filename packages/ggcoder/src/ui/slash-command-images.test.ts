@@ -82,8 +82,9 @@ describe("prompt-template slash commands with attachments", () => {
       plannerOutput: "GOAL_PLAN\nresearch=docs\nproof=run tests\nEND_GOAL_PLAN",
     });
 
-    expect(prompt).toContain("Create a Goal run");
-    expect(prompt).toContain("## User Instructions\n\ndo X");
+    expect(prompt).toContain("## Original Goal Objective\n\ndo X");
+    expect(prompt).not.toContain("Create a Goal run");
+    expect(prompt).not.toContain("## User Instructions");
     expect(prompt.match(/## Goal Planner Output/g)).toHaveLength(1);
     expect(prompt.match(/^GOAL_PLAN$/gm)).toHaveLength(1);
     expect(prompt).toContain("Use the original objective plus this planner output");

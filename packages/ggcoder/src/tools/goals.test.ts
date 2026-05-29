@@ -175,6 +175,82 @@ describe("goals tool state guards", () => {
     );
   });
 
+  it("clears stale setup blockers after create update supplies required setup", async () => {
+    await executeGoals({
+      action: "create",
+      run_id: "draft-then-ready",
+      title: "Draft then ready",
+      goal: "Replace setup draft with complete Goal metadata",
+    });
+
+    const result = await executeGoals({
+      action: "create",
+      run_id: "draft-then-ready",
+      title: "Draft then ready",
+      goal: "Replace setup draft with complete Goal metadata",
+      success_criteria: ["Ready setup has no stale blockers"],
+      evidence_plan: [
+        {
+          id: "ready-proof",
+          label: "Ready proof",
+          mechanism: "test",
+          description: "Focused test proves stale setup blockers clear",
+          status: "ready",
+          evidence: "configured",
+        },
+      ],
+      verifier_command: "pnpm test",
+    });
+
+    const run = await getGoalRun(tmpProject, "draft-then-ready");
+    expect(result).toContain("ready");
+    expect(run?.status).toBe("ready");
+    expect(run?.blockers).toEqual([]);
+  });
+
+  it("preserves earlier evidence when create update records planner GOAL_PLAN", async () => {
+    await executeGoals({
+      action: "create",
+      run_id: "planner-evidence-merge",
+      title: "Planner evidence merge",
+      goal: "Keep preexisting evidence across setup updates",
+      success_criteria: ["initial criterion"],
+      evidence_plan: [
+        {
+          id: "initial-proof",
+          label: "Initial proof",
+          mechanism: "command",
+          description: "Initial evidence plan",
+          status: "ready",
+          evidence: "configured",
+        },
+      ],
+      verifier_command: "pnpm test",
+    });
+    await executeGoals({
+      action: "evidence",
+      run_id: "planner-evidence-merge",
+      evidence_label: "Preexisting audit note",
+      evidence_content: "must survive setup update",
+    });
+
+    await executeGoals({
+      action: "create",
+      run_id: "planner-evidence-merge",
+      title: "Planner evidence merge",
+      goal: "Keep preexisting evidence across setup updates GOAL_PLAN research=none success=ready",
+      summary: "GOAL_PLAN\nresearch=none\nsuccess=ready\nEND_GOAL_PLAN",
+    });
+
+    const run = await getGoalRun(tmpProject, "planner-evidence-merge");
+    expect(run?.evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "Preexisting audit note" }),
+        expect.objectContaining({ label: "Planner GOAL_PLAN" }),
+      ]),
+    );
+  });
+
   it("routes worker goal tool writes to the original project path from isolated worktrees", async () => {
     const workerCwd = await fs.mkdtemp(path.join(os.tmpdir(), "goals-tool-worker-cwd-"));
     const previousProjectPath = process.env.GG_GOAL_PROJECT_PATH;
@@ -290,7 +366,13 @@ describe("goals tool state guards", () => {
       label: "Reference repository https://github.com/acme/reference-ui",
       value: "https://github.com/acme/reference-ui",
     };
-    const tool = createGoalsTool(tmpProject, undefined, () => [reference]);
+    const documentReference: GoalReference = {
+      id: "doc-reference",
+      kind: "text",
+      label: "Attached text reference requirements.md",
+      path: ".gg/goal-references/doc-reference-requirements.md",
+    };
+    const tool = createGoalsTool(tmpProject, undefined, () => [reference, documentReference]);
 
     await tool.execute(
       {
@@ -298,19 +380,21 @@ describe("goals tool state guards", () => {
         run_id: "reference-goal",
         title: "Match reference repo",
         goal: "Implement the UI from the reference repository",
-        success_criteria: ["Implementation matches repo-reference visual and interaction patterns"],
+        success_criteria: [
+          "Implementation matches repo-reference and doc-reference visual and interaction patterns",
+        ],
         evidence_plan: [
           {
             id: "reference-comparison",
-            label: "repo-reference comparison",
+            label: "repo-reference and doc-reference comparison",
             mechanism: "source",
-            description: "Compare against repo-reference before completion",
+            description: "Compare against repo-reference and doc-reference before completion",
             status: "ready",
             evidence: "reference captured",
           },
         ],
         verifier_command: "pnpm test",
-        verifier_description: "Verifier compares output against repo-reference",
+        verifier_description: "Verifier compares output against repo-reference and doc-reference",
       },
       { signal: new AbortController().signal, toolCallId: "test-call" },
     );
@@ -331,9 +415,9 @@ describe("goals tool state guards", () => {
         action: "task",
         run_id: "reference-goal",
         task_id: "reference-task",
-        task_title: "Implement UI from repo-reference",
+        task_title: "Implement UI from repo-reference and doc-reference",
         task_prompt:
-          "Use repo-reference / https://github.com/acme/reference-ui as the source of truth while implementing.",
+          "Use repo-reference / https://github.com/acme/reference-ui and doc-reference at .gg/goal-references/doc-reference-requirements.md as the source of truth while implementing.",
         task_status: "pending",
       },
       { signal: new AbortController().signal, toolCallId: "test-call" },
@@ -341,12 +425,62 @@ describe("goals tool state guards", () => {
     const run = await getGoalRun(tmpProject, "reference-goal");
 
     expect(missingReferenceResult).toContain("task_prompt must explicitly include");
-    expect(referencedTaskResult).toBe('Goal task added: "Implement UI from repo-reference".');
+    expect(missingReferenceResult).toContain("repo-reference, doc-reference");
+    expect(referencedTaskResult).toBe(
+      'Goal task added: "Implement UI from repo-reference and doc-reference".',
+    );
     expect(run?.status).toBe("ready");
-    expect(run?.references).toEqual(expect.arrayContaining([expect.objectContaining(reference)]));
+    expect(run?.references).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining(reference),
+        expect.objectContaining(documentReference),
+      ]),
+    );
     expect(run?.tasks).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: "reference-task" })]),
     );
+  });
+
+  it("persists worker-worktree verifier cwd through setup and verifier results", async () => {
+    await executeGoals({
+      action: "create",
+      run_id: "worktree-verifier-goal",
+      title: "Worktree verifier",
+      goal: "Verify from a worker worktree",
+      success_criteria: ["Verifier runs"],
+      evidence_plan: [
+        {
+          id: "proof",
+          label: "Proof",
+          mechanism: "command",
+          description: "Run worker-built verifier",
+          status: "ready",
+          evidence: "configured",
+        },
+      ],
+      verifier_command: ".goal-evidence/noop/audit.sh",
+      verifier_description: "Worker-built verifier",
+      verifier_cwd: "/tmp/project-goal-worktrees/task-worker",
+    });
+
+    await executeGoals({
+      action: "verify",
+      run_id: "worktree-verifier-goal",
+      verification_status: "pass",
+      summary: "Verifier passed in worker worktree",
+      exit_code: 0,
+    });
+
+    const run = await getGoalRun(tmpProject, "worktree-verifier-goal");
+    expect(run?.verifier).toMatchObject({
+      command: ".goal-evidence/noop/audit.sh",
+      cwd: "/tmp/project-goal-worktrees/task-worker",
+      lastResult: {
+        status: "pass",
+        command: ".goal-evidence/noop/audit.sh",
+        summary: "Verifier passed in worker worktree",
+      },
+    });
   });
 
   it("rejects passing final audits that omit mandatory Goal references", async () => {
@@ -684,6 +818,101 @@ describe("goals tool state guards", () => {
     expect(run?.verifier?.command).toBe("pnpm test:e2e");
   });
 
+  it("adds new evidence-plan items directly after minimal Goal creation", async () => {
+    await executeGoals({
+      action: "create",
+      run_id: "goal-evidence-plan-add",
+      title: "Proof plan add",
+      goal: "Add proof paths after initial Goal creation",
+      success_criteria: ["Evidence plan can be added after create"],
+      verifier_command: "pnpm test",
+    });
+
+    const result = await executeGoals({
+      action: "evidence_plan",
+      run_id: "goal-evidence-plan-add",
+      evidence_plan: [
+        {
+          id: "manual-proof",
+          label: "Manual setup proof",
+          mechanism: "manual",
+          description: "Manual inspection proves setup worked.",
+          status: "planned",
+        },
+      ],
+    });
+    const run = await getGoalRun(tmpProject, "goal-evidence-plan-add");
+
+    expect(result).toBe('Evidence-plan item added for "Proof plan add": "Manual setup proof".');
+    expect(run?.status).toBe("ready");
+    expect(run?.blockers).toEqual([]);
+    expect(run?.evidencePlan).toEqual([
+      expect.objectContaining({
+        id: "manual-proof",
+        label: "Manual setup proof",
+        mechanism: "manual",
+        status: "planned",
+      }),
+    ]);
+  });
+
+  it("upserts evidence-plan items from evidence_plan arrays", async () => {
+    await executeGoals({
+      action: "create",
+      run_id: "goal-evidence-plan-upsert",
+      title: "Proof plan upsert",
+      goal: "Update proof paths from an array call",
+      success_criteria: ["Evidence plan can be upserted"],
+      verifier_command: "pnpm test",
+      evidence_plan: [
+        {
+          id: "manual-proof",
+          label: "Manual setup proof",
+          mechanism: "manual",
+          description: "Manual inspection proves setup worked.",
+          status: "planned",
+        },
+      ],
+    });
+
+    const result = await executeGoals({
+      action: "evidence_plan",
+      run_id: "goal-evidence-plan-upsert",
+      evidence_plan: [
+        {
+          id: "manual-proof",
+          label: "Manual setup proof updated",
+          mechanism: "manual",
+          description: "Manual inspection now has durable evidence.",
+          status: "ready",
+          evidence: "inspection recorded",
+        },
+        {
+          id: "log-proof",
+          label: "Log proof",
+          mechanism: "log",
+          description: "Inspect durable setup log.",
+          status: "planned",
+          path: "artifacts/setup.log",
+        },
+      ],
+    });
+    const run = await getGoalRun(tmpProject, "goal-evidence-plan-upsert");
+
+    expect(result).toBe(
+      'Evidence-plan items upserted for "Proof plan upsert": 1 added, 1 updated.',
+    );
+    expect(run?.evidencePlan).toEqual([
+      expect.objectContaining({
+        id: "manual-proof",
+        label: "Manual setup proof updated",
+        status: "ready",
+        evidence: "inspection recorded",
+      }),
+      expect.objectContaining({ id: "log-proof", label: "Log proof", path: "artifacts/setup.log" }),
+    ]);
+  });
+
   it("updates evidence-plan items directly for post-verifier reconciliation", async () => {
     await executeGoals({
       action: "create",
@@ -745,6 +974,43 @@ describe("goals tool state guards", () => {
       title: "Audit Goal completion evidence",
       reason:
         "Verifier passed; creating final read-only completion audit before the Goal can pass (1/3).",
+    });
+  });
+
+  it("persists evidence-plan evidence and path aliases used by coordinator calls", async () => {
+    await executeGoals({
+      action: "create",
+      run_id: "goal-evidence-aliases",
+      title: "Alias reconciliation",
+      goal: "Persist coordinator evidence-plan aliases",
+      success_criteria: ["Evidence plan is durable"],
+      prerequisites: [],
+      evidence_plan: [
+        {
+          id: "setup-plan",
+          label: "GOAL_PLAN setup evidence",
+          mechanism: "log",
+          description: "Planner output must be durable.",
+          status: "planned",
+        },
+      ],
+      verifier_command: "pnpm test",
+    });
+
+    await executeGoals({
+      action: "evidence_plan",
+      run_id: "goal-evidence-aliases",
+      evidence_plan_item_id: "setup-plan",
+      evidence_plan_status: "ready",
+      evidence: "Exact GOAL_PLAN evidence was recorded.",
+      path: "artifacts/goal-plan.log",
+    });
+    const run = await getGoalRun(tmpProject, "goal-evidence-aliases");
+
+    expect(run?.evidencePlan[0]).toMatchObject({
+      status: "ready",
+      evidence: "Exact GOAL_PLAN evidence was recorded.",
+      path: "artifacts/goal-plan.log",
     });
   });
 

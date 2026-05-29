@@ -29,6 +29,9 @@ export function routePromptCommandInput(
 }
 
 const GOAL_PLANNER_OUTPUT_MAX_CHARS = 2400;
+const GOAL_PLAN_BLOCK_PATTERN = /^GOAL_PLAN\s*$[\s\S]*?^END_GOAL_PLAN\s*$/m;
+const USER_INSTRUCTIONS_HEADING_PATTERN = /^## User Instructions\s*$/m;
+const GOAL_REFERENCES_HEADING_PATTERN = /^## Goal References \(MANDATORY\)\s*$/m;
 
 function messageTextContent(message: Message): string {
   if (typeof message.content === "string") return message.content;
@@ -49,8 +52,39 @@ export function collectAssistantTextSince(
     .map(messageTextContent)
     .join("\n")
     .trim();
+  const goalPlanBlock = text.match(GOAL_PLAN_BLOCK_PATTERN)?.[0]?.trim();
+  if (goalPlanBlock) return goalPlanBlock;
   if (text.length <= maxChars) return text;
   return text.slice(0, maxChars).trimEnd() + "\n[planner output truncated]";
+}
+
+function compactOriginalGoalPromptForSetup(originalGoalPrompt: string): string {
+  const trimmedPrompt = originalGoalPrompt.trim();
+  const userInstructionsMatch = USER_INSTRUCTIONS_HEADING_PATTERN.exec(trimmedPrompt);
+  if (!userInstructionsMatch) return trimmedPrompt;
+
+  const goalReferencesMatch = GOAL_REFERENCES_HEADING_PATTERN.exec(trimmedPrompt);
+  if (goalReferencesMatch && goalReferencesMatch.index < userInstructionsMatch.index) {
+    return trimmedPrompt.slice(goalReferencesMatch.index).trim();
+  }
+
+  const userInstructionsStart = userInstructionsMatch.index + userInstructionsMatch[0].length;
+  const userInstructions = trimmedPrompt.slice(userInstructionsStart).trim();
+  return userInstructions || trimmedPrompt;
+}
+
+function normalizeGoalPlannerOutput(plannerOutput: string): string {
+  const trimmedOutput = plannerOutput.trim();
+  const goalPlanBlock = trimmedOutput.match(GOAL_PLAN_BLOCK_PATTERN)?.[0]?.trim();
+  if (goalPlanBlock) return goalPlanBlock;
+  if (!trimmedOutput) return "GOAL_PLAN\nresearch=none\nEND_GOAL_PLAN";
+  return (
+    "GOAL_PLAN\n" +
+    "research=none\n" +
+    "unknowns=planner_output_missing_or_invalid\n" +
+    "setup=use the original objective and mandatory references; block only if objective or proof is unclear\n" +
+    "END_GOAL_PLAN"
+  );
 }
 
 export function buildGoalSetupPromptFromPlanner({
@@ -60,11 +94,13 @@ export function buildGoalSetupPromptFromPlanner({
   originalGoalPrompt: string;
   plannerOutput: string;
 }): string {
-  const compactPlannerOutput = plannerOutput.trim() || "GOAL_PLAN\nresearch=none\nEND_GOAL_PLAN";
+  const compactOriginalGoalPrompt = compactOriginalGoalPromptForSetup(originalGoalPrompt);
+  const compactPlannerOutput = normalizeGoalPlannerOutput(plannerOutput);
   return (
-    `${originalGoalPrompt.trim()}\n\n` +
+    `## Original Goal Objective\n\n${compactOriginalGoalPrompt}\n\n` +
     `## Goal Planner Output\n\n${compactPlannerOutput}\n\n` +
     `Use the original objective plus this planner output to create durable Goal setup only. ` +
+    `Record this exact GOAL_PLAN as durable setup evidence (for example with goals action=evidence, evidence_label="GOAL_PLAN"). ` +
     `Do not redo planner research unless the planner output is unusable.`
   );
 }

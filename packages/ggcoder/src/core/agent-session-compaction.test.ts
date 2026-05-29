@@ -4,7 +4,6 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message } from "@abukhaled/gg-ai";
 import type * as CompactorModule from "./compaction/compactor.js";
-import type * as RepoMapModule from "./repomap.js";
 import type * as GgAgentModule from "@abukhaled/gg-agent";
 import type * as McpModule from "./mcp/index.js";
 
@@ -18,14 +17,6 @@ vi.mock("./compaction/compactor.js", async () => {
     ...actual,
     shouldCompact: shouldCompactMock,
     compact: compactMock,
-  };
-});
-
-vi.mock("./repomap.js", async () => {
-  const actual = await vi.importActual<typeof RepoMapModule>("./repomap.js");
-  return {
-    ...actual,
-    buildRepoMap: vi.fn(async () => ({ markdown: "", snapshot: { files: [] } })),
   };
 });
 

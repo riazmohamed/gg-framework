@@ -175,7 +175,7 @@ Remaining blockers/residual risks after the re-audit:
 - Confidence: High
 - Area: setup mode, UI orchestration, worker lifecycle, verifier, final completion gating
 - Evidence: The passed command executed unit/integration-style tests for controller/tool/store/events/orchestration. It did not launch the CLI/TUI, invoke `/goal`, press Goal pane controls, spawn a real worker, run a verifier, and observe final completion.
-- Repro/proof: `packages/ggcoder/scripts/verify-goal-e2e.ts` exists per repo map, but this audit did not run it. Therefore the full user-facing `/goal -> setup -> run -> worker -> verifier -> audit -> pass` path remains unproven here.
+- Repro/proof: `packages/ggcoder/scripts/verify-goal-e2e.ts` exists, but this audit did not run it. Therefore the full user-facing `/goal -> setup -> run -> worker -> verifier -> audit -> pass` path remains unproven here.
 - Recommendation: Make `scripts/verify-goal-e2e.ts` the primary quality gate if it is current, or update it to run against a temporary project and `GG_GOALS_BASE`. It should assert durable store contents, worker/verifier logs, synthetic event handling, and final gate behavior.
 - Action status: Fixed in the current working tree by canonical local verifier scripts; see `goal-remediation-report.md`.
 

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
-import { mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type { GoalControllerDecision } from "./goal-controller.js";
@@ -139,6 +139,7 @@ export interface GoalEvidence {
 export interface GoalVerifier {
   description: string;
   command?: string;
+  cwd?: string;
   lastResult?: GoalVerificationResult;
 }
 
@@ -558,6 +559,7 @@ function normalizeVerifier(value: unknown): GoalVerifier | undefined {
   return {
     description,
     ...(optionalString(value.command) ? { command: optionalString(value.command) } : {}),
+    ...(optionalString(value.cwd) ? { cwd: optionalString(value.cwd) } : {}),
     ...(normalizeVerification(value.lastResult)
       ? { lastResult: normalizeVerification(value.lastResult) }
       : {}),
@@ -738,10 +740,42 @@ async function writeGoalRunsFile(cwd: string, runs: readonly GoalRun[]): Promise
   });
 }
 
+const GOAL_STORE_LOCK_WAIT_MS = 10_000;
+const GOAL_STORE_STALE_LOCK_MS = 30_000;
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "EPERM";
+  }
+}
+
+async function shouldRemoveGoalStoreLock(lockPath: string): Promise<boolean> {
+  let lockStats: Awaited<ReturnType<typeof stat>>;
+  try {
+    lockStats = await stat(lockPath);
+  } catch {
+    return false;
+  }
+  if (Date.now() - lockStats.mtimeMs > GOAL_STORE_STALE_LOCK_MS) return true;
+
+  try {
+    const [pidLine] = (await readFile(lockPath, "utf-8")).split("\n");
+    const pid = Number(pidLine?.trim());
+    return !isProcessAlive(pid);
+  } catch {
+    return false;
+  }
+}
+
 async function withGoalStoreLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   await mkdir(dir, { recursive: true });
   const lockPath = join(dir, "goals.lock");
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + GOAL_STORE_LOCK_WAIT_MS;
   for (;;) {
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
@@ -755,7 +789,12 @@ async function withGoalStoreLock<T>(dir: string, fn: () => Promise<T>): Promise<
       }
     } catch (err) {
       await handle?.close().catch(() => undefined);
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() > deadline) throw err;
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      if (await shouldRemoveGoalStoreLock(lockPath)) {
+        await rm(lockPath, { force: true });
+        continue;
+      }
+      if (Date.now() > deadline) throw err;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }

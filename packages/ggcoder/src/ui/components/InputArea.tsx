@@ -8,6 +8,7 @@ import type { ImageAttachment } from "../../utils/image.js";
 import { extractImagePaths, readImageFile, getClipboardImage } from "../../utils/image.js";
 import { SlashCommandMenu, filterCommands, type SlashCommandInfo } from "./SlashCommandMenu.js";
 import { TaskPickerMenu } from "./TaskPickerMenu.js";
+import { stripTerminalFocusSequences } from "../utils/terminal-input.js";
 import { GoalPickerMenu } from "./GoalPickerMenu.js";
 import type { TaskRecord } from "../../core/tasks-store.js";
 import type { GoalRun } from "../../core/goal-store.js";
@@ -47,10 +48,6 @@ const DISABLE_MOUSE = "\x1b[?1006l\x1b[?1000l";
 // Some terminals or multiplexers send these even without mouse tracking enabled.
 function isMouseEscapeSequence(input: string): boolean {
   return input.includes("[<") && /\[<\d+;\d+;\d+[Mm]/.test(input);
-}
-
-function stripTerminalFocusSequences(input: string): string {
-  return input.replaceAll("\x1b[I", "").replaceAll("\x1b[O", "");
 }
 
 // Option+Arrow escape sequences — terminals send these as raw input strings
@@ -206,6 +203,12 @@ export interface PasteInfo {
 interface InputAreaProps {
   onSubmit: (value: string, images: ImageAttachment[], paste?: PasteInfo) => void;
   onAbort: () => void;
+  /**
+   * Text to push into the composer from outside (e.g. queued messages restored
+   * after an interrupt). Bumping `nonce` re-triggers injection even when the
+   * text is unchanged. Injected text is appended after any existing draft.
+   */
+  injectText?: { text: string; nonce: number } | null;
   disabled?: boolean;
   isActive?: boolean;
   onDownAtEnd?: () => void;
@@ -308,6 +311,7 @@ function getVisualLines(text: string, columns: number): string[] {
 export function InputArea({
   onSubmit,
   onAbort,
+  injectText,
   disabled = false,
   isActive = true,
   onDownAtEnd,
@@ -346,6 +350,21 @@ export function InputArea({
   const historyRef = useRef<string[]>(loadHistory());
   const historyIndexRef = useRef(-1);
   const draftRef = useRef("");
+
+  // ── External text injection (e.g. queued messages restored on interrupt) ──
+  // Append injected text to any existing draft and move the cursor to the end.
+  // Keyed on nonce so repeated injections of identical text still fire.
+  const lastInjectNonceRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!injectText || injectText.text.length === 0) return;
+    if (lastInjectNonceRef.current === injectText.nonce) return;
+    lastInjectNonceRef.current = injectText.nonce;
+    setValue((prev) => {
+      const next = prev.length > 0 ? `${prev}\n\n${injectText.text}` : injectText.text;
+      setCursor(next.length);
+      return next;
+    });
+  }, [injectText]);
 
   // ── Ctrl+R history search state ──────────────────────────
   const [searchMode, setSearchMode] = useState(false);
@@ -797,6 +816,7 @@ export function InputArea({
 
       // Reset kill ring accumulation for non-kill keys
       input = inputWithoutFocusReports;
+      const isReturnKey = key.return || input === "\r" || input === "\n";
 
       const isKillKey = key.ctrl && (input === "k" || input === "u" || input === "w");
       if (!isKillKey) lastActionWasKill = false;
@@ -834,7 +854,7 @@ export function InputArea({
           setCursor(savedCursorRef.current);
           return;
         }
-        if (key.return) {
+        if (isReturnKey) {
           // Accept match and submit
           setSearchMode(false);
           return; // fall through to normal submit handling
@@ -896,7 +916,7 @@ export function InputArea({
           if (task) onDeleteTask?.(task);
           return;
         }
-        if (key.return) {
+        if (isReturnKey) {
           const task = runnableTasks[Math.min(taskPickerIndex, runnableTasks.length - 1)];
           if (task) onStartTask?.(task);
           return;
@@ -932,7 +952,7 @@ export function InputArea({
           if (goal) onPauseGoal?.(goal);
           return;
         }
-        if (key.return) {
+        if (isReturnKey) {
           if (goal) onRunGoal?.(goal);
           return;
         }
@@ -972,7 +992,7 @@ export function InputArea({
         // Submitted messages will be queued by the parent component.
       }
 
-      if (key.return && (key.shift || key.meta)) {
+      if (isReturnKey && (key.shift || key.meta)) {
         // If there's a selection, replace it with the newline
         const sel = deleteSelection();
         if (sel) {
@@ -986,7 +1006,7 @@ export function InputArea({
         return;
       }
 
-      if (key.return) {
+      if (isReturnKey) {
         // If slash menu is open and a command is selected, fill it in
         if (isSlashMode && filteredCommands.length > 0) {
           const selected = filteredCommands[Math.min(menuIndex, filteredCommands.length - 1)];

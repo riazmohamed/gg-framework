@@ -442,6 +442,26 @@ describe("goal controller", () => {
     );
   });
 
+  it("explains ready evidence-plan items that have no durable proof anchor", () => {
+    const run = goalRun({
+      evidencePlan: [
+        {
+          id: "plan",
+          label: "GOAL_PLAN setup evidence",
+          mechanism: "log",
+          description: "The exact planner output must be durable.",
+          status: "ready",
+        },
+      ],
+    });
+
+    expect(hasRequiredGoalEvidence(run)).toEqual({
+      ok: false,
+      reason:
+        "Goal evidence plan is not satisfied: GOAL_PLAN setup evidence (ready but no durable evidence, path, or command recorded).",
+    });
+  });
+
   it("rejects evidence-plan false positives before final audit", () => {
     const run = goalRun({
       tasks: [{ id: "task-a", title: "Done", prompt: "Done", status: "done", attempts: 1 }],
@@ -478,7 +498,8 @@ describe("goal controller", () => {
 
     expect(hasRequiredGoalEvidence(run)).toEqual({
       ok: false,
-      reason: "Goal evidence plan is not satisfied: Screenshot proof.",
+      reason:
+        "Goal evidence plan is not satisfied: Screenshot proof (missing durable evidence for path artifacts/screenshot.png).",
     });
     expect(decideGoalNextAction(run)).toMatchObject({
       kind: "create_task",
@@ -623,18 +644,157 @@ describe("goal controller", () => {
     });
   });
 
-  it("runs the verifier only after all tasks are done", () => {
+  it("creates a main-checkout apply task before verifier when integration worktree changes exist", () => {
     expect(
       decideGoalNextAction(
         goalRun({
-          tasks: [{ id: "task-a", title: "Done", prompt: "Done", status: "done", attempts: 1 }],
+          tasks: [
+            {
+              id: "integrate",
+              title: "Integrate candidates and verify",
+              prompt: "Integrate accepted candidates",
+              status: "done",
+              attempts: 1,
+              mergeStrategy: "after_dependencies",
+              worktree: {
+                baseRef: "base-sha",
+                branchName: "goal/a/integrate-worker",
+                path: "/tmp/worktrees/integrate-worker",
+                status: "created",
+              },
+              lastSummary: "Integrated accepted candidate patches and wrote integration.patch.",
+            },
+          ],
           verifier: { description: "Full check", command: "pnpm test" },
+        }),
+      ),
+    ).toMatchObject({
+      kind: "create_task",
+      title: "Apply integrated worktree to main",
+      reason:
+        "Accepted integration worktree changes must be applied to the user's main checkout before verifier, final audit, release, commit, or completion.",
+    });
+  });
+
+  it("runs verifier after main integration, then requires a commit before final audit and completion", () => {
+    const integratedTask = {
+      id: "integrate",
+      title: "Integrate candidates and verify",
+      prompt: "Integrate accepted candidates",
+      status: "done" as const,
+      attempts: 1,
+      mergeStrategy: "after_dependencies" as const,
+      worktree: {
+        baseRef: "base-sha",
+        branchName: "goal/a/integrate-worker",
+        path: "/tmp/worktrees/integrate-worker",
+        status: "created" as const,
+      },
+    };
+    const appliedEvidence = {
+      id: "applied",
+      kind: "summary" as const,
+      label: "Integrated worktree applied to main",
+      content: "Accepted integration diff applied to main and checks passed.",
+      createdAt: "2024-01-01T00:00:01.000Z",
+    };
+
+    expect(
+      decideGoalNextAction(
+        goalRun({
+          tasks: [
+            integratedTask,
+            {
+              id: "apply",
+              title: "Apply integrated worktree to main",
+              prompt: "Apply accepted changes",
+              status: "done",
+              attempts: 1,
+            },
+          ],
+          verifier: { description: "Full check", command: "pnpm test" },
+          evidence: [durablePlanEvidence, appliedEvidence],
         }),
       ),
     ).toEqual({
       kind: "run_verifier",
       command: "pnpm test",
       reason: "All Goal tasks are done; running configured verifier for real completion evidence.",
+    });
+
+    const verifierPassed = goalRun({
+      tasks: [
+        integratedTask,
+        {
+          id: "apply",
+          title: "Apply integrated worktree to main",
+          prompt: "Apply accepted changes",
+          status: "done",
+          attempts: 1,
+        },
+      ],
+      evidence: [durablePlanEvidence, appliedEvidence],
+      verifier: {
+        description: "Full check",
+        command: "pnpm test",
+        lastResult: {
+          status: "pass",
+          summary: "main checkout verifier passed",
+          command: "pnpm test",
+          outputPath: ".goal-evidence/verifier.log",
+          checkedAt: "2024-01-01T00:00:02.000Z",
+        },
+      },
+    });
+
+    expect(canCompleteGoalRun(withPassingCompletionAudit(verifierPassed))).toEqual({
+      ok: false,
+      reason: "Integrated Goal changes have not been committed in the main checkout.",
+    });
+    expect(decideGoalNextAction(verifierPassed)).toMatchObject({
+      kind: "create_task",
+      title: "Commit integrated goal changes",
+      reason:
+        "Verified integrated Goal changes must be committed in the user's main checkout before final audit or completion.",
+    });
+
+    const committed = withPassingCompletionAudit(
+      goalRun({
+        tasks: [
+          integratedTask,
+          {
+            id: "apply",
+            title: "Apply integrated worktree to main",
+            prompt: "Apply accepted changes",
+            status: "done",
+            attempts: 1,
+          },
+          {
+            id: "commit",
+            title: "Commit integrated goal changes",
+            prompt: "Commit accepted changes",
+            status: "done",
+            attempts: 1,
+          },
+        ],
+        evidence: [
+          durablePlanEvidence,
+          appliedEvidence,
+          {
+            id: "commit-evidence",
+            kind: "command",
+            label: "Integrated Goal changes committed",
+            content: "Committed accepted Goal changes as abc1234.",
+            createdAt: "2024-01-01T00:00:03.000Z",
+          },
+        ],
+        verifier: verifierPassed.verifier,
+      }),
+    );
+
+    expect(decideGoalNextAction(committed)).toEqual({
+      kind: "complete",
+      reason: "All tasks are done, verifier evidence passed, and final completion audit passed.",
     });
   });
 
@@ -686,6 +846,11 @@ describe("goal controller", () => {
     expect(prompt).toContain("what failure it catches");
     expect(prompt).toContain("what signal proves it");
     expect(prompt).toContain("Build only the proportional instrument needed");
+    expect(prompt).toContain(
+      "If the verifier artifact exists only in your isolated worker worktree",
+    );
+    expect(prompt).toContain("set verifier_cwd to that worktree path");
+    expect(prompt).toContain("copy/integrate the verifier artifact into the main checkout");
     expect(prompt).toContain("not use narrative-only verification or human visual inspection");
   });
 
@@ -1035,6 +1200,111 @@ describe("goal controller", () => {
       task,
       attempts: 6,
       reason: "Attempt limit reached for task Flaky repair.",
+    });
+  });
+
+  it("does not create duplicate auto evidence or harness tasks", () => {
+    const evidenceTask = {
+      id: "evidence-task",
+      title: "Build Goal evidence path",
+      prompt: "Build proof",
+      status: "done" as const,
+      attempts: 1,
+    };
+    expect(
+      decideGoalNextAction(
+        goalRun({
+          tasks: [evidenceTask],
+          evidencePlan: [
+            {
+              id: "missing-proof",
+              label: "Missing proof",
+              mechanism: "command",
+              description: "Needs a command artifact.",
+              status: "planned",
+              command: "pnpm missing-proof",
+            },
+          ],
+          verifier: { description: "Verifier", command: "pnpm verify" },
+        }),
+      ),
+    ).toEqual({
+      kind: "blocked",
+      reason:
+        'Goal auto-task "Build Goal evidence path" already exists with status done; not creating a duplicate. Reconcile its evidence or update the existing task before continuing. Goal evidence plan still requires local instrumentation or exact prerequisite handling before verification.',
+    });
+
+    const harnessTask = {
+      id: "harness-task",
+      title: "Build Goal verification harness",
+      prompt: "Build harness",
+      status: "blocked" as const,
+      attempts: 1,
+    };
+    expect(
+      decideGoalNextAction(
+        goalRun({
+          tasks: [harnessTask],
+          harness: [{ id: "harness", label: "Harness", description: "Needs instrumentation" }],
+          verifier: { description: "Verifier" },
+        }),
+      ),
+    ).toEqual({
+      kind: "blocked",
+      reason:
+        'Goal auto-task "Build Goal verification harness" already exists with status blocked; not creating a duplicate. Reconcile its evidence or update the existing task before continuing. Goal harness still requires local instrumentation before verification.',
+    });
+  });
+
+  it("reuses existing pending auto tasks instead of creating duplicates", () => {
+    const verifierTask = {
+      id: "verifier-task",
+      title: "Define Goal verifier",
+      prompt: "Define verifier",
+      status: "pending" as const,
+      attempts: 1,
+    };
+
+    expect(
+      decideGoalNextAction(
+        goalRun({ tasks: [verifierTask], verifier: { description: "Verifier" } }),
+      ),
+    ).toEqual({
+      kind: "start_worker",
+      task: verifierTask,
+      attempts: 2,
+      reason: 'Goal task "Define Goal verifier" is ready for worker attempt 2.',
+    });
+  });
+
+  it("blocks rather than creating another verifier-fix task when one is already blocked", () => {
+    const run = goalRun({
+      tasks: [
+        { id: "task-a", title: "Done", prompt: "Done", status: "done", attempts: 1 },
+        {
+          id: "fix-a",
+          title: "Fix verifier failure",
+          prompt: "Fix it",
+          status: "blocked",
+          attempts: 1,
+        },
+      ],
+      verifier: {
+        description: "Full check",
+        command: "pnpm test",
+        lastResult: {
+          status: "fail",
+          summary: "tests failed",
+          checkedAt: "2024-01-01T00:00:00.000Z",
+          exitCode: 1,
+        },
+      },
+    });
+
+    expect(decideGoalNextAction(run)).toEqual({
+      kind: "blocked",
+      reason:
+        "A blocked verifier-fix task already exists; not creating another fix worker until the existing blocker is reconciled.",
     });
   });
 });

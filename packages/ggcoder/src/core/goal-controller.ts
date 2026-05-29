@@ -13,7 +13,13 @@ import {
 export const DEFAULT_GOAL_TASK_ATTEMPT_LIMIT = 5;
 export const DEFAULT_GOAL_VERIFIER_FIX_LIMIT = 5;
 
+export const APPLY_INTEGRATION_TO_MAIN_TASK_TITLE = "Apply integrated worktree to main";
+export const COMMIT_INTEGRATED_GOAL_CHANGES_TASK_TITLE = "Commit integrated goal changes";
 const FINAL_COMPLETION_AUDIT_TASK_TITLE = "Audit Goal completion evidence";
+const BUILD_GOAL_EVIDENCE_PATH_TASK_TITLE = "Build Goal evidence path";
+const BUILD_GOAL_VERIFICATION_HARNESS_TASK_TITLE = "Build Goal verification harness";
+const DEFINE_GOAL_VERIFIER_TASK_TITLE = "Define Goal verifier";
+const FIX_VERIFIER_FAILURE_TASK_TITLE = "Fix verifier failure";
 const DEFAULT_GOAL_COMPLETION_AUDIT_LIMIT = 3;
 
 export type GoalControllerDecision =
@@ -192,6 +198,25 @@ export function unsatisfiedGoalEvidencePlanItems(run: GoalRun): GoalRun["evidenc
   return run.evidencePlan.filter((item) => !evidencePlanItemSatisfiedByDurableEvidence(run, item));
 }
 
+function unsatisfiedEvidencePlanItemReason(
+  run: GoalRun,
+  item: GoalRun["evidencePlan"][number],
+): string {
+  if (item.status === "ready" && !item.evidence?.trim() && !item.path && !item.command) {
+    return `${item.label} (ready but no durable evidence, path, or command recorded)`;
+  }
+  if (item.path && !run.evidence.some((evidence) => evidence.path === item.path)) {
+    return `${item.label} (missing durable evidence for path ${item.path})`;
+  }
+  if (
+    item.command &&
+    !run.evidence.some((evidence) => exactTokenReferenced(evidence.content, item.command))
+  ) {
+    return `${item.label} (missing durable evidence for command ${item.command})`;
+  }
+  return item.label;
+}
+
 function exactTokenReferenced(content: string | undefined, token: string | undefined): boolean {
   return !!content?.trim() && !!token?.trim() && content.includes(token);
 }
@@ -221,7 +246,7 @@ export function hasRequiredGoalEvidence(run: GoalRun): GoalCompletionCheck {
   if (missing.length > 0) {
     return {
       ok: false,
-      reason: `Goal evidence plan is not satisfied: ${missing.map((item) => item.label).join(", ")}.`,
+      reason: `Goal evidence plan is not satisfied: ${missing.map((item) => unsatisfiedEvidencePlanItemReason(run, item)).join(", ")}.`,
     };
   }
   return {
@@ -232,6 +257,58 @@ export function hasRequiredGoalEvidence(run: GoalRun): GoalCompletionCheck {
 
 function finalAuditTaskCount(run: GoalRun): number {
   return run.tasks.filter((task) => task.title === FINAL_COMPLETION_AUDIT_TASK_TITLE).length;
+}
+
+function hasApplyIntegrationTask(run: GoalRun): boolean {
+  return run.tasks.some((task) => task.title === APPLY_INTEGRATION_TO_MAIN_TASK_TITLE);
+}
+
+function hasCommitIntegratedChangesTask(run: GoalRun): boolean {
+  return run.tasks.some((task) => task.title === COMMIT_INTEGRATED_GOAL_CHANGES_TASK_TITLE);
+}
+
+function pendingAfterDependenciesImplementationTasks(run: GoalRun): GoalTask[] {
+  return run.tasks.filter(
+    (task) =>
+      task.status === "done" && task.mergeStrategy === "after_dependencies" && !!task.worktree,
+  );
+}
+
+function appliedIntegrationEvidence(run: GoalRun): boolean {
+  return run.evidence.some(
+    (item) =>
+      item.label === "Integrated worktree applied to main" ||
+      item.label === "Goal decision: apply_integration_to_main",
+  );
+}
+
+function committedIntegrationEvidence(run: GoalRun): boolean {
+  return run.evidence.some((item) => item.label === "Integrated Goal changes committed");
+}
+
+function hasIntegratedWorktreeChanges(run: GoalRun): boolean {
+  return (
+    pendingAfterDependenciesImplementationTasks(run).length > 0 || appliedIntegrationEvidence(run)
+  );
+}
+
+function needsMainIntegrationApplyTask(run: GoalRun): boolean {
+  return (
+    pendingAfterDependenciesImplementationTasks(run).length > 0 &&
+    !hasApplyIntegrationTask(run) &&
+    !appliedIntegrationEvidence(run)
+  );
+}
+
+function needsIntegratedGoalChangesCommitTask(run: GoalRun): boolean {
+  return (
+    hasIntegratedWorktreeChanges(run) &&
+    appliedIntegrationEvidence(run) &&
+    run.verifier?.lastResult?.status === "pass" &&
+    !latestNonAuditWorkerEvidenceAfterVerifier(run) &&
+    !hasCommitIntegratedChangesTask(run) &&
+    !committedIntegrationEvidence(run)
+  );
 }
 
 function shouldCreateFinalAuditTask(
@@ -364,7 +441,7 @@ function buildEvidencePlanTaskPrompt(run: GoalRun): string {
     referencePromptSection(run.references) +
     `Turn the planned proof paths below into real local/free verification capability before the Goal verifier runs. For each path, preserve the orchestrator's goal-specific sensory intent: what experience is being observed, what failure it catches, and what signal proves it.\n` +
     `${plannedItems}\n\n` +
-    `Inventory available local capabilities without anchoring on any fixed tool category. Build only the proportional instrument needed for this proof path, update the Goal evidence_plan/harness/verifier metadata with the goals tool, and persist concrete command/file/artifact/log evidence that the instrument works. Do not use narrative-only verification or human visual inspection as completion evidence. Only block with exact user instructions for inputs that cannot be generated or checked locally.`
+    `Inventory available local capabilities without anchoring on any fixed tool category. Build only the proportional instrument needed for this proof path, update the Goal evidence_plan/harness/verifier metadata with the goals tool, and persist concrete command/file/artifact/log evidence that the instrument works. If the verifier artifact exists only in your isolated worker worktree, set verifier_cwd to that worktree path when recording the verifier; otherwise copy/integrate the verifier artifact into the main checkout before using a main-checkout-relative command. Do not use narrative-only verification or human visual inspection as completion evidence. Only block with exact user instructions for inputs that cannot be generated or checked locally.`
   );
 }
 
@@ -372,7 +449,33 @@ function buildVerifierTaskPrompt(run: GoalRun): string {
   return (
     `Goal: ${run.goal}\n\n` +
     referencePromptSection(run.references) +
-    `Define and build a real end-to-end verifier for this Goal. Begin from the intended experience and required senses/signals already implied by the success criteria and evidence plan, including mandatory Goal references. Choose a proportional local/free verifier that observes those signals and catches the important goal-specific failures; do not add generic simulations, screenshots, benchmarks, or scripts unless they directly support that proof. Update the Goal with a verifier_command and verifier_description using the goals tool. The verifier must be runnable locally/free and produce durable command or file evidence, not narrative or human visual inspection. If an external prerequisite is missing, mark it missing with exact user instructions.`
+    `Define and build a real end-to-end verifier for this Goal. Begin from the intended experience and required senses/signals already implied by the success criteria and evidence plan, including mandatory Goal references. Choose a proportional local/free verifier that observes those signals and catches the important goal-specific failures; do not add generic simulations, screenshots, benchmarks, or scripts unless they directly support that proof. Update the Goal with a verifier_command, verifier_description, and verifier_cwd when the command must run from an isolated worker worktree. The verifier must be runnable locally/free and produce durable command or file evidence, not narrative or human visual inspection. If an external prerequisite is missing, mark it missing with exact user instructions.`
+  );
+}
+
+function buildApplyIntegrationToMainTaskPrompt(run: GoalRun): string {
+  const integrationTasks = pendingAfterDependenciesImplementationTasks(run)
+    .map(
+      (task) =>
+        `- ${task.id} / ${task.title}: worktree=${task.worktree?.path ?? "unknown"}; branch=${task.worktree?.branchName ?? "unknown"}; base=${task.worktree?.baseRef ?? "unknown"}; summary=${task.lastSummary?.slice(0, 600) ?? "none"}`,
+    )
+    .join("\n");
+  return (
+    `Goal: ${run.goal}\n\n` +
+    referencePromptSection(run.references) +
+    `Apply accepted integration worktree changes into the user's main checkout before any release, verifier, final audit, commit, or completion. This task intentionally runs in the main checkout, not a new isolated worktree.\n\n` +
+    `Integrated/after-dependencies worker outputs to apply:\n${integrationTasks || "- none recorded"}\n\n` +
+    `For each integrated worktree, inspect its candidate packet, patch, diffstat, changed files, base SHA, verification logs, and risk notes. Apply or port only accepted changes to the main checkout; reject stale/risky/unrelated artifacts with durable evidence. Preserve user work. Run targeted checks in the main checkout after applying. Record durable evidence with label "Integrated worktree applied to main" containing the source worktree(s), accepted/rejected artifacts, changed files, diffstat, commands/results, and restart-needed note. Do not commit changes in this task; the controller will schedule a separate commit task after main-checkout verification evidence exists. Do not mark the whole Goal complete.`
+  );
+}
+
+function buildCommitIntegratedGoalChangesTaskPrompt(run: GoalRun): string {
+  return (
+    `Goal: ${run.goal}\n\n` +
+    referencePromptSection(run.references) +
+    `Commit verified integrated Goal changes in the user's main checkout before final audit or completion. This task intentionally runs in the main checkout, not a new isolated worktree.\n\n` +
+    `Before committing, inspect git status and recent durable evidence to confirm accepted worktree changes were applied to main and main-checkout verification passed. Preserve user work: commit only files that belong to this Goal's accepted integrated changes, and do not stage unrelated user edits. If unrelated dirty files exist, block with exact paths and instructions instead of committing them.\n\n` +
+    `Run a targeted pre-commit check appropriate to the changed files if no fresh main-checkout verification evidence exists. Create one git commit with a concise message describing the Goal changes. Record durable evidence with label "Integrated Goal changes committed" containing the commit hash, staged/committed files, verification command/result used for confidence, and any restart-needed note. Do not mark the whole Goal complete.`
   );
 }
 
@@ -386,6 +489,45 @@ function activeTask(run: GoalRun): GoalTask | undefined {
 
 function recoverableTask(task: GoalTask): boolean {
   return task.status === "pending" || task.status === "failed";
+}
+
+function existingTaskWithTitle(run: GoalRun, title: string): GoalTask | undefined {
+  return run.tasks.find((task) => task.title === title);
+}
+
+function existingBlockedTaskWithTitle(run: GoalRun, title: string): GoalTask | undefined {
+  return run.tasks.find((task) => task.title === title && task.status === "blocked");
+}
+
+function reconcileExistingAutoTaskDecision(task: GoalTask, reason: string): GoalControllerDecision {
+  if (task.status === "running" || task.status === "verifying") {
+    return {
+      kind: "wait",
+      reason: `Goal auto-task "${task.title}" already exists and is ${task.status}; ${reason}`,
+      ...(task.workerId ? { workerId: task.workerId } : {}),
+    };
+  }
+  if (task.status === "pending" || task.status === "failed") {
+    return {
+      kind: "start_worker",
+      task,
+      attempts: task.attempts + 1,
+      reason: `Goal auto-task "${task.title}" already exists; reusing it instead of creating a duplicate. ${reason}`,
+    };
+  }
+  return {
+    kind: "blocked",
+    reason: `Goal auto-task "${task.title}" already exists with status ${task.status}; not creating a duplicate. Reconcile its evidence or update the existing task before continuing. ${reason}`,
+  };
+}
+
+function duplicateAutoTaskDecision(
+  run: GoalRun,
+  title: string,
+  reason: string,
+): GoalControllerDecision | undefined {
+  const existingTask = existingTaskWithTitle(run, title);
+  return existingTask ? reconcileExistingAutoTaskDecision(existingTask, reason) : undefined;
 }
 
 function taskMatchesDependency(task: GoalTask, dependencyId: string): boolean {
@@ -452,6 +594,13 @@ export function canCompleteGoalRun(run: GoalRun): GoalCompletionCheck {
 
   const requiredEvidence = hasRequiredGoalEvidence(run);
   if (!requiredEvidence.ok) return requiredEvidence;
+
+  if (hasIntegratedWorktreeChanges(run) && !committedIntegrationEvidence(run)) {
+    return {
+      ok: false,
+      reason: "Integrated Goal changes have not been committed in the main checkout.",
+    };
+  }
 
   const verifierResult = run.verifier?.lastResult;
   if (!verifierResult) {
@@ -581,6 +730,13 @@ export function decideGoalNextAction(
 ): GoalControllerDecision {
   const completion = canCompleteGoalRun(run);
   if (completion.ok) {
+    if (run.continueRequestedAt && run.verifier?.command) {
+      return {
+        kind: "run_verifier",
+        command: run.verifier.command,
+        reason: "Goal rerun requested; rerunning configured verifier before any new final audit.",
+      };
+    }
     return { kind: "complete", reason: completion.reason };
   }
 
@@ -656,6 +812,26 @@ export function decideGoalNextAction(
     return { kind: "blocked", reason: blockedEvidence };
   }
 
+  if (needsMainIntegrationApplyTask(run)) {
+    return {
+      kind: "create_task",
+      title: APPLY_INTEGRATION_TO_MAIN_TASK_TITLE,
+      prompt: buildApplyIntegrationToMainTaskPrompt(run),
+      reason:
+        "Accepted integration worktree changes must be applied to the user's main checkout before verifier, final audit, release, commit, or completion.",
+    };
+  }
+
+  if (needsIntegratedGoalChangesCommitTask(run)) {
+    return {
+      kind: "create_task",
+      title: COMMIT_INTEGRATED_GOAL_CHANGES_TASK_TITLE,
+      prompt: buildCommitIntegratedGoalChangesTaskPrompt(run),
+      reason:
+        "Verified integrated Goal changes must be committed in the user's main checkout before final audit or completion.",
+    };
+  }
+
   if (
     run.verifier?.lastResult?.status === "pass" &&
     latestNonAuditWorkerEvidenceAfterVerifier(run) &&
@@ -685,9 +861,15 @@ export function decideGoalNextAction(
           "Verifier passed, but final completion audit did not reconcile the Goal evidence plan after bounded attempts.",
       };
     }
+    const duplicateDecision = duplicateAutoTaskDecision(
+      run,
+      BUILD_GOAL_EVIDENCE_PATH_TASK_TITLE,
+      "Goal evidence plan still requires local instrumentation or exact prerequisite handling before verification.",
+    );
+    if (duplicateDecision) return duplicateDecision;
     return {
       kind: "create_task",
-      title: "Build Goal evidence path",
+      title: BUILD_GOAL_EVIDENCE_PATH_TASK_TITLE,
       prompt: buildEvidencePlanTaskPrompt(run),
       reason:
         "Goal evidence plan requires local instrumentation or exact prerequisite handling before verification.",
@@ -695,9 +877,15 @@ export function decideGoalNextAction(
   }
 
   if (needsHarnessInstrumentation(run)) {
+    const duplicateDecision = duplicateAutoTaskDecision(
+      run,
+      BUILD_GOAL_VERIFICATION_HARNESS_TASK_TITLE,
+      "Goal harness still requires local instrumentation before verification.",
+    );
+    if (duplicateDecision) return duplicateDecision;
     return {
       kind: "create_task",
-      title: "Build Goal verification harness",
+      title: BUILD_GOAL_VERIFICATION_HARNESS_TASK_TITLE,
       prompt: buildHarnessTaskPrompt(run),
       reason: "Goal harness requires local instrumentation before verification.",
     };
@@ -712,10 +900,18 @@ export function decideGoalNextAction(
       };
     }
     const limit = options.verifierFixLimit ?? DEFAULT_GOAL_VERIFIER_FIX_LIMIT;
+    const blockedFixTask = existingBlockedTaskWithTitle(run, FIX_VERIFIER_FAILURE_TASK_TITLE);
+    if (blockedFixTask) {
+      return {
+        kind: "blocked",
+        reason:
+          "A blocked verifier-fix task already exists; not creating another fix worker until the existing blocker is reconciled.",
+      };
+    }
     if (shouldCreateVerifierFixTask(run, limit)) {
       return {
         kind: "create_task",
-        title: "Fix verifier failure",
+        title: FIX_VERIFIER_FAILURE_TASK_TITLE,
         prompt: buildVerifierFailureTaskPrompt(run),
         reason: `Verifier failed; creating bounded fix task ${verifierFixTaskCount(run) + 1}/${limit}.`,
       };
@@ -724,7 +920,7 @@ export function decideGoalNextAction(
       kind: "pause",
       task: {
         id: "verifier-fix-limit",
-        title: "Fix verifier failure",
+        title: FIX_VERIFIER_FAILURE_TASK_TITLE,
         prompt: "Verifier fix attempt limit reached.",
         status: "blocked",
         attempts: limit,
@@ -757,9 +953,15 @@ export function decideGoalNextAction(
     };
   }
 
+  const duplicateDecision = duplicateAutoTaskDecision(
+    run,
+    DEFINE_GOAL_VERIFIER_TASK_TITLE,
+    "No verifier command is configured yet.",
+  );
+  if (duplicateDecision) return duplicateDecision;
   return {
     kind: "create_task",
-    title: "Define Goal verifier",
+    title: DEFINE_GOAL_VERIFIER_TASK_TITLE,
     prompt: buildVerifierTaskPrompt(run),
     reason: "No pending Goal task or verifier command is configured.",
   };

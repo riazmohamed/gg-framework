@@ -17,9 +17,11 @@ import {
 } from "./goal-store.js";
 import {
   createGoalWorkerWorktree,
+  isGoalWorktreeDirtyError,
   type GoalWorktreeCommandRunner,
   type GoalWorktreeCandidate,
 } from "./goal-worktree.js";
+import { APPLY_INTEGRATION_TO_MAIN_TASK_TITLE } from "./goal-controller.js";
 
 const DEFAULT_GOAL_WORKER_MAX_TURNS = 12;
 export const DEFAULT_GOAL_WORKER_TIMEOUT_MS = 30 * 60 * 1000;
@@ -98,17 +100,21 @@ function getCliPath(): string {
 
 export function buildGoalWorkerSystemPrompt(context: GoalWorkerContext): string {
   const title = context.taskTitle ? ` (${context.taskTitle})` : "";
-  return (
-    "You are a disposable Goal worker running inside the same project as the main GG Coder session. " +
-    `Goal context: cwd=${context.cwd}; run_id=${context.goalRunId}; task_id=${context.goalTaskId}${title}. ` +
-    "Follow only the assigned Goal task prompt, which is passed as this worker's user message. Keep changes focused, use local/free tools, source_path/docs/kencode real-code research when relevant, and translate the requested outcome into observable proof: model the intended experience, identify goal-specific failure modes, choose the required senses/signals, then create the simplest reliable local/free proof path for this domain. " +
-    "Create needed scripts/fixtures/harnesses only when they directly observe those signals. Use tests, local CLIs, dev servers, browser/simulator/device screenshots, video/frame inspection, logs, generated assets, protocol traces, database assertions, API probes, contract tests, performance measurements, source/docs comparison, or other artifacts as appropriate; do not default to generic tests, scripts, screenshots, benchmarks, or simulations, and do not rely on narrative or human visual inspection. For mobile/UI, prefer local simulator/browser evidence such as iOS Simulator screenshots when available before requiring a physical phone. " +
-    "Run requested verification and update durable Goal state with the goals tool using command/file evidence, screenshot/log evidence, not narrative or human visual inspection. Worker-started background processes, including dev servers, are worker-owned and are cleaned up when this worker CLI exits; if a later worker/verifier needs a persistent server, record instructions or metadata for the orchestrator to start/provide the localhost URL instead of relying on your background process. " +
-    "Your cwd is the worker candidate checkout. For implementation tasks the launcher should provide an isolated git worktree, so do not merge or touch the main checkout. At completion, record a candidate packet with base SHA, branch/worktree path, changed files, diffstat, patch path or how to reproduce the patch, verifier command/result, evidence paths, and risk notes. " +
-    "Preserve and report any task-graph metadata from the assigned prompt, including depends_on, parallel_group, expected_changed_scope, and merge_strategy, so the coordinator can parallelize independent tasks and hold dependent work until prerequisites are integrated. " +
-    `Record evidence and task status with goals({ action: "evidence" | "task", run_id: "${context.goalRunId}", task_id: "${context.goalTaskId}", ... }) for goal ${context.goalRunId}, task ${context.goalTaskId}. ` +
-    "Do not mark the whole goal complete; only the orchestrator/verifier can complete it."
-  );
+  const locationContract =
+    context.taskTitle === APPLY_INTEGRATION_TO_MAIN_TASK_TITLE
+      ? "Cwd is the user's main checkout; this is the controlled exception to worker isolation and may apply approved candidate packets/worktrees into main, verify, and record evidence before release."
+      : "Cwd is the worker candidate checkout in an isolated git worktree; do not merge or touch the main checkout. Record a candidate packet: base SHA, branch/worktree path, changed files, diffstat, patch path or reproduction steps, verifier result, evidence paths, risks.";
+  return [
+    "You are a disposable Goal worker for GG Coder.",
+    `Context: cwd=${context.cwd}; run_id=${context.goalRunId}; task_id=${context.goalTaskId}${title}.`,
+    "Follow only the assigned user task. Keep changes focused. Use local/free tools and source_path/docs/kencode research when relevant.",
+    "Proof rule: model the intended experience, choose the required senses/signals for goal-specific failures, then create the simplest local/free proof path. Use tests, CLIs, logs, screenshots/video, generated assets, protocol traces, database/API/contract/perf checks, or source/docs comparison only when they directly observe those signals; do not default to generic artifacts and do not rely on narrative or human visual inspection.",
+    "Background processes are worker-owned and must be cleaned up before exit; if a later verifier needs a server, record exact orchestrator instructions instead of leaving your server running.",
+    locationContract,
+    "Preserve task-graph metadata from the prompt: depends_on, parallel_group, expected_changed_scope, merge_strategy.",
+    `Record durable proof and task status with goals({ action: "evidence" | "task", run_id: "${context.goalRunId}", task_id: "${context.goalTaskId}", ... }) using command/file/screenshot/log evidence, not narrative-only claims.`,
+    "Do not mark the whole goal complete; only the coordinator/verifier can complete it.",
+  ].join(" ");
 }
 
 function appendSummary(summary: string, text: string): string {
@@ -218,7 +224,7 @@ export async function startGoalWorker(options: StartGoalWorkerOptions): Promise<
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await updateGoalTask(projectPath, options.goalRunId, options.goalTaskId, {
-        status: "blocked",
+        status: isGoalWorktreeDirtyError(error) ? "pending" : "blocked",
         workerId,
         lastSummary: message,
       });

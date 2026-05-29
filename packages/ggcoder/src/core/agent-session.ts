@@ -25,18 +25,6 @@ import { MCPClientManager, getMCPServers } from "./mcp/index.js";
 import { log } from "./logger.js";
 import { setEstimatorModel } from "./compaction/token-estimator.js";
 import { discoverAgents } from "./agents.js";
-import {
-  buildRepoMap,
-  createRepoMapCache,
-  type RepoMapCache,
-  type RepoMapSnapshot,
-} from "./repomap.js";
-import { getRepoMapBudgetForContext } from "./repomap-budget.js";
-import {
-  getLatestUserText,
-  injectRepoMapContextMessages,
-  stripRepoMapContextMessages,
-} from "./repomap-context.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -101,14 +89,6 @@ export class AgentSession {
   private cacheKeyLogged = false;
   private processManager?: ProcessManager;
   private mcpManager?: MCPClientManager;
-  private repoMapInjectionEnabled = true;
-  private repoMapDirty = true;
-  private repoMapMarkdown = "";
-  private repoMapSnapshot?: RepoMapSnapshot;
-  private repoMapChangedFiles = new Set<string>();
-  private repoMapReadFiles = new Set<string>();
-  private repoMapCache: RepoMapCache = createRepoMapCache();
-
   private provider: Provider;
   private model: string;
   private cwd: string;
@@ -178,8 +158,6 @@ export class AgentSession {
       // Lazy — sessionId isn't assigned yet when createTools() runs, so we
       // must defer reading the cache key until the sub-agent actually fires.
       getCacheKey: () => this.getPromptCacheKey(),
-      onFileRead: (filePath) => this.markRepoMapRead(filePath),
-      onFileMutated: (filePath) => this.markRepoMapDirty(filePath),
     });
     this.tools = tools;
     this.processManager = processManager;
@@ -214,6 +192,9 @@ export class AgentSession {
         false,
         undefined,
         this.tools.map((tool) => tool.name),
+        undefined,
+        "off",
+        this.provider,
       ));
     this.messages = [{ role: "system", content: basePrompt }];
 
@@ -373,8 +354,7 @@ export class AgentSession {
 
     const userAgent = this.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined;
 
-    const latestUserPrompt = getLatestUserText(this.messages);
-    const loopMessages = await this.prepareDynamicContext(latestUserPrompt);
+    const loopMessages = await this.prepareDynamicContext();
 
     const runAgentLoop = async (apiKey: string, accountId?: string, projectId?: string) => {
       const modelInfo = getModel(this.model);
@@ -437,7 +417,7 @@ export class AgentSession {
       }
     }
 
-    this.messages = this.stripDynamicMessages(loopMessages);
+    this.messages = loopMessages;
 
     // Persist new messages
     for (let i = this.lastPersistedIndex; i < this.messages.length; i++) {
@@ -552,6 +532,9 @@ export class AgentSession {
         false,
         undefined,
         this.tools.map((tool) => tool.name),
+        undefined,
+        "off",
+        this.provider,
       ));
     this.messages = [{ role: "system", content: basePrompt }];
     await this.createNewSession();
@@ -644,35 +627,6 @@ export class AgentSession {
     return this.getPromptCacheKey();
   }
 
-  getRepoMapStatus(): { enabled: boolean; markdown: string; snapshot?: RepoMapSnapshot } {
-    return {
-      enabled: this.repoMapInjectionEnabled,
-      markdown: this.repoMapMarkdown,
-      snapshot: this.repoMapSnapshot,
-    };
-  }
-
-  async refreshRepoMap(
-    latestUserPrompt?: string,
-  ): Promise<{ markdown: string; snapshot: RepoMapSnapshot }> {
-    const rendered = await buildRepoMap({
-      cwd: this.cwd,
-      maxChars: this.getRepoMapBudget(),
-      changedFiles: [...this.repoMapChangedFiles],
-      readFiles: [...this.repoMapReadFiles],
-      focusTerms: latestUserPrompt ? [latestUserPrompt] : [],
-      cache: this.repoMapCache,
-    });
-    this.repoMapMarkdown = rendered.markdown;
-    this.repoMapSnapshot = rendered.snapshot;
-    this.repoMapDirty = false;
-    return { markdown: rendered.markdown, snapshot: rendered.snapshot };
-  }
-
-  setRepoMapInjectionEnabled(enabled: boolean): void {
-    this.repoMapInjectionEnabled = enabled;
-  }
-
   async dispose(): Promise<void> {
     this.processManager?.shutdownAll();
     await this.mcpManager?.dispose();
@@ -742,40 +696,8 @@ export class AgentSession {
     this.lastPersistedIndex = this.messages.length;
   }
 
-  private markRepoMapDirty(filePath: string): void {
-    const relativePath = this.relativeRepoMapPath(filePath);
-    this.repoMapChangedFiles.add(relativePath);
-    this.repoMapReadFiles.add(relativePath);
-    this.repoMapDirty = true;
-  }
-
-  private markRepoMapRead(filePath: string): void {
-    this.repoMapReadFiles.add(this.relativeRepoMapPath(filePath));
-    this.repoMapDirty = true;
-  }
-
-  private relativeRepoMapPath(filePath: string): string {
-    return path.relative(this.cwd, filePath).split(path.sep).join("/");
-  }
-
-  private getRepoMapBudget(): number {
-    return getRepoMapBudgetForContext({
-      messages: this.messages,
-      readFileCount: this.repoMapReadFiles.size,
-    });
-  }
-
-  private async prepareDynamicContext(latestUserPrompt?: string): Promise<Message[]> {
-    if (!this.repoMapInjectionEnabled) return this.stripDynamicMessages(this.messages);
-    if (this.repoMapDirty || !this.repoMapMarkdown) {
-      await this.refreshRepoMap(latestUserPrompt);
-    }
-    if (!this.repoMapMarkdown) return this.stripDynamicMessages(this.messages);
-    return injectRepoMapContextMessages(this.messages, this.repoMapMarkdown);
-  }
-
-  private stripDynamicMessages(messages: readonly Message[]): Message[] {
-    return stripRepoMapContextMessages(messages);
+  private async prepareDynamicContext(_latestUserPrompt?: string): Promise<Message[]> {
+    return this.messages;
   }
 
   private async persistMessage(message: Message): Promise<void> {
@@ -827,27 +749,6 @@ export class AgentSession {
         const result = await this.branch(stepsBack);
         return `Branched: rewound from ${result.branchedFrom} to ${result.messagesKept} messages. New messages will fork from here.`;
       },
-      repoMap: async (action = "show") => {
-        if (action === "on") {
-          this.setRepoMapInjectionEnabled(true);
-          return "Dynamic repo map injection is on.";
-        }
-        if (action === "off") {
-          this.setRepoMapInjectionEnabled(false);
-          return "Dynamic repo map injection is off for this session.";
-        }
-        if (action === "refresh") {
-          const latestUserPrompt = getLatestUserText(this.messages);
-          const refreshed = await this.refreshRepoMap(latestUserPrompt);
-          return formatRepoMapCommandOutput(this.repoMapInjectionEnabled, refreshed.markdown, true);
-        }
-        const status = this.getRepoMapStatus();
-        if (!status.markdown) {
-          const refreshed = await this.refreshRepoMap(getLatestUserText(this.messages));
-          return formatRepoMapCommandOutput(status.enabled, refreshed.markdown, false);
-        }
-        return formatRepoMapCommandOutput(status.enabled, status.markdown, false);
-      },
       listBranches: async () => {
         const branches = await this.listBranches();
         if (branches.length <= 1) return "No branches — conversation is linear.";
@@ -859,16 +760,4 @@ export class AgentSession {
       },
     };
   }
-}
-
-function formatRepoMapCommandOutput(
-  enabled: boolean,
-  markdown: string,
-  refreshed: boolean,
-): string {
-  const status = enabled ? "on" : "off";
-  const prefix = refreshed
-    ? `Dynamic repo map refreshed · injection: ${status}`
-    : `Dynamic repo map · injection: ${status}`;
-  return `${prefix}\n\n${markdown}`;
 }

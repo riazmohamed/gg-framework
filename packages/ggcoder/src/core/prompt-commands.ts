@@ -345,11 +345,13 @@ If CLAUDE.md does NOT exist:
 
 ## Step 2: Analyze Project (Use Sub-agents in Parallel)
 
+Derive every fact from the actual project — source code, entry points, manifests, and config. Treat README, docs, and code comments as unverified hints that are frequently stale: never copy claims from them, and only state things you can confirm from the code and config themselves.
+
 Spawn 3 sub-agents in parallel using the subagent tool (call the subagent tool 3 times in a single response):
 
-1. **Project Purpose Agent**: Analyze README, package.json description, main files to understand what the project does
+1. **Project Purpose Agent**: Determine what the project actually does from its real code — entry points, main modules, exported/public APIs, CLI commands, routes, and manifests. Do not rely on the README's description.
 2. **Directory Structure Agent**: Map out the folder structure and what each folder contains
-3. **Tech Stack Agent**: Identify languages, frameworks, tools, dependencies
+3. **Tech Stack Agent**: Identify languages, frameworks, tools, and dependencies from manifests/lockfiles and config (not from prose docs)
 
 Wait for all sub-agents to complete, then synthesize the information.
 
@@ -361,11 +363,11 @@ Check for config files:
 - go.mod -> Go
 - Cargo.toml -> Rust
 
-Extract exact commands that are useful project facts. Verify commands against local package scripts, manifests, Makefiles, CI, or documented project workflows; do not invent commands from convention alone. Do not restate generic "run checks after edits" behavior, and do not turn discovered commands into mandatory after-every-edit requirements unless local docs or CI explicitly require that stricter sequence.
+Extract exact commands that are useful project facts. Take commands from authoritative sources — package scripts, manifests, Makefiles, and CI config; do not invent them from convention, and do not trust README/doc command snippets unless a script or manifest confirms they still exist. Do not restate generic "run checks after edits" behavior, and do not turn discovered commands into mandatory after-every-edit requirements unless local docs or CI explicitly require that stricter sequence.
 
 ## Step 4: Summarize Stable Structure
 
-If useful, create a concise structure summary for future agents showing only key stable directories and files with brief descriptions. Do NOT embed generated symbol maps, exhaustive file indexes, generated repo maps, auto-generated directory listings, or large trees in CLAUDE.md.
+If useful, create a concise structure summary for future agents showing only key stable directories and files with brief descriptions. Do NOT embed generated symbol maps, exhaustive file indexes, auto-generated directory listings, or large trees in CLAUDE.md.
 
 ## Step 5: Generate or Update CLAUDE.md
 
@@ -377,7 +379,7 @@ Create CLAUDE.md with only sections that add project-specific value. Prefer this
 - Exact local commands (install/build/check/test/dev/publish/deploy) when they are not obvious from package scripts alone
 - Project-specific constraints that override defaults (for example required publish order, generated-file workflow, auth/secrets storage, deployment caveats)
 
-Avoid generic sections named "Code Quality", "Organization Rules", or "How to Work" unless every bullet is specific to this project. Do not duplicate language style packs, generic verification rules, or boilerplate quality gates such as "After editing ANY file" / "Code Quality — Zero Tolerance". Do not add generated repo maps, symbol indexes, exhaustive file indexes, or auto-generated project inventories; CLAUDE.md must remain durable, agent-focused project context.
+Avoid generic sections named "Code Quality", "Organization Rules", or "How to Work" unless every bullet is specific to this project. Do not duplicate language style packs, generic verification rules, or boilerplate quality gates such as "After editing ANY file" / "Code Quality — Zero Tolerance". Do not add symbol indexes, exhaustive file indexes, or auto-generated project inventories; CLAUDE.md must remain durable, agent-focused project context.
 
 Keep total file under 100 lines. If updating, preserve any custom sections the user added. After writing, re-read CLAUDE.md and confirm it contains only project-specific facts supported by local files.
 

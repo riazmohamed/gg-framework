@@ -107,7 +107,7 @@ describe("shouldCompact", () => {
     }
     const estimated = estimateConversationTokens(messages);
 
-    const opusContext = getContextWindow("claude-opus-4-7");
+    const opusContext = getContextWindow("claude-opus-4-8");
     const kimiContext = getContextWindow("kimi-k2.6");
 
     // Sanity: Opus has 1M, Kimi has 256k
@@ -193,7 +193,7 @@ describe("compaction thresholds across all models", () => {
   }
 
   const modelThresholds: { model: string; contextWindow: number }[] = [
-    { model: "claude-opus-4-7", contextWindow: 1_000_000 },
+    { model: "claude-opus-4-8", contextWindow: 1_000_000 },
     { model: "claude-sonnet-4-6", contextWindow: 1_000_000 },
     { model: "claude-haiku-4-5-20251001", contextWindow: 200_000 },
     { model: "gpt-5.3-codex", contextWindow: 400_000 },
@@ -332,13 +332,18 @@ describe("prepareMessagesForSummary", () => {
     expect(text).toContain("truncated");
   });
 
-  it("truncates long user messages", () => {
-    const longContent = "x".repeat(5000);
-    const msgs = [makeMessage("user", longContent)];
-    const prepared = prepareMessagesForSummary(msgs);
+  it("truncates very long user messages but preserves moderately long ones", () => {
+    // Moderately long user messages (under the 8k user cap) are kept verbatim —
+    // user turns are the highest-signal content for resuming work.
+    const moderate = "x".repeat(5000);
+    const keptUnchanged = prepareMessagesForSummary([makeMessage("user", moderate)]);
+    expect(keptUnchanged[0].content as string).toBe(moderate);
 
-    expect((prepared[0].content as string).length).toBeLessThan(longContent.length);
-    expect(prepared[0].content as string).toContain("truncated");
+    // Pathologically long user messages are still capped.
+    const huge = "x".repeat(20000);
+    const truncated = prepareMessagesForSummary([makeMessage("user", huge)]);
+    expect((truncated[0].content as string).length).toBeLessThan(huge.length);
+    expect(truncated[0].content as string).toContain("truncated");
   });
 
   it("truncates long assistant text parts", () => {

@@ -9,9 +9,9 @@ import { BLACK_CIRCLE, RETURN_SYMBOL } from "./constants/figures.js";
 import { SPINNER_FRAMES } from "./spinner-frames.js";
 import type { Theme } from "./theme/theme.js";
 import { getUserMessageDisplayParts } from "./utils/user-message-display.js";
-import { buildToolGroupSummary, segmentsToPlainText } from "./tool-group-summary.js";
+import { buildToolGroupSummary } from "./tool-group-summary.js";
 import { renderMarkdownToAnsiLines } from "./utils/markdown-renderer.js";
-import { isAgentSpacingKind } from "./terminal-history-spacing.js";
+import { shouldSeparateTranscriptItems } from "./transcript/spacing.js";
 import {
   MAX_OUTPUT_LINES,
   RESPONSE_LEFT_PADDING,
@@ -34,20 +34,45 @@ import {
   wrapPlain,
 } from "./terminal-history-format.js";
 import {
-  normalizeStatusText,
   renderCompacted,
   renderCompacting,
   renderError,
   renderGoal,
-  renderPlanEvent,
   renderSetupHint,
   renderStatusLine,
   renderStepDone,
   renderStylePack,
   renderUpdateNotice,
 } from "./terminal-history-status-renderers.js";
+import {
+  presentDuration,
+  presentGoalAgentTransition,
+  presentInfo,
+  presentModelTransition,
+  presentPlanEvent,
+  presentQueued,
+  presentStopped,
+  presentTask,
+  presentThemeTransition,
+} from "./transcript/presentation.js";
+import { toolTonePalette } from "./transcript/tool-presentation.js";
 
-const LOGO_LINES = ["", "", ""];
+const LOGO_LINES = [" ▄▀▀▀ ▄▀▀▀", " █ ▀█ █ ▀█", " ▀▄▄▀ ▀▄▄▀"];
+const PLAN_MODE_LOGO = [
+  "▗▄▄▖ ▗▖    ▗▄▖ ▗▖  ▗▖    ▗▖  ▗▖ ▗▄▖ ▗▄▄▄ ▗▄▄▄▖",
+  "▐▌ ▐▌▐▌   ▐▌ ▐▌▐▛▚▖▐▌    ▐▛▚▞▜▌▐▌ ▐▌▐▌  █▐▌",
+  "▐▛▀▘ ▐▌   ▐▛▀▜▌▐▌ ▝▜▌    ▐▌  ▐▌▐▌ ▐▌▐▌  █▐▛▀▀▘",
+  "▐▌   ▐▙▄▄▖▐▌ ▐▌▐▌  ▐▌    ▐▌  ▐▌▝▚▄▞▘▐▙▄▄▀▐▙▄▄▖",
+];
+const PLAN_MODE_GRADIENT = [
+  "#f59e0b",
+  "#fbbf24",
+  "#f59e0b",
+  "#d97706",
+  "#f59e0b",
+  "#fbbf24",
+  "#d97706",
+];
 const GRADIENT = [
   "#60a5fa",
   "#6da1f9",
@@ -106,12 +131,26 @@ export function createTerminalHistoryPrinter({
         if (!options?.force && printed.has(item.id)) continue;
         const output = serializeCompletedItemToTerminalHistory(item, context);
         const endsWithBlankLine = item.kind === "banner";
+        // A continuation assistant chunk is the next paragraph of a response
+        // whose earlier paragraphs were already flushed mid-stream. Re-insert
+        // the blank line that separated them so the reassembled scrollback
+        // matches the whole response (assistant→assistant is otherwise compact).
+        const isContinuationParagraph =
+          item.kind === "assistant" &&
+          item.continuation === true &&
+          previousPrintedKind === "assistant";
         const formatted = formatHistoryWrite(output, {
           leadingSeparator:
-            previousPrintedKind !== null &&
-            isAgentSpacingKind(previousPrintedKind) &&
-            isAgentSpacingKind(item.kind),
+            item.kind === "plan_transition"
+              ? false
+              : isContinuationParagraph
+                ? true
+                : shouldSeparateTranscriptItems({
+                    previousKind: previousPrintedKind ?? undefined,
+                    currentKind: item.kind,
+                  }),
           trailingBlankLine: endsWithBlankLine,
+          trailingNewlines: item.kind === "user" ? 1 : undefined,
         });
         if (formatted.length === 0) continue;
         printed.add(item.id);
@@ -147,8 +186,10 @@ export function serializeCompletedItemToTerminalHistory(
     case "assistant":
       return renderAssistant(item.text, context, item.continuation);
     case "tool_start":
+      if (item.name === "enter_plan") return "";
       return renderToolStart(item.name, item.args, item.progressOutput, context);
     case "tool_done":
+      if (item.name === "enter_plan") return "";
       return renderToolDone(
         item.name,
         item.args,
@@ -167,27 +208,31 @@ export function serializeCompletedItemToTerminalHistory(
       return renderSubAgentGroup(item.agents, item.aborted, context);
     case "goal":
       return renderGoal(item.title, item.workerId, context);
-    case "task":
+    case "task": {
+      const presentation = presentTask(item);
       return renderStatusLine(
-        "▸",
-        `${dim(context, "Task: ")}${color(context.theme.commandColor, item.title, true)}`,
+        presentation.glyph.trim(),
+        `${dim(context, presentation.label ?? "")}${color(context.theme.commandColor, presentation.text, true)}`,
         context,
         context.theme.commandColor,
-        true,
+        presentation.bold,
         true,
       );
+    }
     case "goal_progress":
       return renderGoalProgress(item, context);
     case "error":
       return renderError(item.headline, item.message, item.guidance, context);
-    case "info":
+    case "info": {
+      const presentation = presentInfo(item);
       return renderStatusLine(
-        "○",
-        normalizeStatusText(item.text),
+        presentation.glyph.trim(),
+        presentation.text,
         context,
         context.theme.commandColor,
-        false,
+        presentation.bold,
       );
+    }
     case "style_pack":
       return renderStylePack(item.added, item.showSetupHint, context);
     case "setup_hint":
@@ -204,60 +249,116 @@ export function serializeCompletedItemToTerminalHistory(
         item.tokensAfter,
         context,
       );
-    case "duration":
+    case "duration": {
+      const presentation = presentDuration(item);
       return indent(
-        dim(context, `✻ ${item.verb} ${formatDuration(item.durationMs)}`),
+        dim(context, `${presentation.glyph}${presentation.text}`),
         RESPONSE_LEFT_PADDING,
       );
+    }
+    case "session_summary":
+      return renderSessionSummary(item.summary, context);
     case "plan_transition":
+      return renderPlanModeLogo(context);
+    case "goal_agent_transition": {
+      const presentation = presentGoalAgentTransition(item);
       return renderStatusLine(
-        BLACK_CIRCLE,
-        normalizeStatusText(item.text),
+        presentation.glyph.trim(),
+        presentation.text,
         context,
         context.theme.commandColor,
-        true,
+        presentation.bold,
       );
-    case "goal_agent_transition":
+    }
+    case "model_transition": {
+      const presentation = presentModelTransition(item);
       return renderStatusLine(
-        BLACK_CIRCLE,
-        normalizeStatusText(item.text),
+        presentation.glyph.trim(),
+        `${dim(context, presentation.label ?? "")}${color(context.theme.commandColor, presentation.text, true)}`,
         context,
         context.theme.commandColor,
+        presentation.bold,
         true,
       );
-    case "model_transition":
+    }
+    case "theme_transition": {
+      const presentation = presentThemeTransition(item);
       return renderStatusLine(
-        "▸",
-        `${dim(context, "Switched to ")}${color(context.theme.commandColor, item.modelName, true)}`,
+        presentation.glyph.trim(),
+        `${dim(context, presentation.label ?? "")}${color(context.theme.commandColor, presentation.text, true)}`,
         context,
         context.theme.commandColor,
-        true,
+        presentation.bold,
         true,
       );
-    case "theme_transition":
+    }
+    case "plan_event": {
+      const presentation = presentPlanEvent(item);
       return renderStatusLine(
-        "◐",
-        `${dim(context, "Theme switched to ")}${color(context.theme.commandColor, item.themeName, true)}`,
+        presentation.glyph.trim(),
+        `${color(context.theme.commandColor, presentation.text, true)}${presentation.detail ? dim(context, presentation.detail) : ""}`,
         context,
         context.theme.commandColor,
-        true,
+        presentation.bold,
         true,
       );
-    case "plan_event":
-      return renderPlanEvent(item.event, item.detail, context);
-    case "stopped":
+    }
+    case "stopped": {
+      const presentation = presentStopped(item);
       return renderStatusLine(
-        "⊘",
-        normalizeStatusText(item.text),
+        presentation.glyph.trim(),
+        presentation.text,
         context,
         context.theme.commandColor,
-        true,
+        presentation.bold,
       );
+    }
     case "step_done":
       return renderStepDone(item.stepNum, item.description, context);
     case "tombstone":
       return "";
   }
+}
+
+function renderSessionSummary(
+  summary: Extract<CompletedItem, { kind: "session_summary" }>["summary"],
+  context: TerminalHistoryContext,
+): string {
+  const cacheTokens = (summary.usage.cacheRead ?? 0) + (summary.usage.cacheWrite ?? 0);
+  const successRate =
+    summary.tools.totalCalls > 0
+      ? (summary.tools.totalSuccess / summary.tools.totalCalls) * 100
+      : null;
+  const topTools = Object.entries(summary.tools.byName)
+    .sort(([, a], [, b]) => b.calls - a.calls || b.durationMs - a.durationMs)
+    .slice(0, 5)
+    .map(([name, stats]) => `${name} ×${stats.calls}`)
+    .join(", ");
+  const lines = [
+    color(context.theme.secondary, summary.title, true),
+    "",
+    `${color(context.theme.text, "Session", true)}`,
+    summary.sessionId
+      ? `${color(context.theme.link, "ID:")} ${dim(context, summary.sessionId)}`
+      : undefined,
+    `${color(context.theme.link, "Model:")} ${summary.provider}:${summary.model}`,
+    `${color(context.theme.link, "Directory:")} ${dim(context, summary.cwd)}`,
+    "",
+    `${color(context.theme.text, "Usage", true)}`,
+    `${color(context.theme.link, "Wall time:")} ${formatDuration(summary.wallDurationMs)}`,
+    `${color(context.theme.link, "Turns:")} ${summary.turns.toLocaleString()}`,
+    `${color(context.theme.link, "Tokens:")} ${summary.usage.inputTokens.toLocaleString()} in / ${summary.usage.outputTokens.toLocaleString()} out${cacheTokens > 0 ? dim(context, ` / ${cacheTokens.toLocaleString()} cache`) : ""}`,
+    "",
+    `${color(context.theme.text, "Work", true)}`,
+    `${color(context.theme.link, "Tool calls:")} ${summary.tools.totalCalls.toLocaleString()} (${color(context.theme.success, `✓ ${summary.tools.totalSuccess.toLocaleString()}`)} ${color(context.theme.error, `× ${summary.tools.totalFail.toLocaleString()}`)}${successRate == null ? "" : dim(context, ` · ${successRate.toFixed(1)}%`)})`,
+    `${color(context.theme.link, "Top tools:")} ${dim(context, topTools || "none")}`,
+    summary.linesChanged.added > 0 || summary.linesChanged.removed > 0
+      ? `${color(context.theme.link, "Code changes:")} ${color(context.theme.success, `+${summary.linesChanged.added.toLocaleString()}`)} ${color(context.theme.error, `-${summary.linesChanged.removed.toLocaleString()}`)}`
+      : undefined,
+    summary.footer ? "" : undefined,
+    summary.footer ? dim(context, summary.footer) : undefined,
+  ].filter((line): line is string => line !== undefined);
+  return indent(lines.join("\n"), RESPONSE_LEFT_PADDING);
 }
 
 function renderBanner(context: TerminalHistoryContext): string {
@@ -338,13 +439,13 @@ function renderQueued(
   imageCount: number | undefined,
   context: TerminalHistoryContext,
 ): string {
-  const suffix = imageCount ? ` (+${imageCount} image${imageCount > 1 ? "s" : ""})` : "";
+  const presentation = presentQueued({ kind: "queued", text, imageCount, id: "history-queued" });
   return prefixFirstLine(
     wrapPlain(
-      `${dim(context, "Queued: ")}${color(context.theme.text, text || "(empty)")}${color(context.theme.text, suffix)}`,
+      `${dim(context, presentation.label)}${color(context.theme.text, presentation.text)}${color(context.theme.text, presentation.suffix)}`,
       context.columns - 4,
     ),
-    ` ${color(context.theme.warning, "•", true)} `,
+    ` ${color(context.theme.warning, presentation.glyph.trim(), true)} `,
     "   ",
   );
 }
@@ -369,7 +470,11 @@ function renderAssistant(
         : prefixFirstLine(body, ` ${color(context.theme.primary, BLACK_CIRCLE)} `, "   "),
     );
   }
-  return block(lines);
+  return lines.join("\n");
+}
+
+function renderPlanModeLogo(_context: TerminalHistoryContext): string {
+  return PLAN_MODE_LOGO.map((line) => ` ${gradientLine(line, PLAN_MODE_GRADIENT)}`).join("\n");
 }
 
 function renderToolStart(
@@ -465,9 +570,12 @@ function renderToolGroup(
   const status = allDone ? (hasError ? "error" : "done") : "running";
   return toolHeader(
     status,
-    segmentsToPlainText(buildToolGroupSummary(tools, allDone)),
+    renderSummarySegments(buildToolGroupSummary(tools, allDone), context),
     "",
     context,
+    {
+      labelAlreadyStyled: true,
+    },
   );
 }
 
@@ -686,7 +794,13 @@ function toolHeader(
   label: string,
   detail: string,
   context: TerminalHistoryContext,
-  options: { suffix?: string; quoteDetail?: boolean; dotColor?: string; indicator?: string } = {},
+  options: {
+    suffix?: string;
+    quoteDetail?: boolean;
+    dotColor?: string;
+    indicator?: string;
+    labelAlreadyStyled?: boolean;
+  } = {},
 ): string {
   const dotColor =
     options.dotColor ??
@@ -709,7 +823,21 @@ function toolHeader(
       )
     : "";
   const suffixText = options.suffix ? dim(context, ` ${options.suffix}`) : "";
-  return `${RESPONSE_LEFT_PADDING}${color(dotColor, indicator)} ${color(labelColor, label, true)}${detailText}${suffixText}`;
+  const labelText = options.labelAlreadyStyled ? label : color(labelColor, label, true);
+  return `${RESPONSE_LEFT_PADDING}${color(dotColor, indicator)} ${labelText}${detailText}${suffixText}`;
+}
+
+function renderSummarySegments(
+  segments: ReturnType<typeof buildToolGroupSummary>,
+  context: TerminalHistoryContext,
+): string {
+  return segments
+    .map((segment) =>
+      segment.tone
+        ? color(toolTonePalette(context.theme, segment.tone).primary, segment.text, segment.bold)
+        : color(context.theme.text, segment.text, segment.bold),
+    )
+    .join("");
 }
 
 function stateToolHeader(

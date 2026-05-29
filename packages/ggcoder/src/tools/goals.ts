@@ -122,8 +122,16 @@ const GoalsParams = z.object({
     .enum(["planned", "ready", "blocked"])
     .optional()
     .describe("Updated evidence-plan item status"),
+  evidence: z.string().optional().describe("Observed evidence summary for an evidence-plan update"),
+  path: z.string().optional().describe("Artifact path for an evidence-plan update"),
   verifier_command: z.string().optional().describe("Command that verifies the goal end-to-end"),
   verifier_description: z.string().optional().describe("Natural-language verifier description"),
+  verifier_cwd: z
+    .string()
+    .optional()
+    .describe(
+      "Working directory for the verifier command; use a worker worktree path only when the verifier artifact lives there",
+    ),
   task_id: z.string().optional().describe("Goal task id to update"),
   task_title: z.string().optional().describe("Short worker task title"),
   task_prompt: z
@@ -361,19 +369,27 @@ function resolveTaskDependencyIds(
 
 const SETUP_BLOCKER_PREFIX = "Goal setup incomplete:";
 
+function referenceMentionTokens(reference: GoalReference): string[] {
+  return [reference.id, reference.label, reference.value, reference.path]
+    .filter((token): token is string => !!token?.trim())
+    .map((token) => token.toLowerCase());
+}
+
+function unacknowledgedReferences(
+  references: readonly GoalReference[] | undefined,
+  fields: readonly string[],
+): GoalReference[] {
+  const haystack = fields.join("\n").toLowerCase();
+  return referencesRequiringAcknowledgement(references ?? []).filter(
+    (reference) => !referenceMentionTokens(reference).some((token) => haystack.includes(token)),
+  );
+}
+
 function referencesAcknowledged(
   references: readonly GoalReference[] | undefined,
   fields: readonly string[],
 ): boolean {
-  const required = referencesRequiringAcknowledgement(references ?? []);
-  if (required.length === 0) return true;
-  const haystack = fields.join("\n").toLowerCase();
-  return required.every((reference) => {
-    const tokens = [reference.id, reference.label, reference.value, reference.path]
-      .filter((token): token is string => !!token?.trim())
-      .map((token) => token.toLowerCase());
-    return tokens.some((token) => haystack.includes(token));
-  });
+  return unacknowledgedReferences(references, fields).length === 0;
 }
 
 function hasOriginalGoalPromptReference(references: readonly GoalReference[] | undefined): boolean {
@@ -439,9 +455,10 @@ function setupBlockersForRun(run: {
     run.verifier?.description ?? "",
     run.verifier?.command ?? "",
   ];
-  if (!referencesAcknowledged(run.references, referenceFields)) {
+  const missingReferences = unacknowledgedReferences(run.references, referenceFields);
+  if (missingReferences.length > 0) {
     blockers.push(
-      `${SETUP_BLOCKER_PREFIX} every non-prompt Goal reference must be named in success criteria, task prompts, evidence_plan, or verifier metadata.`,
+      `${SETUP_BLOCKER_PREFIX} every non-prompt Goal reference must be named in success criteria, task prompts, evidence_plan, or verifier metadata. Missing: ${missingReferences.map((reference) => reference.id).join(", ")}.`,
     );
   }
   return blockers;
@@ -553,12 +570,15 @@ export function createGoalsTool(
             ...(item.evidence ? { evidence: item.evidence } : {}),
           }));
           const verifier =
-            args.verifier_command || args.verifier_description
+            args.verifier_command || args.verifier_description || args.verifier_cwd
               ? {
                   description:
                     args.verifier_description ?? existing?.verifier?.description ?? "Goal verifier",
                   ...((args.verifier_command ?? existing?.verifier?.command)
                     ? { command: args.verifier_command ?? existing?.verifier?.command }
+                    : {}),
+                  ...((args.verifier_cwd ?? existing?.verifier?.cwd)
+                    ? { cwd: args.verifier_cwd ?? existing?.verifier?.cwd }
                     : {}),
                   ...(existing?.verifier?.lastResult
                     ? { lastResult: existing.verifier.lastResult }
@@ -589,9 +609,12 @@ export function createGoalsTool(
             verifier,
           };
           const setupBlockers = setupBlockersForRun(draftProbe);
+          const priorBlockers = (args.blockers ?? existing?.blockers ?? []).filter(
+            (blocker) => !blocker.startsWith(SETUP_BLOCKER_PREFIX),
+          );
           const blockers = Array.from(
             new Set([
-              ...(args.blockers ?? existing?.blockers ?? []),
+              ...priorBlockers,
               ...(hasBlockingPrerequisites ? [missingPrerequisites] : []),
               ...setupBlockers,
             ]),
@@ -605,13 +628,17 @@ export function createGoalsTool(
                 ? "draft"
                 : hasBlockingPrerequisites
                   ? "blocked"
-                  : (existing?.status ?? "ready"),
+                  : existing?.status === "draft"
+                    ? "ready"
+                    : (existing?.status ?? "ready"),
             successCriteria: draftProbe.successCriteria,
             prerequisites: nextPrerequisites,
             harness: harness ?? existing?.harness ?? [],
             evidencePlan: draftProbe.evidencePlan,
             references: draftProbe.references,
-            ...(plannerEvidence ? { evidence: plannerEvidence } : {}),
+            ...(plannerEvidence
+              ? { evidence: [...(existing?.evidence ?? []), ...plannerEvidence] }
+              : {}),
             ...(verifier ? { verifier } : {}),
             blockers,
           });
@@ -715,11 +742,14 @@ export function createGoalsTool(
           if (!taskExisted && (!args.task_title || !args.task_prompt)) {
             return "Error: task_title and task_prompt are required when adding a task.";
           }
-          if (
-            !taskExisted &&
-            !referencesAcknowledged(run.references, [args.task_title ?? "", args.task_prompt ?? ""])
-          ) {
-            return "Error: task_prompt must explicitly include each non-prompt Goal reference id, label, URL, or path so workers cannot silently ignore the user's references.";
+          if (!taskExisted) {
+            const missingReferences = unacknowledgedReferences(run.references, [
+              args.task_title ?? "",
+              args.task_prompt ?? "",
+            ]);
+            if (missingReferences.length > 0) {
+              return `Error: task_prompt must explicitly include each non-prompt Goal reference id, label, URL, or path so workers cannot silently ignore the user's references. Missing: ${missingReferences.map((reference) => reference.id).join(", ")}.`;
+            }
           }
           const taskStatus = asTaskStatus(args.task_status);
           const mergeStrategy = asTaskMergeStrategy(args.merge_strategy);
@@ -782,9 +812,54 @@ export function createGoalsTool(
         case "evidence_plan": {
           const run = await resolveRun(storageCwd, args.run_id);
           if (!run) return "Error: no active goal run found.";
-          const evidencePlanItemId = args.evidence_plan_item_id;
-          if (!evidencePlanItemId) return "Error: evidence_plan_item_id is required.";
           const evidencePlan = [...run.evidencePlan];
+          if (args.evidence_plan?.length) {
+            let added = 0;
+            let updatedCount = 0;
+            for (const item of args.evidence_plan) {
+              const itemId = item.id ?? randomUUID();
+              const nextItem = {
+                id: itemId,
+                label: item.label,
+                mechanism: asEvidenceMechanism(item.mechanism),
+                description: item.description,
+                status: item.status ?? "planned",
+                ...(item.command ? { command: item.command } : {}),
+                ...(item.path ? { path: item.path } : {}),
+                ...(item.instructions ? { instructions: item.instructions } : {}),
+                ...(item.evidence ? { evidence: item.evidence } : {}),
+              };
+              const index = evidencePlan.findIndex(
+                (existing) => existing.id === itemId || existing.id.startsWith(itemId),
+              );
+              if (index >= 0) {
+                evidencePlan[index] = nextItem;
+                updatedCount += 1;
+              } else {
+                evidencePlan.push(nextItem);
+                added += 1;
+              }
+            }
+            const evidencePlanRun: GoalRun = { ...run, evidencePlan };
+            const setupBlockers = setupBlockersForRun(evidencePlanRun);
+            const updated = await upsertGoalRun(storageCwd, {
+              ...evidencePlanRun,
+              status: statusAfterSetupCheck(evidencePlanRun, setupBlockers),
+              blockers: blockersAfterSetupCheck(evidencePlanRun, setupBlockers),
+            });
+            await appendGoalDecision(storageCwd, updated.id, {
+              kind: "evidence_plan",
+              reason: `Evidence-plan items upserted: ${added} added, ${updatedCount} updated.`,
+            });
+            if (args.evidence_plan.length === 1) {
+              const item = args.evidence_plan[0];
+              return `Evidence-plan item ${added === 1 ? "added" : "updated"} for "${updated.title}": "${item?.label ?? "Evidence"}".`;
+            }
+            return `Evidence-plan items upserted for "${updated.title}": ${added} added, ${updatedCount} updated.`;
+          }
+          const evidencePlanItemId = args.evidence_plan_item_id;
+          if (!evidencePlanItemId)
+            return "Error: evidence_plan_item_id or evidence_plan is required.";
           const index = evidencePlan.findIndex(
             (item) => item.id === evidencePlanItemId || item.id.startsWith(evidencePlanItemId),
           );
@@ -793,14 +868,14 @@ export function createGoalsTool(
           }
           const existing = evidencePlan[index];
           const status = asEvidencePlanStatus(args.evidence_plan_status);
+          const evidence = args.evidence ?? args.evidence_content ?? args.summary;
+          const path = args.path ?? args.evidence_path;
           evidencePlan[index] = {
             ...existing,
             status,
             ...(args.instructions ? { instructions: args.instructions } : {}),
-            ...(args.evidence_content || args.summary
-              ? { evidence: args.evidence_content ?? args.summary }
-              : {}),
-            ...(args.evidence_path ? { path: args.evidence_path } : {}),
+            ...(evidence ? { evidence } : {}),
+            ...(path ? { path } : {}),
           };
           const canRecoverBlockedRun =
             run.status === "blocked" && status === "ready" && !goalHasBlockingPrerequisites(run);
@@ -843,6 +918,9 @@ export function createGoalsTool(
                 args.verifier_description ?? run.verifier?.description ?? "Goal verifier",
               ...((args.verifier_command ?? run.verifier?.command)
                 ? { command: args.verifier_command ?? run.verifier?.command }
+                : {}),
+              ...((args.verifier_cwd ?? run.verifier?.cwd)
+                ? { cwd: args.verifier_cwd ?? run.verifier?.cwd }
                 : {}),
               lastResult: result,
             },

@@ -16,11 +16,12 @@ interface FooterProps {
   gitBranch?: string | null;
   /**
    * Active thinking tier, or `undefined` when thinking is off. The footer
-   * renders the tier verbatim (`Thinking xhigh`) and color-codes by power.
-   * `xhigh` additionally shimmers to signal it's the top tier.
+   * renders the tier verbatim (`Thinking max`) and color-codes by power.
+   * `xhigh` and `max` additionally shimmer to signal high-power modes.
    */
   thinkingLevel?: ThinkingLevel;
   goalMode?: GoalMode;
+  planMode?: boolean;
   exitPending?: boolean;
   /** Optional left-side status string (e.g. "Connected · DaVinci Resolve"). */
   statusLabel?: string;
@@ -43,7 +44,7 @@ interface FooterProps {
 
 // Model ID → short display name
 const MODEL_SHORT_NAMES: Record<string, string> = {
-  "claude-opus-4-7": "Opus",
+  "claude-opus-4-8": "Opus",
   "claude-sonnet-4-6": "Sonnet",
   "claude-haiku-4-5": "Haiku",
   "claude-haiku-4-5-20251001": "Haiku",
@@ -75,13 +76,15 @@ function getContextColor(pct: number, theme: ReturnType<typeof useTheme>): strin
 
 // ── Thinking-level visual treatment ─────────────────────────
 //
-// Higher tier = warmer / more saturated color. `xhigh` adds a moving shimmer
-// so the top tier reads as visibly "on full power" at a glance.
+// Higher tier = warmer / more saturated color. `xhigh` and `max` add a moving
+// shimmer so high-power modes read as visibly "on full power" at a glance.
 
-const XHIGH_COLOR = "#db2777"; // hot pink — the visible "max power" tone
-const XHIGH_SHIMMER_COLOR = "#f472b6"; // brighter pink that rides the shimmer
+const MAX_COLOR = "#db2777"; // hot pink — the visible "max power" tone
+const MAX_SHIMMER_COLOR = "#f472b6"; // brighter pink that rides the shimmer
 const GOAL_COLOR = "#22c55e";
 const GOAL_SHIMMER_COLOR = "#86efac";
+const PLAN_COLOR = "#a78bfa";
+const PLAN_SHIMMER_COLOR = "#ddd6fe";
 const SHIMMER_WIDTH = 2;
 
 function getThinkingColor(
@@ -92,7 +95,7 @@ function getThinkingColor(
   if (level === "low") return theme.textMuted;
   if (level === "medium") return theme.accent;
   if (level === "high") return theme.warning;
-  return XHIGH_COLOR; // xhigh
+  return MAX_COLOR; // xhigh / max
 }
 
 /**
@@ -140,6 +143,7 @@ export function getFooterRightLength({
   contextPct,
   modelName,
   goalText,
+  planText = "Plan off",
   thinkingText,
   renderMarkdown = true,
 }: {
@@ -147,6 +151,7 @@ export function getFooterRightLength({
   contextPct: number;
   modelName: string;
   goalText: string;
+  planText?: string;
   thinkingText: string;
   renderMarkdown?: boolean;
 }): number {
@@ -159,6 +164,8 @@ export function getFooterRightLength({
     modelName.length +
     3 +
     goalText.length +
+    3 +
+    planText.length +
     (renderMarkdown ? 0 : 3 + "raw markdown".length) +
     3 +
     thinkingText.length
@@ -174,6 +181,7 @@ export function doesFooterFitOnOneLine({
   gitBranch,
   thinkingLevel,
   goalMode = "off",
+  planMode = false,
   statusBelow,
   renderMarkdown: _renderMarkdown = true,
 }: {
@@ -185,6 +193,7 @@ export function doesFooterFitOnOneLine({
   gitBranch?: string | null;
   thinkingLevel?: ThinkingLevel;
   goalMode?: GoalMode;
+  planMode?: boolean;
   statusBelow?: boolean;
   renderMarkdown?: boolean;
 }): boolean {
@@ -195,12 +204,14 @@ export function doesFooterFitOnOneLine({
   const modelName = getShortModelName(model);
   const thinkingText = getThinkingFooterLabel(thinkingLevel);
   const goalText = getGoalFooterLabel(goalMode);
+  const planText = planMode ? "Plan on" : "Plan off";
   const leftLen = displayPath.length + 2 + (gitBranch ? gitBranch.length + 5 : 0);
   const rightLen = getFooterRightLength({
     barWidth: 8,
     contextPct,
     modelName,
     goalText,
+    planText,
     thinkingText,
   });
   return leftLen + rightLen <= columns - 2;
@@ -214,6 +225,7 @@ export function Footer({
   gitBranch,
   thinkingLevel,
   goalMode = "off",
+  planMode = false,
   exitPending,
   statusLabel,
   statusColor,
@@ -268,10 +280,12 @@ export function Footer({
   const thinkingText = getThinkingFooterLabel(thinkingLevel);
   const goalText = getGoalFooterLabel(goalMode);
   const goalActive = goalMode !== "off";
+  const planText = planMode ? "Plan on" : "Plan off";
   const thinkingColor = getThinkingColor(thinkingLevel, theme);
   const reducedMotion = useReducedMotion();
-  const shimmerXhigh = thinkingLevel === "xhigh" && !reducedMotion;
+  const shimmerMaxPower = (thinkingLevel === "xhigh" || thinkingLevel === "max") && !reducedMotion;
   const shimmerGoal = goalActive && !reducedMotion;
+  const shimmerPlan = planMode && !reducedMotion;
 
   // Calculate whether everything fits on one line
   const rightLen = getFooterRightLength({
@@ -279,6 +293,7 @@ export function Footer({
     contextPct,
     modelName,
     goalText,
+    planText,
     thinkingText,
     renderMarkdown,
   });
@@ -292,6 +307,7 @@ export function Footer({
     gitBranch,
     thinkingLevel,
     goalMode,
+    planMode,
     statusBelow,
     renderMarkdown,
   });
@@ -324,6 +340,19 @@ export function Footer({
           {goalText}
         </Text>
       )}
+      {sep}
+      {shimmerPlan ? (
+        <ShimmerLabel
+          text={planText}
+          color={PLAN_COLOR}
+          shimmerColor={PLAN_SHIMMER_COLOR}
+          active={!exitPending}
+        />
+      ) : (
+        <Text color={planMode ? PLAN_COLOR : theme.textDim} bold={planMode}>
+          {planText}
+        </Text>
+      )}
       {!renderMarkdown && (
         <>
           {sep}
@@ -333,11 +362,11 @@ export function Footer({
         </>
       )}
       {sep}
-      {shimmerXhigh ? (
+      {shimmerMaxPower ? (
         <ShimmerLabel
           text={thinkingText}
-          color={XHIGH_COLOR}
-          shimmerColor={XHIGH_SHIMMER_COLOR}
+          color={MAX_COLOR}
+          shimmerColor={MAX_SHIMMER_COLOR}
           active={!exitPending}
         />
       ) : (

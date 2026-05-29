@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { toAnthropicMessages, toAnthropicTools, toOpenAIMessages } from "./transform.js";
+import {
+  toAnthropicMessages,
+  toAnthropicThinking,
+  toAnthropicTools,
+  toOpenAIMessages,
+  toOpenAIReasoningEffort,
+} from "./transform.js";
 import type { Message, Tool } from "../types.js";
 
 const exampleTools: Tool[] = [
@@ -15,6 +21,8 @@ const exampleTools: Tool[] = [
     parameters: z.object({ filePath: z.string(), content: z.string() }),
   },
 ];
+
+const MAX_TOKENS = 16_000;
 
 describe("Anthropic transform", () => {
   it("splits system prompt into cached and uncached blocks at the marker", () => {
@@ -76,6 +84,139 @@ describe("Anthropic transform", () => {
 
     expect(tools.map((tool) => tool.eager_input_streaming)).toEqual([true, true]);
   });
+
+  it("preserves empty text blocks that precede a thinking block (no position shift)", () => {
+    // Anthropic rejects the request if a thinking block in the latest assistant
+    // message moves position. Dropping the leading empty text block would shift
+    // the signed thinking block from index 1 to 0 -> "thinking blocks ... cannot
+    // be modified". The empty text block must be kept.
+    const messages: Message[] = [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "" },
+          { type: "thinking", text: "reasoning", signature: "sig-abc" },
+          { type: "tool_call", id: "toolu_1", name: "read_file", args: { filePath: "a.ts" } },
+        ],
+      },
+    ];
+
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[1]?.content as unknown as Array<Record<string, unknown>>;
+    expect(content.map((b) => b.type)).toEqual(["text", "thinking", "tool_use"]);
+    expect(content[1]).toEqual({ type: "thinking", thinking: "reasoning", signature: "sig-abc" });
+  });
+
+  it("keeps empty text before a redacted_thinking (raw) block", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "" },
+          { type: "raw", data: { type: "redacted_thinking", data: "encrypted" } },
+          { type: "tool_call", id: "toolu_2", name: "read_file", args: { filePath: "b.ts" } },
+        ],
+      },
+    ];
+
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(content.map((b) => b.type)).toEqual(["text", "redacted_thinking", "tool_use"]);
+  });
+
+  it("still strips empty text blocks when no thinking block is present", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "" },
+          { type: "text", text: "real answer" },
+        ],
+      },
+    ];
+
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(content).toEqual([{ type: "text", text: "real answer" }]);
+  });
+
+  it("strips empty text blocks that come after the last thinking block", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", text: "reasoning", signature: "sig-xyz" },
+          { type: "text", text: "answer" },
+          { type: "text", text: "" },
+        ],
+      },
+    ];
+
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(content.map((b) => b.type)).toEqual(["thinking", "text"]);
+  });
+
+  it("converts unsigned thinking blocks to text instead of dropping them", () => {
+    // Cross-provider (GLM/OpenAI) or aborted-stream thinking has no signature.
+    // Anthropic rejects empty signatures, so preserve the reasoning as text
+    // rather than discarding the content.
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", text: "unsigned reasoning" },
+          { type: "text", text: "answer" },
+        ],
+      },
+    ];
+
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(content).toEqual([
+      { type: "text", text: "unsigned reasoning" },
+      { type: "text", text: "answer" },
+    ]);
+  });
+
+  it("drops unsigned thinking blocks that carry no text", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", text: "" },
+          { type: "text", text: "answer" },
+        ],
+      },
+    ];
+
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(content).toEqual([{ type: "text", text: "answer" }]);
+  });
+
+  it("does not treat unsigned thinking as position-sensitive (empty text still stripped)", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "" },
+          { type: "thinking", text: "unsigned" },
+          { type: "text", text: "answer" },
+        ],
+      },
+    ];
+
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[0]?.content as unknown as Array<Record<string, unknown>>;
+    // Leading empty text is dropped because the following thinking block is
+    // unsigned (becomes text) and imposes no positional constraint.
+    expect(content).toEqual([
+      { type: "text", text: "unsigned" },
+      { type: "text", text: "answer" },
+    ]);
+  });
 });
 
 describe("OpenAI transform", () => {
@@ -90,5 +231,30 @@ describe("OpenAI transform", () => {
       { role: "system", content },
       { role: "user", content: "Hello" },
     ]);
+  });
+});
+
+describe("toAnthropicThinking", () => {
+  it("passes Anthropic adaptive effort levels through for Claude Opus 4.8", () => {
+    for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
+      expect(toAnthropicThinking(level, MAX_TOKENS, "claude-opus-4-8").outputConfig).toEqual({
+        effort: level,
+      });
+    }
+  });
+
+  it("clamps xhigh to high on adaptive Anthropic models that do not support xhigh", () => {
+    expect(toAnthropicThinking("xhigh", MAX_TOKENS, "claude-sonnet-4-6").outputConfig).toEqual({
+      effort: "high",
+    });
+    expect(toAnthropicThinking("max", MAX_TOKENS, "claude-sonnet-4-6").outputConfig).toEqual({
+      effort: "max",
+    });
+  });
+});
+
+describe("toOpenAIReasoningEffort", () => {
+  it("clamps shared max thinking level to OpenAI's xhigh effort", () => {
+    expect(toOpenAIReasoningEffort("max", "gpt-5.5")).toBe("xhigh");
   });
 });

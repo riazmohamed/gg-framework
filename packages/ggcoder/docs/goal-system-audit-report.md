@@ -108,6 +108,23 @@ Signals checked: source map coverage, contradiction/gap audit artifact, setup-on
 
 A subsequent remediation pass is documented in `packages/ggcoder/docs/goal-remediation-report.md`. The requested verifier chain passed and wrote `packages/ggcoder/.goal-evidence/goal-remediation-verifier.log`.
 
+## Fix-diff summary: setup handoff and worker prompt simplification
+
+This isolated fix pass addressed two domain-agnostic bottlenecks observed while running the current Goal system against [original-goal-prompt]:
+
+- Reduced redundant planner→setup token handoff in `packages/ggcoder/src/ui/prompt-routing.ts` by stripping the generic slash-command preamble before setup and preserving mandatory references/original user instructions under a concise `## Original Goal Objective` section.
+- Hardened GOAL_PLAN capture by accepting only anchored `GOAL_PLAN ... END_GOAL_PLAN` blocks and replacing unusable planner chatter with a bounded fallback block, instead of embedding arbitrary planner narrative into setup.
+- Simplified `buildGoalWorkerSystemPrompt` in `packages/ggcoder/src/core/goal-worker.ts` while preserving proof, worktree isolation, candidate packet, task DAG, evidence, and no-complete contracts for worker-to-worker/coordinator handoff.
+- Added/updated targeted Vitest coverage in `src/ui/prompt-routing.test.ts`, `src/ui/slash-command-images.test.ts`, and `src/core/goal-worker.test.ts`.
+
+Verification run for this fix pass:
+
+```sh
+pnpm --dir packages/ggcoder exec vitest run src/ui/prompt-routing.test.ts src/ui/slash-command-images.test.ts src/core/goal-worker.test.ts src/system-prompt.test.ts
+```
+
+Result: **PASS** — 4 files, 42 tests passed. Note: an earlier `pnpm --filter @kenkaiiii/ggcoder test -- ...` invocation unexpectedly ran broad suites and failed on missing workspace build outputs for `@kenkaiiii/gg-ai`, `@kenkaiiii/gg-agent`, and `@kenkaiiii/gg-pixel`; the focused verifier above avoids that unrelated package-entry failure and directly covers this fix diff.
+
 ## Residual risks
 
 The system is materially stronger than a narrative-only `/goal` workflow because completion is gated by durable evidence, verifier results, evidence-plan reconciliation, and a final audit. The highest original risks around fuzzy evidence matching, final-audit contract enforcement, lifecycle cleanup, store preservation, setup completeness, and local E2E verification now have targeted automated coverage. Remaining risk is primarily that this proof path is automated/local rather than a fully interactive TUI session with a provider-backed worker.
