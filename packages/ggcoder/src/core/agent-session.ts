@@ -193,7 +193,6 @@ export class AgentSession {
         undefined,
         this.tools.map((tool) => tool.name),
         undefined,
-        "off",
         this.provider,
       ));
     this.messages = [{ role: "system", content: basePrompt }];
@@ -533,7 +532,6 @@ export class AgentSession {
         undefined,
         this.tools.map((tool) => tool.name),
         undefined,
-        "off",
         this.provider,
       ));
     this.messages = [{ role: "system", content: basePrompt }];

@@ -1,21 +1,23 @@
 import type { PasteInfo } from "./components/InputArea.js";
 import type { SubAgentInfo } from "./components/SubAgentPanel.js";
-import type { GoalSummaryRow, GoalSummarySection } from "./goal-summary.js";
 import type { LanguageId } from "../core/language-detector.js";
 import type { SessionSummary } from "./session-summary.js";
+
+/** Decoded image bytes for inline terminal-graphics preview (kitty/iTerm2). */
+export interface ImagePreview {
+  base64: string;
+  mediaType: string;
+  /** Absolute path to the on-disk image, rendered as a clickable OSC 8 link. */
+  path?: string;
+}
 
 export interface UserItem {
   kind: "user";
   text: string;
   imageCount?: number;
   pasteInfo?: PasteInfo;
-  id: string;
-}
-
-export interface GoalItem {
-  kind: "goal";
-  title: string;
-  workerId?: string;
+  /** Inline previews for attached images, rendered after the user row. */
+  imagePreviews?: ImagePreview[];
   id: string;
 }
 
@@ -24,28 +26,6 @@ export interface TaskItem {
   title: string;
   id: string;
 }
-
-export interface GoalProgressItem {
-  kind: "goal_progress";
-  phase:
-    | "worker_started"
-    | "worker_finished"
-    | "orchestrator_reviewing"
-    | "orchestrator_working"
-    | "continuing"
-    | "verifier_started"
-    | "verifier_finished"
-    | "terminal";
-  title: string;
-  detail?: string;
-  summaryRows?: GoalSummaryRow[];
-  summarySections?: GoalSummarySection[];
-  workerId?: string;
-  status?: string;
-  id: string;
-}
-
-export type GoalProgressDraft = Omit<GoalProgressItem, "id">;
 
 export interface AssistantItem {
   kind: "assistant";
@@ -76,6 +56,8 @@ export interface ToolDoneItem {
   isError: boolean;
   durationMs: number;
   details?: unknown;
+  /** Inline previews for image-bearing tool results (read/screenshot). */
+  imagePreviews?: ImagePreview[];
   id: string;
 }
 
@@ -116,6 +98,48 @@ export interface SetupHintItem {
 }
 
 export const UPDATE_NOTICE_TEXT = "KEN HAS PUSHED A NEW GG CODER UPDATE";
+
+/** Copy shown when the automatic pre-final ideal-review hook engages. */
+export const IDEAL_HOOK_NOTICE_TEXT = "Hook engaged — running an ideal review before finalizing.";
+
+/** Copy shown when the loop-breaker hook fires because the agent looks stuck. */
+export const LOOP_BREAK_NOTICE_TEXT =
+  "Hook engaged — breaking a stuck loop and rethinking the approach.";
+
+/** Copy shown when the post-compaction re-grounding hook re-pins the request. */
+export const REGROUNDING_NOTICE_TEXT =
+  "Hook engaged — re-grounding on the original request after compaction.";
+
+/**
+ * Semantic tone for an agent-hook notice. Each maps to a theme color so the
+ * three hooks read distinctly: a reflective review, a corrective break, and
+ * an informational re-orientation.
+ *  - "review"  → secondary (ideal review, a quality pass)
+ *  - "warning" → warning   (loop-breaker, the agent was stuck)
+ *  - "info"    → primary   (re-grounding after compaction)
+ */
+export type HookTone = "review" | "warning" | "info";
+
+/** Theme color key for each hook tone. Shared by every render path (live Ink,
+ *  Static scrollback, transcript) so colors stay consistent. */
+export const HOOK_TONE_COLOR: Record<HookTone, "secondary" | "warning" | "primary"> = {
+  review: "secondary",
+  warning: "warning",
+  info: "primary",
+};
+
+/**
+ * Rendered like an assistant message (same prefix dot, left padding and
+ * spacing) but in a tone-specific color so it's obvious which hook just took
+ * over the turn. Pushed when an agent hook injects a message into the loop.
+ */
+export interface IdealHookItem {
+  kind: "ideal_hook";
+  text: string;
+  /** Defaults to "review" when omitted. */
+  tone?: HookTone;
+  id: string;
+}
 
 export interface UpdateNoticeItem {
   kind: "update_notice";
@@ -197,12 +221,6 @@ export interface PlanTransitionItem {
   id: string;
 }
 
-export interface GoalAgentTransitionItem {
-  kind: "goal_agent_transition";
-  text: string;
-  id: string;
-}
-
 export interface ModelTransitionItem {
   kind: "model_transition";
   modelName: string;
@@ -257,12 +275,54 @@ export interface ToolGroupItem {
   id: string;
 }
 
+/**
+ * Tool-activity item kinds whose transcript rendering is REPLACED by the pinned
+ * LiveToolPanel. These items still flow through live/history state (so flush,
+ * overflow, and persistence logic is unchanged) but render to nothing in the
+ * transcript — the panel above the activity bar is now their sole display.
+ *
+ * Server tools and sub-agent groups are intentionally excluded: they keep their
+ * own richer transcript rows.
+ */
+const PANEL_REPLACED_TOOL_KINDS = new Set<string>(["tool_start", "tool_done", "tool_group"]);
+
+/**
+ * True when an item's transcript row is replaced by the LiveToolPanel.
+ *
+ * Image-bearing tool results (read/screenshot) are an exception: the inline
+ * image is real content the user asked to see, so those items keep rendering
+ * in the transcript. Only the text-only activity rows are suppressed.
+ */
+export function isPanelReplacedToolItem(item: {
+  kind: string;
+  imagePreviews?: readonly unknown[];
+}): boolean {
+  if (!PANEL_REPLACED_TOOL_KINDS.has(item.kind)) return false;
+  return !(item.imagePreviews && item.imagePreviews.length > 0);
+}
+
+/**
+ * The last item in a transcript slice that actually renders a row. Panel-replaced
+ * tool items (now shown only in the LiveToolPanel) render `null`, so they must be
+ * skipped when deriving the "previous item" for spacing decisions — otherwise a
+ * tool→assistant boundary inserts a blank separator above an invisible row,
+ * leaving a phantom gap above the response.
+ */
+export function lastVisibleTranscriptItem<
+  T extends { kind: string; imagePreviews?: readonly unknown[] },
+>(items: readonly T[]): T | undefined {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item && !isPanelReplacedToolItem(item)) return item;
+  }
+  return undefined;
+}
+
 export type CompletedItem =
   | UserItem
-  | GoalItem
   | TaskItem
-  | GoalProgressItem
   | AssistantItem
+  | IdealHookItem
   | ToolStartItem
   | ToolDoneItem
   | ServerToolStartItem
@@ -281,7 +341,6 @@ export type CompletedItem =
   | SubAgentGroupItem
   | ToolGroupItem
   | PlanTransitionItem
-  | GoalAgentTransitionItem
   | ModelTransitionItem
   | ThemeTransitionItem
   | PlanEventItem

@@ -56,7 +56,7 @@ import { runRpcMode } from "./modes/rpc-mode.js";
 import { runServeMode } from "./modes/serve-mode.js";
 import { runAgentHomeMode } from "./modes/agent-home-mode.js";
 import { renderSessionSelector } from "./ui/sessions.js";
-import type { CompletedItem, GoalProgressDraft } from "./ui/app-items.js";
+import type { CompletedItem } from "./ui/app-items.js";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { segmentDisplayText, stripDoneMarkers } from "./utils/plan-steps.js";
 import { formatUserError } from "./utils/error-handler.js";
@@ -71,6 +71,7 @@ import { setProviderDiagnostic } from "@abukhaled/gg-ai";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { createTools } from "./tools/index.js";
+import { CheckpointStore } from "./core/checkpoint-store.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import {
   createCompactedSessionCheckpoint,
@@ -84,9 +85,10 @@ import {
   getMaxThinkingLevel,
   getModel,
 } from "./core/model-registry.js";
-import { MCPClientManager, getMCPServers } from "./core/mcp/index.js";
+import { MCPClientManager, getAllMcpServers } from "./core/mcp/index.js";
 import { runPixel } from "./cli/pixel.js";
 import { runLogin, runLogout, runDoctor } from "./cli/auth.js";
+import { runMcp } from "./cli/mcp.js";
 import {
   CLI_VERSION,
   LOGO_LINES,
@@ -100,9 +102,7 @@ import { discoverSkills } from "./core/skills.js";
 import path from "node:path";
 import chalk from "chalk";
 import { checkAndAutoUpdate } from "./core/auto-update.js";
-import { parseGoalSyntheticEvent } from "./ui/goal-events.js";
-import type { GoalReference } from "./core/goal-store.js";
-import type { GoalMode } from "./core/runtime-mode.js";
+
 import { routeCliCommandInput, type CliSubcommandName } from "./cli/command-routing.js";
 
 const THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh", "max"]);
@@ -155,6 +155,7 @@ function printHelp(): void {
     ["telegram", "Configure Telegram bot integration"],
     ["agent-home-login", "Configure Agent Home relay connection"],
     ["agent-home", "Connect to Agent Home as a remote agent"],
+    ["mcp", "Add and manage MCP servers"],
   ];
   for (const [name, desc] of cmds) {
     console.log(`  ${accent(name.padEnd(20))} ${dim(desc)}`);
@@ -188,8 +189,6 @@ function printHelp(): void {
   const slashCmds: [string, string][] = [
     ["/help", "Show available slash commands"],
     ["/model", "Switch AI model"],
-    ["/goal", "Create a programmatic goal loop"],
-    ["/goals", "Open the goal pane"],
     ["/compact", "Compact conversation context"],
     ["/session", "Switch or create sessions"],
     ["/new", "Start a new session"],
@@ -204,7 +203,6 @@ function printHelp(): void {
   // Keyboard shortcuts
   console.log(primary("Keyboard shortcuts:"));
   const shortcuts: [string, string][] = [
-    ["Ctrl+G", "Toggle goal overlay"],
     ["Ctrl+S", "Toggle skills overlay"],
     ["Shift+Tab", "Toggle thinking"],
     ["Shift+Enter", "New line in input"],
@@ -231,6 +229,7 @@ function createCliSubcommandHandlers(): Record<CliSubcommandName, () => void> {
 
   return {
     pixel: () => runWithStandardErrorHandling(() => runPixel({ runInkTUI }), true),
+    mcp: () => runWithStandardErrorHandling(runMcp),
     login: () => runWithStandardErrorHandling(runLogin),
     logout: () => runWithStandardErrorHandling(runLogout),
     sessions: () => runWithStandardErrorHandling(runSessions),
@@ -370,6 +369,7 @@ function main(): void {
     model,
     cwd,
     thinkingLevel,
+    idealReviewEnabled: saved.idealReviewEnabled,
     continueRecent,
     resumeSessionPath: values.resume,
     theme: savedTheme,
@@ -392,6 +392,7 @@ async function runInkTUI(opts: {
   resumeSessionPath?: string;
   theme?: "auto" | ThemeName;
   initialOverlay?: "pixel";
+  idealReviewEnabled?: boolean;
 }): Promise<void> {
   requireInteractiveTTY();
 
@@ -512,27 +513,28 @@ async function runInkTUI(opts: {
   });
 
   // Runtime mode refs — shared between tools and UI
-  const goalModeRef = { current: "off" as GoalMode };
   const planModeRef = { current: false };
-  const goalReferencesRef: { current: readonly GoalReference[] | undefined } = {
-    current: undefined,
-  };
   const planToolCallbacks: {
     onEnterPlan?: (reason?: string) => void | Promise<void>;
     onExitPlan?: (planPath: string) => Promise<string>;
   } = {};
+
+  // Holder so the (cwd-bound) tools can snapshot pre-mutation file state for
+  // /rewind. The store is created once the session id is known (below).
+  const checkpointRef: { current: CheckpointStore | null } = { current: null };
+  const onPreFileMutation = (filePath: string): Promise<void> =>
+    checkpointRef.current?.recordPreMutation(filePath) ?? Promise.resolve();
 
   const { tools, processManager } = createTools(cwd, {
     agents,
     skills,
     provider,
     model,
-    goalModeRef,
     planModeRef,
+    onPreFileMutation,
     onEnterPlan: (reason) => planToolCallbacks.onEnterPlan?.(reason),
     onExitPlan: (planPath) =>
       planToolCallbacks.onExitPlan?.(planPath) ?? Promise.resolve("Plan review is unavailable."),
-    getGoalReferences: () => goalReferencesRef.current,
   });
 
   // Rebuilds the cwd-bound tools for a different project root. Used by the
@@ -544,12 +546,11 @@ async function runInkTUI(opts: {
       skills,
       provider,
       model,
-      goalModeRef,
       planModeRef,
+      onPreFileMutation,
       onEnterPlan: (reason) => planToolCallbacks.onEnterPlan?.(reason),
       onExitPlan: (planPath) =>
         planToolCallbacks.onExitPlan?.(planPath) ?? Promise.resolve("Plan review is unavailable."),
-      getGoalReferences: () => goalReferencesRef.current,
     });
     return rebuilt;
   };
@@ -562,7 +563,8 @@ async function runInkTUI(opts: {
     initialMcpConnectPromise ??= (async () => {
       const providerApiKey =
         provider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
-      return mcpManager.connectAll(getMCPServers(provider, providerApiKey));
+      const servers = await getAllMcpServers(provider, providerApiKey, cwd);
+      return mcpManager.connectAll(servers);
     })();
     return initialMcpConnectPromise;
   };
@@ -574,7 +576,6 @@ async function runInkTUI(opts: {
     undefined,
     tools.map((tool) => tool.name),
     undefined,
-    goalModeRef.current,
     provider,
   );
 
@@ -686,6 +687,11 @@ async function runInkTUI(opts: {
     log("INFO", "session", `New session created`, { path: sessionPath });
   }
 
+  // Now that the session id is finalized, back /rewind with a checkpoint store.
+  if (sessionId) {
+    checkpointRef.current = new CheckpointStore({ sessionId, cwd });
+  }
+
   await renderApp({
     provider,
     model,
@@ -710,11 +716,11 @@ async function runInkTUI(opts: {
     settingsFile: paths.settingsFile,
     mcpManager,
     authStorage,
-    goalModeRef,
     planModeRef,
-    goalReferencesRef,
     skills,
+    checkpointStore: checkpointRef.current ?? undefined,
     initialOverlay: opts.initialOverlay,
+    idealReviewEnabled: opts.idealReviewEnabled,
     rebuildToolsForCwd,
     connectInitialMcpTools,
     planCallbacks: planToolCallbacks,
@@ -767,6 +773,7 @@ async function runSessions(): Promise<void> {
     model,
     cwd,
     thinkingLevel,
+    idealReviewEnabled: saved2.idealReviewEnabled,
     resumeSessionPath: selectedPath,
     theme: saved2.theme,
   });
@@ -1247,90 +1254,21 @@ function extractText(content: string | Array<{ type: string; text?: string }>): 
     .join("\n");
 }
 
-function goalCompletionDetail(summary: string): string | undefined {
-  const lines = summary
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && line !== "[agent_done]");
-  const statusLine = lines.find((line) => /^Status:/i.test(line));
-  const changedLine = lines.find((line) =>
-    /^(Changed|Implemented|Fixed|Added|Key findings|Full verifier)/i.test(line),
-  );
-  const verificationLine = lines.find((line) => /^(Verification|Verified|Result):/i.test(line));
-  return statusLine ?? changedLine ?? verificationLine ?? lines[0];
-}
-
 function restoredPromptCommandDisplayText(text: string): string | null {
   for (const command of PROMPT_COMMANDS) {
     if (text === command.prompt) return `/${command.name}`;
     const prefix = `${command.prompt}\n\n## User Instructions\n\n`;
     if (text.startsWith(prefix)) {
-      const args =
-        text
-          .slice(prefix.length)
-          .split(/^## Goal References \(MANDATORY\)\s*$/m)[0]
-          ?.trim() ?? "";
+      const args = text.slice(prefix.length).trim();
       return args ? `/${command.name} ${args}` : `/${command.name}`;
     }
   }
-  if (text.startsWith("## Original Goal Objective\n\n")) return null;
   return null;
-}
-
-function goalProgressFromSyntheticText(text: string): GoalProgressDraft | null {
-  const eventInfo = parseGoalSyntheticEvent(text.trimStart());
-  if (!eventInfo) return null;
-  const summary = eventInfo.summary ?? "";
-  const terminalStatus = eventInfo.goalState?.status;
-  if (
-    terminalStatus === "passed" ||
-    terminalStatus === "failed" ||
-    terminalStatus === "blocked" ||
-    terminalStatus === "paused"
-  ) {
-    const terminalTitle =
-      terminalStatus === "passed"
-        ? "Goal passed"
-        : terminalStatus === "failed"
-          ? "Goal failed"
-          : terminalStatus === "blocked"
-            ? "Goal blocked"
-            : "Goal paused";
-    return {
-      kind: "goal_progress",
-      phase: "terminal",
-      title: `${terminalTitle}: ${eventInfo.goal ?? "Goal"}`,
-      detail: goalCompletionDetail(summary),
-      status: terminalStatus,
-    };
-  }
-  if (eventInfo.kind === "worker") {
-    const titlePrefix = eventInfo.status === "done" ? "Done" : "Failed";
-    return {
-      kind: "goal_progress",
-      phase: "worker_finished",
-      title: `${titlePrefix}: ${eventInfo.task ?? "Goal worker"}`,
-      detail: goalCompletionDetail(summary),
-      workerId: eventInfo.worker,
-      status: eventInfo.status,
-    };
-  }
-  return {
-    kind: "goal_progress",
-    phase: "verifier_finished",
-    title: `Verifier ${eventInfo.status ?? "finished"}: ${eventInfo.goal ?? "Goal"}`,
-    detail: goalCompletionDetail(summary),
-    status: eventInfo.status,
-  };
 }
 
 export function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
   const items: CompletedItem[] = [];
   let id = 0;
-
-  const pushGoalProgress = (draft: GoalProgressDraft) => {
-    items.push({ ...draft, id: `restore-${id++}` });
-  };
 
   const pushRestoredAssistantText = (text: string) => {
     const segments = segmentDisplayText(text, []);
@@ -1382,16 +1320,11 @@ export function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
     if (msg.role === "user") {
       const text = extractText(msg.content);
       if (!text) continue;
-      const goalProgress = goalProgressFromSyntheticText(text);
-      if (goalProgress) {
-        pushGoalProgress(goalProgress);
-      } else {
-        items.push({
-          kind: "user",
-          text: restoredPromptCommandDisplayText(text) ?? text,
-          id: `restore-${id++}`,
-        });
-      }
+      items.push({
+        kind: "user",
+        text: restoredPromptCommandDisplayText(text) ?? text,
+        id: `restore-${id++}`,
+      });
     } else if (msg.role === "assistant") {
       const content = msg.content;
       if (typeof content === "string") {

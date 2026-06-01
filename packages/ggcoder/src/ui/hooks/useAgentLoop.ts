@@ -2,8 +2,25 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { agentLoop, type AgentEvent, type AgentTool } from "@abukhaled/gg-agent";
 import { ProviderError } from "@abukhaled/gg-ai";
 import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from "@abukhaled/gg-ai";
+import type { IdealReviewStats } from "../../core/ideal-review.js";
+import {
+  detectTextRepetition,
+  toolCallSignature,
+  type LoopBreakStats,
+} from "../../core/loop-breaker.js";
 import { getClaudeCliUserAgent } from "../../core/claude-code-version.js";
 import { log } from "../../core/logger.js";
+
+/** Extract plain text from this run's user input — the verbatim request that
+ *  the re-grounding hook re-pins after a compaction. Captured at run start so
+ *  it is never the lossy summary compaction leaves behind. */
+function userContentText(content: string | (TextContent | ImageContent)[]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((c): c is TextContent => "text" in c && typeof c.text === "string")
+    .map((c) => c.text)
+    .join(" ");
+}
 
 /** Rough token estimate from message content (~4 chars per token). */
 function estimateTokens(msgs: Message[]): number {
@@ -90,6 +107,13 @@ export interface AgentLoopOptions {
     messages: Message[],
     options?: { force?: boolean },
   ) => Message[] | Promise<Message[]>;
+  getIdealReviewMessage?: (stats: IdealReviewStats) => Message | null;
+  /** Polled mid-loop when the agent appears stuck (repeated failures / calls /
+   *  edits, or degenerate output). Return a user message to break the loop. */
+  getLoopBreakMessage?: (stats: LoopBreakStats) => Message | null;
+  /** Polled mid-loop after a compaction reduced the context. Return a user
+   *  message that re-pins the original request. */
+  getRegroundingMessage?: (originalRequest: string) => Message | null;
 }
 
 export type ActivityPhase = "waiting" | "thinking" | "generating" | "tools" | "retrying" | "idle";
@@ -241,6 +265,31 @@ export function useAgentLoop(
   const thinkingVisibleRef = useRef("");
   const runStartRef = useRef(0);
   const toolsUsedRef = useRef<Set<string>>(new Set());
+  const idealReviewStatsRef = useRef<IdealReviewStats>({
+    changedLines: 0,
+    toolCalls: 0,
+    toolFailures: 0,
+    turns: 0,
+    writeCalls: 0,
+    editCalls: 0,
+    bashCalls: 0,
+  });
+  const idealReviewInjectedRef = useRef(false);
+  // ── Loop-breaker tracking ──
+  const loopSignatureCountsRef = useRef<Map<string, number>>(new Map());
+  const fileEditCountsRef = useRef<Map<string, number>>(new Map());
+  const consecutiveFailuresRef = useRef(0);
+  const maxSignatureRepeatsRef = useRef(0);
+  const maxSameFileEditsRef = useRef(0);
+  const loopBreakInjectedRef = useRef(false);
+  // ── Re-grounding tracking ──
+  const compactionOccurredRef = useRef(false);
+  const regroundingInjectedRef = useRef(false);
+  // Captured at run start, BEFORE any in-run compaction replaces the first
+  // user message with a lossy summary. This is the verbatim ground truth the
+  // re-grounding hook re-pins; reading it post-compaction would re-inject the
+  // summary itself.
+  const originalRequestRef = useRef("");
   const phaseRef = useRef<ActivityPhase>("idle");
   const thinkingStartRef = useRef<number | null>(null);
   const thinkingAccumRef = useRef(0);
@@ -397,6 +446,24 @@ export function useAgentLoop(
           messages: String(messages.current.length),
         });
         toolsUsedRef.current = new Set();
+        idealReviewStatsRef.current = {
+          changedLines: 0,
+          toolCalls: 0,
+          toolFailures: 0,
+          turns: 0,
+          writeCalls: 0,
+          editCalls: 0,
+          bashCalls: 0,
+        };
+        idealReviewInjectedRef.current = false;
+        loopSignatureCountsRef.current = new Map();
+        fileEditCountsRef.current = new Map();
+        consecutiveFailuresRef.current = 0;
+        maxSignatureRepeatsRef.current = 0;
+        maxSameFileEditsRef.current = 0;
+        loopBreakInjectedRef.current = false;
+        compactionOccurredRef.current = false;
+        regroundingInjectedRef.current = false;
         charCountRef.current = 0;
         realTokensAccumRef.current = 0;
         thinkingAccumRef.current = 0;
@@ -444,6 +511,11 @@ export function useAgentLoop(
         const userMsg: Message = { role: "user", content: content };
         messages.current.push(userMsg);
         const startIndex = messages.current.length;
+        // Capture the verbatim request driving THIS run, before any in-run
+        // compaction can replace it with a summary. This is the freshest
+        // ground truth — the task actually being executed — not the first
+        // message of a long session (which may itself already be a summary).
+        originalRequestRef.current = userContentText(content);
 
         try {
           // Resolve fresh credentials (handles OAuth token refresh)
@@ -489,22 +561,76 @@ export function useAgentLoop(
             projectId,
             signal: ac.signal,
             userAgent,
-            transformContext: options.transformContext,
+            // Wrap transformContext to flag when a compaction actually shrank
+            // the context — the re-grounding hook keys off this.
+            transformContext: options.transformContext
+              ? async (msgs, opts) => {
+                  const result = await options.transformContext!(msgs, opts);
+                  if (result !== msgs && result.length < msgs.length) {
+                    compactionOccurredRef.current = true;
+                  }
+                  return result;
+                }
+              : undefined,
             // Drain queued messages as steering — injected between tool calls
             // and before the agent would stop, so the LLM sees user guidance
-            // within the same run instead of waiting for a new one.
+            // within the same run instead of waiting for a new one. User
+            // steering wins; then the loop-breaker; then post-compaction
+            // re-grounding — all polled at the same mid-loop boundary.
             getSteeringMessages: () => {
-              if (queueRef.current.length === 0) return null;
-              const batch = queueRef.current.splice(0);
-              setQueuedCount(0);
-              const merged = mergeUserContent(batch.map((q) => q.content));
-              onQueuedStart?.(merged);
-              return [{ role: "user" as const, content: merged }];
+              if (queueRef.current.length > 0) {
+                const batch = queueRef.current.splice(0);
+                setQueuedCount(0);
+                const merged = mergeUserContent(batch.map((q) => q.content));
+                onQueuedStart?.(merged);
+                return [{ role: "user" as const, content: merged }];
+              }
+
+              // Loop-breaker: at most once per run, when the agent looks stuck.
+              if (!loopBreakInjectedRef.current && options.getLoopBreakMessage) {
+                const loopBreakMessage = options.getLoopBreakMessage({
+                  consecutiveFailures: consecutiveFailuresRef.current,
+                  maxSignatureRepeats: maxSignatureRepeatsRef.current,
+                  maxSameFileEdits: maxSameFileEditsRef.current,
+                  textRepetitionDetected: detectTextRepetition(textVisibleRef.current),
+                });
+                if (loopBreakMessage) {
+                  loopBreakInjectedRef.current = true;
+                  return [loopBreakMessage];
+                }
+              }
+
+              // Re-grounding: once per compaction event.
+              if (
+                !regroundingInjectedRef.current &&
+                compactionOccurredRef.current &&
+                options.getRegroundingMessage
+              ) {
+                const regroundingMessage = options.getRegroundingMessage(
+                  originalRequestRef.current,
+                );
+                if (regroundingMessage) {
+                  regroundingInjectedRef.current = true;
+                  return [regroundingMessage];
+                }
+              }
+
+              return null;
             },
             // Polled when the agent would otherwise stop — used to inject
             // "continue with the next plan step" when an approved plan still
             // has incomplete steps. See App.tsx for the implementation.
-            getFollowUpMessages: getFollowUpMessages,
+            getFollowUpMessages: async () => {
+              const followUp = (await getFollowUpMessages?.()) ?? null;
+              if (followUp && followUp.length > 0) return followUp;
+              if (idealReviewInjectedRef.current || !options.getIdealReviewMessage) return null;
+              const idealReviewMessage = options.getIdealReviewMessage({
+                ...idealReviewStatsRef.current,
+              });
+              if (!idealReviewMessage) return null;
+              idealReviewInjectedRef.current = true;
+              return [idealReviewMessage];
+            },
             // clearToolUses disabled — causes model to output unsolicited context
             // summaries ("KEY CONTEXT TO REMEMBER") when it sees gaps from stripped
             // tool blocks. Normal client-side compaction handles context management.
@@ -642,6 +768,31 @@ export function useAgentLoop(
                   event.details,
                   tc?.args,
                 );
+                idealReviewStatsRef.current.toolCalls += 1;
+                if (event.isError) idealReviewStatsRef.current.toolFailures += 1;
+                if (toolName === "write") idealReviewStatsRef.current.writeCalls += 1;
+                if (toolName === "edit") idealReviewStatsRef.current.editCalls += 1;
+                if (toolName === "bash") idealReviewStatsRef.current.bashCalls += 1;
+                // ── Loop-breaker signals ──
+                if (event.isError) {
+                  consecutiveFailuresRef.current += 1;
+                } else {
+                  consecutiveFailuresRef.current = 0;
+                }
+                {
+                  const sig = toolCallSignature(toolName, tc?.args);
+                  const next = (loopSignatureCountsRef.current.get(sig) ?? 0) + 1;
+                  loopSignatureCountsRef.current.set(sig, next);
+                  if (next > maxSignatureRepeatsRef.current) maxSignatureRepeatsRef.current = next;
+                }
+                if ((toolName === "edit" || toolName === "write") && tc?.args) {
+                  const filePath = (tc.args as { file_path?: unknown }).file_path;
+                  if (typeof filePath === "string") {
+                    const next = (fileEditCountsRef.current.get(filePath) ?? 0) + 1;
+                    fileEditCountsRef.current.set(filePath, next);
+                    if (next > maxSameFileEditsRef.current) maxSameFileEditsRef.current = next;
+                  }
+                }
                 // Track lines changed for edit tools
                 if (toolName === "edit" && !event.isError) {
                   const diff =
@@ -649,6 +800,7 @@ export function useAgentLoop(
                   const addedLines = (diff.match(/^\+[^+]/gm) ?? []).length;
                   const removedLines = (diff.match(/^-[^-]/gm) ?? []).length;
                   if (addedLines > 0 || removedLines > 0) {
+                    idealReviewStatsRef.current.changedLines += addedLines + removedLines;
                     setLinesChanged((prev) => ({
                       added: prev.added + addedLines,
                       removed: prev.removed + removedLines,
@@ -727,6 +879,7 @@ export function useAgentLoop(
                 }
                 flushStreamState();
                 setRetryInfo(null);
+                idealReviewStatsRef.current.turns = event.turn;
                 onTurnEnd?.(event.turn, event.stopReason, event.usage);
                 setCurrentTurn(event.turn);
                 setTotalTokens((prev) => ({
