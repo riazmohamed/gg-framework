@@ -2,18 +2,23 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [rebrand/abukhaled]
   pull_request:
-    branches: [main]
+    branches: [rebrand/abukhaled]
 
-# Cross-platform smoke matrix. Every push to main and every PR runs build +
-# typecheck + test + bin-smoke on macOS, Linux, and Windows so we catch
-# platform-specific regressions before they hit npm.
+# Cross-platform smoke matrix. Every push to the rebrand/abukhaled product
+# branch and every PR into it runs build + typecheck + test + bin-smoke on
+# macOS, Linux, and Windows so we catch platform-specific regressions before
+# they hit npm.
+#
+# `main` is a passive mirror of upstream and is intentionally NOT covered here —
+# it carries upstream's own (sometimes red) test suite, which is not our code to
+# keep green.
 #
 # We deliberately keep the gg-editor + gg-pixel packages out of the matrix
 # for now — they have heavier native deps (sharp, transformers) that slow CI
 # without buying us much for the framework's release-critical packages
-# (gg-ai, gg-agent, ggcoder, gg-boss).
+# (gg-ai, gg-agent, ogcoder, gg-boss).
 
 jobs:
   test:
@@ -25,13 +30,13 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         node: [22.x]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
@@ -41,23 +46,23 @@ jobs:
 
       - name: Build framework packages
         run: |
-          pnpm --filter @kenkaiiii/gg-ai build
-          pnpm --filter @kenkaiiii/gg-agent build
-          pnpm --filter @kenkaiiii/ggcoder build
+          pnpm --filter @abukhaled/gg-ai build
+          pnpm --filter @abukhaled/gg-agent build
+          pnpm --filter @abukhaled/ogcoder build
           pnpm --filter @kenkaiiii/gg-boss build
 
       - name: Typecheck
         run: |
-          pnpm --filter @kenkaiiii/gg-ai check
-          pnpm --filter @kenkaiiii/gg-agent check
-          pnpm --filter @kenkaiiii/ggcoder check
+          pnpm --filter @abukhaled/gg-ai check
+          pnpm --filter @abukhaled/gg-agent check
+          pnpm --filter @abukhaled/ogcoder check
           pnpm --filter @kenkaiiii/gg-boss check
 
       - name: Test framework packages
         run: |
-          pnpm --filter @kenkaiiii/gg-ai test
-          pnpm --filter @kenkaiiii/gg-agent test
-          pnpm --filter @kenkaiiii/ggcoder test
+          pnpm --filter @abukhaled/gg-ai test
+          pnpm --filter @abukhaled/gg-agent test
+          pnpm --filter @abukhaled/ogcoder test
           pnpm --filter @kenkaiiii/gg-boss test
 
       - name: ggboss CLI smoke (extra belt-and-braces)
