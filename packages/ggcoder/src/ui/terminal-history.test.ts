@@ -546,8 +546,15 @@ describe("terminal history", () => {
   it("writes an inline graphics sequence after an image-bearing item on kitty terminals", () => {
     const prevKitty = process.env.KITTY_WINDOW_ID;
     const prevTmux = process.env.TMUX;
+    const prevTermProgram = process.env.TERM_PROGRAM;
+    const prevWezterm = process.env.WEZTERM_PANE;
     process.env.KITTY_WINDOW_ID = "1";
     delete process.env.TMUX;
+    // iTerm2/WezTerm detection takes precedence over kitty, so clear those
+    // markers (which leak in when the suite runs inside iTerm) to assert the
+    // kitty path deterministically.
+    delete process.env.TERM_PROGRAM;
+    delete process.env.WEZTERM_PANE;
     const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
     Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
     try {
@@ -580,6 +587,10 @@ describe("terminal history", () => {
       else process.env.KITTY_WINDOW_ID = prevKitty;
       if (prevTmux === undefined) delete process.env.TMUX;
       else process.env.TMUX = prevTmux;
+      if (prevTermProgram === undefined) delete process.env.TERM_PROGRAM;
+      else process.env.TERM_PROGRAM = prevTermProgram;
+      if (prevWezterm === undefined) delete process.env.WEZTERM_PANE;
+      else process.env.WEZTERM_PANE = prevWezterm;
       if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
     }
   });

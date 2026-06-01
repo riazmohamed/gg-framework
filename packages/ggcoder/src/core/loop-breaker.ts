@@ -1,4 +1,4 @@
-import type { Message } from "@kenkaiiii/gg-ai";
+import type { Message } from "@abukhaled/gg-ai";
 
 /**
  * Loop-breaker hook — the mid-loop counterpart to the ideal review.

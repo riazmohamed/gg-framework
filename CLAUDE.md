@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Last updated:** 2026-05-29 — Latest sync from main (main@bcec2b0) with @abukhaled namespace preservation. Major upstream additions: refactored App.tsx component structure, new goal overhead harness testing, thinking-level core extraction, enter/exit-plan tools, chat layout/state management hooks, transcript rendering improvements, gg-boss orchestrator refactoring, and new CLI auth/pixel modules.
+**Last updated:** 2026-06-01 — Latest sync from main (main@bd5635d), version 4.3.237, with @abukhaled namespace preservation. Major upstream changes: **the Goals System was removed** (goal-store/worker/worktree/verifier/prerequisites + `/goals` UI) and replaced by focused modules — `checkpoint-store` + `RewindOverlay` (rewind), `loop-breaker` (repetition detection), `regrounding` (drift correction), and `ideal-review` (`IdealHookMessage`). New content tools: `web-fetch` upgraded to multi-URL + Markdown (turndown) + PDF (unpdf) extraction, plus `html-extract`, `pdf-extract`, and a Playwright-backed `screenshot` tool. First-class MCP management CLI/UI (`ogcoder mcp`, `core/mcp/store.ts`, `parse-add-command.ts`, `cli/mcp.ts`, `ui/mcp.tsx`). Transcript rendering reworked (`TranscriptViewport`, `transcript-scroll-store`, `useTranscriptScroll`, `terminal-graphics.ts` kitty/iTerm2 inline images). New deps: `turndown`, `turndown-plugin-gfm`, `unpdf`, `playwright`.
 
 ## Project
 
@@ -52,10 +52,6 @@ pnpm check && pnpm lint && pnpm format:check
 pnpm --filter @abukhaled/gg-ai test          # Test one package
 pnpm --filter @abukhaled/ogcoder test -- src/tools/read.test.ts  # Single test file
 pnpm test -- -t "should read files"          # Test by name pattern
-
-# Goal system tests (in ggcoder)
-pnpm --filter @abukhaled/ogcoder verify:goal:tests   # Test goal store, worker, lifecycle
-pnpm --filter @abukhaled/ogcoder verify:goal:e2e     # End-to-end goal execution
 ```
 
 ## Architecture
@@ -88,7 +84,7 @@ pnpm --filter @abukhaled/ogcoder verify:goal:e2e     # End-to-end goal execution
 
 ### ggcoder: CLI Application
 
-- **Tools** (`tools/`): Factory functions returning `AgentTool<ZodSchema>`. Each tool gets `ToolOperations` interface for I/O abstraction (local fs by default, injectable for remote). Core tools: `bash`, `read`, `write`, `edit`, `grep`, `find`, `ls`, `web-fetch`, `web-search`. Advanced tools: `subagent` (spawns child `ogcoder` process in json-mode, streams NDJSON back), `skill` (injects skill markdown into context), `tasks`/`task-output`/`task-stop` (background task management), `enter-plan`/`exit-plan` (plan mode gating).
+- **Tools** (`tools/`): Factory functions returning `AgentTool<ZodSchema>`. Each tool gets `ToolOperations` interface for I/O abstraction (local fs by default, injectable for remote). Core tools: `bash`, `read`, `write`, `edit`, `grep`, `find`, `ls`, `web-fetch`, `web-search`. Content tools: `web-fetch` (multi-URL with bounded concurrency, Markdown extraction via `html-extract.ts` using turndown, PDF text via `pdf-extract.ts` using unpdf, prefers `/llms.txt` for docs), `screenshot` (Playwright-driven page capture). Advanced tools: `subagent` (spawns child `ogcoder` process in json-mode, streams NDJSON back), `skill` (injects skill markdown into context), `tasks`/`task-output`/`task-stop` (background task management), `enter-plan`/`exit-plan` (plan mode gating).
 - **MCP** (`core/mcp/`): Servers configured with command (stdio) or url (HTTP/SSE with fallback). Tools wrapped as `AgentTool` with `mcp__${server}__${tool}` naming. Rate-limited (2s min gap).
 - **Model router** (`core/model-router.ts`): Per-turn model switching. Modes: `vision` (auto-switch on images/video/docs), `plan-execute` (heavy planner + light executor), `hybrid` (vision priority, then plan-execute). Vision fallback chain: GLM-4.6V → MiMo Omni → Moonshot → OpenAI (Claude excluded for cost).
 - **Compaction** (`core/compaction/compactor.ts`): Triggers at 80% context or `contextWindow - 16384` tokens (whichever is lower). Keeps system message + recent ~20K tokens intact. Middle section summarized via LLM. Falls back to extractive summary on failure.
@@ -146,16 +142,14 @@ Project-agnostic probes that let the agent *see* what's happening in the running
 - **Probes** (each is a self-contained shell module with `install.sh` / `detect.sh` / `test.sh` and platform impls under `impl/`): `visual` (simctl / adb / window / playwright / generic), `runtime_logs` (tail / docker / simctl / adb-logcat), `http` (curl), `capture_email` (mailpit). Add a probe by dropping a new directory under `packages/ggcoder-eyes/probes/`.
 - **Slash commands**: `/setup-eyes` (install probes for the current project) and `/eyes-improve` (triage open journal signals into actionable improvements). Both are loaded from `core/prompt-commands.ts`.
 
-### Goals System
+### Checkpoints & Rewind
 
-A hierarchical goal execution engine for multi-step, long-running work with state tracking, prerequisite checks, and worktree isolation.
+> **Note:** The standalone Goals System (goal-store/goal-worker/goal-worktree/goal-verifier/goal-prerequisites and the `/goals` UI) was **removed** upstream in the 4.3.237 sync (2026-06-01). Its responsibilities are now covered by lighter, focused modules below plus the existing Task Management System.
 
-- **Goal Store** (`core/goal-store.ts`): Persists goals with rich metadata. Goal has `id`, `title`, `description`, `status` (draft/blocked/ready/running/verifying/passed/failed/paused), `runId`, and `tasks[]`. Each task tracks merge strategy (parallel_candidate/after_dependencies/serial/manual), status, and evidence. Stored per-project in `~/.gg/projects/{hash}/goals/`.
-- **Goal Worker** (`core/goal-worker.ts`): Spawns isolated agent subprocesses (via `ogcoder` in json-mode) to execute a goal task. Enforces `maxTurns` (default 12) and `timeoutMs` (default 30 min). Streams tool use and delta events to a log file. Completion includes summary, exit code, and tools used. Workers emit completion events on finish/timeout/spawn error.
-- **Goal Worktree** (`core/goal-worktree.ts`): Creates isolated git worktrees for candidate goals, runs them in `fix/{goalId}` branches, then tries merging back to the original branch (with conflict resolution strategies). Prevents goal work from polluting the main worktree.
-- **Goal Prerequisites** (`core/goal-prerequisites.ts`): Checks (via shell commands or fixture existence) are run before task execution. Prerequisites have `status` (unknown/met/missing) and optional `checkCommand`, `instructions`, `evidence`.
-- **Goal Verification** (`core/goal-verifier.ts`): After a goal task completes, runs verification commands to confirm the goal was actually met. Returns `GoalVerificationResult` with status (pass/fail/unknown), summary, and optional output path.
-- **UI Integration**: Goal status bar shows run progress, merge status, and verification results. Slash commands: `/goals list`, `/goals run <goalId>`, `/goals verify <goalId>`. Goal lifecycle emits events (started, task_done, verified, merged) that the UI renders in real time.
+- **Checkpoint Store** (`core/checkpoint-store.ts`): Snapshots conversation/work state so the agent can roll back. Backs the `RewindOverlay` UI and the `checkpoint-hook` that captures restore points around risky edits.
+- **Loop Breaker** (`core/loop-breaker.ts`): Detects repetition in the agent's output — `detectTextRepetition()` and `toolCallSignature()` flag when the model is stuck repeating text or identical tool calls (`LoopBreakStats`), surfaced through `useAgentLoop`.
+- **Regrounding** (`core/regrounding.ts`): Periodically re-anchors the agent to the original task to counter drift on long runs.
+- **Ideal Review** (`core/ideal-review.ts`): Produces `IdealReviewStats` and an `IdealHookMessage` that nudge the agent toward higher-quality completion before declaring done.
 
 ### Task Management System
 
@@ -198,33 +192,33 @@ Fix errors from checks you do run before continuing. Quick fixes:
 
 ### Scopes & file locations
 
-- **Global** → `~/.gg/mcp.json` — available in all GG Coder sessions.
+- **Global** → `~/.gg/mcp.json` — available in all OG Coder sessions.
 - **Project** → `./.gg/mcp.json` — only the current project root.
 - On a name collision, **project wins**. Provider defaults (e.g. `kencode-search`) stay authoritative — a user server can only add a new name, never override a default.
 
 ### Commands
 
 ```bash
-ggcoder mcp                              # interactive dashboard (🟢/🔴 status, tool counts, scope)
-ggcoder mcp list                         # list servers with live connection status
-ggcoder mcp get <name>                   # show one server's config (secrets masked)
-ggcoder mcp add <args…>                  # add a server (claude-compatible grammar)
-ggcoder mcp remove <name> [--scope s]    # remove a server
+ogcoder mcp                              # interactive dashboard (🟢/🔴 status, tool counts, scope)
+ogcoder mcp list                         # list servers with live connection status
+ogcoder mcp get <name>                   # show one server's config (secrets masked)
+ogcoder mcp add <args…>                  # add a server (claude-compatible grammar)
+ogcoder mcp remove <name> [--scope s]    # remove a server
 ```
 
-The `add` grammar mirrors `claude mcp add` 1:1 — you can paste a `claude mcp add …` (or `ggcoder mcp add …`) line and the prefix is stripped automatically:
+The `add` grammar mirrors `claude mcp add` 1:1 — you can paste a `claude mcp add …` (or `ogcoder mcp add …`) line and the prefix is stripped automatically:
 
 ```bash
-ggcoder mcp add --transport http notion https://mcp.notion.com/mcp
-ggcoder mcp add --transport sse asana https://mcp.asana.com/sse
-ggcoder mcp add --env AIRTABLE_API_KEY=key airtable -- npx -y airtable-mcp-server
+ogcoder mcp add --transport http notion https://mcp.notion.com/mcp
+ogcoder mcp add --transport sse asana https://mcp.asana.com/sse
+ogcoder mcp add --env AIRTABLE_API_KEY=key airtable -- npx -y airtable-mcp-server
 ```
 
 `--scope user` maps to global; `local`/`project` map to project. Code lives in `core/mcp/` (`store.ts` persistence, `parse-add-command.ts` parser, `client.ts` `connectAllDetailed`/`probe`) and `cli/mcp.ts` + `ui/mcp.tsx`.
 
 ### Caveats
 
-- **Connection is startup-only.** MCP connects once at launch (`connectInitialMcpTools` in `cli.ts`). Adding a server via `ggcoder mcp` mid-session won't hot-load it — restart ggcoder.
+- **Connection is startup-only.** MCP connects once at launch (`connectInitialMcpTools` in `cli.ts`). Adding a server via `ogcoder mcp` mid-session won't hot-load it — restart ogcoder.
 - **Pixel chdir flow.** Project-scoped servers load relative to `process.cwd()` at startup. The Pixel fix flow swaps cwd mid-session (`process.chdir` + `rebuildToolsForCwd`); project MCP servers won't follow that swap.
 - **WebSocket transport** is parsed but rejected (no WS client today).
 - **Env var expansion** (`${VAR}`) in `.mcp.json` is NOT expanded in v1 — values pass through literally.

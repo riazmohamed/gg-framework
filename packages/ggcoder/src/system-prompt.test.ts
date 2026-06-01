@@ -363,7 +363,7 @@ describe("buildSystemPrompt", () => {
     expect(audit.size.sections).toBeGreaterThanOrEqual(8);
   });
 
-  it("uses the Claude Code identity for Anthropic and GG Coder for other providers", async () => {
+  it("uses the Claude Code identity for Anthropic and OG Coder for other providers", async () => {
     const cwd = await makeProject();
     const anthropic = await buildSystemPrompt(
       cwd,
@@ -385,8 +385,8 @@ describe("buildSystemPrompt", () => {
     );
 
     expect(anthropic.startsWith("You are Claude Code")).toBe(true);
-    expect(anthropic).not.toContain("GG Coder by Ken Kai");
-    expect(openai.startsWith("You are GG Coder by Ken Kai")).toBe(true);
+    expect(anthropic).not.toContain("OG Coder by Abu Khaled");
+    expect(openai.startsWith("You are OG Coder by Abu Khaled")).toBe(true);
     expect(openai).not.toContain("You are Claude Code");
   });
 });

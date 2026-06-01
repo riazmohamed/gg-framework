@@ -13,11 +13,11 @@ const UNCACHED_MARKER = "<!-- uncached -->";
 /**
  * The agent's product identity. Anthropic models run as "Claude Code" (matching
  * the Claude Code identity Anthropic's OAuth tokens require in the system
- * prompt); every other provider runs as GG Coder. Keeping this dynamic avoids a
+ * prompt); every other provider runs as OG Coder. Keeping this dynamic avoids a
  * contradictory double identity when streaming through Anthropic.
  */
 function productName(provider: Provider | undefined): string {
-  return provider === "anthropic" ? "Claude Code" : "GG Coder by Ken Kai";
+  return provider === "anthropic" ? "Claude Code" : "OG Coder by Abu Khaled";
 }
 
 function renderIdentitySection(provider: Provider | undefined): string {
@@ -156,7 +156,7 @@ function renderUncachedDateSuffix(): string {
  *   Pass `tools.map(t => t.name)` from the session so the prompt reflects
  *   exactly what the model can call. Defaults to the full built-in set.
  * @param provider — the active LLM provider. Drives the product identity
- *   (`anthropic` → "Claude Code", everything else → "GG Coder").
+ *   (`anthropic` → "Claude Code", everything else → "OG Coder").
  */
 export async function buildSystemPrompt(
   cwd: string,
