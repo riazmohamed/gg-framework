@@ -16,13 +16,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution |
 | `packages/ggcoder` | `@abukhaled/ogcoder` | CLI coding agent (`ogcoder` binary) |
 | `packages/ggcoder-eyes` | `@abukhaled/ggcoder-eyes` | Project-agnostic perception probes — screenshots, logs, HTTP, capture sinks |
+| `packages/gg-voice` | `@kenkaiiii/gg-voice` | Provider-agnostic realtime voice orchestration for GG tools/agents |
 | `packages/gg-pixel` | `@kenkaiiii/gg-pixel` | Universal error tracking SDK (Node + Browser + Deno + Workers) |
 | `packages/gg-pixel-server` | (private — Cloudflare Worker) | Ingest backend (Workers + D1) |
+| `packages/gg-pixel-{go,py,rb,rs,swift}` | (native) | Language ports of the gg-pixel SDK (Go, Python, Ruby, Rust, Swift) — **not** pnpm workspaces; built with their own toolchains |
 | `packages/gg-editor` | `@kenkaiiii/gg-editor` | Video editing agent (DaVinci Resolve / Premiere) |
 | `packages/gg-editor-premiere-panel` | `@kenkaiiii/gg-editor-premiere-panel` | CEP panel bridge for Premiere |
 | `packages/gg-boss` | `@kenkaiiii/gg-boss` | Orchestrator (`ggboss` binary) — drives multiple ogcoder workers across projects from one chat |
+| `Matey` | `matey` (private) | Electron desktop app (top-level dir, not under `packages/`); included in lint/format/build scope |
 
-**Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`). `gg-boss` consumes `gg-ai` + `gg-agent` + `ogcoder` to spawn worker sessions.
+**Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`). `gg-boss` consumes `gg-ai` + `gg-agent` + `ogcoder` to spawn worker sessions. `gg-voice` provides voice transcription consumed by ogcoder's serve mode.
+
+**Workspace globs** (`pnpm-workspace.yaml`): `packages/*`, `Matey`, `experiments/*`. The native pixel ports (`gg-pixel-{go,py,rb,rs,swift}`) have no `package.json`, so `pnpm -r` skips them.
 
 ## Development Approach
 
@@ -54,7 +59,10 @@ pnpm check && pnpm lint && pnpm format:check
 pnpm --filter @abukhaled/gg-ai test          # Test one package
 pnpm --filter @abukhaled/ogcoder test -- src/tools/read.test.ts  # Single test file
 pnpm test -- -t "should read files"          # Test by name pattern
+pnpm --filter matey lint                     # The Matey Electron app lints separately
 ```
+
+`lint`/`format` cover both `packages/*/src/**` and the top-level `Matey/**`; `build`/`check`/`test` run recursively (`pnpm -r`) across all workspace packages. `ggcoder` builds with `tsc`; `gg-ai`/`gg-agent`/`gg-voice`/`gg-boss` build with `tsup` (ESM + CJS + DTS).
 
 ## Architecture
 
