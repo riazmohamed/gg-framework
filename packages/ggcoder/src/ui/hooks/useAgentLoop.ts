@@ -1,7 +1,14 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { agentLoop, type AgentEvent, type AgentTool } from "@abukhaled/gg-agent";
 import { ProviderError } from "@abukhaled/gg-ai";
-import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from "@abukhaled/gg-ai";
+import type {
+  Message,
+  Provider,
+  ThinkingLevel,
+  TextContent,
+  ImageContent,
+  VideoContent,
+} from "@abukhaled/gg-ai";
 import type { IdealReviewStats } from "../../core/ideal-review.js";
 import {
   detectTextRepetition,
@@ -14,7 +21,7 @@ import { log } from "../../core/logger.js";
 /** Extract plain text from this run's user input — the verbatim request that
  *  the re-grounding hook re-pins after a compaction. Captured at run start so
  *  it is never the lossy summary compaction leaves behind. */
-function userContentText(content: string | (TextContent | ImageContent)[]): string {
+function userContentText(content: string | (TextContent | ImageContent | VideoContent)[]): string {
   if (typeof content === "string") return content;
   return content
     .filter((c): c is TextContent => "text" in c && typeof c.text === "string")
@@ -55,7 +62,7 @@ function mergeUserContent(items: UserContent[]): UserContent {
   }
 
   // Flatten into a single content array
-  const parts: (TextContent | ImageContent)[] = [];
+  const parts: (TextContent | ImageContent | VideoContent)[] = [];
   for (const item of items) {
     if (typeof item === "string") {
       parts.push({ type: "text", text: item });
@@ -93,6 +100,10 @@ export interface AgentLoopOptions {
   tools: AgentTool[];
   webSearch?: boolean;
   maxTokens: number;
+  /** Whether the active model supports native image input. */
+  supportsImages?: boolean;
+  /** Whether the active model supports native video input. */
+  supportsVideo?: boolean;
   thinking?: ThinkingLevel;
   apiKey?: string;
   baseUrl?: string;
@@ -131,7 +142,7 @@ export interface RetryInfo {
   delayMs: number;
 }
 
-export type UserContent = string | (TextContent | ImageContent)[];
+export type UserContent = string | (TextContent | ImageContent | VideoContent)[];
 
 export interface StreamSnapshot {
   text: string;
@@ -219,10 +230,18 @@ export function useAgentLoop(
         cacheWrite?: number;
       },
     ) => void;
-    onDone?: (durationMs: number, toolsUsed: string[]) => void;
+    onDone?: (
+      durationMs: number,
+      toolsUsed: string[],
+      runStats?: { counts: Record<string, number>; tokens: number },
+    ) => void;
     onAborted?: () => void;
     /** Called when a queued message starts processing (after the previous run completes). */
     onQueuedStart?: (content: UserContent) => void;
+    /** Called when the agent restarts a turn after a stall/overload retry.
+     *  The UI should roll back any pending progressive flushes from the
+     *  aborted attempt so the retry's regenerated text doesn't duplicate. */
+    onRetry?: () => void;
     /** Polled when the agent would otherwise stop. Return a user message to
      *  inject and continue the loop (e.g. "continue with the next plan step"). */
     getFollowUpMessages?: () => Message[] | null;
@@ -239,6 +258,7 @@ export function useAgentLoop(
   const onDone = callbacks?.onDone;
   const onAborted = callbacks?.onAborted;
   const onQueuedStart = callbacks?.onQueuedStart;
+  const onRetry = callbacks?.onRetry;
   const getFollowUpMessages = callbacks?.getFollowUpMessages;
   const [isRunning, setIsRunning] = useState(false);
   const [streamingText, setStreamingText] = useState("");
@@ -265,6 +285,7 @@ export function useAgentLoop(
   const thinkingVisibleRef = useRef("");
   const runStartRef = useRef(0);
   const toolsUsedRef = useRef<Set<string>>(new Set());
+  const toolCountsRef = useRef<Map<string, number>>(new Map());
   const idealReviewStatsRef = useRef<IdealReviewStats>({
     changedLines: 0,
     toolCalls: 0,
@@ -335,6 +356,7 @@ export function useAgentLoop(
   const reset = useCallback(() => {
     // Abort any running agent loop first — this kills in-flight subagent processes
     abortRef.current?.abort();
+    setIsRunning(false);
     setCurrentTurn(0);
     setTotalTokens({ input: 0, output: 0 });
     setContextUsed(0);
@@ -346,6 +368,8 @@ export function useAgentLoop(
     setThinkingMs(0);
     setIsThinking(false);
     setStreamedTokenEstimate(0);
+    setRetryInfo(null);
+    setStallError(null);
     queueRef.current = [];
     setQueuedCount(0);
   }, []);
@@ -446,6 +470,7 @@ export function useAgentLoop(
           messages: String(messages.current.length),
         });
         toolsUsedRef.current = new Set();
+        toolCountsRef.current = new Map();
         idealReviewStatsRef.current = {
           changedLines: 0,
           toolCalls: 0,
@@ -554,6 +579,8 @@ export function useAgentLoop(
             tools: options.tools,
             webSearch: options.webSearch,
             maxTokens: options.maxTokens,
+            supportsImages: options.supportsImages,
+            supportsVideo: options.supportsVideo,
             thinking: options.thinking,
             apiKey,
             baseUrl: options.baseUrl,
@@ -728,6 +755,10 @@ export function useAgentLoop(
                   thinkingMs: thinkingAccumRef.current,
                 });
                 toolsUsedRef.current.add(event.name);
+                toolCountsRef.current.set(
+                  event.name,
+                  (toolCountsRef.current.get(event.name) ?? 0) + 1,
+                );
                 activeToolCallsRef.current = [...activeToolCallsRef.current, newTc];
                 setActiveToolCalls(activeToolCallsRef.current);
                 break;
@@ -821,6 +852,25 @@ export function useAgentLoop(
                   thinking: thinkingBufferRef.current,
                   thinkingMs: thinkingAccumRef.current,
                 });
+                // A server tool (e.g. Anthropic's native web_search) does NOT
+                // end the turn — the model keeps streaming text afterwards into
+                // the SAME turn. onServerToolCall just pinned the pre-tool text
+                // to scrollback, so the buffer must be reset here (mirroring a
+                // turn boundary). Without this the post-tool text appends to the
+                // already-pinned text, so turn_end re-renders the whole thing
+                // (visible duplicate) and the two blocks are concatenated with
+                // no separator ("…bundling.Researched the landscape").
+                if (streamFlushTimer) {
+                  clearTimeout(streamFlushTimer);
+                  streamFlushTimer = null;
+                }
+                textVisibleRef.current = "";
+                thinkingBufferRef.current = "";
+                thinkingVisibleRef.current = "";
+                streamTextDirty = false;
+                streamThinkingDirty = false;
+                setStreamingText("");
+                setStreamingThinking("");
                 break;
 
               case "server_tool_result":
@@ -856,6 +906,9 @@ export function useAgentLoop(
                 streamThinkingDirty = false;
                 setStreamingText("");
                 setStreamingThinking("");
+                // Let the UI roll back pending progressive flushes from the
+                // aborted attempt before the retry's new stream starts.
+                onRetry?.();
                 // Hidden retries (silent) don't update the UI — the user
                 // only sees retry indicators after silent attempts are exhausted.
                 if (!event.silent) {
@@ -935,7 +988,10 @@ export function useAgentLoop(
                 setActivityPhase("idle");
                 // Call onDone HERE (not in finally) so its state updates
                 // (doneStatus, flushing items to Static) are batched too.
-                onDone?.(Date.now() - runStartRef.current, [...toolsUsedRef.current]);
+                onDone?.(Date.now() - runStartRef.current, [...toolsUsedRef.current], {
+                  counts: Object.fromEntries(toolCountsRef.current),
+                  tokens: realTokensAccumRef.current,
+                });
                 doneCalledRef.current = true;
                 break;
             }
@@ -980,7 +1036,10 @@ export function useAgentLoop(
           } else if (!doneCalledRef.current) {
             // Safety fallback — normally agent_done calls onDone in-band
             const durationMs = Date.now() - runStartRef.current;
-            onDone?.(durationMs, [...toolsUsedRef.current]);
+            onDone?.(durationMs, [...toolsUsedRef.current], {
+              counts: Object.fromEntries(toolCountsRef.current),
+              tokens: realTokensAccumRef.current,
+            });
           }
 
           // Notify parent of new messages

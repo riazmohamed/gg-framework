@@ -2,7 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Last updated:** 2026-06-01 — Latest sync from main (main@bd5635d), version 4.3.237, with @abukhaled namespace preservation. Major upstream changes: **the Goals System was removed** (goal-store/worker/worktree/verifier/prerequisites + `/goals` UI) and replaced by focused modules — `checkpoint-store` + `RewindOverlay` (rewind), `loop-breaker` (repetition detection), `regrounding` (drift correction), and `ideal-review` (`IdealHookMessage`). New content tools: `web-fetch` upgraded to multi-URL + Markdown (turndown) + PDF (unpdf) extraction, plus `html-extract`, `pdf-extract`, and a Playwright-backed `screenshot` tool. First-class MCP management CLI/UI (`ogcoder mcp`, `core/mcp/store.ts`, `parse-add-command.ts`, `cli/mcp.ts`, `ui/mcp.tsx`). Transcript rendering reworked (`TranscriptViewport`, `transcript-scroll-store`, `useTranscriptScroll`, `terminal-graphics.ts` kitty/iTerm2 inline images). New deps: `turndown`, `turndown-plugin-gfm`, `unpdf`, `playwright`.
+**Last updated:** 2026-06-03 — Synced from main (main@1277132), version 4.3.243, with @abukhaled namespace preservation. Major upstream changes in this sync: **multimodal expansion** — gg-ai now has a first-class `gemini` provider (`providers/gemini.ts` + `streamGemini`, registered in `stream.ts`; OAuth via `core/oauth/gemini.ts`), and **native video** support across the transport layer (`VideoContent` accepted by MiniMax-M3 over the Anthropic transport and by Moonshot/GLM-5V via OpenAI-compatible `video_url`; non-video models are downgraded to text by `downgradeUnsupportedVideos`). The MiniMax model was renamed **M2.7 → M3** (1M context, image + video), and new vision models were added (GLM-4.6V family, Xiaomi MiMo V2 Omni/Flash). `model-registry.ts` capability flags `supportsVideo`/`supportsDocuments` are **optional** in the @abukhaled registry (omitted ⇒ unsupported). Video attachments flow through the chat input via `extractMediaPaths` (formerly `extractImagePaths`, kept as an alias) and `VIDEO_MEDIA_TYPES` in `utils/image.ts`. New error helper `isHardBillingMessage` (gg-ai `errors.ts`). Logo rendering was consolidated into the shared `renderLogoBlock` helper (`cli/shared.ts`), used by serve/agent-home modes, login, pixel, sessions, and mcp screens — OG Coder keeps a blank (text-only) logo. New `experiments/prompt-bench/` harness for prompt/tools-section A/B benchmarking.
+
+**@abukhaled-preserved feature: PDF documents.** gg-ai carries a `DocumentContent` block type (PDF base64) that upstream's `M3` video work does not have. It is wired through `transform.ts` (Anthropic `document` block; OpenAI `file` content part) and `UserMessage` content. When resolving future merges, keep `DocumentContent` in `types.ts`/`index.ts` and the document branches in `transform.ts` (`stripImages`/`stripVideos` strip it for non-vision/non-video models).
 
 ## Project
 
@@ -62,12 +64,13 @@ pnpm test -- -t "should read files"          # Test by name pattern
 
 ### gg-ai: Provider-Agnostic Streaming
 
-- **Provider registry** (`provider-registry.ts` + `stream.ts`): Map-based dispatch. Built-in providers registered at module load: `anthropic` and `minimax` → `streamAnthropic()` (MiniMax uses an Anthropic-compatible endpoint); `openai`, `glm`, `moonshot`, `xiaomi`, `ollama`, `deepseek`, `openrouter` → `streamOpenAI()` with provider-specific baseUrl/config.
+- **Provider registry** (`provider-registry.ts` + `stream.ts`): Map-based dispatch. Built-in providers registered at module load: `anthropic` and `minimax` → `streamAnthropic()` (MiniMax-M3 uses an Anthropic-compatible endpoint); `gemini` → `streamGemini()` (native Gemini transport, OAuth via `core/oauth/gemini.ts`); `openai`, `glm`, `moonshot`, `xiaomi`, `ollama`, `deepseek`, `openrouter` → `streamOpenAI()` with provider-specific baseUrl/config.
 - **Message transform** (`providers/transform.ts`): Converts unified `Message[]` to provider format. Key quirks:
   - Anthropic: `toolu_*` IDs, `thinking` content blocks with signatures, tool results wrapped in user messages
   - OpenAI-compat: IDs remapped to `call_*` prefix, `reasoning_content` field (GLM/Moonshot only), tool results as `tool` role
   - GLM: merges user text into preceding tool messages to preserve thinking context
-  - MiniMax: silently strips image/video/document content (unsupported)
+  - Video: `VideoContent` rides Anthropic transport for MiniMax-M3 and `video_url` content parts for Moonshot/GLM-5V; `downgradeUnsupportedVideos` swaps video → text placeholder for non-video models before transform
+  - Documents: `DocumentContent` (PDF) → Anthropic `document` block / OpenAI `file` content part; `stripImages`/`stripVideos` strip it for models lacking vision/video
 - **StreamResult**: dual-interface — async iterable (`for await`) AND thenable (`await` for final response)
 - **Zod → JSON Schema** (`utils/zod-to-json-schema.ts`): `z.toJSONSchema(schema)` with `$schema` key stripped. Bypassed when tool has `rawInputSchema` (MCP tools).
 - **Test provider**: `providers/palsu.ts` — deterministic mock provider used in tests; `providers/openai-codex.ts` is a legacy OpenAI Codex endpoint variant.

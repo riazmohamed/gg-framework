@@ -3,12 +3,14 @@ import type OpenAI from "openai";
 import type {
   CacheRetention,
   ContentPart,
+  DocumentContent,
   ImageContent,
   Message,
   StopReason,
   TextContent,
   ThinkingContent,
   ThinkingLevel,
+  VideoContent,
   Tool,
   ToolChoice,
   ToolResultContent,
@@ -88,20 +90,29 @@ function toAnthropicAssistantPart(
 /**
  * Build an assistant message's Anthropic content blocks.
  *
- * Anthropic only validates thinking-block integrity in the LATEST assistant
- * message. For every earlier turn, keeping signed thinking just makes the
- * history fragile — any later edit, compaction, or reorder invalidates the
+ * Anthropic requires thinking blocks to be preserved for the duration of the
+ * ACTIVE trajectory — every assistant turn from the last real user message
+ * forward (a multi-step tool loop has no user message between steps, so each
+ * read/grep/edit turn is part of the same trajectory). The cookbook is explicit:
+ * a final assistant message must start with a thinking block preceding the
+ * lastmost tool_use/tool_result set, and previous-turn thinking should be kept.
+ * Stripping reasoning from earlier in-trajectory turns leaves the model with a
+ * bare tool_use → result chain and no reasoning anchor, which can degenerate the
+ * next turn's leading token.
+ *
+ * For SETTLED turns (before the last user message), keeping signed thinking just
+ * makes history fragile — any later edit, compaction, or reorder invalidates the
  * signature and triggers "thinking ... blocks cannot be modified". So thinking
- * and redacted_thinking are stripped from all but the latest turn (tool_use and
- * text survive). On the latest turn they are preserved byte-identical (signed)
- * or downgraded to text (unsigned). This mirrors the AutoGPT / hermes-agent fix.
+ * and redacted_thinking are stripped there (tool_use and text survive). Within
+ * the active trajectory they are preserved byte-identical (signed) or downgraded
+ * to text (unsigned).
  */
 function toAnthropicAssistantContent(
   content: ContentPart[],
-  isLatest: boolean,
+  preserveThinking: boolean,
   idMap: Map<string, string>,
 ): Anthropic.ContentBlockParam[] {
-  if (!isLatest) {
+  if (!preserveThinking) {
     return content
       .filter((part) => {
         if (part.type === "thinking" || isRawThinking(part)) return false;
@@ -113,7 +124,7 @@ function toAnthropicAssistantContent(
       .filter((b): b is Anthropic.ContentBlockParam => b !== null);
   }
 
-  // Latest assistant turn: thinking/redacted_thinking blocks are byte-identical
+  // Active-trajectory assistant turn: thinking/redacted_thinking blocks are byte-identical
   // AND position-sensitive (interleaved-thinking-2025-05-14). Dropping a block
   // that PRECEDES a thinking block shifts that block's index, which the API
   // rejects, so empty text blocks before the last thinking block are kept;
@@ -135,21 +146,62 @@ function toAnthropicAssistantContent(
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
+const NON_VIDEO_USER_PLACEHOLDER = "(video omitted: model does not support video)";
 
-/** Replace image/video/document blocks with a text placeholder (deduping consecutive placeholders). */
-function stripImages(content: ContentPart[], placeholder: string): TextContent[] {
-  const out: TextContent[] = [];
+/** Replace image/document blocks with a text placeholder (deduping consecutive placeholders). */
+function stripImages<T extends TextContent | ImageContent | VideoContent | DocumentContent>(
+  content: T[],
+  placeholder: string,
+): (Exclude<T, ImageContent | DocumentContent> | TextContent)[] {
+  const out: (Exclude<T, ImageContent | DocumentContent> | TextContent)[] = [];
   let lastWasPlaceholder = false;
   for (const block of content) {
-    if (block.type !== "text") {
+    if (block.type === "image" || block.type === "document") {
+      if (!lastWasPlaceholder) out.push({ type: "text", text: placeholder });
+      lastWasPlaceholder = true;
+      continue;
+    }
+    out.push(block as Exclude<T, ImageContent | DocumentContent>);
+    lastWasPlaceholder = block.type === "text" && block.text === placeholder;
+  }
+  return out;
+}
+
+/** Replace video blocks with a text placeholder (deduping consecutive placeholders). */
+function stripVideos(
+  content: (TextContent | ImageContent | VideoContent | DocumentContent)[],
+  placeholder: string,
+): (TextContent | ImageContent | DocumentContent)[] {
+  const out: (TextContent | ImageContent | DocumentContent)[] = [];
+  let lastWasPlaceholder = false;
+  for (const block of content) {
+    if (block.type === "video") {
       if (!lastWasPlaceholder) out.push({ type: "text", text: placeholder });
       lastWasPlaceholder = true;
       continue;
     }
     out.push(block);
-    lastWasPlaceholder = block.text === placeholder;
+    lastWasPlaceholder = block.type === "text" && block.text === placeholder;
   }
   return out;
+}
+
+/**
+ * Pre-transform pass: when the target model doesn't support video, replace
+ * video blocks in user messages with a text placeholder. Tool results never
+ * carry video, so only user messages are scanned.
+ */
+export function downgradeUnsupportedVideos(
+  messages: Message[],
+  supportsVideo: boolean | undefined,
+): Message[] {
+  if (supportsVideo === true) return messages;
+  return messages.map((msg) => {
+    if (msg.role === "user" && Array.isArray(msg.content)) {
+      return { ...msg, content: stripVideos(msg.content, NON_VIDEO_USER_PLACEHOLDER) };
+    }
+    return msg;
+  });
 }
 
 /**
@@ -267,11 +319,12 @@ export function toAnthropicMessages(
   const out: Anthropic.MessageParam[] = [];
   const idMap = new Map<string, string>();
 
-  // Only the latest assistant message has its thinking blocks validated by
-  // Anthropic; thinking is stripped from all earlier turns (see
-  // toAnthropicAssistantContent).
-  const lastAssistantIdx = messages.reduce(
-    (last, m, i) => (m.role === "assistant" ? i : last),
+  // Thinking is preserved across the ACTIVE trajectory: every assistant turn
+  // after the last real user message (tool results are role "tool", not "user",
+  // so this is simply the last role==="user" index). Earlier, settled turns have
+  // thinking stripped to keep history robust against signature invalidation.
+  const trajectoryStartIdx = messages.reduce(
+    (last, m, i) => (m.role === "user" ? i : last),
     -1 as number,
   );
 
@@ -315,7 +368,19 @@ export function toAnthropicMessages(
                     ...(part.name ? { title: part.name } : {}),
                   } as Anthropic.DocumentBlockParam;
                 }
-                // "video" — Anthropic does not support video; skip by returning placeholder text
+                if (part.type === "video") {
+                  // MiniMax-M3 rides the Anthropic transport and accepts native
+                  // video blocks. Non-video models never reach here — video is
+                  // downgraded to text by downgradeUnsupportedVideos first.
+                  return {
+                    type: "video" as const,
+                    source: {
+                      type: "base64" as const,
+                      media_type: part.mediaType,
+                      data: part.data,
+                    },
+                  } as unknown as Anthropic.ContentBlockParam;
+                }
                 return {
                   type: "text" as const,
                   text: "[Video content not supported by this provider]",
@@ -328,7 +393,7 @@ export function toAnthropicMessages(
       const content =
         typeof msg.content === "string"
           ? msg.content
-          : toAnthropicAssistantContent(msg.content, msgIdx === lastAssistantIdx, idMap);
+          : toAnthropicAssistantContent(msg.content, msgIdx > trajectoryStartIdx, idMap);
       // Skip assistant messages with no content blocks (can happen when all
       // blocks are filtered — e.g. thinking-only responses from non-Anthropic
       // providers where signature is missing and text is empty)
@@ -605,7 +670,9 @@ export function toOpenAIMessages(
               };
             }
             if (part.type === "video") {
-              // GLM-5V Turbo accepts video via a non-standard `video_url` content part.
+              // Moonshot/Kimi and GLM-5V Turbo accept video via a non-standard
+              // `video_url` content part. Non-video models never reach here — video
+              // is downgraded to text by downgradeUnsupportedVideos before this runs.
               // This format is not in the OpenAI SDK types, so we cast through unknown.
               return {
                 type: "video_url",

@@ -158,8 +158,20 @@ export async function runInteractive(config: CliConfig): Promise<void> {
 
     // Create abort controller for this run
     const ac = new AbortController();
+    let sigintCount = 0;
+    let sigintTimer: ReturnType<typeof setTimeout> | null = null;
     const onSigint = () => {
-      ac.abort();
+      sigintCount++;
+      if (sigintTimer) clearTimeout(sigintTimer);
+      sigintTimer = setTimeout(() => {
+        sigintCount = 0;
+      }, 2000);
+      if (sigintCount === 1) {
+        ac.abort();
+      } else {
+        // Second Ctrl+C: force exit immediately (130 = 128 + SIGINT)
+        process.exit(130);
+      }
     };
     process.on("SIGINT", onSigint);
 
@@ -195,6 +207,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
       }
     } finally {
       process.removeListener("SIGINT", onSigint);
+      if (sigintTimer) clearTimeout(sigintTimer);
     }
 
     // Persist new messages added by agentLoop

@@ -44,7 +44,7 @@ export interface ImageContent {
 
 export interface VideoContent {
   type: "video";
-  mediaType: string;
+  mediaType: string; // e.g. "video/mp4"
   data: string; // base64
 }
 
@@ -287,6 +287,10 @@ export interface StreamOptions {
    *  in user messages and tool_result messages is downgraded to a text placeholder
    *  before being sent to the provider. Default: true. */
   supportsImages?: boolean;
+  /** Whether the target model supports video input. When false, video content
+   *  in user messages is downgraded to a text placeholder before being sent to
+   *  the provider. Default: false. */
+  supportsVideo?: boolean;
   /** Use streaming transport (default: true). When false, providers issue a
    *  single non-streaming request and synthesize events from the full response.
    *  The agent loop flips this to `false` as a fallback after repeated stream

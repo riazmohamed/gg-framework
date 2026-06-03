@@ -236,6 +236,43 @@ describe("streamAnthropic error normalization", () => {
     } satisfies Partial<ProviderError>);
   });
 
+  it("stamps a MiniMax 500 insufficient-balance body as a usage limit", async () => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      APIError: new (
+        status: number | undefined,
+        error: unknown,
+        message: string,
+        requestID?: string | null,
+        type?: string | null,
+      ) => Error;
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextEvents = null;
+    const err = new AnthropicMock.APIError(
+      500,
+      { type: "api_error", message: "insufficient balance (1008)" },
+      "500 Internal Server Error",
+      "req_minimax_balance",
+      "api_error",
+    );
+    AnthropicMock.nextError = err;
+
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model: "minimax-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "token",
+    });
+
+    await expect(result.response).rejects.toMatchObject({
+      provider: "anthropic",
+      statusCode: 500,
+    } satisfies Partial<ProviderError>);
+    await expect(result.response).rejects.toThrow(/usage limit reached/i);
+  });
+
   it("preserves tool arguments carried on the streamed content block start", async () => {
     const { default: Anthropic } = await import("@anthropic-ai/sdk");
     const AnthropicMock = Anthropic as unknown as {
@@ -293,6 +330,82 @@ describe("streamAnthropic error normalization", () => {
       id: "toolu_123",
       name: "bash",
       args: { command: "echo ok" },
+    });
+  });
+
+  it("reconstructs server tool input from streamed input_json_delta", async () => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextError = null;
+    // Native web_search: the content_block_start carries an empty input `{}`
+    // and the real query streams in afterward via input_json_delta. The
+    // provider must reconstruct the query from the accumulated argsJson, not
+    // the empty block-start input -- otherwise Anthropic rejects the call with
+    // `invalid_tool_input`.
+    AnthropicMock.nextEvents = [
+      {
+        type: "message_start",
+        message: { usage: { input_tokens: 7 } },
+      },
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "server_tool_use",
+          id: "srvtoolu_123",
+          name: "web_search",
+          input: {},
+        },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: '{"query":"opus ' },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: 'clip pricing"}' },
+      },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 3 } },
+      { type: "message_stop" },
+    ];
+
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-ant-test",
+      webSearch: true,
+    });
+
+    const events = [];
+    for await (const event of result) {
+      events.push(event);
+    }
+
+    await expect(result.response).resolves.toMatchObject({
+      message: {
+        content: [
+          {
+            type: "server_tool_call",
+            id: "srvtoolu_123",
+            name: "web_search",
+            input: { query: "opus clip pricing" },
+          },
+        ],
+      },
+      stopReason: "tool_use",
+    });
+    expect(events).toContainEqual({
+      type: "server_toolcall",
+      id: "srvtoolu_123",
+      name: "web_search",
+      input: { query: "opus clip pricing" },
     });
   });
 });
