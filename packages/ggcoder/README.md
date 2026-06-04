@@ -21,7 +21,7 @@ The CLI that sits on top of the [GG Framework](../../README.md). Built on [`@abu
 npm i -g @abukhaled/ogcoder
 ```
 
-**Windows users:** OG Coder runs inside WSL. See the [WSL installation guide](../../docs/INSTALL-WSL.md) for step-by-step setup.
+**Windows users:** OG Coder runs natively on Windows via Git for Windows (Git Bash) — set `GG_GIT_BASH_PATH` if it isn't auto-detected. WSL also works; see the [WSL installation guide](../../docs/INSTALL-WSL.md).
 
 ---
 
