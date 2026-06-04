@@ -4,7 +4,7 @@ import { ThemeContext, loadTheme, useTheme } from "@abukhaled/ogcoder/ui/theme";
 import { AnimationProvider } from "@abukhaled/ogcoder/ui";
 import { useDoublePress } from "@abukhaled/ogcoder/ui/hooks/double-press";
 import type { Provider } from "@abukhaled/gg-ai";
-import { getNextThinkingLevel } from "@abukhaled/ogcoder";
+import { getNextThinkingLevel } from "@abukhaled/gg-core";
 import { TerminalSizeProvider, useTerminalSize } from "@abukhaled/ogcoder/ui/hooks/terminal-size";
 import { BossChatScreen } from "./boss-chat-screen.js";
 import { bossStore, getBossState, useBossState } from "./boss-store.js";

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { z } from "zod";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool } from "@abukhaled/gg-agent";
 
 /**
  * A single recorded tool invocation. The rubric scorers read this trajectory

@@ -148,7 +148,7 @@ export function isBillingError(err: unknown): boolean {
   // provider set (DeepSeek, OpenRouter, ...). Never retriable.
   const statusCode = (err as Error & { statusCode?: unknown }).statusCode;
   if (statusCode === 402) return true;
-  // Shared marker list (single source of truth in @kenkaiiii/gg-ai) so the
+  // Shared marker list (single source of truth in @abukhaled/gg-ai) so the
   // provider boundary and this classifier can't drift apart.
   return isHardBillingMessage(err.message);
 }
@@ -640,6 +640,7 @@ export async function* agentLoop(
           compaction: options.compaction,
           clearToolUses: options.clearToolUses,
           userAgent: options.userAgent,
+          defaultHeaders: options.defaultHeaders,
           // Flip to non-streaming fallback after repeated stream stalls.
           ...(useNonStreamingFallback ? { streaming: false } : {}),
         });

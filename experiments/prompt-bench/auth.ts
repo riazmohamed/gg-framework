@@ -1,5 +1,5 @@
-import { AuthStorage } from "@kenkaiiii/ggcoder";
-import type { Provider } from "@kenkaiiii/gg-ai";
+import { AuthStorage } from "@abukhaled/ogcoder";
+import type { Provider } from "@abukhaled/gg-ai";
 
 /**
  * Credential loader for the bench. Uses the CLI's own `AuthStorage` so OAuth

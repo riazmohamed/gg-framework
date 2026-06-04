@@ -3,7 +3,7 @@ import { Text, Box } from "ink";
 import type { ThinkingLevel } from "@abukhaled/gg-ai";
 import { useTheme } from "@abukhaled/ogcoder/ui/theme";
 import { useTerminalSize } from "@abukhaled/ogcoder/ui/hooks/terminal-size";
-import { getContextWindow } from "@abukhaled/ogcoder";
+import { getContextWindow } from "@abukhaled/gg-core";
 import { COLORS } from "./branding.js";
 
 const PARTIAL_BLOCKS = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];

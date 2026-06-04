@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { Provider } from "@abukhaled/gg-ai";
-import { MODELS } from "@abukhaled/ogcoder";
+import { MODELS } from "@abukhaled/gg-core";
 import { useTerminalSize } from "@abukhaled/ogcoder/ui/hooks/terminal-size";
 import { useTheme } from "@abukhaled/ogcoder/ui/theme";
 

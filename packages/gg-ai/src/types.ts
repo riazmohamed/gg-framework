@@ -46,6 +46,11 @@ export interface VideoContent {
   type: "video";
   mediaType: string; // e.g. "video/mp4"
   data: string; // base64
+  /** Moonshot/Kimi file id (e.g. "d4f0…") after uploading via the files API.
+   *  Moonshot rejects inline base64 video; the provider uploads the clip once
+   *  and caches the id here so later turns reference `ms://<fileId>` instead of
+   *  re-sending the bytes. */
+  fileId?: string;
 }
 
 export interface DocumentContent {
@@ -62,7 +67,7 @@ export interface ToolCall {
   args: Record<string, unknown>;
 }
 
-export type ToolResultContent = string | (TextContent | ImageContent)[];
+export type ToolResultContent = string | (TextContent | ImageContent | VideoContent)[];
 
 export interface ToolResult {
   type: "tool_result";
@@ -303,4 +308,9 @@ export interface StreamOptions {
    *  version should pass it here. Ignored for non-Anthropic providers and for
    *  Anthropic requests using a regular API key. */
   userAgent?: string;
+  /** Extra HTTP headers attached to every model request. Used by providers
+   *  whose endpoint gates on client identity (e.g. Kimi For Coding requires a
+   *  `User-Agent: kimi-code-cli/...` and `X-Msh-*` device headers). Merged
+   *  into the underlying SDK's default headers. */
+  defaultHeaders?: Record<string, string>;
 }

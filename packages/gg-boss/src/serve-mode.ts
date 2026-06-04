@@ -1,14 +1,15 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import chalk from "chalk";
-import { getAppPaths, MODELS, type ModelInfo } from "@abukhaled/ogcoder";
+import { getAppPaths } from "@abukhaled/ogcoder";
+import { MODELS, type ModelInfo } from "@abukhaled/gg-core";
 import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { setStreamDiagnostic } from "@abukhaled/gg-agent";
 import { GGBoss } from "./orchestrator.js";
 import { loadLinks } from "./links.js";
 import { tasksStore } from "./tasks-store.js";
 import { saveSettings } from "./settings.js";
-import { transcribeVoice, isModelLoaded, setProgressCallback } from "./voice-transcriber.js";
+import { transcribeVoice, isModelLoaded, setProgressCallback } from "@abukhaled/gg-core";
 import {
   subscribeToBossStore,
   getBossState,
@@ -16,7 +17,7 @@ import {
   type HistoryItem,
   type BossUiState,
 } from "./boss-store.js";
-import { TelegramBot, type TelegramMessage, type TelegramVoiceMessage } from "./telegram.js";
+import { TelegramBot, type TelegramMessage, type TelegramVoiceMessage } from "@abukhaled/gg-core";
 import { initLogger, log, closeLogger } from "./logger.js";
 import { VERSION, BRAND, AUTHOR, LOGO_LINES, LOGO_GAP, GRADIENT, COLORS } from "./branding.js";
 

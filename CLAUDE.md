@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Last updated:** 2026-06-03 — Synced from main (main@1277132), version 4.3.243, with @abukhaled namespace preservation. Major upstream changes in this sync: **multimodal expansion** — gg-ai now has a first-class `gemini` provider (`providers/gemini.ts` + `streamGemini`, registered in `stream.ts`; OAuth via `core/oauth/gemini.ts`), and **native video** support across the transport layer (`VideoContent` accepted by MiniMax-M3 over the Anthropic transport and by Moonshot/GLM-5V via OpenAI-compatible `video_url`; non-video models are downgraded to text by `downgradeUnsupportedVideos`). The MiniMax model was renamed **M2.7 → M3** (1M context, image + video), and new vision models were added (GLM-4.6V family, Xiaomi MiMo V2 Omni/Flash). `model-registry.ts` capability flags `supportsVideo`/`supportsDocuments` are **optional** in the @abukhaled registry (omitted ⇒ unsupported). Video attachments flow through the chat input via `extractMediaPaths` (formerly `extractImagePaths`, kept as an alias) and `VIDEO_MEDIA_TYPES` in `utils/image.ts`. New error helper `isHardBillingMessage` (gg-ai `errors.ts`). Logo rendering was consolidated into the shared `renderLogoBlock` helper (`cli/shared.ts`), used by serve/agent-home modes, login, pixel, sessions, and mcp screens — OG Coder keeps a blank (text-only) logo. New `experiments/prompt-bench/` harness for prompt/tools-section A/B benchmarking.
+**Last updated:** 2026-06-04 — Synced from main (main@e6c357e), version 4.5.0, with @abukhaled namespace preservation. Major upstream changes in this sync: **new `gg-core` package** — provider-agnostic, UI-free shared foundation extracted from ggcoder/gg-boss (model registry, thinking levels, app paths, OAuth + auth storage, file-writer logger core, telegram + voice transcription, self-updater). ggcoder keeps thin re-export shims (`core/model-registry.ts`, `core/auth-storage.ts`, `core/oauth/*`, etc.) so existing relative imports and subpath exports keep resolving. On this branch gg-core is published as **`@abukhaled/gg-core`**. Also new: **Changesets-based versioning/publishing** (`.changeset/`, fixed version group for the framework spine), **Kimi OAuth** (`oauth/kimi.ts`, `MOONSHOT_OAUTH_KEY` — OAuth preferred over the Moonshot API key when both exist), **error classification in gg-ai** (`classifyProviderError` in `error-classification.ts`), **Moonshot video file-service upload** (`providers/moonshot-video.ts`; uploaded clips referenced as `ms://<fileId>` via `VideoContent.fileId`), and `maxVideoBytes`/`getVideoByteLimit` in the model registry (per-transport video payload caps).
 
 **@abukhaled-preserved feature: PDF documents.** gg-ai carries a `DocumentContent` block type (PDF base64) that upstream's `M3` video work does not have. It is wired through `transform.ts` (Anthropic `document` block; OpenAI `file` content part) and `UserMessage` content. When resolving future merges, keep `DocumentContent` in `types.ts`/`index.ts` and the document branches in `transform.ts` (`stripImages`/`stripVideos` strip it for non-vision/non-video models).
 
@@ -14,6 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |---|---|---|
 | `packages/gg-ai` | `@abukhaled/gg-ai` | Unified LLM streaming API (Anthropic + OpenAI-compatible providers) |
 | `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution |
+| `packages/gg-core` | `@abukhaled/gg-core` | Provider-agnostic, UI-free shared foundation: model registry, thinking levels, app paths, OAuth + auth storage, file-writer logger core, telegram + voice transcription, self-updater |
 | `packages/ggcoder` | `@abukhaled/ogcoder` | CLI coding agent (`ogcoder` binary) |
 | `packages/ggcoder-eyes` | `@abukhaled/ggcoder-eyes` | Project-agnostic perception probes — screenshots, logs, HTTP, capture sinks |
 | `packages/gg-voice` | `@kenkaiiii/gg-voice` | Provider-agnostic realtime voice orchestration for GG tools/agents |
@@ -25,7 +26,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `packages/gg-boss` | `@kenkaiiii/gg-boss` | Orchestrator (`ggboss` binary) — drives multiple ogcoder workers across projects from one chat |
 | `Matey` | `matey` (private) | Electron desktop app (top-level dir, not under `packages/`); included in lint/format/build scope |
 
-**Dependency chain**: `gg-ai` → `gg-agent` → `ogcoder` (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`). `gg-boss` consumes `gg-ai` + `gg-agent` + `ogcoder` to spawn worker sessions. `gg-voice` provides voice transcription consumed by ogcoder's serve mode.
+**Dependency chain**: `gg-ai` → `gg-agent` → `gg-core` → { `ogcoder`, `gg-boss`, `gg-editor`, `gg-voice` } (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`). `gg-boss` consumes `gg-ai` + `gg-agent` + `gg-core` + `ogcoder` to spawn worker sessions. `gg-voice` provides voice transcription consumed by ogcoder's serve mode.
+
+**One home for provider-coupled code**: anything coupled to provider behavior — model registry, context windows, thinking levels, app paths, auth/OAuth — has exactly one home in `@abukhaled/gg-core` (depends only on gg-ai for `Provider`/`ThinkingLevel` types; must NOT import gg-agent or React/Ink). Raw provider error *wording* lives in `@abukhaled/gg-ai` (`classifyProviderError`, `isHardBillingMessage`). Fix a model entry or error string once and ogcoder, gg-boss, gg-editor, and gg-voice all inherit it on their next build — do not re-add per-app copies. The logger's `attachToEventBus` bridge (needs the gg-agent `EventBus` type) stays in the apps; only the pure file-writer logger core lives in gg-core.
 
 **Workspace globs** (`pnpm-workspace.yaml`): `packages/*`, `Matey`, `experiments/*`. The native pixel ports (`gg-pixel-{go,py,rb,rs,swift}`) have no `package.json`, so `pnpm -r` skips them.
 
@@ -40,6 +43,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   1. **Phase 1 (now)**: Learn codebase deeply by working with a copy. Understand agent loop, LLM streaming, tool execution, UI patterns.
   2. **Phase 2 (future)**: Implement own features and improvements as expertise grows. Diverge from upstream where beneficial.
   3. **Phase 3 (long-term)**: Publish independently to npm under `@abukhaled` scope.
+
 
 ## Commands
 
@@ -62,7 +66,7 @@ pnpm test -- -t "should read files"          # Test by name pattern
 pnpm --filter matey lint                     # The Matey Electron app lints separately
 ```
 
-`lint`/`format` cover both `packages/*/src/**` and the top-level `Matey/**`; `build`/`check`/`test` run recursively (`pnpm -r`) across all workspace packages. `ggcoder` builds with `tsc`; `gg-ai`/`gg-agent`/`gg-voice`/`gg-boss` build with `tsup` (ESM + CJS + DTS).
+`lint`/`format` cover both `packages/*/src/**` and the top-level `Matey/**`; `build`/`check`/`test` run recursively (`pnpm -r`) across all workspace packages. `ggcoder` builds with `tsc`; `gg-ai`/`gg-agent`/`gg-core`/`gg-voice`/`gg-boss` build with `tsup` (ESM + CJS + DTS).
 
 ## Architecture
 
@@ -265,19 +269,29 @@ When a fix starts, `startPixelFix(errorId)` in `App.tsx` swaps four things in lo
 - Providers → `providers/` in gg-ai, one file per provider
 - Tools → `tools/` in ggcoder, one file per tool
 - UI components → `ui/components/`, one per file
-- OAuth flows → `core/oauth/`, one per provider
+- OAuth flows, auth storage, model registry, app paths, logger core → `@abukhaled/gg-core` (`packages/gg-core/src/`), one file per provider under `oauth/`. ggcoder keeps thin re-export shims at `core/oauth/*`, `core/auth-storage.ts`, `core/model-registry.ts`, etc. so existing relative imports + subpath exports (`@abukhaled/ogcoder/auth`, `/models`) keep resolving.
+- Provider error classification → `@abukhaled/gg-ai` (`classifyProviderError` in `error-classification.ts`)
 - Tests → co-located with source files
 
-## Publishing
+## Publishing to npm (Changesets)
 
-Publish in dependency order. The three core packages (`gg-ai`, `gg-agent`, `ogcoder`) must share the same version. `ggcoder-eyes` versions independently.
+Versioning + publishing is managed by [Changesets](https://github.com/changesets/changesets).
+Manual multi-package version bumping is gone — do **not** hand-edit `version` fields.
+
+The framework spine — `@abukhaled/gg-ai`, `@abukhaled/gg-agent`, `@abukhaled/gg-core`,
+`@abukhaled/ogcoder`, `@kenkaiiii/gg-boss` — is a **fixed group** in
+`.changeset/config.json`: a changeset touching any one bumps them all to the same
+version together. Dependents like gg-editor / gg-voice get an automatic patch bump.
 
 ```bash
-pnpm build
-pnpm --filter @abukhaled/gg-ai publish --no-git-checks
-pnpm --filter @abukhaled/gg-agent publish --no-git-checks
-pnpm --filter @abukhaled/ggcoder-eyes publish --no-git-checks
-pnpm --filter @abukhaled/ogcoder publish --no-git-checks
+pnpm changeset            # describe the change; pick bump level (patch/minor/major)
+pnpm changeset version    # apply bumps + update internal deps + write changelogs
+pnpm build                # rebuild with the new versions
+pnpm changeset publish    # publishes in topological order (uses pnpm under the hood)
 ```
 
-All packages use `"publishConfig": { "access": "public" }` (required for scoped packages). Use `--no-git-checks` to skip git dirty/tag checks.
+`pnpm changeset status` shows the pending release graph at any time.
+
+- npm granular access token must be set: `npm set //registry.npmjs.org/:_authToken=<token>`
+- `access: public` is set in `.changeset/config.json` (and each package's `publishConfig`), required for scoped packages.
+- `workspace:*` references resolve to real versions at publish time because changesets publishes via pnpm.
