@@ -61,7 +61,7 @@ import { runAgentHomeMode } from "./modes/agent-home-mode.js";
 import { renderLoginSelector, renderXiaomiRegionSelector } from "./ui/login.js";
 import { getXiaomiBaseUrl } from "./core/xiaomi-regions.js";
 import { renderSessionSelector } from "./ui/sessions.js";
-import type { CompletedItem, GoalProgressDraft } from "./ui/App.js";
+import type { CompletedItem, GoalProgressDraft } from "./ui/app-items.js";
 import { segmentDisplayText, stripDoneMarkers } from "./utils/plan-steps.js";
 import { formatUserError } from "./utils/error-handler.js";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
@@ -73,7 +73,6 @@ import { initLogger, log, closeLogger } from "./core/logger.js";
 import { setStreamDiagnostic, type AgentTool } from "@abukhaled/gg-agent";
 import { setProviderDiagnostic } from "@abukhaled/gg-ai";
 import { buildSystemPrompt } from "./system-prompt.js";
-import { isEyesActive, journalCount } from "@abukhaled/ggcoder-eyes";
 import { createTools } from "./tools/index.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import {
@@ -101,6 +100,7 @@ import { checkAndAutoUpdate } from "./core/auto-update.js";
 import { parseGoalSyntheticEvent } from "./ui/goal-events.js";
 import type { GoalReference } from "./core/goal-store.js";
 import type { GoalMode } from "./core/runtime-mode.js";
+import { routeCliCommandInput, type CliSubcommandName } from "./cli/command-routing.js";
 
 const _require = createRequire(import.meta.url);
 const CLI_VERSION = (_require("../package.json") as { version: string }).version;
@@ -258,6 +258,50 @@ function printHelp(): void {
   console.log();
 }
 
+function createCliSubcommandHandlers(): Record<CliSubcommandName, () => void> {
+  const runWithStandardErrorHandling = (operation: () => Promise<void>, logStack = false): void => {
+    operation().catch((err) => {
+      log(
+        "ERROR",
+        "fatal",
+        err instanceof Error ? (logStack ? (err.stack ?? err.message) : err.message) : String(err),
+      );
+      closeLogger();
+      process.stderr.write(formatUserError(err) + "\n");
+      process.exit(1);
+    });
+  };
+
+  return {
+    eyes: () => {
+      let cliPath: string;
+      try {
+        cliPath = _require.resolve("@abukhaled/ggcoder-eyes/cli");
+      } catch {
+        process.stderr.write("ggcoder-eyes package not installed\n");
+        process.exit(1);
+      }
+      const result = spawnSync(process.execPath, [cliPath, ...process.argv.slice(3)], {
+        stdio: "inherit",
+      });
+      process.exit(result.status ?? 0);
+    },
+    login: () => runWithStandardErrorHandling(runLogin),
+    logout: () => runWithStandardErrorHandling(runLogout),
+    sessions: () => runWithStandardErrorHandling(runSessions),
+    telegram: () => runWithStandardErrorHandling(runTelegramSetup),
+    serve: () => runWithStandardErrorHandling(runServe),
+    doctor: () => {
+      runDoctor().catch((err) => {
+        process.stderr.write(formatUserError(err) + "\n");
+        process.exit(1);
+      });
+    },
+    "agent-home-login": () => runWithStandardErrorHandling(runAgentHomeLogin),
+    "agent-home": () => runWithStandardErrorHandling(runAgentHome),
+  };
+}
+
 function main(): void {
   // Silent auto-update check — fire-and-forget in the background so it never
   // blocks startup (the old synchronous check could stall for 3-4 seconds on
@@ -266,119 +310,18 @@ function main(): void {
     if (msg) console.error(chalk.hex("#60a5fa")(msg));
   });
 
-  // Intercept --help / -h before anything else so it works with subcommands
-  // (e.g. `ogcoder login --help` or `ogcoder --help`)
-  if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    printHelp();
-    process.exit(0);
-  }
+  const commandRoute = routeCliCommandInput({
+    argv: process.argv,
+    printHelp,
+    exit: process.exit,
+    handlers: createCliSubcommandHandlers(),
+  });
 
-  // Handle subcommands before parseArgs
-  const subcommand = process.argv[2];
-
-  // Passthrough to @abukhaled/ggcoder-eyes CLI. Agents call this from bash as
-  // `ogcoder eyes log rough "..."` etc. — `ogcoder` is guaranteed on PATH
-  // (user launched it), so this avoids depending on nested bin visibility in
-  // global npm/pnpm installs.
-  if (subcommand === "eyes") {
-    let cliPath: string;
-    try {
-      cliPath = _require.resolve("@abukhaled/ggcoder-eyes/cli");
-    } catch {
-      process.stderr.write("ggcoder-eyes package not installed\n");
-      process.exit(1);
-    }
-    const r = spawnSync(process.execPath, [cliPath, ...process.argv.slice(3)], {
-      stdio: "inherit",
-    });
-    process.exit(r.status ?? 0);
-  }
-
-  if (subcommand === "login") {
-    runLogin().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
+  if (commandRoute.kind === "handled") {
     return;
   }
 
-  if (subcommand === "logout") {
-    runLogout().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "sessions") {
-    process.argv.splice(2, 1);
-    runSessions().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "telegram") {
-    runTelegramSetup().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "serve") {
-    process.argv.splice(2, 1);
-    runServe().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "doctor") {
-    runDoctor().catch((err) => {
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "agent-home-login") {
-    runAgentHomeLogin().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "agent-home") {
-    process.argv.splice(2, 1);
-    runAgentHome().catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  if (subcommand === "continue") {
-    // Remove "continue" so parseArgs handles remaining flags
-    process.argv.splice(2, 1);
-  }
+  const subcommand = commandRoute.kind === "continue" ? "continue" : commandRoute.subcommand;
 
   const { values, positionals } = parseArgs({
     options: {
@@ -717,14 +660,16 @@ async function runInkTUI(opts: {
     onFileMutated: (filePath) => markRepoMapDirty(cwd, filePath),
   });
 
-  // Start MCP server connections in the background — don't block startup.
-  // The promise is passed to the App which merges tools once they resolve.
+  // MCP startup can involve `npx` installing/booting servers. Do it after the
+  // TUI paints so a slow network or npm cache never looks like "nothing happens".
   const mcpManager = new MCPClientManager();
-  const providerApiKey =
-    effectiveProvider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
-  const pendingMCPTools = mcpManager
-    .connectAll(getMCPServers(effectiveProvider, providerApiKey))
-    .catch((err) => {
+  let initialMcpConnectPromise: Promise<AgentTool[]> | undefined;
+  const connectInitialMcpTools = async (): Promise<AgentTool[]> => {
+    initialMcpConnectPromise ??= (async () => {
+      const providerApiKey =
+        effectiveProvider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
+      return mcpManager.connectAll(getMCPServers(effectiveProvider, providerApiKey));
+    })().catch((err) => {
       log(
         "WARN",
         "mcp",
@@ -732,6 +677,8 @@ async function runInkTUI(opts: {
       );
       return [] as AgentTool[];
     });
+    return initialMcpConnectPromise;
+  };
 
   const systemPrompt = await buildSystemPrompt(
     cwd,
@@ -856,9 +803,9 @@ async function runInkTUI(opts: {
     goalModeRef,
     goalReferencesRef,
     skills,
-    pendingMCPTools,
     repoMapChangedFilesRef,
     repoMapReadFilesRef,
+    connectInitialMcpTools,
   });
 
   closeLogger();

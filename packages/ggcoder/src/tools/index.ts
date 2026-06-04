@@ -129,6 +129,7 @@ export { createWebSearchTool } from "./web-search.js";
 export { createSourcePathTool } from "./source-path.js";
 export { createTaskOutputTool } from "./task-output.js";
 export { createTaskStopTool } from "./task-stop.js";
+export { createTasksTool } from "./tasks.js";
 export { createGoalsTool } from "./goals.js";
 export { createSkillTool } from "./skill.js";
 export { ProcessManager } from "../core/process-manager.js";

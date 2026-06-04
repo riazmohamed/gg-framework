@@ -12,7 +12,6 @@ import {
   navigateTaskBar,
   killTask,
 } from "./stores/taskbar-store.js";
-import { writeFileSync } from "node:fs";
 import { playNotificationSound } from "../utils/sound.js";
 import {
   formatError,
@@ -20,7 +19,6 @@ import {
   type Provider,
   type ThinkingLevel,
   type TextContent,
-  type ImageContent,
 } from "@abukhaled/gg-ai";
 import { extractImagePaths, type ImageAttachment } from "../utils/image.js";
 import {
@@ -29,7 +27,6 @@ import {
 } from "../core/goal-references.js";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { useAgentLoop, type StreamSnapshot, type UserContent } from "./hooks/useAgentLoop.js";
-import { isEyesActive, journalCount } from "@abukhaled/ggcoder-eyes";
 import { UserMessage } from "./components/UserMessage.js";
 import type { PasteInfo } from "./components/InputArea.js";
 import { AssistantMessage } from "./components/AssistantMessage.js";
@@ -37,7 +34,6 @@ import { ToolExecution } from "./components/ToolExecution.js";
 import { ToolUseLoader } from "./components/ToolUseLoader.js";
 import { ToolGroupExecution } from "./components/ToolGroupExecution.js";
 import { ServerToolExecution } from "./components/ServerToolExecution.js";
-import { MessageResponse } from "./components/MessageResponse.js";
 import { SubAgentPanel, type SubAgentInfo } from "./components/SubAgentPanel.js";
 import { CompactionSpinner, CompactionDone } from "./components/CompactionNotice.js";
 import type { SubAgentUpdate, SubAgentDetails } from "../tools/subagent.js";
@@ -59,26 +55,19 @@ import { ModelSelector } from "./components/ModelSelector.js";
 import { GoalOverlay } from "./components/GoalOverlay.js";
 import { EyesOverlay } from "./components/EyesOverlay.js";
 import { TaskOverlay } from "./components/TaskOverlay.js";
-import {
-  buildGoalFinalSummarySections,
-  buildGoalSummaryRows,
-  goalPassedDetail,
-  type GoalSummaryRow,
-  type GoalSummarySection,
-} from "./goal-summary.js";
 import { SkillsOverlay } from "./components/SkillsOverlay.js";
 import { ThemeSelector } from "./components/ThemeSelector.js";
 import {
   BackgroundTasksBar,
   getFooterStatusLayoutDecision,
-  type FooterStatusLayoutDecision,
 } from "./components/BackgroundTasksBar.js";
 import type { SlashCommandInfo } from "./components/SlashCommandMenu.js";
 import type { ProcessManager } from "../core/process-manager.js";
 import { useTheme, useSetTheme, type ThemeName } from "./theme/theme.js";
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { getGitBranch } from "../utils/git.js";
-import { getModel, getContextWindow, getMaxThinkingLevel } from "../core/model-registry.js";
+import { getModel, getContextWindow } from "../core/model-registry.js";
+import { BLACK_CIRCLE } from "./constants/figures.js";
 import { SessionManager } from "../core/session-manager.js";
 import {
   appendMessagesToSession as appendSessionMessages,
@@ -115,13 +104,12 @@ import {
 } from "../core/language-detector.js";
 import { detectVerifyCommands } from "../core/verify-commands.js";
 import {
-  FOCUSED_REPO_MAP_MAX_CHARS,
-  FIRST_TURN_REPO_MAP_MAX_CHARS,
   buildRepoMap,
   createRepoMapCache,
   type RepoMapCache,
   type RepoMapSnapshot,
 } from "../core/repomap.js";
+import { getRepoMapBudgetForContext } from "../core/repomap-budget.js";
 import {
   getLatestUserText,
   injectRepoMapContextMessages,
@@ -152,17 +140,22 @@ import {
   formatGoalBlockingPrerequisites,
   goalHasBlockingPrerequisites,
   loadGoalRuns,
+  loadGoalRunsSync,
   reconcileActiveGoalRuns,
+  saveGoalRunsSync,
   updateGoalTask,
   upsertGoalRun,
   type GoalReference,
   type GoalRun,
 } from "../core/goal-store.js";
 import {
-  canCompleteGoalRun,
-  decideGoalNextAction,
-  type GoalControllerDecision,
-} from "../core/goal-controller.js";
+  getNextPendingTask,
+  loadTasksSync,
+  markTaskInProgress,
+  saveTasksSync,
+  type TaskRecord,
+} from "../core/tasks-store.js";
+import { canCompleteGoalRun, decideGoalNextAction } from "../core/goal-controller.js";
 import { runGoalPrerequisiteChecks } from "../core/goal-prerequisites.js";
 import { runGoalVerifierCommand } from "../core/goal-verifier.js";
 import {
@@ -180,6 +173,116 @@ import {
 } from "./goal-events.js";
 import type { GoalMode } from "../core/runtime-mode.js";
 import type { TerminalHistoryContext, TerminalHistoryPrinter } from "./terminal-history.js";
+import {
+  buildUserContentWithAttachments,
+  isGoalPromptCommandName,
+  routePromptCommandInput,
+  runGoalPromptSetupSequence,
+} from "./prompt-routing.js";
+import { getNextThinkingLevel, isThinkingLevelSupported } from "./thinking-level.js";
+import {
+  appendGoalProgressDraft,
+  completedItemsWithDurableGoalTerminalProgress,
+  formatGoalTerminalProgress,
+  formatGoalWorkerFinishedTitle,
+  getGoalContinuationChoiceKey,
+  goalTerminalProgressId,
+  routeGoalSyntheticEvent,
+  summarizeGoalCompletion,
+  truncateGoalProgressText,
+} from "./goal-progress.js";
+import {
+  getChatControlsLayoutDecision,
+  getDoneFlushDecision,
+  getGoalActivationPaneTransition,
+  getGoalSetupFinishedPaneTransition,
+  getGoalSetupPaneTransitionAfterRun,
+  isAgentSpacingItem,
+  MIN_LIVE_AREA_ROWS,
+  nextGoalModeAfterAgentDone,
+  shouldResetUIForGoalSetupPaneTransition,
+  shouldTopSpaceAfterPrintedAgentBoundary,
+  shouldTopSpaceAssistantAfterToolBoundary,
+  shouldTopSpaceStreamingAssistant,
+  type DoneStatus,
+} from "./layout-decisions.js";
+import {
+  compactHistory,
+  getNextGeneratedItemId,
+  isActiveItem,
+  isSameAssistantText,
+  normalizeAssistantText,
+  partitionCompleted,
+  pinStreamingTextBeforeToolBoundary,
+  removeItemsWithIds,
+  uniqueItemsById,
+} from "./item-helpers.js";
+import type {
+  CompletedItem,
+  CompactedItem,
+  ErrorItem,
+  GoalProgressDraft,
+  GoalProgressItem,
+  QueuedItem,
+  TaskItem,
+  ServerToolDoneItem,
+  ServerToolStartItem,
+  SubAgentGroupItem,
+  ToolDoneItem,
+  ToolGroupItem,
+  ToolStartItem,
+  UserItem,
+} from "./app-items.js";
+
+export type {
+  CompletedItem,
+  GoalProgressDraft,
+  GoalProgressItem,
+  ToolGroupItem,
+} from "./app-items.js";
+export type { DoneStatus } from "./layout-decisions.js";
+export {
+  buildGoalSetupPromptFromPlanner,
+  buildUserContentWithAttachments,
+  collectAssistantTextSince,
+  isGoalPromptCommandName,
+  routePromptCommandInput,
+  runGoalPromptSetupSequence,
+} from "./prompt-routing.js";
+export { getNextThinkingLevel } from "./thinking-level.js";
+export {
+  appendGoalProgressDraft,
+  completedItemsWithDurableGoalTerminalProgress,
+  formatGoalTerminalProgress,
+  getGoalContinuationChoiceKey,
+  routeGoalSyntheticEvent,
+  truncateGoalProgressText,
+} from "./goal-progress.js";
+export {
+  getChatControlsLayoutDecision,
+  getDoneFlushDecision,
+  getGoalActivationPaneTransition,
+  getGoalSetupFinishedPaneTransition,
+  getGoalSetupPaneTransitionAfterRun,
+  getScrollStabilizationDecision,
+  getStaticHistoryKey,
+  hasParagraphBreakLiveUserMessage,
+  isTallLiveUserMessage,
+  nextGoalModeAfterAgentDone,
+  shouldHideHistoryForOverlayView,
+  shouldHideStaticItemsForOverlayView,
+  shouldResetUIForGoalSetupPaneTransition,
+  shouldStabilizeOverlayPaneRerender,
+  shouldTopSpaceAfterPrintedAgentBoundary,
+  shouldTopSpaceAssistantAfterToolBoundary,
+  shouldTopSpaceStreamingAssistant,
+} from "./layout-decisions.js";
+export {
+  getNextGeneratedItemId,
+  isActiveItem,
+  partitionCompleted,
+  pinStreamingTextBeforeToolBoundary,
+} from "./item-helpers.js";
 
 /** Where ggcoder bugs should be reported. Surfaced in the guidance line. */
 const GGCODER_BUG_REPORT_URL = "github.com/kenkaiiii/gg-framework/issues";
@@ -217,376 +320,6 @@ function toErrorItem(err: unknown, id: string, contextPrefix?: string): ErrorIte
   };
 }
 
-// ── Completed Item Types ───────────────────────────────────
-
-interface UserItem {
-  kind: "user";
-  text: string;
-  imageCount?: number;
-  pasteInfo?: PasteInfo;
-  id: string;
-}
-
-interface GoalItem {
-  kind: "goal";
-  title: string;
-  workerId?: string;
-  id: string;
-}
-
-export function routePromptCommandInput(
-  input: string,
-  promptCommands = PROMPT_COMMANDS,
-  customCommands: Pick<CustomCommand, "name" | "prompt">[] = [],
-): { cmdName: string; cmdArgs: string; promptText: string; fullPrompt: string } | null {
-  const trimmed = input.trim();
-  if (!trimmed.startsWith("/")) return null;
-  const parts = trimmed.slice(1).split(" ");
-  const cmdName = parts[0];
-  const cmdArgs = parts.slice(1).join(" ").trim();
-  const builtinCmd = promptCommands.find((c) => c.name === cmdName || c.aliases.includes(cmdName));
-  const customCmd = !builtinCmd ? customCommands.find((c) => c.name === cmdName) : undefined;
-  const promptText = builtinCmd?.prompt ?? customCmd?.prompt;
-  if (!promptText) return null;
-  return {
-    cmdName,
-    cmdArgs,
-    promptText,
-    fullPrompt: cmdArgs ? `${promptText}\n\n## User Instructions\n\n${cmdArgs}` : promptText,
-  };
-}
-
-const GOAL_PLANNER_OUTPUT_MAX_CHARS = 2400;
-
-function messageTextContent(message: Message): string {
-  if (typeof message.content === "string") return message.content;
-  return message.content
-    .filter((part): part is TextContent => part.type === "text")
-    .map((part) => part.text)
-    .join("\n");
-}
-
-export function collectAssistantTextSince(
-  messages: readonly Message[],
-  startIndex: number,
-  maxChars = GOAL_PLANNER_OUTPUT_MAX_CHARS,
-): string {
-  const text = messages
-    .slice(startIndex)
-    .filter((message) => message.role === "assistant")
-    .map(messageTextContent)
-    .join("\n")
-    .trim();
-  if (text.length <= maxChars) return text;
-  return text.slice(0, maxChars).trimEnd() + "\n[planner output truncated]";
-}
-
-export function buildGoalSetupPromptFromPlanner({
-  originalGoalPrompt,
-  plannerOutput,
-}: {
-  originalGoalPrompt: string;
-  plannerOutput: string;
-}): string {
-  const compactPlannerOutput = plannerOutput.trim() || "GOAL_PLAN\nresearch=none\nEND_GOAL_PLAN";
-  return (
-    `${originalGoalPrompt.trim()}\n\n` +
-    `## Goal Planner Output\n\n${compactPlannerOutput}\n\n` +
-    `Use the original objective plus this planner output to create durable Goal setup only. ` +
-    `Do not redo planner research unless the planner output is unusable.`
-  );
-}
-
-export function isGoalPromptCommandName(cmdName: string): boolean {
-  return getPromptCommand(cmdName)?.name === "goal";
-}
-
-export async function runGoalPromptSetupSequence({
-  userContent,
-  fullPrompt,
-  messagesRef,
-  setGoalModeAndPrompt,
-  runAgent,
-  onStage,
-}: {
-  userContent: UserContent;
-  fullPrompt: string;
-  messagesRef: { current: Message[] };
-  setGoalModeAndPrompt: (nextMode: GoalMode) => Promise<void>;
-  runAgent: (content: UserContent) => Promise<void>;
-  onStage?: (text: string) => void;
-}): Promise<void> {
-  onStage?.("Planning Goal setup");
-  await setGoalModeAndPrompt("planner");
-  const plannerStartIndex = messagesRef.current.length;
-  await runAgent(userContent);
-  const plannerOutput = collectAssistantTextSince(messagesRef.current, plannerStartIndex);
-  const setupPrompt = buildGoalSetupPromptFromPlanner({
-    originalGoalPrompt: fullPrompt,
-    plannerOutput,
-  });
-  await setGoalModeAndPrompt("setup");
-  onStage?.("Creating Goal run");
-  await runAgent(setupPrompt);
-}
-
-function buildGoalTaskPromptWithReferences(run: GoalRun, taskPrompt: string): string {
-  if (taskPrompt.includes("## Goal References (MANDATORY)")) return taskPrompt;
-  const references = formatGoalReferencesForPrompt(run.references ?? []);
-  return references ? `${references}\n\n${taskPrompt}` : taskPrompt;
-}
-
-export function buildUserContentWithAttachments(
-  text: string,
-  inputImages: ImageAttachment[],
-  modelSupportsImages: boolean,
-): string | (TextContent | ImageContent)[] {
-  if (inputImages.length === 0) return text;
-
-  const parts: (TextContent | ImageContent)[] = [];
-  if (text) {
-    parts.push({ type: "text", text });
-  }
-
-  for (const img of inputImages) {
-    if (img.kind === "text") {
-      parts.push({
-        type: "text",
-        text: `<file name="${img.fileName}">\n${img.data}\n</file>`,
-      });
-    } else if (modelSupportsImages) {
-      parts.push({ type: "image", mediaType: img.mediaType, data: img.data });
-    } else {
-      // GLM models: save image to temp file and instruct model to use vision MCP tool
-      const ext = img.mediaType.split("/")[1] ?? "png";
-      const tmpPath = `/tmp/ggcoder-img-${Date.now()}.${ext}`;
-      try {
-        writeFileSync(tmpPath, Buffer.from(img.data, "base64"));
-        parts.push({
-          type: "text",
-          text: `[User attached an image saved at: ${tmpPath} — use the image_analysis tool to view and analyze it]`,
-        });
-      } catch {
-        parts.push({
-          type: "text",
-          text: `[User attached an image but it could not be saved for analysis]`,
-        });
-      }
-    }
-  }
-
-  // If only text parts remain after stripping images, simplify to plain string
-  return parts.length === 1 && parts[0].type === "text" ? parts[0].text : parts;
-}
-
-export interface GoalProgressItem {
-  kind: "goal_progress";
-  phase:
-    | "worker_started"
-    | "worker_finished"
-    | "orchestrator_reviewing"
-    | "orchestrator_working"
-    | "continuing"
-    | "verifier_started"
-    | "verifier_finished"
-    | "terminal";
-  title: string;
-  detail?: string;
-  summaryRows?: GoalSummaryRow[];
-  summarySections?: GoalSummarySection[];
-  workerId?: string;
-  status?: string;
-  id: string;
-}
-
-export type GoalProgressDraft = Omit<GoalProgressItem, "id">;
-
-interface AssistantItem {
-  kind: "assistant";
-  text: string;
-  thinking?: string;
-  thinkingMs?: number;
-  continuation?: boolean;
-  id: string;
-}
-
-interface ToolStartItem {
-  kind: "tool_start";
-  toolCallId: string;
-  name: string;
-  args: Record<string, unknown>;
-  id: string;
-  startedAt: number;
-  animateUntil: number;
-  /** Live progress output (e.g., bash streaming stdout). */
-  progressOutput?: string;
-}
-
-interface ToolDoneItem {
-  kind: "tool_done";
-  name: string;
-  args: Record<string, unknown>;
-  result: string;
-  isError: boolean;
-  durationMs: number;
-  details?: unknown;
-  id: string;
-}
-
-interface ErrorItem {
-  kind: "error";
-  /** Plain-English headline, e.g. "OpenAI returned an error." */
-  headline: string;
-  /** Detailed message body (clean, no JSON). */
-  message: string;
-  /** Action line — "Retry, this is an OpenAI issue" / "Report this ggcoder bug …". */
-  guidance: string;
-  id: string;
-}
-
-interface InfoItem {
-  kind: "info";
-  text: string;
-  id: string;
-}
-
-interface StylePackItem {
-  kind: "style_pack";
-  /** Newly-added language ids in this injection. Rendered via LANGUAGE_DISPLAY_NAMES. */
-  added: readonly LanguageId[];
-  /** Show the one-time /setup hint. Only true for the first badge in a session. */
-  showSetupHint: boolean;
-  id: string;
-}
-
-/**
- * Shown once per session when initial language detection finds no packs —
- * keeps `/setup` discoverable in dirs that don't look like a project root
- * (parent folders, scratch dirs, etc.).
- */
-interface SetupHintItem {
-  kind: "setup_hint";
-  id: string;
-}
-
-interface UpdateNoticeItem {
-  kind: "update_notice";
-  text: string;
-  id: string;
-}
-
-interface QueuedItem {
-  kind: "queued";
-  text: string;
-  imageCount?: number;
-  id: string;
-}
-
-interface CompactingItem {
-  kind: "compacting";
-  id: string;
-}
-
-interface CompactedItem {
-  kind: "compacted";
-  originalCount: number;
-  newCount: number;
-  tokensBefore: number;
-  tokensAfter: number;
-  id: string;
-}
-
-interface DurationItem {
-  kind: "duration";
-  durationMs: number;
-  toolsUsed: string[];
-  verb: string;
-  id: string;
-}
-
-interface BannerItem {
-  kind: "banner";
-  id: string;
-}
-
-interface SubAgentGroupItem {
-  kind: "subagent_group";
-  agents: SubAgentInfo[];
-  aborted?: boolean;
-  id: string;
-}
-
-interface ServerToolStartItem {
-  kind: "server_tool_start";
-  serverToolCallId: string;
-  name: string;
-  input: unknown;
-  startedAt: number;
-  animateUntil: number;
-  id: string;
-}
-
-interface ServerToolDoneItem {
-  kind: "server_tool_done";
-  name: string;
-  input: unknown;
-  resultType: string;
-  data: unknown;
-  durationMs: number;
-  id: string;
-}
-
-interface PlanTransitionItem {
-  kind: "plan_transition";
-  text: string;
-  active: boolean;
-  id: string;
-}
-
-interface GoalAgentTransitionItem {
-  kind: "goal_agent_transition";
-  text: string;
-  id: string;
-}
-
-interface ModelTransitionItem {
-  kind: "model_transition";
-  modelName: string;
-  id: string;
-}
-
-interface ThemeTransitionItem {
-  kind: "theme_transition";
-  themeName: string;
-  id: string;
-}
-
-interface PlanEventItem {
-  kind: "plan_event";
-  event: "approved" | "rejected" | "dismissed";
-  /** Free-form detail (reject feedback, etc.) — quoted in the rendered row. */
-  detail?: string;
-  id: string;
-}
-
-interface StoppedItem {
-  kind: "stopped";
-  text: string;
-  id: string;
-}
-
-interface TombstoneItem {
-  kind: "tombstone";
-  id: string;
-}
-
-interface StepDoneItem {
-  kind: "step_done";
-  stepNum: number;
-  description: string;
-  id: string;
-}
-
 /** Tools that get aggregated into a single compact group when possible. */
 const AGGREGATABLE_TOOLS = new Set([
   "read",
@@ -598,126 +331,18 @@ const AGGREGATABLE_TOOLS = new Set([
   "mcp__kencode-search__discoverRepos",
 ]);
 
-const OPENAI_GPT_THINKING_LEVELS: readonly ThinkingLevel[] = ["medium", "high", "xhigh"];
-
-function isOpenAIGptModel(provider: Provider, model: string): boolean {
-  return provider === "openai" && model.startsWith("gpt-");
-}
-
-export function getNextThinkingLevel(
-  provider: Provider,
-  model: string,
-  current: ThinkingLevel | undefined,
-): ThinkingLevel | undefined {
-  if (!isOpenAIGptModel(provider, model)) {
-    return current ? undefined : getMaxThinkingLevel(model);
-  }
-
-  if (!current) return "medium";
-  const index = OPENAI_GPT_THINKING_LEVELS.indexOf(current);
-  if (index === -1) return "medium";
-  return OPENAI_GPT_THINKING_LEVELS[index + 1];
-}
 const RUNNING_INDICATOR_ANIMATION_MS = 1_200;
 
-interface ToolGroupTool {
-  toolCallId: string;
-  name: string;
-  args: Record<string, unknown>;
-  status: "running" | "done";
-  animateUntil?: number;
-  result?: string;
-  isError?: boolean;
-}
-
-export interface ToolGroupItem {
-  kind: "tool_group";
-  tools: ToolGroupTool[];
-  id: string;
-}
-
-export type CompletedItem =
-  | UserItem
-  | GoalItem
-  | GoalProgressItem
-  | AssistantItem
-  | ToolStartItem
-  | ToolDoneItem
-  | ServerToolStartItem
-  | ServerToolDoneItem
-  | ErrorItem
-  | InfoItem
-  | StylePackItem
-  | SetupHintItem
-  | UpdateNoticeItem
-  | QueuedItem
-  | CompactingItem
-  | CompactedItem
-  | DurationItem
-  | BannerItem
-  | SubAgentGroupItem
-  | ToolGroupItem
-  | PlanTransitionItem
-  | GoalAgentTransitionItem
-  | ModelTransitionItem
-  | ThemeTransitionItem
-  | PlanEventItem
-  | StoppedItem
-  | TombstoneItem
-  | StepDoneItem;
-
-/**
- * Cap memory by replacing old finalized rows with tiny tombstones. The full
- * transcript is already printed into terminal scrollback, so the in-memory copy
- * only needs enough recent structure to survive remounts and session mirroring.
- */
-const MAX_LIVE_HISTORY = 200;
-function compactHistory(items: CompletedItem[]): CompletedItem[] {
-  if (items.length <= MAX_LIVE_HISTORY) return items;
-  const cutoff = items.length - MAX_LIVE_HISTORY;
-  const compacted = new Array<CompletedItem>(items.length);
-  for (let i = 0; i < cutoff; i++) {
-    const it = items[i];
-    compacted[i] = it.kind === "tombstone" ? it : { kind: "tombstone", id: it.id };
-  }
-  for (let i = cutoff; i < items.length; i++) {
-    compacted[i] = items[i];
-  }
-  return compacted;
-}
-
-function summarizeGoalCompletion(summary: string): string | undefined {
-  const lines = summary
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && line !== "[agent_done]");
-  const statusLine = lines.find((line) => /^Status:/i.test(line));
-  const changedLine = lines.find((line) =>
-    /^(Changed|Implemented|Fixed|Added|Key findings|Full verifier)/i.test(line),
-  );
-  const verificationLine = lines.find((line) => /^(Verification|Verified|Result):/i.test(line));
-  return statusLine ?? changedLine ?? verificationLine ?? lines[0];
-}
-
-const GOAL_PROGRESS_TEXT_LIMIT = 72;
-
-export function truncateGoalProgressText(text: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (normalized.length <= GOAL_PROGRESS_TEXT_LIMIT) return normalized;
-  return `${normalized.slice(0, GOAL_PROGRESS_TEXT_LIMIT - 1).trimEnd()}…`;
-}
-
-function formatGoalWorkerFinishedTitle(
-  taskTitle: string,
-  status: GoalWorkerCompletion["status"],
-): string {
-  const prefix = status === "done" ? "Done" : "Failed";
-  return truncateGoalProgressText(`${prefix}: ${taskTitle}`);
+function buildGoalTaskPromptWithReferences(run: GoalRun, taskPrompt: string): string {
+  if (taskPrompt.includes("## Goal References (MANDATORY)")) return taskPrompt;
+  const references = formatGoalReferencesForPrompt(run.references ?? []);
+  return references ? `${references}\n\n${taskPrompt}` : taskPrompt;
 }
 
 function goalProgressLoaderStatus(item: GoalProgressItem): "running" | "done" | "error" {
-  if (item.status === "failed" || item.status === "fail" || item.status === "blocked")
+  if (item.status === "failed" || item.status === "fail" || item.status === "blocked") {
     return "error";
+  }
   if (
     item.phase === "worker_finished" ||
     item.phase === "verifier_finished" ||
@@ -738,598 +363,6 @@ function goalProgressColor(item: GoalProgressItem, theme: ReturnType<typeof useT
   }
   if (item.phase === "continuing") return theme.warning;
   return theme.primary;
-}
-
-function goalTerminalProgressId(run: GoalRun): string {
-  return `goal-terminal-${run.id}`;
-}
-
-function goalTerminalRunIdFromItem(item: CompletedItem): string | undefined {
-  if (item.kind !== "goal_progress" || item.phase !== "terminal") return undefined;
-  if (!item.id.startsWith("goal-terminal-")) return undefined;
-  return item.id.slice("goal-terminal-".length);
-}
-
-function goalProgressMatchesDraft(item: GoalProgressItem, draft: GoalProgressDraft): boolean {
-  return (
-    item.phase === draft.phase &&
-    item.title === draft.title &&
-    item.detail === draft.detail &&
-    item.workerId === draft.workerId &&
-    item.status === draft.status &&
-    JSON.stringify(item.summaryRows ?? []) === JSON.stringify(draft.summaryRows ?? []) &&
-    JSON.stringify(item.summarySections ?? []) === JSON.stringify(draft.summarySections ?? [])
-  );
-}
-
-export function appendGoalProgressDraft(
-  items: readonly CompletedItem[],
-  draft: GoalProgressDraft,
-  makeId: () => string,
-): CompletedItem[] {
-  const previous = items.at(-1);
-  if (previous?.kind === "goal_progress" && goalProgressMatchesDraft(previous, draft)) {
-    return items as CompletedItem[];
-  }
-  return [...items, { ...draft, id: makeId() }];
-}
-
-/**
- * Reconcile terminal Goal cards that are already visible in this UI session.
- *
- * This intentionally does not synthesize missing cards from durable GoalRun
- * state. Goal terminal cards are event notifications: they should appear when
- * the terminal event happens in the current UI, not whenever a fresh session
- * polls old Goal runs from the Goal pane. Callers that just observed a terminal
- * event append that card first, then use this helper to tombstone stale older
- * cards for the same run.
- */
-export function getNextGeneratedItemId(items: readonly Pick<CompletedItem, "id">[]): number {
-  let max = -1;
-  for (const item of items) {
-    const raw = item.id.startsWith("ui-") ? item.id.slice(3) : item.id;
-    const n = Number(raw);
-    if (Number.isInteger(n) && n >= 0 && n > max) max = n;
-  }
-  return max + 1;
-}
-
-export function completedItemsWithDurableGoalTerminalProgress(
-  items: readonly CompletedItem[],
-  runs: readonly GoalRun[],
-): CompletedItem[] {
-  const runIds = new Set(runs.map((run) => run.id));
-  const terminalByRun = new Map(
-    runs
-      .map((run) => [run.id, formatGoalTerminalProgress(run)] as const)
-      .filter((entry): entry is readonly [string, GoalProgressDraft] => entry[1] !== null),
-  );
-  if (runIds.size === 0) return items as CompletedItem[];
-
-  let changed = false;
-  const reconciled = items.map((item, index): CompletedItem => {
-    const runId = goalTerminalRunIdFromItem(item);
-    if (!runId || !runIds.has(runId)) return item;
-
-    const draft = terminalByRun.get(runId);
-    if (draft && goalProgressMatchesDraft(item as GoalProgressItem, draft)) return item;
-
-    changed = true;
-    return { kind: "tombstone", id: `tombstone-${item.id}-${index}` };
-  });
-
-  return changed ? reconciled : (items as CompletedItem[]);
-}
-
-export function formatGoalTerminalProgress(run: GoalRun): GoalProgressDraft | null {
-  switch (run.status) {
-    case "passed":
-      return {
-        kind: "goal_progress",
-        phase: "terminal",
-        title: `Goal passed: ${run.title}`,
-        detail: goalPassedDetail(run),
-        summaryRows: buildGoalSummaryRows(run),
-        summarySections: buildGoalFinalSummarySections(run),
-        status: run.status,
-      };
-    case "failed":
-      return {
-        kind: "goal_progress",
-        phase: "terminal",
-        title: `Goal failed: ${run.title}`,
-        detail: "Auto-continuation stopped. Check Goal tasks for the failing step.",
-        summaryRows: buildGoalSummaryRows(run),
-        status: run.status,
-      };
-    case "blocked":
-      return {
-        kind: "goal_progress",
-        phase: "terminal",
-        title: `Goal blocked: ${run.title}`,
-        detail: goalHasBlockingPrerequisites(run)
-          ? formatGoalBlockingPrerequisites(run)
-          : (run.blockers[0] ?? "A prerequisite or missing verifier blocked progress."),
-        summaryRows: buildGoalSummaryRows(run),
-        status: run.status,
-      };
-    case "paused":
-      return {
-        kind: "goal_progress",
-        phase: "terminal",
-        title: `Goal paused: ${run.title}`,
-        detail: run.blockers[0] ?? "Auto-continuation paused.",
-        summaryRows: buildGoalSummaryRows(run),
-        status: run.status,
-      };
-    case "draft":
-    case "ready":
-    case "running":
-    case "verifying":
-      return null;
-  }
-}
-
-export type OverlayPaneKind =
-  | "model"
-  | "tasks"
-  | "goal"
-  | "skills"
-  | "plan"
-  | "theme"
-  | "eyes";
-
-export function shouldHideHistoryForOverlayView(
-  isOverlayView: boolean,
-  _isAgentRunning: boolean,
-): boolean {
-  // Overlay panes are standalone full-screen states. Finalized chat rows are
-  // printed outside Ink, so overlays should never replay transcript UI behind them.
-  return isOverlayView;
-}
-
-export function shouldStabilizeOverlayPaneRerender({
-  overlayPane,
-  isAgentRunning,
-}: {
-  overlayPane: OverlayPaneKind | null;
-  isAgentRunning: boolean;
-}): boolean {
-  return isAgentRunning && overlayPane === "goal";
-}
-
-export function shouldHideStaticItemsForOverlayView({
-  shouldHideHistoryForOverlay,
-  stabilizeOverlayPaneRerender: _stabilizeOverlayPaneRerender,
-}: {
-  shouldHideHistoryForOverlay: boolean;
-  stabilizeOverlayPaneRerender: boolean;
-}): boolean {
-  return shouldHideHistoryForOverlay;
-}
-
-export interface DoneFlushDecision {
-  showDoneStatus: boolean;
-  flushLiveItems: boolean;
-}
-
-export function getDoneFlushDecision({
-  planOverlayPending,
-  goalMode,
-  goalAutoExpand,
-}: {
-  planOverlayPending: boolean;
-  goalMode: GoalMode;
-  goalAutoExpand: boolean;
-}): DoneFlushDecision {
-  return {
-    showDoneStatus: !(
-      planOverlayPending ||
-      goalMode === "planner" ||
-      goalMode === "setup" ||
-      goalAutoExpand
-    ),
-    flushLiveItems: true,
-  };
-}
-
-export interface GoalSetupPaneTransition {
-  overlay: "goal";
-  goalAutoExpand: true;
-  planAutoExpand: false;
-  suppressDoneStatus: true;
-}
-
-export function getGoalSetupFinishedPaneTransition(): GoalSetupPaneTransition {
-  return {
-    overlay: "goal",
-    goalAutoExpand: true,
-    planAutoExpand: false,
-    suppressDoneStatus: true,
-  };
-}
-
-export function getGoalSetupPaneTransitionAfterRun({
-  isGoalSetupCommand,
-  setupPanePending,
-}: {
-  isGoalSetupCommand: boolean;
-  setupPanePending: boolean;
-}): GoalSetupPaneTransition | null {
-  return isGoalSetupCommand && setupPanePending ? getGoalSetupFinishedPaneTransition() : null;
-}
-
-export function shouldResetUIForSetupPaneTransition({
-  hasResetUI,
-  hasSessionStore,
-}: {
-  hasResetUI: boolean;
-  hasSessionStore: boolean;
-}): boolean {
-  // Opening a review pane is a full-screen state transition. A bare React state
-  // flip hides history in the virtual tree, but it does not reset Ink/log-update's
-  // already-written terminal frame, so the pane can render below prior chat.
-  return hasResetUI && hasSessionStore;
-}
-
-export const shouldResetUIForGoalSetupPaneTransition = shouldResetUIForSetupPaneTransition;
-
-export interface GoalActivationPaneTransition {
-  overlay: null;
-  goalAutoExpand: false;
-  planAutoExpand: false;
-  resetReviewScreen: boolean;
-}
-
-export function getGoalActivationPaneTransition(): GoalActivationPaneTransition {
-  return { overlay: null, goalAutoExpand: false, planAutoExpand: false, resetReviewScreen: true };
-}
-
-export function getGoalContinuationChoiceKey({
-  runId,
-  decision,
-}: {
-  runId: string;
-  decision: GoalControllerDecision;
-}): string {
-  switch (decision.kind) {
-    case "create_task":
-      return `${runId}:create_task:${decision.title}:${decision.prompt}`;
-    case "start_worker":
-    case "pause":
-      return `${runId}:${decision.kind}:${decision.task.id}:${decision.attempts}`;
-    case "run_verifier":
-      return `${runId}:run_verifier:${decision.command}`;
-    case "blocked":
-    case "complete":
-    case "terminal":
-    case "wait":
-      return `${runId}:${decision.kind}:${decision.reason}`;
-  }
-}
-
-export interface ScrollStabilizationDecision {
-  /** Legacy signal for tests that modeled Static replay avoidance. */
-  preserveStatic: boolean;
-  /** New output should still appear normally when the user is at the bottom. */
-  autoFollow: boolean;
-}
-
-export interface DoneStatus {
-  durationMs: number;
-  toolsUsed: string[];
-  verb: string;
-}
-
-export function getScrollStabilizationDecision({
-  isUserScrolled,
-  hasNewOutput,
-  hasTallLiveUserMessage = false,
-  hasParagraphBreakLiveUserMessage = false,
-}: {
-  isUserScrolled: boolean;
-  hasNewOutput: boolean;
-  hasTallLiveUserMessage?: boolean;
-  hasParagraphBreakLiveUserMessage?: boolean;
-}): ScrollStabilizationDecision {
-  const shouldPreserveStatic =
-    isUserScrolled || hasTallLiveUserMessage || hasParagraphBreakLiveUserMessage;
-  const shouldAutoFollow = !(isUserScrolled || hasTallLiveUserMessage);
-  return {
-    preserveStatic: shouldPreserveStatic && hasNewOutput,
-    autoFollow: shouldAutoFollow,
-  };
-}
-
-export function nextGoalModeAfterAgentDone({
-  currentMode,
-  runningGoalIds,
-  queuedSyntheticEvents,
-  activeContinuationFlights = 0,
-  wasGoalSetupTurn,
-}: {
-  currentMode: GoalMode;
-  runningGoalIds: number;
-  queuedSyntheticEvents: number;
-  activeContinuationFlights?: number;
-  wasGoalSetupTurn?: boolean;
-}): GoalMode {
-  if (wasGoalSetupTurn) return "off";
-  if (currentMode === "planner" || currentMode === "setup") return currentMode;
-  if (queuedSyntheticEvents > 0) return "coordinator";
-  if (activeContinuationFlights > 0) return "coordinator";
-  if (currentMode === "coordinator" && runningGoalIds > 0) return "coordinator";
-  return "off";
-}
-
-export function hasParagraphBreakLiveUserMessage(text: string): boolean {
-  return /\n[ \t]*\n/.test(text);
-}
-
-export function isTallLiveUserMessage(text: string, rows: number): boolean {
-  return text.split("\n").length > Math.max(8, Math.floor(rows * 0.6));
-}
-
-export function getStaticHistoryKey({ resizeKey }: { resizeKey: number }): string {
-  return `${resizeKey}`;
-}
-
-const MIN_LIVE_AREA_ROWS = 3;
-const INPUT_AREA_ROWS = 3;
-const STATUS_SLOT_ROWS = 2;
-const FOOTER_ONE_LINE_ROWS = 1;
-const FOOTER_TWO_LINE_ROWS = 2;
-const GOAL_STATUS_ROWS = 1;
-const COLLAPSED_FOOTER_STATUS_ROWS = 1;
-const MAX_EXPANDED_BACKGROUND_TASK_ROWS = 7;
-
-function isAgentSpacingKind(kind: CompletedItem["kind"]): boolean {
-  return [
-    "assistant",
-    "queued",
-    "goal_progress",
-    "tool_start",
-    "tool_done",
-    "tool_group",
-    "server_tool_start",
-    "server_tool_done",
-    "subagent_group",
-    "info",
-    "error",
-    "stopped",
-    "plan_transition",
-    "goal_agent_transition",
-    "model_transition",
-    "theme_transition",
-    "plan_event",
-    "update_notice",
-    "compacting",
-    "compacted",
-    "style_pack",
-    "setup_hint",
-  ].includes(kind);
-}
-
-function isToolBoundaryKind(kind: CompletedItem["kind"]): boolean {
-  return [
-    "goal_progress",
-    "tool_start",
-    "tool_done",
-    "tool_group",
-    "server_tool_start",
-    "server_tool_done",
-    "subagent_group",
-  ].includes(kind);
-}
-
-function isAgentSpacingItem(item: CompletedItem): boolean {
-  return isAgentSpacingKind(item.kind);
-}
-
-export function shouldTopSpaceAfterPrintedAgentBoundary({
-  currentKind,
-  previousLiveItem,
-  lastPendingHistoryItem,
-  lastHistoryItem,
-}: {
-  currentKind: CompletedItem["kind"];
-  previousLiveItem?: CompletedItem;
-  lastPendingHistoryItem?: CompletedItem;
-  lastHistoryItem?: CompletedItem;
-}): boolean {
-  const needsExternalSpacing = isAgentSpacingKind(currentKind);
-  if (!needsExternalSpacing) return false;
-  if (previousLiveItem !== undefined) return false;
-  const previousKind = lastPendingHistoryItem?.kind ?? lastHistoryItem?.kind;
-  return previousKind !== undefined && isAgentSpacingKind(previousKind);
-}
-
-export function shouldTopSpaceAssistantAfterToolBoundary({
-  text,
-  previousLiveItem,
-  lastPendingHistoryItem,
-  lastHistoryItem,
-}: {
-  text: string;
-  previousLiveItem?: CompletedItem;
-  lastPendingHistoryItem?: CompletedItem;
-  lastHistoryItem?: CompletedItem;
-}): boolean {
-  if (text.trim().length === 0) return false;
-  if (
-    shouldTopSpaceAfterPrintedAgentBoundary({
-      currentKind: "assistant",
-      previousLiveItem,
-      lastPendingHistoryItem,
-      lastHistoryItem,
-    })
-  ) {
-    return true;
-  }
-  const previousKind = previousLiveItem?.kind;
-  return previousKind !== undefined && isToolBoundaryKind(previousKind);
-}
-
-export function shouldTopSpaceStreamingAssistant({
-  visibleStreamingText,
-  lastLiveItem,
-  lastPendingHistoryItem,
-  lastHistoryItem,
-}: {
-  visibleStreamingText: string;
-  lastLiveItem?: CompletedItem;
-  lastPendingHistoryItem?: CompletedItem;
-  lastHistoryItem?: CompletedItem;
-}): boolean {
-  return shouldTopSpaceAssistantAfterToolBoundary({
-    text: visibleStreamingText,
-    previousLiveItem: lastLiveItem,
-    lastPendingHistoryItem,
-    lastHistoryItem,
-  });
-}
-
-export interface ChatControlsLayoutOptions {
-  rows: number;
-  columns: number;
-  agentRunning: boolean;
-  activityVisible: boolean;
-  doneStatusVisible: boolean;
-  stallStatusVisible: boolean;
-  exitPending: boolean;
-  footerStatusLayout: FooterStatusLayoutDecision;
-  taskBarExpanded: boolean;
-  goalStatusEntryCount: number;
-  footerFitsOnOneLine: boolean;
-}
-
-export interface ChatControlsLayoutDecision {
-  controlsRows: number;
-  liveAreaRows: number;
-}
-
-export function getChatControlsLayoutDecision({
-  rows,
-  agentRunning,
-  activityVisible,
-  doneStatusVisible,
-  stallStatusVisible,
-  exitPending,
-  footerStatusLayout,
-  taskBarExpanded,
-  goalStatusEntryCount,
-  footerFitsOnOneLine,
-}: ChatControlsLayoutOptions): ChatControlsLayoutDecision {
-  const statusRows =
-    activityVisible || stallStatusVisible || doneStatusVisible || agentRunning
-      ? STATUS_SLOT_ROWS
-      : 0;
-  const footerRows =
-    exitPending || footerFitsOnOneLine ? FOOTER_ONE_LINE_ROWS : FOOTER_TWO_LINE_ROWS;
-  const goalRows = !exitPending && goalStatusEntryCount > 0 ? GOAL_STATUS_ROWS : 0;
-  const footerStatusRows = footerStatusLayout.stack
-    ? Number(footerStatusLayout.hasBackgroundTasks) + Number(footerStatusLayout.hasUpdateNotice)
-    : footerStatusLayout.hasBackgroundTasks || footerStatusLayout.hasUpdateNotice
-      ? COLLAPSED_FOOTER_STATUS_ROWS
-      : 0;
-  const expandedTaskRows =
-    taskBarExpanded && footerStatusLayout.hasBackgroundTasks
-      ? MAX_EXPANDED_BACKGROUND_TASK_ROWS - COLLAPSED_FOOTER_STATUS_ROWS
-      : 0;
-  const controlsRows =
-    statusRows + INPUT_AREA_ROWS + footerRows + goalRows + footerStatusRows + expandedTaskRows;
-  const maxControlsRows = Math.max(1, rows - MIN_LIVE_AREA_ROWS);
-  const boundedControlsRows = Math.min(controlsRows, maxControlsRows);
-
-  return {
-    controlsRows: boundedControlsRows,
-    liveAreaRows: Math.max(MIN_LIVE_AREA_ROWS, rows - boundedControlsRows),
-  };
-}
-
-// flushOnTurnText, flushOnTurnEnd are imported from ./live-item-flush.ts
-
-/** Check whether an item is still active (running spinner, pending result). */
-export function isActiveItem(item: CompletedItem): boolean {
-  switch (item.kind) {
-    case "tool_start":
-    case "server_tool_start":
-    case "queued":
-    case "compacting":
-      return true;
-    case "tool_group":
-      return (item as ToolGroupItem).tools.some((t) => t.status === "running");
-    case "subagent_group":
-      return (item as SubAgentGroupItem).agents.some((a) => a.status === "running");
-    default:
-      return false;
-  }
-}
-
-/**
- * Partition live items into completed (flushable to finalized history) and still-active.
- * Completed items precede active ones — we flush the longest contiguous prefix
- * of completed items to keep ordering stable.
- */
-export function partitionCompleted(items: CompletedItem[]): {
-  flushed: CompletedItem[];
-  remaining: CompletedItem[];
-} {
-  // Find the first active item — everything before it is safe to flush as a
-  // single chronological prefix. Splitting assistant text out of that prefix
-  // lets later tool rows print to scrollback above the message that introduced
-  // them, so keep the prefix intact.
-  const firstActiveIdx = items.findIndex(isActiveItem);
-  if (firstActiveIdx === -1) {
-    return { flushed: items, remaining: [] };
-  }
-  if (firstActiveIdx === 0) {
-    return { flushed: [], remaining: items };
-  }
-  return {
-    flushed: items.slice(0, firstActiveIdx),
-    remaining: items.slice(firstActiveIdx),
-  };
-}
-
-function normalizeAssistantText(text: string): string {
-  return stripDoneMarkers(text).trim();
-}
-
-function isReasoningMarkerText(text: string): boolean {
-  return /^(?:currentItem\?\.type\s*=+\s*)?["']?reasoning["']?$/u.test(text.trim());
-}
-
-function isSameAssistantText(item: CompletedItem, text: string): boolean {
-  return item.kind === "assistant" && normalizeAssistantText(item.text) === text;
-}
-
-export function pinStreamingTextBeforeToolBoundary({
-  items,
-  visibleStreamingText,
-  thinking,
-  thinkingMs,
-  makeId,
-}: {
-  items: CompletedItem[];
-  visibleStreamingText: string;
-  thinking: string;
-  thinkingMs: number;
-  makeId: () => string;
-}): CompletedItem[] {
-  const text = normalizeAssistantText(visibleStreamingText);
-  if (text.length === 0 || isReasoningMarkerText(text)) return items;
-  if (items.some((item) => item.kind === "assistant")) return items;
-  return [
-    ...items,
-    {
-      kind: "assistant",
-      text,
-      thinking: thinking.length > 0 ? thinking : undefined,
-      thinkingMs: thinking.length > 0 ? thinkingMs : undefined,
-      id: makeId(),
-    },
-  ];
 }
 
 // ── Duration summary ─────────────────────────────────────
@@ -1422,12 +455,10 @@ export interface AppProps {
   goalModeRef?: { current: GoalMode };
   skills?: Skill[];
   initialOverlay?: "goal";
-  rebuildToolsForCwd?: (cwd: string) => AgentTool[];
   goalReferencesRef?: { current: readonly GoalReference[] | undefined };
   repoMapChangedFilesRef?: { current: Set<string> };
   repoMapReadFilesRef?: { current: Set<string> };
-  /** Deferred MCP tools — resolved after UI renders to avoid blocking startup. */
-  pendingMCPTools?: Promise<AgentTool[]>;
+  connectInitialMcpTools?: () => Promise<AgentTool[]>;
   terminalHistoryPrinter?: TerminalHistoryPrinter;
   /**
    * Wired by `renderApp`. Tears down the current Ink instance and renders
@@ -1540,9 +571,11 @@ export function App(props: AppProps) {
   // Items from the current/last turn — rendered in the live area so they stay visible.
   // Seed from sessionStore so Goal progress/completion rows and other live output
   // survive pane/overlay/resize remounts before they are finalized.
-  const [liveItems, setLiveItems] = useState<CompletedItem[]>(
-    () => props.sessionStore?.liveItems ?? [],
-  );
+  const [liveItems, setLiveItems] = useState<CompletedItem[]>(() => {
+    const restoredLiveItems = uniqueItemsById(props.sessionStore?.liveItems ?? []);
+    const restoredHistoryIds = new Set(history.map((item) => item.id));
+    return removeItemsWithIds(restoredLiveItems, restoredHistoryIds);
+  });
   // overlay seeded from sessionStore (lives across remount). Falls back to
   // props.initialOverlay (CLI launched with one), then null.
   const [overlay, setOverlay] = useState<
@@ -1561,8 +594,18 @@ export function App(props: AppProps) {
   const goalContinuationFlightsRef = useRef<Set<string>>(new Set());
   const goalContinuationRecentChoicesRef = useRef<Map<string, number>>(new Map());
   const startGoalRunRef = useRef<(run: GoalRun) => void>(() => {});
+  const [taskPickerOpen, setTaskPickerOpen] = useState(false);
+  const [taskPickerTasks, setTaskPickerTasks] = useState<TaskRecord[]>(() =>
+    loadTasksSync(props.cwd),
+  );
+  const [goalPickerOpen, setGoalPickerOpen] = useState(false);
+  const [goalPickerGoals, setGoalPickerGoals] = useState<GoalRun[]>(() =>
+    loadGoalRunsSync(props.cwd),
+  );
+  const runAllTasksRef = useRef(props.sessionStore?.runAllTasks ?? false);
+  const startTaskRef = useRef<(title: string, prompt: string, taskId: string) => void>(() => {});
   const cwdRef = useRef(props.cwd);
-  const [displayedCwd, setDisplayedCwd] = useState(props.cwd);
+  const displayedCwd = props.cwd;
   const [doneStatus, setDoneStatus] = useState<DoneStatus | null>(
     props.sessionStore?.doneStatus ?? null,
   );
@@ -1718,8 +761,9 @@ export function App(props: AppProps) {
       pendingHistoryFlushRef.current = [...pendingHistoryFlushRef.current, ...flushed];
       if (sessionStore) {
         const queuedIds = new Set(items.map((item) => item.id));
-        sessionStore.liveItems = (sessionStore.liveItems ?? []).filter(
-          (item) => !queuedIds.has(item.id),
+        sessionStore.liveItems = removeItemsWithIds(
+          uniqueItemsById(sessionStore.liveItems ?? []),
+          queuedIds,
         );
       }
       setHistoryFlushGeneration((generation) => generation + 1);
@@ -1749,11 +793,8 @@ export function App(props: AppProps) {
     onRuntimeStateChange?.({ provider: currentProvider });
   }, [currentProvider, onRuntimeStateChange]);
   useEffect(() => {
-    if (thinkingLevel && !isOpenAIGptModel(currentProvider, currentModel)) {
-      const maxLevel = getMaxThinkingLevel(currentModel);
-      if (thinkingLevel !== maxLevel) {
-        setThinkingLevel(maxLevel);
-      }
+    if (thinkingLevel && !isThinkingLevelSupported(currentProvider, currentModel, thinkingLevel)) {
+      setThinkingLevel(getNextThinkingLevel(currentProvider, currentModel, undefined));
     }
   }, [currentProvider, currentModel, thinkingLevel]);
 
@@ -1794,7 +835,9 @@ export function App(props: AppProps) {
     if (sessionStore) sessionStore.history = history;
   }, [history, sessionStore]);
   useEffect(() => {
-    if (sessionStore) sessionStore.liveItems = liveItems;
+    if (!sessionStore) return;
+    const historyIds = new Set(historyRef.current.map((item) => item.id));
+    sessionStore.liveItems = removeItemsWithIds(uniqueItemsById(liveItems), historyIds);
   }, [liveItems, sessionStore]);
   useEffect(() => {
     if (sessionStore) sessionStore.doneStatus = doneStatus;
@@ -1900,22 +943,6 @@ export function App(props: AppProps) {
     currentToolsRef.current = currentTools;
   }, [currentTools]);
 
-  // Deferred MCP tools — connect in the background so it doesn't block startup.
-  // The connectAll() promise from cli.ts resolves once stdio/HTTP transports
-  // are wired up; we merge those tools into currentTools when they arrive.
-  useEffect(() => {
-    if (!props.pendingMCPTools) return;
-    let cancelled = false;
-    props.pendingMCPTools.then((mcpTools) => {
-      if (!cancelled && mcpTools.length > 0) {
-        setCurrentTools((prev) => [...prev, ...mcpTools]);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [props.pendingMCPTools]);
-
   // ── Runtime mode wiring ──────────────────────────────────
   // Sync runtime mode refs with React state.
   useEffect(() => {
@@ -1967,6 +994,32 @@ export function App(props: AppProps) {
     },
     [rebuildSystemPrompt],
   );
+
+  useEffect(() => {
+    if (!props.connectInitialMcpTools) return;
+    let cancelled = false;
+    void props
+      .connectInitialMcpTools()
+      .then((mcpTools) => {
+        if (cancelled || mcpTools.length === 0) return;
+        setCurrentTools((prev) => {
+          const next = [...prev.filter((tool) => !tool.name.startsWith("mcp__")), ...mcpTools];
+          currentToolsRef.current = next;
+          void replaceSystemPrompt({ tools: next });
+          return next;
+        });
+      })
+      .catch((err: unknown) => {
+        log(
+          "WARN",
+          "mcp",
+          `MCP initialization failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.connectInitialMcpTools, replaceSystemPrompt]);
 
   const setGoalModeAndPrompt = useCallback(
     async (
@@ -2270,11 +1323,10 @@ export function App(props: AppProps) {
   }, [props.repoMapChangedFilesRef, props.repoMapReadFilesRef]);
 
   const getRepoMapBudget = useCallback((): number => {
-    const userTurns = messagesRef.current.filter((message) => message.role === "user").length;
-    const readCount = props.repoMapReadFilesRef?.current.size ?? 0;
-    if (userTurns <= 1 && readCount === 0) return FIRST_TURN_REPO_MAP_MAX_CHARS;
-    if (readCount > 0) return FOCUSED_REPO_MAP_MAX_CHARS;
-    return FOCUSED_REPO_MAP_MAX_CHARS + 1000;
+    return getRepoMapBudgetForContext({
+      messages: messagesRef.current,
+      readFileCount: props.repoMapReadFilesRef?.current.size ?? 0,
+    });
   }, [props.repoMapReadFilesRef]);
 
   const refreshRepoMap = useCallback(
@@ -3037,6 +2089,21 @@ export function App(props: AppProps) {
             void setGoalModeAndPrompt(nextGoalMode);
           }
 
+          // Run-all: auto-start next pending task after a short delay.
+          if (runAllTasksRef.current) {
+            setTimeout(() => {
+              const cwd = cwdRef.current;
+              const next = getNextPendingTask(cwd);
+              if (next) {
+                markTaskInProgress(cwd, next.id);
+                startTaskRef.current(next.title, next.prompt, next.id);
+              } else {
+                setRunAllTasks(false);
+                log("INFO", "tasks", "Run-all complete — no more pending tasks");
+              }
+            }, 500);
+          }
+
           // Goal loop: after the orchestrator handles a worker/verifier event,
           // continue the same Goal automatically until it reaches a terminal state.
           for (const runId of [...runningGoalIdsRef.current]) {
@@ -3247,80 +2314,6 @@ export function App(props: AppProps) {
     }
   }, [agentLoop.isRunning, sessionStore, props.resetUI]);
 
-  // Run-all-tasks driver. When runAllTasks is true and the agent is idle,
-  // pick the next pending task, mark it in-progress, run its prompt with a
-  // completion contract appended, and verify the agent self-marked the task
-  // done via the `tasks` tool before advancing.
-  //
-  // Verification rule: after agentLoop.run resolves, re-read the task. Only
-  // advance to the next task if its status is "done" (i.e. the agent called
-  // `tasks done <id>`). If still "in-progress", stop the loop and leave the
-  // task as-is for inspection — auto-retrying could loop forever on a stuck
-  // task. On thrown error, revert to "pending" so it gets picked up later.
-  const runAllTasksRef = useRef(false);
-  useEffect(() => {
-    if (!runAllTasks || agentLoop.isRunning || runAllTasksRef.current) return;
-    runAllTasksRef.current = true;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { getNextPendingTask, loadTasks, setTaskStatus } = await import(
-          "../core/task-store.js"
-        );
-        const next = await getNextPendingTask(props.cwd);
-        if (cancelled) return;
-        if (!next) {
-          setRunAllTasks(false);
-          return;
-        }
-        await setTaskStatus(props.cwd, next.id, "in-progress");
-        if (cancelled) return;
-
-        // Completion contract — tells the agent how to signal it finished.
-        // Without this hint the agent rarely calls `tasks done` and we'd
-        // have to fall back to "completed iff didn't throw," which is wrong.
-        const taskPrompt =
-          `${next.prompt}\n\n` +
-          `---\n` +
-          `Task ID: \`${next.id}\`\n` +
-          `When you have completed this task, call the \`tasks\` tool with ` +
-          `\`action: "done"\` and \`id: "${next.id}"\`. If you cannot complete ` +
-          `the task (blocker, missing info, etc.), do NOT call done — leave it ` +
-          `in-progress and explain what's needed.`;
-
-        try {
-          await agentLoop.run(taskPrompt);
-          if (cancelled) return;
-          // Verify: re-read tasks.json. Did the agent self-mark done?
-          const after = await loadTasks(props.cwd);
-          const updated = after.find((t) => t.id === next.id);
-          if (updated?.status === "done") {
-            // Agent verified completion — keep looping
-          } else {
-            // Agent stopped without marking done — halt the loop so the user
-            // can inspect. The task stays in-progress on disk; user can
-            // resume later or restart run-all.
-            log(
-              "WARN",
-              "tasks",
-              `Task ${next.id} ended without agent calling tasks done — halting run-all`,
-            );
-            setRunAllTasks(false);
-          }
-        } catch (err) {
-          log("ERROR", "tasks", err instanceof Error ? err.message : String(err));
-          await setTaskStatus(props.cwd, next.id, "pending");
-          setRunAllTasks(false);
-        }
-      } finally {
-        runAllTasksRef.current = false;
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [runAllTasks, agentLoop.isRunning, agentLoop, props.cwd]);
-
   // Consume sessionStore.pendingAction once on mount. Set by resetUI options
   // for paths that remount AND immediately drive the agent (plan accept,
   // plan reject, startTask). The action survives the unmount
@@ -3523,24 +2516,11 @@ export function App(props: AppProps) {
         return;
       }
 
-      // Handle /goals — open goal pane
+      // Handle /goals — open the input-area goal picker.
       if (trimmed === "/goals") {
-        if (props.resetUI && props.sessionStore && !agentLoop.isRunning) {
-          props.sessionStore.overlay = "goal";
-          props.sessionStore.planAutoExpand = false;
-          props.sessionStore.goalAutoExpand = false;
-          props.resetUI();
-        } else {
-          if (props.sessionStore) {
-            props.sessionStore.overlay = "goal";
-            props.sessionStore.planAutoExpand = false;
-            props.sessionStore.goalAutoExpand = false;
-            if (agentLoop.isRunning) props.sessionStore.pendingResetUI = true;
-          }
-          setPlanAutoExpand(false);
-          setGoalAutoExpand(false);
-          setOverlay("goal");
-        }
+        setGoalPickerGoals(loadGoalRunsSync(displayedCwd));
+        setTaskPickerOpen(false);
+        setGoalPickerOpen(true);
         return;
       }
 
@@ -3625,28 +2605,11 @@ export function App(props: AppProps) {
               await setGoalModeAndPrompt("off");
             }
             if (paneTransition) {
-              goalAutoExpandRef.current = paneTransition.goalAutoExpand;
-              setTimeout(() => {
-                const resetUI = props.resetUI;
-                const sessionStore = props.sessionStore;
-                if (
-                  shouldResetUIForGoalSetupPaneTransition({
-                    hasResetUI: resetUI !== undefined,
-                    hasSessionStore: sessionStore !== undefined,
-                  }) &&
-                  resetUI &&
-                  sessionStore
-                ) {
-                  sessionStore.overlay = paneTransition.overlay;
-                  sessionStore.goalAutoExpand = paneTransition.goalAutoExpand;
-                  sessionStore.planAutoExpand = paneTransition.planAutoExpand;
-                  resetUI();
-                  return;
-                }
-                setGoalAutoExpand(paneTransition.goalAutoExpand);
-                setPlanAutoExpand(paneTransition.planAutoExpand);
-                setOverlay(paneTransition.overlay);
-              }, 300);
+              goalAutoExpandRef.current = false;
+              setGoalAutoExpand(false);
+              setPlanAutoExpand(false);
+              setGoalPickerGoals(loadGoalRunsSync(displayedCwd));
+              setGoalPickerOpen(true);
             }
           }
         }
@@ -4047,78 +3010,30 @@ export function App(props: AppProps) {
             pasteInfo={item.pasteInfo}
           />
         );
-      case "goal":
+      case "goal": {
+        const workerSuffix = item.workerId ? ` · worker ${item.workerId}` : "";
+        const text = `▶ Goal: ${item.title}${workerSuffix}`;
         return (
-          <Box key={item.id} paddingLeft={1} marginTop={1}>
-            <Text wrap="wrap">
-              <Text color={theme.success} bold>
-                {"▶ "}
-              </Text>
-              <Text color={theme.textDim}>{"Goal: "}</Text>
-              <Text color={theme.success}>{truncateGoalProgressText(item.title)}</Text>
-              {item.workerId ? <Text color={theme.textDim}> · worker {item.workerId}</Text> : null}
+          <Box key={item.id} paddingLeft={1} marginTop={1} width={columns} flexShrink={1}>
+            <Text color={theme.success} wrap="truncate">
+              {truncateGoalProgressText(text, Math.max(8, columns - 2))}
             </Text>
           </Box>
         );
+      }
       case "goal_progress": {
         const color = goalProgressColor(item, theme);
         const loaderStatus = goalProgressLoaderStatus(item);
-        const hasBody =
-          !!item.detail ||
-          (item.summaryRows !== undefined && item.summaryRows.length > 0) ||
-          (item.summarySections !== undefined && item.summarySections.length > 0);
-        const headerContentWidth = Math.max(10, columns - 3);
+        const suffix = [item.workerId ? `worker ${item.workerId}` : undefined, item.detail]
+          .filter((part): part is string => !!part?.trim())
+          .join(" · ");
+        const text = suffix ? `${item.title} · ${suffix}` : item.title;
         return withPrintedBoundarySpacing(
-          <Box key={item.id} flexDirection="column" paddingLeft={1} marginTop={1} flexShrink={1}>
-            <Box flexDirection="row">
-              <ToolUseLoader status={loaderStatus} staticDisplay />
-              <Box flexGrow={1} width={headerContentWidth}>
-                <Text wrap="wrap">
-                  <Text color={color} bold>
-                    {truncateGoalProgressText(item.title)}
-                  </Text>
-                  {item.workerId ? (
-                    <Text color={theme.textDim}> · worker {item.workerId}</Text>
-                  ) : null}
-                </Text>
-              </Box>
-            </Box>
-            {hasBody ? (
-              <MessageResponse>
-                <Box flexDirection="column" flexShrink={1}>
-                  {item.detail ? (
-                    <Text color={theme.textDim} wrap="wrap">
-                      {truncateGoalProgressText(item.detail)}
-                    </Text>
-                  ) : null}
-                  {item.summaryRows?.map((row) => (
-                    <Text key={row.label} wrap="truncate">
-                      <Text color={theme.textDim}>{row.label.padEnd(12)}</Text>
-                      <Text color={theme.text}>{truncateGoalProgressText(row.value)}</Text>
-                      {row.detail ? (
-                        <Text color={theme.textDim}> · {truncateGoalProgressText(row.detail)}</Text>
-                      ) : null}
-                    </Text>
-                  ))}
-                  {item.summarySections?.map((section) => (
-                    <Box key={section.title} flexDirection="column" marginTop={1} flexShrink={1}>
-                      <Text color={theme.textDim} bold>
-                        {section.title}
-                      </Text>
-                      {section.lines.map((line, sectionLineIndex) => (
-                        <Text
-                          key={`${section.title}-${sectionLineIndex}`}
-                          color={theme.text}
-                          wrap="wrap"
-                        >
-                          {`• ${truncateGoalProgressText(line)}`}
-                        </Text>
-                      ))}
-                    </Box>
-                  ))}
-                </Box>
-              </MessageResponse>
-            ) : null}
+          <Box key={item.id} flexDirection="row" paddingLeft={1} marginTop={1} width={columns}>
+            <ToolUseLoader status={loaderStatus} staticDisplay color={color} />
+            <Text color={color} bold wrap="truncate">
+              {truncateGoalProgressText(text, Math.max(8, columns - 4))}
+            </Text>
           </Box>,
         );
       }
@@ -4295,7 +3210,7 @@ export function App(props: AppProps) {
       case "plan_transition":
         return renderStatusMessage(
           item.id,
-          "● ",
+          `${BLACK_CIRCLE} `,
           normalizeStatusText(item.text),
           theme.commandColor,
           { bold: true },
@@ -4303,10 +3218,25 @@ export function App(props: AppProps) {
       case "goal_agent_transition":
         return renderStatusMessage(
           item.id,
-          "● ",
+          `${BLACK_CIRCLE} `,
           normalizeStatusText(item.text),
           theme.commandColor,
           { bold: true },
+        );
+      case "task":
+        return withPrintedBoundarySpacing(
+          renderStatusMessage(
+            item.id,
+            "▸ ",
+            <>
+              <Text color={theme.textDim}>{"Task: "}</Text>
+              <Text color={theme.commandColor} bold>
+                {item.title}
+              </Text>
+            </>,
+            theme.commandColor,
+            { bold: true },
+          ),
         );
       case "model_transition":
         return renderStatusMessage(
@@ -4464,7 +3394,7 @@ export function App(props: AppProps) {
       }
       setOverlay(null);
     }
-  }, [agentLoop.isRunning, overlay, props]);
+  }, [agentLoop.isRunning, props]);
 
   const runGoalSyntheticEvent = useCallback(
     (eventText: string) => {
@@ -4473,9 +3403,13 @@ export function App(props: AppProps) {
         eventInfo?.kind === "worker"
           ? `Inspecting worker result${eventInfo.task ? ` for ${eventInfo.task}` : ""}.`
           : `Inspecting verifier result${eventInfo?.status ? ` (${eventInfo.status})` : ""}.`;
-      if (agentRunningRef.current) {
-        queuedGoalSyntheticEventsRef.current += 1;
-        void setGoalModeAndPrompt("coordinator");
+      const route = routeGoalSyntheticEvent({
+        agentRunning: agentRunningRef.current,
+        queuedSyntheticEvents: queuedGoalSyntheticEventsRef.current,
+      });
+      if (route.action === "queue") {
+        queuedGoalSyntheticEventsRef.current = route.nextQueuedSyntheticEvents;
+        void setGoalModeAndPrompt(route.nextGoalMode);
         appendGoalProgress({
           kind: "goal_progress",
           phase: "orchestrator_reviewing",
@@ -5098,8 +4032,78 @@ export function App(props: AppProps) {
     [appendGoalProgress, clearGoalModeIfIdle, clearGoalStatusEntry, props.cwd],
   );
 
+  const startTask = useCallback(
+    (title: string, prompt: string, taskId: string) => {
+      const taskCwd = cwdRef.current;
+      const shortId = taskId.slice(0, 8);
+      const completionHint =
+        `\n\n---\nWhen you have fully completed this task, call the tasks tool to mark it done:\n` +
+        `tasks({ action: "done", id: "${shortId}" })`;
+      const fullPrompt = prompt + completionHint;
+
+      if (props.resetUI && props.sessionStore) {
+        const sysMsg = messagesRef.current[0];
+        const newMessages: Message[] =
+          sysMsg && sysMsg.role === "system" ? [sysMsg] : messagesRef.current.slice(0, 1);
+        const taskItem: TaskItem = { kind: "task", title, id: getId() };
+        const sm = sessionManagerRef.current;
+
+        void (async () => {
+          let newSessionPath: string | undefined;
+          if (sm) {
+            try {
+              const session = await sm.create(taskCwd, currentProvider, currentModel);
+              newSessionPath = session.path;
+              log("INFO", "tasks", "New session for task", { path: session.path });
+            } catch {
+              // Session creation is best-effort.
+            }
+          }
+          if (props.sessionStore) props.sessionStore.overlay = null;
+          props.resetUI?.({
+            wipeSession: true,
+            messages: newMessages,
+            history: [{ kind: "banner", id: "banner" }, taskItem],
+            sessionPath: newSessionPath,
+            pendingAction: { prompt: fullPrompt },
+          });
+        })();
+        return;
+      }
+
+      pendingHistoryFlushRef.current = [];
+      props.terminalHistoryPrinter?.clear();
+      setHistory([{ kind: "banner", id: "banner" }]);
+      setLiveItems([]);
+      messagesRef.current = messagesRef.current.slice(0, 1);
+      agentLoop.reset();
+      persistedIndexRef.current = messagesRef.current.length;
+      const sm = sessionManagerRef.current;
+      if (sm) {
+        void sm.create(taskCwd, currentProvider, currentModel).then((session) => {
+          sessionPathRef.current = session.path;
+          log("INFO", "tasks", "New session for task", { path: session.path });
+        });
+      }
+      const taskItem: TaskItem = { kind: "task", title, id: getId() };
+      setLastUserMessage(title);
+      setDoneStatus(null);
+      setLiveItems([taskItem]);
+      void agentLoop.run(fullPrompt).catch((err: unknown) => {
+        setLiveItems((prev) => [...prev, toErrorItem(err, getId())]);
+      });
+    },
+    [agentLoop, currentModel, currentProvider, props],
+  );
+
   // Keep refs in sync for access from stale closures (onDone)
+  startTaskRef.current = startTask;
   startGoalRunRef.current = startGoalRun;
+
+  useEffect(() => {
+    runAllTasksRef.current = runAllTasks;
+    if (props.sessionStore) props.sessionStore.runAllTasks = runAllTasks;
+  }, [runAllTasks, props.sessionStore]);
 
   useEffect(() => {
     agentRunningRef.current = agentLoop.isRunning;
@@ -5115,12 +4119,6 @@ export function App(props: AppProps) {
     backgroundTaskCount: bgTasks.length,
     updatePending,
   });
-  const isOverlayView =
-    isTaskView || isGoalView || isSkillsView || isPlanView || isEyesView;
-  const shouldHideHistoryForOverlay = shouldHideHistoryForOverlayView(
-    isOverlayView,
-    agentLoop.isRunning,
-  );
   const activityVisible = agentLoop.isRunning && agentLoop.activityPhase !== "idle";
   const stallStatusVisible = !activityVisible && !!agentLoop.stallError;
   const doneStatusVisible =
@@ -5336,13 +4334,23 @@ export function App(props: AppProps) {
           cwd={props.cwd}
           agentRunning={agentLoop.isRunning}
           onClose={closeOverlay}
-          onWorkOnTask={(_title, prompt) => {
+          onWorkOnTask={(title, prompt, taskId) => {
             setOverlay(null);
-            void agentLoop.run(prompt);
+            markTaskInProgress(displayedCwd, taskId);
+            setTaskPickerTasks(loadTasksSync(displayedCwd));
+            startTask(title, prompt, taskId);
           }}
           onRunAllTasks={() => {
-            setRunAllTasks(true);
             setOverlay(null);
+            setRunAllTasks(true);
+            const selected = getNextPendingTask(displayedCwd);
+            if (selected) {
+              markTaskInProgress(displayedCwd, selected.id);
+              setTaskPickerTasks(loadTasksSync(displayedCwd));
+              startTask(selected.title, selected.prompt, selected.id);
+            } else {
+              setRunAllTasks(false);
+            }
           }}
         />
       ) : isPlanView ? (
@@ -5482,7 +4490,7 @@ export function App(props: AppProps) {
         <Box flexDirection="column" width={columns} flexShrink={0} flexGrow={0}>
           {/* MainContent */}
           <Box flexDirection="column" flexGrow={0} flexShrink={1} overflowY="hidden">
-            {liveItems.map((item, index, items) => renderItem(item, index, items))}
+            {uniqueItemsById(liveItems).map((item, index, items) => renderItem(item, index, items))}
             <StreamingArea
               isRunning={agentLoop.isRunning}
               streamingText={visibleStreamingText}
@@ -5583,14 +4591,68 @@ export function App(props: AppProps) {
               isActive={!taskBarFocused && !overlay}
               onDownAtEnd={handleFocusTaskBar}
               onShiftTab={handleToggleThinking}
+              onToggleTasks={() => {
+                setGoalPickerOpen(false);
+                setTaskPickerTasks(loadTasksSync(displayedCwd));
+                setTaskPickerOpen((open) => !open);
+              }}
+              taskPickerOpen={taskPickerOpen}
+              tasks={taskPickerTasks}
+              onCloseTaskPicker={() => setTaskPickerOpen(false)}
+              onStartTask={(task) => {
+                setTaskPickerOpen(false);
+                markTaskInProgress(displayedCwd, task.id);
+                setTaskPickerTasks(loadTasksSync(displayedCwd));
+                startTask(task.title, task.prompt, task.id);
+              }}
+              onRunAllTasks={(task) => {
+                setTaskPickerOpen(false);
+                setRunAllTasks(true);
+                const selected = task
+                  ? {
+                      id: task.id,
+                      title: task.title,
+                      prompt: task.prompt || task.text || task.title,
+                    }
+                  : getNextPendingTask(displayedCwd);
+                if (selected) {
+                  markTaskInProgress(displayedCwd, selected.id);
+                  setTaskPickerTasks(loadTasksSync(displayedCwd));
+                  startTask(selected.title, selected.prompt, selected.id);
+                }
+              }}
+              onDeleteTask={(task) => {
+                const nextTasks = loadTasksSync(displayedCwd).filter(
+                  (candidate) => candidate.id !== task.id,
+                );
+                saveTasksSync(displayedCwd, nextTasks);
+                setTaskPickerTasks(nextTasks);
+              }}
+              goalPickerOpen={goalPickerOpen}
+              goals={goalPickerGoals}
+              onCloseGoalPicker={() => setGoalPickerOpen(false)}
+              onRunGoal={(run) => {
+                setGoalPickerOpen(false);
+                startGoalRun(run);
+              }}
+              onDeleteGoal={(run) => {
+                const nextGoals = loadGoalRunsSync(displayedCwd).filter(
+                  (candidate) => candidate.id !== run.id,
+                );
+                saveGoalRunsSync(displayedCwd, nextGoals);
+                setGoalPickerGoals(nextGoals);
+              }}
+              onPauseGoal={(run) => {
+                setGoalPickerOpen(false);
+                pauseGoalRun(run);
+              }}
               onToggleGoal={() => {
-                openOverlay("goal");
+                setTaskPickerOpen(false);
+                setGoalPickerGoals(loadGoalRunsSync(displayedCwd));
+                setGoalPickerOpen((open) => !open);
               }}
               onToggleSkills={() => {
                 openOverlay("skills");
-              }}
-              onToggleTasks={() => {
-                openOverlay("tasks");
               }}
               onToggleEyes={() => {
                 openOverlay("eyes");

@@ -51,13 +51,11 @@ export interface RenderAppConfig {
   authStorage?: AuthStorage;
   goalModeRef?: { current: GoalMode };
   skills?: Skill[];
-  /** Deferred MCP tools — resolved after UI renders to avoid blocking startup. */
-  pendingMCPTools?: Promise<AgentTool[]>;
   initialOverlay?: "goal";
-  rebuildToolsForCwd?: (cwd: string) => AgentTool[];
   goalReferencesRef?: { current: readonly GoalReference[] | undefined };
   repoMapChangedFilesRef?: { current: Set<string> };
   repoMapReadFilesRef?: { current: Set<string> };
+  connectInitialMcpTools?: () => Promise<AgentTool[]>;
 }
 
 /**
@@ -105,7 +103,7 @@ export interface SessionStore {
   /**
    * Action to run on the next mount (consumed once). Used by paths that
    * remount AND immediately drive the agent — plan accept / reject,
-   * pixel fix, etc. The new App reads this on mount, fires the agent,
+   * task start, etc. The new App reads this on mount, fires the agent,
    * and clears the field.
    */
   pendingAction?: {
@@ -132,12 +130,6 @@ export interface SessionStore {
    * sessionStore.history before the unmount, so the chat isn't lost.
    */
   pendingResetUI?: boolean;
-  /**
-   * Pixel fix auto-chaining flag. Survives the deferred resetUI() that may
-   * fire when the agent goes idle (e.g. after a pane was toggled mid-fix).
-   * Without this, the second fix onward loses the chaining intent.
-   */
-  runAllPixel?: boolean;
   /** Active goal status bar entries. Preserved across Goal pane open/close remounts. */
   goalStatusEntries?: GoalStatusEntry[];
   /** Goal orchestration mode display state. */
@@ -318,12 +310,11 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             authStorage: config.authStorage,
             goalModeRef: config.goalModeRef,
             skills: config.skills,
-            pendingMCPTools: config.pendingMCPTools,
             initialOverlay: config.initialOverlay,
-            rebuildToolsForCwd: config.rebuildToolsForCwd,
             goalReferencesRef: config.goalReferencesRef,
             repoMapChangedFilesRef: config.repoMapChangedFilesRef,
             repoMapReadFilesRef: config.repoMapReadFilesRef,
+            connectInitialMcpTools: config.connectInitialMcpTools,
             terminalHistoryPrinter,
             resetUI,
             onRuntimeStateChange,

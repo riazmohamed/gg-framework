@@ -1,13 +1,12 @@
 import React from "react";
 import { Box, Text, render, renderToString } from "ink";
 import { describe, expect, it } from "vitest";
+import { partitionCompleted, pinStreamingTextBeforeToolBoundary } from "./item-helpers.js";
 import {
   getChatControlsLayoutDecision,
-  partitionCompleted,
-  pinStreamingTextBeforeToolBoundary,
   shouldTopSpaceAssistantAfterToolBoundary,
   shouldTopSpaceStreamingAssistant,
-} from "./App.js";
+} from "./layout-decisions.js";
 import { AssistantMessage } from "./components/AssistantMessage.js";
 import { StreamingArea } from "./components/StreamingArea.js";
 import { TerminalSizeProvider } from "./hooks/useTerminalSize.js";
@@ -286,6 +285,19 @@ describe("streaming assistant spacing", () => {
         visibleStreamingText: "First answer in the conversation.",
       }),
     ).toBe(false);
+  });
+
+  it("top-spaces streaming text after a finalized task row", () => {
+    expect(
+      shouldTopSpaceStreamingAssistant({
+        visibleStreamingText: "Now I’ll work through the task output.",
+        lastHistoryItem: {
+          kind: "task",
+          id: "task-1",
+          title: "Restore task pane",
+        },
+      }),
+    ).toBe(true);
   });
 
   it("top-spaces streaming text after finalized notice rows", () => {

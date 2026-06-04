@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { GoalRun, GoalTask } from "../core/goal-store.js";
 import { canCompleteGoalRun, decideGoalNextAction } from "../core/goal-controller.js";
+import type { CompletedItem } from "./app-items.js";
 import {
   appendGoalProgressDraft,
   completedItemsWithDurableGoalTerminalProgress,
   formatGoalTerminalProgress,
-  nextGoalModeAfterAgentDone,
+  routeGoalSyntheticEvent,
   truncateGoalProgressText,
-  type CompletedItem,
-} from "./App.js";
+} from "./goal-progress.js";
+import { nextGoalModeAfterAgentDone } from "./layout-decisions.js";
 
 function goalRun(overrides: Partial<GoalRun> = {}): GoalRun {
   return {
@@ -151,7 +152,7 @@ describe("/goal UI orchestration lifecycle", () => {
       "Choosing next Goal step: A-Z /goal system test, refinement, leak-safety, and report";
 
     expect(truncateGoalProgressText(text)).toBe(
-      "Choosing next Goal step: A-Z /goal system test, refinement, leak-safety…",
+      "Choosing next Goal step: A-Z /goal system test, refin…",
     );
   });
 
@@ -177,6 +178,30 @@ describe("/goal UI orchestration lifecycle", () => {
     expect(once).toHaveLength(1);
     expect(twice).toHaveLength(1);
     expect(afterDifferentRow).toHaveLength(3);
+  });
+
+  it("queues worker completion synthetic events while the orchestrator is busy", () => {
+    expect(
+      routeGoalSyntheticEvent({
+        agentRunning: true,
+        queuedSyntheticEvents: 2,
+      }),
+    ).toEqual({
+      action: "queue",
+      nextQueuedSyntheticEvents: 3,
+      nextGoalMode: "coordinator",
+    });
+
+    expect(
+      routeGoalSyntheticEvent({
+        agentRunning: false,
+        queuedSyntheticEvents: 2,
+      }),
+    ).toEqual({
+      action: "run",
+      nextQueuedSyntheticEvents: 2,
+      nextGoalMode: "coordinator",
+    });
   });
 
   it("keeps coordinator mode only while Goal continuation work remains", () => {
@@ -268,24 +293,8 @@ describe("/goal UI orchestration lifecycle", () => {
 
     const reconstructedAfterRestore = formatGoalTerminalProgress(blocked);
     expect(reconstructedAfterRestore).toEqual(initiallyVisible);
-    expect(reconstructedAfterRestore?.summaryRows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          label: "Verifier",
-          value: "fail",
-          detail: ".goal-evidence/blocker.log",
-        }),
-        expect.objectContaining({
-          label: "Evidence",
-          value: "1 recorded",
-          detail: ".goal-evidence/blocker.log",
-        }),
-        expect.objectContaining({
-          label: "Blocked on",
-          value: "GOAL BLOCKER verification failed after pane switch",
-        }),
-      ]),
-    );
+    expect(reconstructedAfterRestore).not.toHaveProperty("summaryRows");
+    expect(reconstructedAfterRestore).not.toHaveProperty("summarySections");
   });
 
   it("does not synthesize old terminal Goal messages into fresh UI state", () => {

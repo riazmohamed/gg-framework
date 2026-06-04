@@ -3,7 +3,7 @@ import { Box, Text, renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 import stripAnsi from "strip-ansi";
 import stringWidth from "string-width";
-import type { CompletedItem } from "./App.js";
+import type { CompletedItem } from "./app-items.js";
 import { serializeCompletedItemToTerminalHistory } from "./terminal-history.js";
 import { loadTheme, ThemeContext } from "./theme/theme.js";
 import type { Theme } from "./theme/theme.js";
@@ -19,6 +19,7 @@ import { LANGUAGE_DISPLAY_NAMES } from "../core/language-detector.js";
 import { AssistantMessage } from "./components/AssistantMessage.js";
 import { UserMessage } from "./components/UserMessage.js";
 import { Banner } from "./components/Banner.js";
+import { BLACK_CIRCLE } from "./constants/figures.js";
 
 const TERMINAL_COLUMNS = 68;
 const theme = loadTheme("dark");
@@ -123,7 +124,7 @@ function renderGoalProgressLive(
   return (
     <Box flexDirection="column" paddingLeft={1} marginTop={1} flexShrink={1}>
       <Box flexDirection="row">
-        <ToolUseLoader status={status} staticDisplay />
+        <ToolUseLoader status={status} staticDisplay color={color} />
         <Box flexGrow={1} width={Math.max(10, TERMINAL_COLUMNS - 3)}>
           <Text wrap="wrap">
             <Text color={color} bold>
@@ -329,6 +330,19 @@ function liveElementFor(item: CompletedItem): React.ReactElement | null {
           </Text>
         </Box>
       );
+    case "task":
+      return renderStatusLive(
+        "▸ ",
+        <>
+          <Text color={theme.textDim}>{"Task: "}</Text>
+          <Text color={theme.commandColor} bold>
+            {item.title}
+          </Text>
+        </>,
+        theme.commandColor,
+        theme,
+        { bold: true },
+      );
     case "queued":
       return renderQueuedLiveItem(item, theme);
     case "tool_start":
@@ -422,7 +436,7 @@ function liveElementFor(item: CompletedItem): React.ReactElement | null {
       return renderStatusLive("○ ", item.text, theme.commandColor, theme, { muted: true });
     case "plan_transition":
       return renderStatusLive(
-        "● ",
+        `${BLACK_CIRCLE} `,
         item.text.replace(/\\n/g, "\n").replace(/^\n+|\n+$/g, ""),
         theme.commandColor,
         theme,
@@ -430,7 +444,7 @@ function liveElementFor(item: CompletedItem): React.ReactElement | null {
       );
     case "goal_agent_transition":
       return renderStatusLive(
-        "● ",
+        `${BLACK_CIRCLE} `,
         item.text.replace(/\\n/g, "\n").replace(/^\n+|\n+$/g, ""),
         theme.commandColor,
         theme,
@@ -527,6 +541,7 @@ const parityCaseByKind = {
   user: { kind: "user", id: "user-1", text: "hello from user", imageCount: 1 },
   assistant: { kind: "assistant", id: "assistant-1", text: "Hello **world** from assistant" },
   goal: { kind: "goal", id: "goal-1", title: "Ship the TUI polish", workerId: "worker-1" },
+  task: { kind: "task", id: "task-1", title: "Restore task pane" },
   queued: { kind: "queued", id: "queued-1", text: "next prompt with wrapping words" },
   tool_start: {
     kind: "tool_start",

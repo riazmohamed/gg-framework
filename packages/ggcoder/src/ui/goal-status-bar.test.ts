@@ -211,7 +211,7 @@ describe("GoalStatusBar helpers", () => {
     const remountedEntries = sessionStore.goalStatusEntries ?? [];
     expect(remountedEntries).toHaveLength(1);
     expect(remountedEntries.map(formatGoalStatusActiveText)).toContain(
-      "Goal working · Implement status persistence",
+      "Goal working · Implement status persis…",
     );
   });
 });

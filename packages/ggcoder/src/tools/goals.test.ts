@@ -5,7 +5,12 @@ import path from "node:path";
 import type { ToolExecuteResult } from "@abukhaled/gg-agent";
 import { createGoalsTool } from "./goals.js";
 import { decideGoalNextAction } from "../core/goal-controller.js";
-import { getGoalRun, upsertGoalRun, type GoalReference } from "../core/goal-store.js";
+import {
+  getActiveGoalRun,
+  getGoalRun,
+  upsertGoalRun,
+  type GoalReference,
+} from "../core/goal-store.js";
 
 let tmpBase: string;
 let tmpProject: string;
@@ -168,6 +173,58 @@ describe("goals tool state guards", () => {
         "Goal setup incomplete: verifier_command is required.",
       ]),
     );
+  });
+
+  it("routes worker goal tool writes to the original project path from isolated worktrees", async () => {
+    const workerCwd = await fs.mkdtemp(path.join(os.tmpdir(), "goals-tool-worker-cwd-"));
+    const previousProjectPath = process.env.GG_GOAL_PROJECT_PATH;
+    try {
+      process.env.GG_GOAL_PROJECT_PATH = tmpProject;
+      await upsertGoalRun(tmpProject, {
+        id: "worker-env-goal",
+        title: "Worker env goal",
+        goal: "Persist from isolated worker cwd",
+        status: "ready",
+        successCriteria: [],
+        prerequisites: [],
+        harness: [],
+        evidencePlan: [],
+        tasks: [],
+        evidence: [],
+        blockers: [],
+      });
+
+      const tool = createGoalsTool(workerCwd);
+      const result = await tool.execute(
+        {
+          action: "evidence",
+          evidence_kind: "summary",
+          evidence_label: "Worker isolated evidence",
+          evidence_content: "stored on original project",
+        },
+        { signal: new AbortController().signal, toolCallId: "test-call" },
+      );
+
+      const projectRun = await getGoalRun(tmpProject, "worker-env-goal");
+      const workerRun = await getActiveGoalRun(workerCwd);
+      expect(result).toBe('Evidence added to "Worker env goal".');
+      expect(workerRun).toBeNull();
+      expect(projectRun?.evidence).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            label: "Worker isolated evidence",
+            content: "stored on original project",
+          }),
+        ]),
+      );
+    } finally {
+      if (previousProjectPath === undefined) {
+        delete process.env.GG_GOAL_PROJECT_PATH;
+      } else {
+        process.env.GG_GOAL_PROJECT_PATH = previousProjectPath;
+      }
+      await fs.rm(workerCwd, { recursive: true, force: true });
+    }
   });
 
   it("updates an explicit run_id task and evidence when no active goal exists in the caller cwd", async () => {
@@ -383,6 +440,14 @@ describe("goals tool state guards", () => {
         },
       ],
     });
+    await executeGoals({
+      action: "task",
+      run_id: "dag-goal",
+      task_id: "schema-task",
+      task_title: "Build schema candidate",
+      task_prompt: "Build only the schema candidate in an isolated worktree.",
+      task_status: "done",
+    });
 
     const addResult = await executeGoals({
       action: "task",
@@ -407,7 +472,7 @@ describe("goals tool state guards", () => {
     const updated = await getGoalRun(tmpProject, "dag-goal");
     expect(addResult).toBe('Goal task added: "Build UI candidate".');
     expect(updateResult).toBe('Goal task updated: "Build UI candidate".');
-    expect(updated?.tasks[0]).toEqual(
+    expect(updated?.tasks.find((task) => task.id === "ui-task")).toEqual(
       expect.objectContaining({
         id: "ui-task",
         title: "Build UI candidate",
@@ -420,9 +485,116 @@ describe("goals tool state guards", () => {
         mergeStrategy: "after_dependencies",
       }),
     );
-    await expect(executeGoals({ action: "status", run_id: "dag-goal" })).resolves.toContain(
-      "DAG: ui-task depends_on=schema-task parallel_group=frontend expected_changed_scope=packages/ggcoder/src/ui/** merge_strategy=after_dependencies",
+    const status = await executeGoals({ action: "status", run_id: "dag-goal" });
+    expect(status).toContain(
+      "[ready] Typed DAG (id: dag-goal) — no prereqs, 2/2 tasks done, verifier configured",
     );
+    expect(status).not.toContain("DAG:");
+    expect(status).not.toContain("expected_changed_scope=");
+  });
+
+  it("keeps status output compact without verbose reference or DAG detail blocks", async () => {
+    await executeGoals({
+      action: "create",
+      run_id: "compact-status-goal",
+      title: "Compact status",
+      goal: "Show compact Goal status",
+      success_criteria: ["Status is one line"],
+      prerequisites: [],
+      verifier_command: "pnpm test",
+      evidence_plan: [
+        {
+          id: "status-proof",
+          label: "Status proof",
+          mechanism: "test",
+          description: "Focused tests prove status output does not wrap with verbose metadata.",
+          status: "ready",
+          evidence: "configured",
+        },
+      ],
+    });
+    await executeGoals({
+      action: "task",
+      run_id: "compact-status-goal",
+      task_id: "audit-task",
+      task_title: "Audit /goal efficiency hotspots",
+      task_prompt: "Audit the /goal system.",
+      task_status: "done",
+      parallel_group: "analysis",
+      expected_changed_scope: ["packages/ggcoder/src/tools/goals.ts"],
+      merge_strategy: "manual",
+    });
+
+    const result = await executeGoals({ action: "status", run_id: "compact-status-goal" });
+
+    expect(result).toContain(
+      "[ready] Compact status (id: compact-) — no prereqs, 1/1 tasks done, verifier configured",
+    );
+    expect(result).not.toContain("\nReferences:");
+    expect(result).not.toContain("\nTasks:");
+    expect(result).not.toContain("DAG:");
+    expect(result).not.toContain("expected_changed_scope=");
+  });
+
+  it("resolves task title dependencies to ids and rejects missing dependencies", async () => {
+    await executeGoals({
+      action: "create",
+      run_id: "dag-title-goal",
+      title: "Title dependencies",
+      goal: "Normalize Goal task dependencies",
+      success_criteria: ["Dependencies are stored as task ids"],
+      prerequisites: [],
+      verifier_command: "pnpm test",
+      evidence_plan: [
+        {
+          id: "dependency-proof",
+          label: "Dependency proof",
+          mechanism: "test",
+          description: "Focused tests prove depends_on cannot create permanently blocked runs.",
+          status: "ready",
+          evidence: "configured",
+        },
+      ],
+    });
+    await executeGoals({
+      action: "task",
+      run_id: "dag-title-goal",
+      task_id: "audit-task",
+      task_title: "Audit /goal efficiency hotspots",
+      task_prompt: "Audit the /goal system.",
+      task_status: "done",
+    });
+
+    const missingResult = await executeGoals({
+      action: "task",
+      run_id: "dag-title-goal",
+      task_id: "blocked-task",
+      task_title: "Blocked task",
+      task_prompt: "This should not be persisted with an invalid dependency.",
+      depends_on: ["Missing task title"],
+    });
+    const titleResult = await executeGoals({
+      action: "task",
+      run_id: "dag-title-goal",
+      task_id: "implementation-task",
+      task_title: "Simplify goal routing/controller",
+      task_prompt: "Implement the audited /goal simplification.",
+      depends_on: ["Audit /goal efficiency hotspots"],
+    });
+    const run = await getGoalRun(tmpProject, "dag-title-goal");
+
+    expect(missingResult).toContain(
+      'depends_on entry "Missing task title" does not match an existing task id/prefix',
+    );
+    expect(titleResult).toBe('Goal task added: "Simplify goal routing/controller".');
+    expect(run?.tasks.find((task) => task.id === "blocked-task")).toBeUndefined();
+    expect(run?.tasks.find((task) => task.id === "implementation-task")?.dependsOn).toEqual([
+      "audit-task",
+    ]);
+    expect(run ? decideGoalNextAction(run) : null).toMatchObject({
+      kind: "start_worker",
+      task: expect.objectContaining({ id: "implementation-task" }),
+    });
   });
 
   it("status resolves full UUID, short ID, and completed latest fallback", async () => {
