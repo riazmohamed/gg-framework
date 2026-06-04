@@ -74,10 +74,18 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 
 | Provider | Models | Auth |
 |---|---|---|
-| **Anthropic** | Claude Opus 4.7, Sonnet 4.6, Haiku 4.5 | OAuth |
-| **OpenAI** | GPT-4.1, o3, o4-mini | OAuth |
-| **Z.AI (GLM)** | GLM-5.1, GLM-4.7 | API key |
+| **Anthropic** | Claude Opus 4.8, Sonnet 4.6, Haiku 4.5 | OAuth |
+| **OpenAI** | GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex | OAuth |
 | **Moonshot** | Kimi K2.6 | API key |
+| **Z.AI (GLM)** | GLM-5.1, GLM-4.7, GLM-4.7 Flash | API key |
+| **MiniMax** | MiniMax M3 (image + video) | API key |
+| **Xiaomi (MiMo)** | MiMo-V2-Pro | API key |
+| **DeepSeek** | DeepSeek V4 Pro, V4 Flash | API key |
+| **OpenRouter** | Qwen3.6-Plus + multi-provider gateway | API key |
+
+The same conversation, the same tools, the same project context — only the model changes. Use a strong reasoning model when you need it, swap to a fast cheap one for grunt work, never restart your session.
+
+**Attachments.** Drag, paste, or type a path to attach images and video in the chat input. Video is sent natively to models that support it (Gemini 3.x, Kimi K2.6, MiniMax M3); for other models the video is saved to a temp file and the model is told to inspect it with ffmpeg or its own tools.
 
 ---
 
@@ -85,7 +93,7 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 
 | Key | What it does |
 |---|---|
-| <kbd>Ctrl+G</kbd> | Open the Goal pane |
+| <kbd>Ctrl+T</kbd> | Open the Task pane |
 | <kbd>Ctrl+S</kbd> | Open the Skills pane |
 | <kbd>Shift+Tab</kbd> | Cycle extended thinking (off / low / medium / high / max) |
 | <kbd>Esc</kbd> | Interrupt the agent mid-turn |
@@ -99,16 +107,23 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 
 Everything runs through slash commands inside the session. Not CLI flags.
 
-```bash
-/model claude-opus-4-7       # Switch models on the fly
-/model kimi-k2.6
-/compact                      # Compress context when it gets long
+| Command | What it does |
+|---|---|
+| `/model` (`/m`) | Switch model on the fly |
+| `/compact` (`/c`) | Compress context when it gets long |
+| `/new` (`/n`) | Start a fresh session in this project |
+| `/session` (`/s`) | Resume a prior session |
+| `/branch` (`/b`) | Branch the current conversation |
+| `/branches` | List branches of the current session |
+| `/rewind` | Restore files and/or conversation to an earlier checkpoint |
+| `/buddy` | Spin up a second model to review the current chat |
+| `/settings` (`/config`) | Open settings |
+| `/help` (`/h`, `/?`) | Show all commands |
+| `/quit` (`/q`, `/exit`) | Exit |
 
-# Built-in workflows
-/goal          # Set up a durable Goal run
-/scan          # Dead code, bugs, security issues (5 parallel agents)
-/verify        # Verify against docs and best practices (8 parallel agents)
-/research      # Research best tools and patterns for your stack
+Plus built-in workflows that ship with the binary:
+
+```bash
 /expand        # Compare against current alternatives and report gaps
 /bullet-proof  # Run a defensive security review
 /init          # Generate CLAUDE.md for your project
@@ -118,9 +133,40 @@ Everything runs through slash commands inside the session. Not CLI flags.
 
 ---
 
-## Custom commands
+## 🛠 Tools
+
+OG Coder comes with a focused set of tools. Each one is small, well-described, and earns its place in the prompt.
+
+| Tool | What it does |
+|---|---|
+| `bash` | Run shell commands |
+| `read` | Read file contents |
+| `write` | Write files |
+| `edit` | Surgical string replacements |
+| `grep` | Search file contents (regex) |
+| `find` | Find files by glob pattern |
+| `ls` | List directory contents |
+| `web_fetch` | Fetch URL content |
+| `screenshot` | Open a URL / dev server in a headless browser and capture a PNG so the agent can see the rendered page |
+| `subagent` | Spawn parallel sub-agents |
+
+The `screenshot` tool needs the optional `playwright` dependency plus a one-time `npx playwright install chromium`. Without it the tool returns an install hint instead of failing the turn. Captured images render inline in graphics-capable terminals (kitty, Ghostty, WezTerm, iTerm2); other terminals show a text line.
+
+Plus the [Grep MCP](https://grep.dev) for searching across 1M+ public GitHub repos. Add your own MCPs in settings if you need more — but start lean.
+
+---
+
+## 🪄 Custom commands
 
 Drop a markdown file in `.gg/commands/` and it becomes a slash command. Your React app gets `/deploy` and `/storybook`. Your API gets `/migrate` and `/seed`. Different projects, different commands.
+
+---
+
+## ⏪ Checkpoints & `/rewind`
+
+Before every file the agent writes or edits, OG Coder snapshots the prior on-disk content into a per-session checkpoint (stored under `~/.gg/checkpoints/`, never in your repo). Run `/rewind` to pick an earlier checkpoint and restore **code only**, **conversation only**, or **both**.
+
+Only edits made through ogcoder's `write`/`edit` tools are tracked — changes made by `bash` (e.g. `sed`, `rm`, codegen) are **not** captured.
 
 ---
 

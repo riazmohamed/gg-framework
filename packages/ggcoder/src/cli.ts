@@ -49,19 +49,16 @@ import { PerformanceObserver, performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import readline from "node:readline/promises";
-import { execFile } from "node:child_process";
-import { createRequire } from "node:module";
 import { renderApp } from "./ui/render.js";
 import { runJsonMode } from "./modes/json-mode.js";
 import { runRpcMode } from "./modes/rpc-mode.js";
 import { runServeMode } from "./modes/serve-mode.js";
 import { runAgentHomeMode } from "./modes/agent-home-mode.js";
-import { renderLoginSelector, renderXiaomiRegionSelector } from "./ui/login.js";
-import { getXiaomiBaseUrl } from "./core/xiaomi-regions.js";
 import { renderSessionSelector } from "./ui/sessions.js";
-import type { CompletedItem, GoalProgressDraft } from "./ui/app-items.js";
+import type { CompletedItem } from "./ui/app-items.js";
 import { segmentDisplayText, stripDoneMarkers } from "./utils/plan-steps.js";
 import { formatUserError } from "./utils/error-handler.js";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
@@ -73,7 +70,9 @@ import { initLogger, log, closeLogger } from "./core/logger.js";
 import { setStreamDiagnostic, type AgentTool } from "@abukhaled/gg-agent";
 import { setProviderDiagnostic } from "@abukhaled/gg-ai";
 import { buildSystemPrompt } from "./system-prompt.js";
+import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { createTools } from "./tools/index.js";
+import { CheckpointStore } from "./core/checkpoint-store.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import {
   createCompactedSessionCheckpoint,
@@ -87,76 +86,32 @@ import {
   getMaxThinkingLevel,
   getModel,
 } from "./core/model-registry.js";
-import { MCPClientManager, getMCPServers } from "./core/mcp/index.js";
+import { MCPClientManager, getAllMcpServers } from "./core/mcp/index.js";
+import { runLogin, runLogout, runDoctor } from "./cli/auth.js";
+import type { OAuthCredentials } from "./core/oauth/types.js";
+import { runMcp } from "./cli/mcp.js";
+import {
+  CLI_VERSION,
+  clearVisibleScreen,
+  renderLogoBlock,
+  requireInteractiveTTY,
+} from "./cli/shared.js";
 import { discoverAgents } from "./core/agents.js";
 import { discoverSkills } from "./core/skills.js";
 import path from "node:path";
-import { loginAnthropic } from "./core/oauth/anthropic.js";
-import { loginOpenAI } from "./core/oauth/openai.js";
-import { loginGemini } from "./core/oauth/gemini.js";
-import type { OAuthCredentials, OAuthLoginCallbacks } from "./core/oauth/types.js";
 import chalk from "chalk";
 import { checkAndAutoUpdate } from "./core/auto-update.js";
-import { parseGoalSyntheticEvent } from "./ui/goal-events.js";
-import type { GoalReference } from "./core/goal-store.js";
-import type { GoalMode } from "./core/runtime-mode.js";
+
 import { routeCliCommandInput, type CliSubcommandName } from "./cli/command-routing.js";
 
-const _require = createRequire(import.meta.url);
-const CLI_VERSION = (_require("../package.json") as { version: string }).version;
-const THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh"]);
+const THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh", "max"]);
 
 export function parseThinkingLevel(value: string | undefined): ThinkingLevel | undefined {
   if (value === undefined) return undefined;
   if (THINKING_LEVELS.has(value as ThinkingLevel)) return value as ThinkingLevel;
-  throw new Error(`Invalid --thinking value "${value}". Expected low, medium, high, or xhigh.`);
-}
-
-// ── Logo + gradient (mirrors Banner.tsx) ────────────────────────────
-const LOGO_LINES = ["", "", ""];
-const GRADIENT = [
-  "#60a5fa",
-  "#6da1f9",
-  "#7a9df7",
-  "#8799f5",
-  "#9495f3",
-  "#a18ff1",
-  "#a78bfa",
-  "#a18ff1",
-  "#9495f3",
-  "#8799f5",
-  "#7a9df7",
-  "#6da1f9",
-];
-
-function gradientLine(text: string): string {
-  let result = "";
-  let colorIdx = 0;
-  for (const ch of text) {
-    if (ch === " ") {
-      result += ch;
-    } else {
-      result += chalk.hex(GRADIENT[colorIdx % GRADIENT.length])(ch);
-      colorIdx++;
-    }
-  }
-  return result;
-}
-
-function clearVisibleScreen(): void {
-  process.stdout.write("\x1b[2J\x1b[H");
-}
-
-function requireInteractiveTTY(): void {
-  if (process.stdin.isTTY) return;
-  process.stderr.write(
-    chalk.red("ogcoder needs an interactive terminal — your stdin isn't a TTY.\n") +
-      chalk.hex("#6b7280")(
-        "Run ogcoder directly in your terminal (not piped or through an API shell). " +
-          'For headless use try "ogcoder --json \'<prompt>\'" or "ogcoder --rpc".\n',
-      ),
+  throw new Error(
+    `Invalid --thinking value "${value}". Expected low, medium, high, xhigh, or max.`,
   );
-  process.exit(1);
 }
 
 function printHelp(): void {
@@ -167,20 +122,15 @@ function printHelp(): void {
   const primary = chalk.hex("#60a5fa");
   const accent = chalk.hex("#a78bfa");
   const bold = chalk.bold;
-  const gap = "   ";
 
-  // Banner — matches the Ink Banner component layout
+  // Banner — matches the interactive TUI banner layout
   console.log();
-  console.log(
-    gradientLine(LOGO_LINES[0]) +
-      gap +
-      primary.bold("OG Coder") +
-      dim(` v${CLI_VERSION}`) +
-      dim(" · By ") +
-      bold("abukhaled"),
-  );
-  console.log(gradientLine(LOGO_LINES[1]) + gap + dim("AI coding agent"));
-  console.log(gradientLine(LOGO_LINES[2]));
+  for (const row of renderLogoBlock([
+    primary.bold("OG Coder") + dim(` v${CLI_VERSION}`) + dim(" · By ") + bold("abukhaled"),
+    dim("AI coding agent"),
+  ])) {
+    console.log(row);
+  }
   console.log();
 
   // Usage
@@ -199,6 +149,7 @@ function printHelp(): void {
     ["telegram", "Configure Telegram bot integration"],
     ["agent-home-login", "Configure Agent Home relay connection"],
     ["agent-home", "Connect to Agent Home as a remote agent"],
+    ["mcp", "Add and manage MCP servers"],
   ];
   for (const [name, desc] of cmds) {
     console.log(`  ${accent(name.padEnd(20))} ${dim(desc)}`);
@@ -217,7 +168,8 @@ function printHelp(): void {
     ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-5.5)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Override the system prompt"],
-    ["--thinking <level>", "Enable thinking level (low, medium, high, xhigh)"],
+    ["--thinking <level>", "Enable thinking level (low, medium, high, xhigh, max)"],
+    ["--resume <id>", "Resume a session by id"],
     ["--json", "JSON output mode (for sub-agents)"],
     ["--rpc", "JSON-RPC mode (for IDE integrations)"],
   ];
@@ -231,8 +183,6 @@ function printHelp(): void {
   const slashCmds: [string, string][] = [
     ["/help", "Show available slash commands"],
     ["/model", "Switch AI model"],
-    ["/goal", "Create a programmatic goal loop"],
-    ["/goals", "Open the goal pane"],
     ["/compact", "Compact conversation context"],
     ["/session", "Switch or create sessions"],
     ["/new", "Start a new session"],
@@ -247,7 +197,6 @@ function printHelp(): void {
   // Keyboard shortcuts
   console.log(primary("Keyboard shortcuts:"));
   const shortcuts: [string, string][] = [
-    ["Ctrl+G", "Toggle goal overlay"],
     ["Ctrl+S", "Toggle skills overlay"],
     ["Shift+Tab", "Toggle thinking"],
     ["Shift+Enter", "New line in input"],
@@ -286,6 +235,7 @@ function createCliSubcommandHandlers(): Record<CliSubcommandName, () => void> {
       });
       process.exit(result.status ?? 0);
     },
+    mcp: () => runWithStandardErrorHandling(runMcp),
     login: () => runWithStandardErrorHandling(runLogin),
     logout: () => runWithStandardErrorHandling(runLogout),
     sessions: () => runWithStandardErrorHandling(runSessions),
@@ -302,13 +252,14 @@ function createCliSubcommandHandlers(): Record<CliSubcommandName, () => void> {
   };
 }
 
+const _require = createRequire(import.meta.url);
+
 function main(): void {
-  // Silent auto-update check — fire-and-forget in the background so it never
-  // blocks startup (the old synchronous check could stall for 3-4 seconds on
-  // slow networks or when an npm install was triggered).
-  checkAndAutoUpdate(CLI_VERSION).then((msg) => {
-    if (msg) console.error(chalk.hex("#60a5fa")(msg));
-  });
+  // Silent auto-update check — gg-core's updater polls the registry in the
+  // background (fire-and-forget fetch + detached install), so this never
+  // blocks startup.
+  const updateMessage = checkAndAutoUpdate(CLI_VERSION);
+  if (updateMessage) console.error(chalk.hex("#60a5fa")(updateMessage));
 
   const commandRoute = routeCliCommandInput({
     argv: process.argv,
@@ -335,6 +286,7 @@ function main(): void {
       "system-prompt": { type: "string" },
       "prompt-cache-key": { type: "string" },
       thinking: { type: "string" },
+      resume: { type: "string" },
     },
     allowPositionals: true,
     strict: true,
@@ -354,7 +306,7 @@ function main(): void {
   if (values.json) {
     const message = positionals[0] ?? "";
     const jsonProvider = (values.provider ?? "anthropic") as Provider;
-    const jsonModel = values.model ?? "claude-opus-4-7";
+    const jsonModel = values.model ?? "claude-opus-4-8";
     const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
     const systemPrompt = values["system-prompt"];
     const promptCacheKey = values["prompt-cache-key"];
@@ -379,7 +331,7 @@ function main(): void {
   // RPC mode — headless JSON-over-stdio for IDE integrations
   if (values.rpc) {
     const rpcProvider = (values.provider ?? "anthropic") as Provider;
-    const rpcModel = values.model ?? "claude-opus-4-7";
+    const rpcModel = values.model ?? "claude-opus-4-8";
     const systemPrompt = values["system-prompt"];
     const cwd = process.cwd();
     runRpcMode({
@@ -405,10 +357,10 @@ function main(): void {
     if (p === "gemini") return "gemini-3.1-flash-lite-preview";
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.6";
-    if (p === "minimax") return "MiniMax-M2.7";
+    if (p === "minimax") return "MiniMax-M3";
     if (p === "deepseek") return "deepseek-v4-pro";
     if (p === "openrouter") return "qwen/qwen3.6-plus";
-    return "claude-opus-4-7";
+    return "claude-opus-4-8";
   }
 
   const model: string = saved.model ?? getHardcodedDefault(provider);
@@ -425,7 +377,9 @@ function main(): void {
     model,
     cwd,
     thinkingLevel,
+    idealReviewEnabled: saved.idealReviewEnabled,
     continueRecent,
+    resumeSessionPath: values.resume,
     theme: savedTheme,
   }).catch((err) => {
     log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
@@ -445,6 +399,7 @@ async function runInkTUI(opts: {
   continueRecent?: boolean;
   resumeSessionPath?: string;
   theme?: "auto" | ThemeName;
+  idealReviewEnabled?: boolean;
 }): Promise<void> {
   const { provider, model, cwd } = opts;
 
@@ -607,7 +562,9 @@ async function runInkTUI(opts: {
   const localGGDir = path.join(cwd, ".gg");
   const sessionManager = new SessionManager(paths.sessionsDir);
   const resumePathPromise = opts.resumeSessionPath
-    ? Promise.resolve(opts.resumeSessionPath)
+    ? opts.resumeSessionPath.includes("/")
+      ? Promise.resolve<string | null>(opts.resumeSessionPath)
+      : sessionManager.findById(cwd, opts.resumeSessionPath)
     : opts.continueRecent
       ? sessionManager.getMostRecent(cwd)
       : Promise.resolve(null);
@@ -622,29 +579,17 @@ async function runInkTUI(opts: {
   ]);
 
   // Runtime mode refs — shared between tools and UI
-  const goalModeRef = { current: "off" as GoalMode };
-  const goalReferencesRef: { current: readonly GoalReference[] | undefined } = {
-    current: undefined,
-  };
   const planModeRef = { current: false };
-  const onEnterPlanRef: { current: (reason?: string) => void } = {
-    current: () => {},
-  };
-  const onExitPlanRef: { current: (planPath: string) => Promise<string> } = {
-    current: async () => "rejected",
-  };
-  const repoMapChangedFilesRef: { current: Set<string> } = { current: new Set() };
-  const repoMapReadFilesRef: { current: Set<string> } = { current: new Set() };
-  const toRepoMapPath = (root: string, filePath: string): string =>
-    path.relative(root, filePath).split(path.sep).join("/");
-  const markRepoMapRead = (root: string, filePath: string): void => {
-    repoMapReadFilesRef.current.add(toRepoMapPath(root, filePath));
-  };
-  const markRepoMapDirty = (root: string, filePath: string): void => {
-    const relativePath = toRepoMapPath(root, filePath);
-    repoMapChangedFilesRef.current.add(relativePath);
-    repoMapReadFilesRef.current.add(relativePath);
-  };
+  const planToolCallbacks: {
+    onEnterPlan?: (reason?: string) => void | Promise<void>;
+    onExitPlan?: (planPath: string) => Promise<string>;
+  } = {};
+
+  // Holder so the (cwd-bound) tools can snapshot pre-mutation file state for
+  // /rewind. The store is created once the session id is known (below).
+  const checkpointRef: { current: CheckpointStore | null } = { current: null };
+  const onPreFileMutation = (filePath: string): Promise<void> =>
+    checkpointRef.current?.recordPreMutation(filePath) ?? Promise.resolve();
 
   const { tools, processManager } = createTools(cwd, {
     agents,
@@ -652,13 +597,28 @@ async function runInkTUI(opts: {
     provider,
     model,
     planModeRef,
-    onEnterPlan: (reason) => onEnterPlanRef.current(reason),
-    onExitPlan: (planPath) => onExitPlanRef.current(planPath),
-    goalModeRef,
-    getGoalReferences: () => goalReferencesRef.current,
-    onFileRead: (filePath) => markRepoMapRead(cwd, filePath),
-    onFileMutated: (filePath) => markRepoMapDirty(cwd, filePath),
+    onPreFileMutation,
+    onEnterPlan: (reason) => planToolCallbacks.onEnterPlan?.(reason),
+    onExitPlan: (planPath) =>
+      planToolCallbacks.onExitPlan?.(planPath) ?? Promise.resolve("Plan review is unavailable."),
   });
+
+  // Rebuilds the cwd-bound tools for a different project root, so the agent
+  // can operate in another project directory than where ogcoder was launched.
+  const rebuildToolsForCwd = (newCwd: string) => {
+    const { tools: rebuilt } = createTools(newCwd, {
+      agents,
+      skills,
+      provider,
+      model,
+      planModeRef,
+      onPreFileMutation,
+      onEnterPlan: (reason) => planToolCallbacks.onEnterPlan?.(reason),
+      onExitPlan: (planPath) =>
+        planToolCallbacks.onExitPlan?.(planPath) ?? Promise.resolve("Plan review is unavailable."),
+    });
+    return rebuilt;
+  };
 
   // MCP startup can involve `npx` installing/booting servers. Do it after the
   // TUI paints so a slow network or npm cache never looks like "nothing happens".
@@ -668,7 +628,8 @@ async function runInkTUI(opts: {
     initialMcpConnectPromise ??= (async () => {
       const providerApiKey =
         effectiveProvider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
-      return mcpManager.connectAll(getMCPServers(effectiveProvider, providerApiKey));
+      const servers = await getAllMcpServers(effectiveProvider, providerApiKey, cwd);
+      return mcpManager.connectAll(servers);
     })().catch((err) => {
       log(
         "WARN",
@@ -683,11 +644,11 @@ async function runInkTUI(opts: {
   const systemPrompt = await buildSystemPrompt(
     cwd,
     skills,
-    false,
+    planModeRef.current,
     undefined,
     tools.map((tool) => tool.name),
     undefined,
-    goalModeRef.current,
+    provider,
   );
 
   // Kill all background processes on exit (synchronous — catches all exit paths)
@@ -701,6 +662,7 @@ async function runInkTUI(opts: {
 
   // Session management — resume or create session file
   let sessionPath: string | undefined;
+  let sessionId: string | undefined;
   let initialHistory: CompletedItem[] | undefined;
 
   if (resumePath) {
@@ -711,6 +673,7 @@ async function runInkTUI(opts: {
       if (loadedMessages.length > 0) {
         messages.push(...loadedMessages);
         sessionPath = resumePath;
+        sessionId = loaded.header.id;
         log("INFO", "session", `Restored session`, {
           path: resumePath,
           messageCount: String(loadedMessages.length),
@@ -745,6 +708,7 @@ async function runInkTUI(opts: {
               messages: compacted.messages,
             });
             sessionPath = compactedSession.path;
+            sessionId = compactedSession.id;
             messages.length = 0;
             messages.push(...compacted.messages);
             log("INFO", "session", `Auto-compaction complete`, {
@@ -758,7 +722,14 @@ async function runInkTUI(opts: {
         }
 
         const restoredMessages = getRestoredMessagesForDisplay(messages);
-        initialHistory = messagesToHistoryItems(restoredMessages);
+        const restoredDisplayItems = sessionManager.getDisplayItems(
+          loaded.entries,
+          loaded.header.leafId,
+        );
+        initialHistory =
+          restoredDisplayItems.length > 0
+            ? restoredDisplayItems
+            : messagesToHistoryItems(restoredMessages);
         initialHistory.push({
           kind: "info",
           text: formatRestoreInfoText(loadedMessages.length, restoredMessages.length),
@@ -774,7 +745,13 @@ async function runInkTUI(opts: {
   if (!sessionPath) {
     const session = await sessionManager.create(cwd, provider, model);
     sessionPath = session.path;
+    sessionId = session.id;
     log("INFO", "session", `New session created`, { path: sessionPath });
+  }
+
+  // Now that the session id is finalized, back /rewind with a checkpoint store.
+  if (sessionId) {
+    checkpointRef.current = new CheckpointStore({ sessionId, cwd });
   }
 
   await renderApp({
@@ -796,401 +773,21 @@ async function runInkTUI(opts: {
     initialHistory,
     sessionsDir: paths.sessionsDir,
     sessionPath,
+    sessionId,
     processManager,
     settingsFile: paths.settingsFile,
     mcpManager,
     authStorage,
-    goalModeRef,
-    goalReferencesRef,
+    planModeRef,
     skills,
-    repoMapChangedFilesRef,
-    repoMapReadFilesRef,
+    checkpointStore: checkpointRef.current ?? undefined,
+    idealReviewEnabled: opts.idealReviewEnabled,
+    rebuildToolsForCwd,
     connectInitialMcpTools,
+    planCallbacks: planToolCallbacks,
   });
 
   closeLogger();
-}
-
-// ── Login ──────────────────────────────────────────────────
-
-async function runLogin(): Promise<void> {
-  requireInteractiveTTY();
-  clearVisibleScreen();
-  const paths = await ensureAppDirs();
-  initLogger(paths.logFile, { version: CLI_VERSION });
-  log("INFO", "auth", "Login flow started");
-
-  const authStorage = new AuthStorage();
-  await authStorage.load();
-
-  // Phase 1: Ink-based provider selector
-  const provider = await renderLoginSelector(CLI_VERSION);
-  if (!provider) {
-    console.log(chalk.hex("#6b7280")("Login cancelled."));
-    return;
-  }
-
-  // Phase 1.5: Xiaomi keys are region-scoped — prompt for the region before
-  // opening readline (raw-mode selector must not compete with readline).
-  let xiaomiBaseUrl: string | undefined;
-  if (provider === "xiaomi") {
-    const region = await renderXiaomiRegionSelector();
-    if (!region) {
-      console.log(chalk.hex("#6b7280")("Login cancelled."));
-      return;
-    }
-    xiaomiBaseUrl = getXiaomiBaseUrl(region);
-  }
-
-  console.log(
-    chalk.hex("#60a5fa").bold("\nLogging in to ") +
-      chalk.hex("#a78bfa")(displayName(provider)) +
-      chalk.hex("#60a5fa").bold("...\n"),
-  );
-
-  // Phase 2: OAuth flow (readline needed for Anthropic code paste)
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-
-  try {
-    const callbacks: OAuthLoginCallbacks = {
-      onOpenUrl: (url) => {
-        console.log(chalk.hex("#60a5fa").bold("Opening browser..."));
-        openBrowser(url);
-        console.log(
-          chalk.hex("#6b7280")("\nIf the browser didn't open, visit:\n") +
-            chalk.hex("#6b7280")(url) +
-            "\n",
-        );
-      },
-      onPromptCode: async (message) => {
-        return rl.question(message + " ");
-      },
-      onStatus: (message) => {
-        console.log(chalk.hex("#6b7280")(message));
-      },
-    };
-
-    let creds;
-    if (
-      provider === "glm" ||
-      provider === "moonshot" ||
-      provider === "xiaomi" ||
-      provider === "minimax" ||
-      provider === "deepseek" ||
-      provider === "openrouter"
-    ) {
-      const keyLabel =
-        provider === "glm"
-          ? "Z.AI"
-          : provider === "xiaomi"
-            ? "Xiaomi MiMo"
-            : provider === "minimax"
-              ? "MiniMax"
-              : provider === "deepseek"
-                ? "DeepSeek"
-                : provider === "openrouter"
-                  ? "OpenRouter"
-                  : "Moonshot";
-      const apiKey = await rl.question(chalk.hex("#60a5fa")(`Paste your ${keyLabel} API key: `));
-      if (!apiKey.trim()) {
-        console.log(chalk.hex("#ef4444")("No API key provided. Login cancelled."));
-        return;
-      }
-      creds = {
-        accessToken: apiKey.trim(),
-        refreshToken: "",
-        expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000 * 100, // ~100 years
-        ...(provider === "xiaomi" && xiaomiBaseUrl ? { baseUrl: xiaomiBaseUrl } : {}),
-      } satisfies OAuthCredentials;
-    } else {
-      creds =
-        provider === "anthropic"
-          ? await loginAnthropic(callbacks)
-          : provider === "gemini"
-            ? await loginGemini(callbacks)
-            : await loginOpenAI(callbacks);
-    }
-
-    await authStorage.setCredentials(provider, creds);
-    log("INFO", "auth", `Login succeeded for ${displayName(provider)}`);
-    console.log(chalk.hex("#4ade80")(`\n✓ Logged in to ${displayName(provider)} successfully!`));
-  } finally {
-    rl.close();
-    closeLogger();
-  }
-}
-
-// ── Doctor ─────────────────────────────────────────────────
-
-async function runDoctor(): Promise<void> {
-  clearVisibleScreen();
-
-  const os = await import("node:os");
-  const fsP = await import("node:fs/promises");
-
-  const dim = chalk.hex("#6b7280");
-  const primary = chalk.hex("#60a5fa");
-  const accent = chalk.hex("#a78bfa");
-  const good = chalk.hex("#4ade80");
-  const warn = chalk.hex("#fbbf24");
-  const bad = chalk.hex("#ef4444");
-
-  // ── Banner ──────────────────────────────────────────────────
-  const LOGO = LOGO_LINES;
-  const GAP = "   ";
-  console.log();
-  console.log(
-    `  ${gradientLine(LOGO[0]!)}${GAP}` +
-      primary.bold("OG Coder") +
-      dim(` v${CLI_VERSION}`) +
-      dim(" · By ") +
-      chalk.white.bold("Abu Khaled"),
-  );
-  console.log(`  ${gradientLine(LOGO[1]!)}${GAP}` + accent("Doctor"));
-  console.log(`  ${gradientLine(LOGO[2]!)}${GAP}` + dim("Diagnose & Fix"));
-  console.log();
-
-  const home = os.homedir();
-  const ggDir = path.join(home, ".gg");
-  const authFile = path.join(ggDir, "auth.json");
-  const lockFile = authFile + ".lock";
-  const myUid = process.getuid!();
-  let fixed = 0;
-
-  // ── Environment ─────────────────────────────────────────────
-  console.log(accent("  Environment\n"));
-  console.log(dim(`    Home:      ${home}`));
-  console.log(dim(`    $HOME:     ${process.env.HOME ?? "(not set)"}`));
-  console.log(dim(`    Node.js:   ${process.version}`));
-  console.log(dim(`    Platform:  ${process.platform} ${process.arch}`));
-  console.log(dim(`    UID:       ${myUid}  EUID: ${process.geteuid!()}`));
-
-  if (process.env.HOME && process.env.HOME !== home) {
-    console.log(warn("\n    ⚠ $HOME differs from os.homedir() — this can cause auth mismatches"));
-  }
-  if (myUid !== process.geteuid!()) {
-    console.log(warn("    ⚠ uid ≠ euid — running with elevated privileges (sudo?)"));
-    console.log(dim("      Running ogcoder with sudo can cause ownership issues."));
-    console.log(dim("      Use without sudo, or fix after: sudo chown -R $(whoami) ~/.gg"));
-  }
-  console.log();
-
-  // ── Config Directory ────────────────────────────────────────
-  console.log(accent("  Config Directory\n"));
-
-  try {
-    const stat = await fsP.stat(ggDir);
-    const mode = stat.mode & 0o777;
-    console.log(dim(`    Path:  ${ggDir}`));
-    console.log(dim(`    Mode:  0o${mode.toString(8)}  UID: ${stat.uid}`));
-
-    // Fix ownership
-    if (stat.uid !== myUid) {
-      console.log(warn(`    ⚠ Owned by uid ${stat.uid}, expected ${myUid}`));
-      try {
-        await fsP.chown(ggDir, myUid, process.getgid!());
-        console.log(good("    ✓ Fixed directory ownership"));
-        fixed++;
-      } catch {
-        console.log(bad(`    ✗ Cannot fix — try: sudo chown -R $(whoami) ${ggDir}`));
-      }
-    }
-
-    // Fix permissions (should be 0o700)
-    if (mode !== 0o700) {
-      try {
-        await fsP.chmod(ggDir, 0o700);
-        console.log(good("    ✓ Fixed directory permissions → 0o700"));
-        fixed++;
-      } catch {
-        console.log(bad(`    ✗ Cannot fix — try: chmod 700 ${ggDir}`));
-      }
-    }
-  } catch {
-    console.log(warn(`    ${ggDir} missing — creating...`));
-    try {
-      await fsP.mkdir(ggDir, { recursive: true, mode: 0o700 });
-      console.log(good(`    ✓ Created ${ggDir}`));
-      fixed++;
-    } catch (mkErr) {
-      console.log(
-        bad(`    ✗ Cannot create: ${mkErr instanceof Error ? mkErr.message : String(mkErr)}`),
-      );
-      console.log();
-      return;
-    }
-  }
-  console.log();
-
-  // ── Lock File ───────────────────────────────────────────────
-  try {
-    const lockStat = await fsP.stat(lockFile);
-    const ageMs = Date.now() - lockStat.mtimeMs;
-    console.log(accent("  Lock File\n"));
-    console.log(warn(`    ⚠ Stale lock found (age: ${Math.round(ageMs / 1000)}s)`));
-    await fsP.unlink(lockFile);
-    console.log(good("    ✓ Removed"));
-    fixed++;
-    console.log();
-  } catch {
-    // No lock file — good, skip section entirely
-  }
-
-  // ── Auth File ───────────────────────────────────────────────
-  console.log(accent("  Auth File\n"));
-
-  let authData: Record<string, unknown> | null = null;
-  let authNeedsRewrite = false;
-
-  try {
-    const stat = await fsP.stat(authFile);
-    const mode = stat.mode & 0o777;
-    console.log(dim(`    Path:  ${authFile}`));
-    console.log(
-      dim(`    Size:  ${stat.size} bytes  Mode: 0o${mode.toString(8)}  UID: ${stat.uid}`),
-    );
-
-    // Fix ownership
-    if (stat.uid !== myUid) {
-      console.log(warn(`    ⚠ Owned by uid ${stat.uid}, expected ${myUid}`));
-      try {
-        await fsP.chown(authFile, myUid, process.getgid!());
-        console.log(good("    ✓ Fixed file ownership"));
-        fixed++;
-      } catch {
-        console.log(bad(`    ✗ Cannot fix — try: sudo chown $(whoami) ${authFile}`));
-      }
-    }
-
-    // Fix permissions (should be 0o600)
-    if (mode !== 0o600) {
-      try {
-        await fsP.chmod(authFile, 0o600);
-        console.log(good("    ✓ Fixed file permissions → 0o600"));
-        fixed++;
-      } catch {
-        console.log(bad(`    ✗ Cannot fix — try: chmod 600 ${authFile}`));
-      }
-    }
-
-    // Try to read and parse
-    try {
-      const content = await fsP.readFile(authFile, "utf-8");
-      try {
-        authData = JSON.parse(content) as Record<string, unknown>;
-      } catch {
-        console.log(bad("    ✗ Invalid JSON — backing up and resetting"));
-        const backupName = `auth.json.corrupt.${Date.now()}`;
-        await fsP.copyFile(authFile, path.join(ggDir, backupName));
-        await fsP.writeFile(authFile, "{}", { encoding: "utf-8", mode: 0o600 });
-        console.log(good(`    ✓ Corrupt file backed up as ${backupName}`));
-        console.log(dim('      Run "ogcoder login" to re-authenticate'));
-        authData = {};
-        fixed++;
-      }
-    } catch (readErr) {
-      const code = (readErr as NodeJS.ErrnoException).code;
-      if (code === "EACCES") {
-        console.log(bad("    ✗ Permission denied reading auth.json"));
-        console.log(dim(`      Try: sudo chown $(whoami) ${authFile} && chmod 600 ${authFile}`));
-      } else {
-        console.log(
-          bad(`    ✗ Read error: ${readErr instanceof Error ? readErr.message : String(readErr)}`),
-        );
-      }
-    }
-  } catch {
-    console.log(dim(`    Path:  ${authFile}`));
-    console.log(warn('    Not found — run "ogcoder login" to authenticate'));
-  }
-  console.log();
-
-  // ── Credentials ─────────────────────────────────────────────
-  if (authData && Object.keys(authData).length > 0) {
-    console.log(accent("  Credentials\n"));
-
-    for (const p of Object.keys(authData)) {
-      const cred = authData[p] as Record<string, unknown> | undefined;
-      if (!cred || typeof cred !== "object") {
-        console.log(bad(`    ✗ ${p}: invalid entry — removing`));
-        delete authData[p];
-        authNeedsRewrite = true;
-        fixed++;
-        continue;
-      }
-      if (!cred.accessToken || typeof cred.accessToken !== "string") {
-        console.log(bad(`    ✗ ${p}: missing accessToken — removing`));
-        delete authData[p];
-        authNeedsRewrite = true;
-        fixed++;
-        continue;
-      }
-      const token = String(cred.accessToken);
-      const masked = token.slice(0, 8) + "..." + token.slice(-4);
-      const expires =
-        typeof cred.expiresAt === "number" ? new Date(cred.expiresAt).toISOString() : "unknown";
-      const expired = typeof cred.expiresAt === "number" && Date.now() > cred.expiresAt;
-      if (expired) {
-        console.log(warn(`    ⚠ ${p}: ${masked}  expired ${expires}`));
-      } else {
-        console.log(good(`    ✓ ${p}: ${masked}  expires ${expires}`));
-      }
-    }
-
-    if (authNeedsRewrite) {
-      try {
-        await fsP.writeFile(authFile, JSON.stringify(authData, null, 2), {
-          encoding: "utf-8",
-          mode: 0o600,
-        });
-        console.log(good("    ✓ Cleaned up auth.json"));
-      } catch {
-        console.log(bad("    ✗ Failed to write cleaned auth.json"));
-      }
-    }
-    console.log();
-  }
-
-  // ── Temp Files ──────────────────────────────────────────────
-  try {
-    const entries = await fsP.readdir(ggDir);
-    const tmpFiles = entries.filter((e) => e.startsWith("auth.json.") && e.endsWith(".tmp"));
-    if (tmpFiles.length > 0) {
-      console.log(accent("  Temp Files\n"));
-      console.log(warn(`    ⚠ ${tmpFiles.length} orphaned temp file(s) from interrupted writes`));
-      for (const tmp of tmpFiles) {
-        await fsP.unlink(path.join(ggDir, tmp)).catch(() => {});
-      }
-      console.log(good(`    ✓ Removed ${tmpFiles.length} file(s)`));
-      fixed++;
-      console.log();
-    }
-  } catch {
-    // Can't read directory — already flagged above
-  }
-
-  // ── Summary ─────────────────────────────────────────────────
-  if (fixed > 0) {
-    console.log(good(`  ✓ Fixed ${fixed} issue${fixed > 1 ? "s" : ""}.`));
-  } else {
-    console.log(good("  ✓ Everything looks good."));
-  }
-  console.log();
-}
-
-// ── Logout ─────────────────────────────────────────────────
-
-async function runLogout(): Promise<void> {
-  const paths = await ensureAppDirs();
-  initLogger(paths.logFile, { version: CLI_VERSION });
-  log("INFO", "auth", "Logout requested");
-
-  const authStorage = new AuthStorage();
-  await authStorage.load();
-  await authStorage.clearAll();
-  log("INFO", "auth", "Logout succeeded");
-  closeLogger();
-  console.log(chalk.green("Logged out successfully."));
 }
 
 // ── Sessions ──────────────────────────────────────────────
@@ -1220,9 +817,9 @@ async function runSessions(): Promise<void> {
     if (p === "gemini") return "gemini-3.1-flash-lite-preview";
     if (p === "glm") return "glm-5.1";
     if (p === "moonshot") return "kimi-k2.6";
-    if (p === "minimax") return "MiniMax-M2.7";
+    if (p === "minimax") return "MiniMax-M3";
     if (p === "deepseek") return "deepseek-v4-pro";
-    return "claude-opus-4-7";
+    return "claude-opus-4-8";
   }
 
   const model = saved2.model ?? getDefault(provider);
@@ -1237,6 +834,7 @@ async function runSessions(): Promise<void> {
     model,
     cwd,
     thinkingLevel,
+    idealReviewEnabled: saved2.idealReviewEnabled,
     resumeSessionPath: selectedPath,
     theme: saved2.theme,
   });
@@ -1276,48 +874,18 @@ async function runTelegramSetup(): Promise<void> {
 
   const existing = await loadTelegramConfig();
 
-  // Banner (matches Banner.tsx)
-  const LOGO = [
-    " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
-    " \u2588  \u2588 \u2588 \u2580\u2588",
-    " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
-  ];
-  const GRADIENT = [
-    "#60a5fa",
-    "#6da1f9",
-    "#7a9df7",
-    "#8799f5",
-    "#9495f3",
-    "#a18ff1",
-    "#a78bfa",
-    "#a18ff1",
-    "#9495f3",
-    "#8799f5",
-    "#7a9df7",
-    "#6da1f9",
-  ];
-  function gradientText(text: string): string {
-    let colorIdx = 0;
-    return text
-      .split("")
-      .map((ch) => {
-        if (ch === " ") return ch;
-        const color = GRADIENT[colorIdx++ % GRADIENT.length]!;
-        return chalk.hex(color)(ch);
-      })
-      .join("");
-  }
-  const GAP = "   ";
+  // Banner
   console.log();
-  console.log(
-    `  ${gradientText(LOGO[0]!)}${GAP}` +
-      chalk.hex("#60a5fa").bold("OG Coder") +
+  for (const row of renderLogoBlock([
+    chalk.hex("#60a5fa").bold("OG Coder") +
       chalk.hex("#6b7280")(` v${CLI_VERSION}`) +
       chalk.hex("#6b7280")(" · By ") +
       chalk.white.bold("Abu Khaled"),
-  );
-  console.log(`  ${gradientText(LOGO[1]!)}${GAP}` + chalk.hex("#a78bfa")("Telegram Setup"));
-  console.log(`  ${gradientText(LOGO[2]!)}${GAP}` + chalk.hex("#6b7280")("Remote Control"));
+    chalk.hex("#a78bfa")("Telegram Setup"),
+    chalk.hex("#6b7280")("Remote Control"),
+  ])) {
+    console.log(row);
+  }
   console.log();
 
   if (existing) {
@@ -1527,35 +1095,17 @@ async function runAgentHomeLogin(): Promise<void> {
   const existing = await loadAgentHomeConfig();
 
   // Banner
-  const LOGO = [
-    " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
-    " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
-    " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
-  ];
-  function gradientTextLocal(text: string): string {
-    let colorIdx = 0;
-    return text
-      .split("")
-      .map((ch) => {
-        if (ch === " ") return ch;
-        const color = GRADIENT[colorIdx++ % GRADIENT.length]!;
-        return chalk.hex(color)(ch);
-      })
-      .join("");
-  }
-  const GAP = "   ";
   console.log();
-  console.log(
-    `  ${gradientTextLocal(LOGO[0]!)}${GAP}` +
-      chalk.hex("#60a5fa").bold("OG Coder") +
+  for (const row of renderLogoBlock([
+    chalk.hex("#60a5fa").bold("OG Coder") +
       chalk.hex("#6b7280")(` v${CLI_VERSION}`) +
       chalk.hex("#6b7280")(" \u00b7 By ") +
       chalk.white.bold("Abu Khaled"),
-  );
-  console.log(`  ${gradientTextLocal(LOGO[1]!)}${GAP}` + chalk.hex("#a78bfa")("Agent Home Setup"));
-  console.log(
-    `  ${gradientTextLocal(LOGO[2]!)}${GAP}` + chalk.hex("#6b7280")("Remote Control via iOS"),
-  );
+    chalk.hex("#a78bfa")("Agent Home Setup"),
+    chalk.hex("#6b7280")("Remote Control via iOS"),
+  ])) {
+    console.log(row);
+  }
   console.log();
 
   if (existing) {
@@ -1700,7 +1250,7 @@ async function resolveActiveProvider(
   ];
   const loggedInProviders: Provider[] = [];
   for (const p of allProviders) {
-    if (await authStorage.getCredentials(p)) loggedInProviders.push(p);
+    if (await authStorage.hasProviderAuth(p)) loggedInProviders.push(p);
   }
 
   if (loggedInProviders.length === 0) {
@@ -1724,19 +1274,6 @@ async function resolveActiveProvider(
   return { provider, model: getDefaultModel(provider).id, loggedInProviders };
 }
 
-function displayName(provider: Provider): string {
-  if (provider === "anthropic") return "Anthropic";
-  if (provider === "xiaomi") return "Xiaomi (MiMo)";
-  if (provider === "gemini") return "Gemini";
-  if (provider === "glm") return "Z.AI (GLM)";
-  if (provider === "moonshot") return "Moonshot";
-  if (provider === "minimax") return "MiniMax";
-  if (provider === "ollama") return "Ollama";
-  if (provider === "deepseek") return "DeepSeek";
-  if (provider === "openrouter") return "OpenRouter";
-  return "OpenAI";
-}
-
 function extractText(content: string | Array<{ type: string; text?: string }>): string {
   if (typeof content === "string") return content;
   return content
@@ -1745,73 +1282,21 @@ function extractText(content: string | Array<{ type: string; text?: string }>): 
     .join("\n");
 }
 
-function goalCompletionDetail(summary: string): string | undefined {
-  const lines = summary
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && line !== "[agent_done]");
-  const statusLine = lines.find((line) => /^Status:/i.test(line));
-  const changedLine = lines.find((line) =>
-    /^(Changed|Implemented|Fixed|Added|Key findings|Full verifier)/i.test(line),
-  );
-  const verificationLine = lines.find((line) => /^(Verification|Verified|Result):/i.test(line));
-  return statusLine ?? changedLine ?? verificationLine ?? lines[0];
-}
-
-function goalProgressFromSyntheticText(text: string): GoalProgressDraft | null {
-  const eventInfo = parseGoalSyntheticEvent(text.trimStart());
-  if (!eventInfo) return null;
-  const summary = eventInfo.summary ?? "";
-  const terminalStatus = eventInfo.goalState?.status;
-  if (
-    terminalStatus === "passed" ||
-    terminalStatus === "failed" ||
-    terminalStatus === "blocked" ||
-    terminalStatus === "paused"
-  ) {
-    const terminalTitle =
-      terminalStatus === "passed"
-        ? "Goal passed"
-        : terminalStatus === "failed"
-          ? "Goal failed"
-          : terminalStatus === "blocked"
-            ? "Goal blocked"
-            : "Goal paused";
-    return {
-      kind: "goal_progress",
-      phase: "terminal",
-      title: `${terminalTitle}: ${eventInfo.goal ?? "Goal"}`,
-      detail: goalCompletionDetail(summary),
-      status: terminalStatus,
-    };
+function restoredPromptCommandDisplayText(text: string): string | null {
+  for (const command of PROMPT_COMMANDS) {
+    if (text === command.prompt) return `/${command.name}`;
+    const prefix = `${command.prompt}\n\n## User Instructions\n\n`;
+    if (text.startsWith(prefix)) {
+      const args = text.slice(prefix.length).trim();
+      return args ? `/${command.name} ${args}` : `/${command.name}`;
+    }
   }
-  if (eventInfo.kind === "worker") {
-    const titlePrefix = eventInfo.status === "done" ? "Done" : "Failed";
-    return {
-      kind: "goal_progress",
-      phase: "worker_finished",
-      title: `${titlePrefix}: ${eventInfo.task ?? "Goal worker"}`,
-      detail: goalCompletionDetail(summary),
-      workerId: eventInfo.worker,
-      status: eventInfo.status,
-    };
-  }
-  return {
-    kind: "goal_progress",
-    phase: "verifier_finished",
-    title: `Verifier ${eventInfo.status ?? "finished"}: ${eventInfo.goal ?? "Goal"}`,
-    detail: goalCompletionDetail(summary),
-    status: eventInfo.status,
-  };
+  return null;
 }
 
 export function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
   const items: CompletedItem[] = [];
   let id = 0;
-
-  const pushGoalProgress = (draft: GoalProgressDraft) => {
-    items.push({ ...draft, id: `restore-${id++}` });
-  };
 
   const pushRestoredAssistantText = (text: string) => {
     const segments = segmentDisplayText(text, []);
@@ -1863,12 +1348,11 @@ export function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
     if (msg.role === "user") {
       const text = extractText(msg.content);
       if (!text) continue;
-      const goalProgress = goalProgressFromSyntheticText(text);
-      if (goalProgress) {
-        pushGoalProgress(goalProgress);
-      } else {
-        items.push({ kind: "user", text, id: `restore-${id++}` });
-      }
+      items.push({
+        kind: "user",
+        text: restoredPromptCommandDisplayText(text) ?? text,
+        id: `restore-${id++}`,
+      });
     } else if (msg.role === "assistant") {
       const content = msg.content;
       if (typeof content === "string") {
@@ -1950,15 +1434,6 @@ export function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
   });
 
   return items;
-}
-
-function openBrowser(url: string): void {
-  const cmd =
-    process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-
-  execFile(cmd, [url], () => {
-    // Ignore errors — user can copy URL manually
-  });
 }
 
 if (process.argv[1]) {

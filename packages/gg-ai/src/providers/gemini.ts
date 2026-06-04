@@ -11,8 +11,11 @@ import type {
 } from "../types.js";
 import { ProviderError } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
-import { downgradeUnsupportedImages } from "./transform.js";
-import { zodToJsonSchema } from "../utils/zod-to-json-schema.js";
+import { downgradeUnsupportedImages, downgradeUnsupportedVideos } from "./transform.js";
+import { resolveToolSchema } from "../utils/zod-to-json-schema.js";
+import { isJsonObject } from "../utils/json.js";
+import { readSseStream } from "../utils/sse.js";
+import { getEnvironment } from "../utils/env.js";
 
 const DEFAULT_CODE_ASSIST_BASE_URL = "https://cloudcode-pa.googleapis.com";
 const CODE_ASSIST_API_VERSION = "v1internal";
@@ -145,19 +148,6 @@ interface GeminiGenerateResponse {
   usageMetadata?: GeminiUsageMetadata;
 }
 
-interface ParsedSseEvent {
-  event?: string;
-  data: string;
-}
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return value != null && typeof value === "object" && !Array.isArray(value);
-}
-
-function getEnvironment(): Record<string, string | undefined> | undefined {
-  return (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
-}
-
 function getGoogleProject(options: StreamOptions): string | undefined {
   const env = getEnvironment();
   return options.projectId ?? env?.GOOGLE_CLOUD_PROJECT ?? env?.GOOGLE_CLOUD_PROJECT_ID;
@@ -179,6 +169,51 @@ function formatErrorMessage(status: number, body: string, model: string): string
     return `Gemini API error (404): ${body}\n\n${formatUnsupportedModelMessage(model)}`;
   }
   return `Gemini API error (${status}): ${body}`;
+}
+
+/**
+ * Gemini answers HTTP 429 with status `RESOURCE_EXHAUSTED` for two distinct
+ * conditions that must be handled differently:
+ *
+ *  - **Transient per-minute throttle** — the body carries a `RetryInfo` detail
+ *    with a short `retryDelay` (e.g. "18s"). Retrying after that delay clears it.
+ *  - **Hard quota exhaustion** — daily cap, disabled billing, or an
+ *    unprovisioned preview model. No `retryDelay`, and the message says the
+ *    capacity/quota is exhausted. Retrying just burns the backoff budget and
+ *    misleads the user with "Rate limited — retrying", so the agent loop must
+ *    surface it immediately.
+ *
+ * This returns the parsed signal so the caller can stamp `resetsAt` (transient)
+ * onto the ProviderError, or mark it a hard quota error (non-retriable).
+ */
+interface GeminiQuotaSignal {
+  /** Hard exhaustion — the loop should surface immediately, not retry. */
+  exhausted: boolean;
+  /** Seconds until the throttle clears, parsed from RetryInfo.retryDelay. */
+  retryDelaySeconds?: number;
+}
+
+function parseRetryDelaySeconds(body: string): number | undefined {
+  // RetryInfo.retryDelay is a protobuf Duration string like "18s" or "1.5s".
+  const match = body.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
+  if (!match) return undefined;
+  const seconds = Number(match[1]);
+  return Number.isFinite(seconds) ? seconds : undefined;
+}
+
+function parseGeminiQuota(status: number, body: string): GeminiQuotaSignal | null {
+  if (status !== 429) return null;
+  const lower = body.toLowerCase();
+  if (!lower.includes("resource_exhausted") && !lower.includes("quota")) return null;
+  // The presence of a `RetryInfo.retryDelay` is Gemini's authoritative signal
+  // that the 429 is a recoverable throttle: it tells us exactly how long to
+  // wait. Its absence means a hard stop (daily cap, disabled billing, or an
+  // unprovisioned preview model) that won't clear with a quick retry. We rely
+  // on this delay rather than sniffing message wording, since per-minute and
+  // per-day quota IDs both appear in the body regardless of which limit fired.
+  const retryDelaySeconds = parseRetryDelaySeconds(body);
+  const exhausted = retryDelaySeconds === undefined;
+  return { exhausted, retryDelaySeconds };
 }
 
 function toSystemAndContents(messages: Message[]): {
@@ -203,6 +238,7 @@ function toSystemAndContents(messages: Message[]): {
             ? [{ text: msg.content }]
             : msg.content.map((part): GeminiPart => {
                 if (part.type === "text") return { text: part.text };
+                // Both image and video ride Gemini's inlineData part shape.
                 return { inlineData: { mimeType: part.mediaType, data: part.data } };
               }),
       });
@@ -251,6 +287,16 @@ function toSystemAndContents(messages: Message[]): {
             },
           },
         });
+        // functionResponse can't carry media, so a tool that returned video
+        // (e.g. read on a .mp4) gets its clips appended as inlineData parts the
+        // model actually watches. stringifyToolContent left a text marker above.
+        if (typeof result.content !== "string") {
+          for (const block of result.content) {
+            if (block.type === "video") {
+              parts.push({ inlineData: { mimeType: block.mediaType, data: block.data } });
+            }
+          }
+        }
       }
       if (parts.length > 0) contents.push({ role: "user", parts });
     }
@@ -275,7 +321,7 @@ function toGeminiTools(tools: Tool[] | undefined): GeminiTool[] | undefined {
       functionDeclarations: tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
-        parameters: sanitizeSchema(tool.rawInputSchema ?? zodToJsonSchema(tool.parameters)),
+        parameters: sanitizeSchema(resolveToolSchema(tool)),
       })),
     },
   ];
@@ -330,6 +376,7 @@ function toGemini3ThinkingLevel(
       return "MEDIUM";
     case "high":
     case "xhigh":
+    case "max":
       return "HIGH";
   }
 }
@@ -342,6 +389,7 @@ function toThinkingBudget(level: NonNullable<StreamOptions["thinking"]>): number
       return 8_192;
     case "high":
     case "xhigh":
+    case "max":
       return 8_192;
   }
 }
@@ -364,7 +412,8 @@ function toThinkingConfig(
 }
 
 function buildGenerateRequest(options: StreamOptions): GeminiGenerateContentRequest {
-  const downgradedMessages = downgradeUnsupportedImages(options.messages, options.supportsImages);
+  const downgradedImages = downgradeUnsupportedImages(options.messages, options.supportsImages);
+  const downgradedMessages = downgradeUnsupportedVideos(downgradedImages, options.supportsVideo);
   const { systemInstruction, contents } = toSystemAndContents(downgradedMessages);
   const tools = toGeminiTools(options.tools);
   const toolConfig = toGeminiToolConfig(options.toolChoice, options.tools);
@@ -439,61 +488,11 @@ function normalizeGeminiStopReason(reason: string | undefined): StreamResponse["
   }
 }
 
-function parseSseEvents(buffer: string): { events: ParsedSseEvent[]; remaining: string } {
-  const events: ParsedSseEvent[] = [];
-  let cursor = 0;
-
-  while (true) {
-    const next = buffer.indexOf("\n\n", cursor);
-    if (next === -1) break;
-    const raw = buffer.slice(cursor, next);
-    cursor = next + 2;
-
-    let eventName: string | undefined;
-    const dataLines: string[] = [];
-    for (const line of raw.split("\n")) {
-      if (line.startsWith("event:")) {
-        eventName = line.slice("event:".length).trim();
-      } else if (line.startsWith("data:")) {
-        dataLines.push(line.slice("data:".length).trimStart());
-      }
-    }
-
-    if (dataLines.length > 0) {
-      events.push({ event: eventName, data: dataLines.join("\n") });
-    }
-  }
-
-  return { events, remaining: buffer.slice(cursor) };
-}
-
 async function* streamSse(response: Response): AsyncGenerator<GeminiGenerateResponse> {
   if (!response.body) return;
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
-      const parsed = parseSseEvents(buffer);
-      buffer = parsed.remaining;
-      for (const event of parsed.events) {
-        if (event.data === "[DONE]") continue;
-        yield JSON.parse(event.data) as GeminiGenerateResponse;
-      }
-    }
-    buffer += decoder.decode().replace(/\r\n/g, "\n");
-    const parsed = parseSseEvents(buffer + "\n\n");
-    for (const event of parsed.events) {
-      if (event.data === "[DONE]") continue;
-      yield JSON.parse(event.data) as GeminiGenerateResponse;
-    }
-  } finally {
-    reader.releaseLock();
+  for await (const event of readSseStream(response.body)) {
+    if (event.data === "[DONE]") continue;
+    yield JSON.parse(event.data) as GeminiGenerateResponse;
   }
 }
 
@@ -569,8 +568,19 @@ async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions):
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      throw new ProviderError("gemini", formatErrorMessage(response.status, text, options.model), {
+      const quota = parseGeminiQuota(response.status, text);
+      let message = formatErrorMessage(response.status, text, options.model);
+      let resetsAt: number | undefined;
+      if (quota?.exhausted) {
+        // Stamp the canonical phrase the agent loop matches on so this hard
+        // 429 is surfaced immediately instead of retried for minutes.
+        message = `Gemini quota exhausted — usage limit reached. ${message}`;
+      } else if (quota?.retryDelaySeconds !== undefined) {
+        resetsAt = Math.floor(Date.now() / 1000) + Math.ceil(quota.retryDelaySeconds);
+      }
+      throw new ProviderError("gemini", message, {
         statusCode: response.status,
+        ...(resetsAt !== undefined ? { resetsAt } : {}),
       });
     }
 

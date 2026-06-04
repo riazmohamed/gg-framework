@@ -19,15 +19,19 @@ function formatTokenCount(n: number): string {
 interface CompactionSpinnerProps {
   /** Disable decorative ticks so terminal scrollback remains usable during active runs. */
   staticDisplay?: boolean;
+  marginTop?: number;
 }
 
-export function CompactionSpinner({ staticDisplay = false }: CompactionSpinnerProps) {
+export function CompactionSpinner({
+  staticDisplay = false,
+  marginTop = 0,
+}: CompactionSpinnerProps) {
   const theme = useTheme();
   const { active: animationActive, tick } = useFocusedAnimation(!staticDisplay);
   const frame = animationActive ? deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length) : 0;
 
   return (
-    <Box paddingLeft={1} marginTop={1}>
+    <Box paddingLeft={1} marginTop={marginTop}>
       <Box
         borderStyle="single"
         borderLeft
@@ -54,6 +58,7 @@ interface CompactionDoneProps {
   newCount: number;
   tokensBefore: number;
   tokensAfter: number;
+  marginTop?: number;
 }
 
 export function CompactionDone({
@@ -61,12 +66,13 @@ export function CompactionDone({
   newCount,
   tokensBefore,
   tokensAfter,
+  marginTop = 0,
 }: CompactionDoneProps) {
   const theme = useTheme();
   const reduction = tokensBefore > 0 ? Math.round((1 - tokensAfter / tokensBefore) * 100) : 0;
 
   return (
-    <Box paddingLeft={1} marginTop={1}>
+    <Box paddingLeft={1} marginTop={marginTop}>
       <Box
         borderStyle="single"
         borderLeft

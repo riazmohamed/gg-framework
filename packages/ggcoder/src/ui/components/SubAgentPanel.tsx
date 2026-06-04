@@ -21,6 +21,7 @@ export interface SubAgentInfo {
 interface SubAgentPanelProps {
   agents: SubAgentInfo[];
   aborted?: boolean;
+  marginTop?: number;
 }
 
 function formatTokens(n: number): string {
@@ -150,7 +151,7 @@ const AgentRow = React.memo(
   },
 );
 
-export function SubAgentPanel({ agents, aborted = false }: SubAgentPanelProps) {
+export function SubAgentPanel({ agents, aborted = false, marginTop = 0 }: SubAgentPanelProps) {
   const { columns } = useTerminalSize();
 
   if (agents.length === 0) return null;
@@ -171,7 +172,7 @@ export function SubAgentPanel({ agents, aborted = false }: SubAgentPanelProps) {
   const dotStatus = aborted ? "error" : allDone ? "done" : "running";
 
   return (
-    <Box paddingLeft={RESPONSE_LEFT_PADDING} marginTop={1} flexDirection="row">
+    <Box paddingLeft={RESPONSE_LEFT_PADDING} marginTop={marginTop} flexDirection="row">
       <ToolUseLoader status={dotStatus} />
       <Box flexDirection="column" flexGrow={1} width={contentColumns}>
         <Text bold wrap="wrap">

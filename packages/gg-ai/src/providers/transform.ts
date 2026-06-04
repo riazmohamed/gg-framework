@@ -10,35 +10,200 @@ import type {
   TextContent,
   ThinkingContent,
   ThinkingLevel,
+  VideoContent,
   Tool,
   ToolChoice,
   ToolResultContent,
-  VideoContent,
 } from "../types.js";
-import { zodToJsonSchema } from "../utils/zod-to-json-schema.js";
+import { resolveToolSchema, zodToJsonSchema } from "../utils/zod-to-json-schema.js";
 
 // ── Shared helpers ─────────────────────────────────────────
 
+/**
+ * A thinking block is only safe to round-trip to Anthropic as a real `thinking`
+ * block when it carries a genuinely non-empty signature. Empty or whitespace-
+ * only signatures (e.g. from an interrupted stream that never received its
+ * `signature_delta`, or from non-Anthropic providers) would be rejected with
+ * "thinking ... blocks cannot be modified", so they are downgraded to text.
+ */
+function hasValidThinkingSignature(part: ThinkingContent): boolean {
+  return typeof part.signature === "string" && part.signature.trim().length > 0;
+}
+
+/** True for `raw` parts that wrap a thinking / redacted_thinking wire block. */
+function isRawThinking(part: ContentPart): boolean {
+  if (part.type !== "raw") return false;
+  const t = part.data.type;
+  return t === "thinking" || t === "redacted_thinking";
+}
+
+/**
+ * True for content parts that Anthropic treats as position-sensitive reasoning
+ * blocks in the latest assistant message: SIGNED `thinking` blocks and
+ * `redacted_thinking` blocks (round-tripped as opaque `raw`). Unsigned thinking
+ * (e.g. from GLM/OpenAI or an aborted stream) is excluded — it is converted to a
+ * text block on the way out, so it carries no signature for Anthropic to validate
+ * and imposes no positional constraint.
+ */
+function isPositionSensitiveThinking(part: ContentPart): boolean {
+  if (part.type === "thinking") return hasValidThinkingSignature(part);
+  return isRawThinking(part);
+}
+
+/** Map a single assistant content part to its Anthropic wire block (or null to drop). */
+function toAnthropicAssistantPart(
+  part: ContentPart,
+  idMap: Map<string, string>,
+): Anthropic.ContentBlockParam | null {
+  if (part.type === "text") return { type: "text", text: part.text };
+  if (part.type === "thinking") {
+    // Signed thinking round-trips verbatim. Unsigned/invalid-signature thinking
+    // (GLM/OpenAI, or an aborted Anthropic stream) has nothing for Anthropic to
+    // validate and would be rejected as a thinking block, so preserve its
+    // reasoning as a text block instead of discarding it.
+    const sig = part.signature;
+    return sig && sig.trim().length > 0
+      ? { type: "thinking", thinking: part.text, signature: sig }
+      : { type: "text", text: part.text };
+  }
+  if (part.type === "tool_call")
+    return {
+      type: "tool_use",
+      id: remapAnthropicToolCallId(part.id, idMap),
+      name: part.name,
+      input: part.args,
+    };
+  if (part.type === "server_tool_call")
+    return {
+      type: "server_tool_use",
+      id: part.id,
+      name: part.name,
+      input: part.input,
+    } as unknown as Anthropic.ContentBlockParam;
+  if (part.type === "server_tool_result")
+    return part.data as unknown as Anthropic.ContentBlockParam;
+  if (part.type === "raw") return part.data as unknown as Anthropic.ContentBlockParam;
+  // Unknown content type (e.g. image in assistant message) — drop it.
+  return null;
+}
+
+/**
+ * Build an assistant message's Anthropic content blocks.
+ *
+ * Anthropic requires thinking blocks to be preserved for the duration of the
+ * ACTIVE trajectory — every assistant turn from the last real user message
+ * forward (a multi-step tool loop has no user message between steps, so each
+ * read/grep/edit turn is part of the same trajectory). The cookbook is explicit:
+ * a final assistant message must start with a thinking block preceding the
+ * lastmost tool_use/tool_result set, and previous-turn thinking should be kept.
+ * Stripping reasoning from earlier in-trajectory turns leaves the model with a
+ * bare tool_use → result chain and no reasoning anchor, which can degenerate the
+ * next turn's leading token.
+ *
+ * For SETTLED turns (before the last user message), keeping signed thinking just
+ * makes history fragile — any later edit, compaction, or reorder invalidates the
+ * signature and triggers "thinking ... blocks cannot be modified". So thinking
+ * and redacted_thinking are stripped there (tool_use and text survive). Within
+ * the active trajectory they are preserved byte-identical (signed) or downgraded
+ * to text (unsigned).
+ */
+function toAnthropicAssistantContent(
+  content: ContentPart[],
+  preserveThinking: boolean,
+  idMap: Map<string, string>,
+): Anthropic.ContentBlockParam[] {
+  if (!preserveThinking) {
+    return content
+      .filter((part) => {
+        if (part.type === "thinking" || isRawThinking(part)) return false;
+        // Anthropic rejects empty text content blocks.
+        if (part.type === "text" && !part.text) return false;
+        return true;
+      })
+      .map((part) => toAnthropicAssistantPart(part, idMap))
+      .filter((b): b is Anthropic.ContentBlockParam => b !== null);
+  }
+
+  // Active-trajectory assistant turn: thinking/redacted_thinking blocks are byte-identical
+  // AND position-sensitive (interleaved-thinking-2025-05-14). Dropping a block
+  // that PRECEDES a thinking block shifts that block's index, which the API
+  // rejects, so empty text blocks before the last thinking block are kept;
+  // empty text after it can be dropped safely.
+  const lastThinkingIdx = content.reduce(
+    (last, part, idx) => (isPositionSensitiveThinking(part) ? idx : last),
+    -1 as number,
+  );
+  return content
+    .filter((part, idx) => {
+      // Drop empty, signature-less thinking blocks — nothing to preserve.
+      if (part.type === "thinking" && !hasValidThinkingSignature(part) && !part.text) return false;
+      if (part.type === "text" && !part.text && idx > lastThinkingIdx) return false;
+      return true;
+    })
+    .map((part) => toAnthropicAssistantPart(part, idMap))
+    .filter((b): b is Anthropic.ContentBlockParam => b !== null);
+}
+
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
+const NON_VIDEO_USER_PLACEHOLDER = "(video omitted: model does not support video)";
 
-/** Replace image/video/document blocks with a text placeholder (deduping consecutive placeholders). */
-function stripImages(
-  content: (TextContent | ImageContent | VideoContent | DocumentContent)[],
+/** Replace image/document blocks with a text placeholder (deduping consecutive placeholders).
+ *  Video is handled separately by downgradeUnsupportedVideos so video-capable
+ *  models keep their video blocks. */
+function stripImages<T extends TextContent | ImageContent | VideoContent | DocumentContent>(
+  content: T[],
   placeholder: string,
-): TextContent[] {
-  const out: TextContent[] = [];
+): (Exclude<T, ImageContent | DocumentContent> | TextContent)[] {
+  const out: (Exclude<T, ImageContent | DocumentContent> | TextContent)[] = [];
   let lastWasPlaceholder = false;
   for (const block of content) {
-    if (block.type === "image" || block.type === "video" || block.type === "document") {
+    if (block.type === "image" || block.type === "document") {
+      if (!lastWasPlaceholder) out.push({ type: "text", text: placeholder });
+      lastWasPlaceholder = true;
+      continue;
+    }
+    out.push(block as Exclude<T, ImageContent | DocumentContent>);
+    lastWasPlaceholder = block.type === "text" && block.text === placeholder;
+  }
+  return out;
+}
+
+/** Replace video blocks with a text placeholder (deduping consecutive placeholders). */
+function stripVideos(
+  content: (TextContent | ImageContent | VideoContent | DocumentContent)[],
+  placeholder: string,
+): (TextContent | ImageContent | DocumentContent)[] {
+  const out: (TextContent | ImageContent | DocumentContent)[] = [];
+  let lastWasPlaceholder = false;
+  for (const block of content) {
+    if (block.type === "video") {
       if (!lastWasPlaceholder) out.push({ type: "text", text: placeholder });
       lastWasPlaceholder = true;
       continue;
     }
     out.push(block);
-    lastWasPlaceholder = block.text === placeholder;
+    lastWasPlaceholder = block.type === "text" && block.text === placeholder;
   }
   return out;
+}
+
+/**
+ * Pre-transform pass: when the target model doesn't support video, replace
+ * video blocks in user messages with a text placeholder. Tool results never
+ * carry video, so only user messages are scanned.
+ */
+export function downgradeUnsupportedVideos(
+  messages: Message[],
+  supportsVideo: boolean | undefined,
+): Message[] {
+  if (supportsVideo === true) return messages;
+  return messages.map((msg) => {
+    if (msg.role === "user" && Array.isArray(msg.content)) {
+      return { ...msg, content: stripVideos(msg.content, NON_VIDEO_USER_PLACEHOLDER) };
+    }
+    return msg;
+  });
 }
 
 /**
@@ -73,7 +238,7 @@ export function downgradeUnsupportedImages(
 }
 
 /** Extract concatenated text from tool_result content (array or string). */
-function toolResultText(content: ToolResultContent): string {
+export function toolResultText(content: ToolResultContent): string {
   if (typeof content === "string") return content;
   return content
     .filter((b): b is TextContent => b.type === "text")
@@ -85,6 +250,12 @@ function toolResultText(content: ToolResultContent): string {
 function toolResultImages(content: ToolResultContent): ImageContent[] {
   if (typeof content === "string") return [];
   return content.filter((b): b is ImageContent => b.type === "image");
+}
+
+/** Extract video blocks from tool_result content. Returns empty array for string content. */
+function toolResultVideos(content: ToolResultContent): VideoContent[] {
+  if (typeof content === "string") return [];
+  return content.filter((b): b is VideoContent => b.type === "video");
 }
 
 // ── Anthropic Transforms ───────────────────────────────────
@@ -111,14 +282,26 @@ type AnthropicImageSource = {
  * arrays are mapped to Anthropic's (text | image) block format, which
  * tool_result.content accepts natively.
  */
+type AnthropicToolResultBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; source: AnthropicImageSource }
+  | { type: "video"; source: { type: "base64"; media_type: string; data: string } };
+
 function toAnthropicToolResultContent(
   content: ToolResultContent,
-):
-  | string
-  | Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }> {
+): string | AnthropicToolResultBlock[] {
   if (typeof content === "string") return content;
-  return content.map((block) => {
+  return content.map((block): AnthropicToolResultBlock => {
     if (block.type === "text") return { type: "text" as const, text: block.text };
+    // Video blocks (e.g. read on a .mp4 for MiniMax) use the same base64 video
+    // shape as inline user content. Real Anthropic models are supportsVideo:false
+    // so they never reach here; this serves the Anthropic-compatible MiniMax API.
+    if (block.type === "video") {
+      return {
+        type: "video" as const,
+        source: { type: "base64" as const, media_type: block.mediaType, data: block.data },
+      };
+    }
     return {
       type: "image" as const,
       source: {
@@ -156,7 +339,18 @@ export function toAnthropicMessages(
   const out: Anthropic.MessageParam[] = [];
   const idMap = new Map<string, string>();
 
+  // Thinking is preserved across the ACTIVE trajectory: every assistant turn
+  // after the last real user message (tool results are role "tool", not "user",
+  // so this is simply the last role==="user" index). Earlier, settled turns have
+  // thinking stripped to keep history robust against signature invalidation.
+  const trajectoryStartIdx = messages.reduce(
+    (last, m, i) => (m.role === "user" ? i : last),
+    -1 as number,
+  );
+
+  let msgIdx = -1;
   for (const msg of messages) {
+    msgIdx++;
     if (msg.role === "system") {
       systemText = msg.content;
       continue;
@@ -169,19 +363,18 @@ export function toAnthropicMessages(
             ? msg.content
             : msg.content.map((part): Anthropic.ContentBlockParam => {
                 if (part.type === "text") return { type: "text" as const, text: part.text };
-                if (part.type === "image") {
+                if (part.type === "video") {
+                  // MiniMax-M3 rides the Anthropic transport and accepts native
+                  // video blocks. Non-video models never reach here — video is
+                  // downgraded to text by downgradeUnsupportedVideos first.
                   return {
-                    type: "image" as const,
+                    type: "video" as const,
                     source: {
                       type: "base64" as const,
-                      media_type: part.mediaType as
-                        | "image/jpeg"
-                        | "image/png"
-                        | "image/gif"
-                        | "image/webp",
+                      media_type: part.mediaType,
                       data: part.data,
                     },
-                  };
+                  } as unknown as Anthropic.ContentBlockParam;
                 }
                 if (part.type === "document") {
                   return {
@@ -194,10 +387,17 @@ export function toAnthropicMessages(
                     ...(part.name ? { title: part.name } : {}),
                   } as Anthropic.DocumentBlockParam;
                 }
-                // "video" — Anthropic does not support video; skip by returning placeholder text
                 return {
-                  type: "text" as const,
-                  text: "[Video content not supported by this provider]",
+                  type: "image" as const,
+                  source: {
+                    type: "base64" as const,
+                    media_type: part.mediaType as
+                      | "image/jpeg"
+                      | "image/png"
+                      | "image/gif"
+                      | "image/webp",
+                    data: part.data,
+                  },
                 };
               }),
       });
@@ -207,43 +407,7 @@ export function toAnthropicMessages(
       const content =
         typeof msg.content === "string"
           ? msg.content
-          : msg.content
-              .filter((part) => {
-                // Strip thinking blocks without a valid signature (e.g. from GLM/OpenAI)
-                // — Anthropic rejects empty signatures
-                if (part.type === "thinking" && !part.signature) return false;
-                // Strip empty text blocks — Anthropic rejects text content blocks
-                // with empty strings (can happen when the model returns tool_use
-                // with an empty companion text block)
-                if (part.type === "text" && !part.text) return false;
-                return true;
-              })
-              .map((part): Anthropic.ContentBlockParam => {
-                if (part.type === "text") return { type: "text", text: part.text };
-                if (part.type === "thinking")
-                  return { type: "thinking", thinking: part.text, signature: part.signature! };
-                if (part.type === "tool_call")
-                  return {
-                    type: "tool_use",
-                    id: remapAnthropicToolCallId(part.id, idMap),
-                    name: part.name,
-                    input: part.args,
-                  };
-                if (part.type === "server_tool_call")
-                  return {
-                    type: "server_tool_use",
-                    id: part.id,
-                    name: part.name,
-                    input: part.input,
-                  } as unknown as Anthropic.ContentBlockParam;
-                if (part.type === "server_tool_result")
-                  return part.data as unknown as Anthropic.ContentBlockParam;
-                if (part.type === "raw") return part.data as unknown as Anthropic.ContentBlockParam;
-                // Unknown content type (e.g. image in assistant message) — skip
-                // by returning a marker that will be filtered out below
-                return null as unknown as Anthropic.ContentBlockParam;
-              })
-              .filter(Boolean);
+          : toAnthropicAssistantContent(msg.content, msgIdx > trajectoryStartIdx, idMap);
       // Skip assistant messages with no content blocks (can happen when all
       // blocks are filtered — e.g. thinking-only responses from non-Anthropic
       // providers where signature is missing and text is empty)
@@ -254,12 +418,14 @@ export function toAnthropicMessages(
     if (msg.role === "tool") {
       out.push({
         role: "user",
+        // Cast covers the video block (used by the Anthropic-compatible MiniMax
+        // API), which isn't in the first-party Anthropic tool_result types.
         content: msg.content.map((result) => ({
           type: "tool_result" as const,
           tool_use_id: remapAnthropicToolCallId(result.toolCallId, idMap),
           content: toAnthropicToolResultContent(result.content),
           is_error: result.isError,
-        })),
+        })) as unknown as Anthropic.ContentBlockParam[],
       });
     }
   }
@@ -352,8 +518,14 @@ export function toAnthropicToolChoice(choice: ToolChoice): Anthropic.ToolChoice 
   return { type: "tool", name: choice.name };
 }
 
-function supportsAdaptiveThinking(model: string): boolean {
-  return /opus-4-7|opus-4-6|sonnet-4-6/.test(model);
+/**
+ * Anthropic models with built-in adaptive thinking (Opus 4.8/4.7/4.6,
+ * Sonnet 4.6). Matches both dashed (`opus-4-8`) and dotted (`opus-4.8`) forms
+ * so callers don't have to enumerate variants. These models don't need the
+ * `interleaved-thinking` beta header — it's built in.
+ */
+export function isAdaptiveThinkingModel(model: string): boolean {
+  return /opus-4[-.]8|opus-4[-.]7|opus-4[-.]6|sonnet-4[-.]6/.test(model);
 }
 
 export function toAnthropicThinking(
@@ -365,13 +537,13 @@ export function toAnthropicThinking(
   maxTokens: number;
   outputConfig?: { effort: string };
 } {
-  if (supportsAdaptiveThinking(model)) {
+  if (isAdaptiveThinkingModel(model)) {
     // Adaptive thinking — model decides when/how much to think.
-    // budget_tokens is deprecated on Opus 4.7 / Opus 4.6 / Sonnet 4.6.
-    // Anthropic's output_config.effort uses "max" as the top tier (Opus-only);
-    // map our "xhigh" → "max", and clamp non-Opus models to "high".
-    let effort: string = level === "xhigh" ? "max" : level;
-    if (effort === "max" && !model.includes("opus")) {
+    // budget_tokens is deprecated on Opus 4.8 / Opus 4.7 / Opus 4.6 / Sonnet 4.6.
+    // Anthropic's output_config.effort accepts low, medium, high, xhigh, and max.
+    // xhigh is Opus 4.8/4.7-only; max is supported by Opus 4.8/4.7/4.6 and Sonnet 4.6.
+    let effort: string = level;
+    if (effort === "xhigh" && !/opus-4-8|opus-4-7/.test(model)) {
       effort = "high";
     }
     return {
@@ -381,8 +553,8 @@ export function toAnthropicThinking(
     };
   }
 
-  // Legacy budget-based thinking for older models ("xhigh" treated as "high")
-  const effectiveLevel = level === "xhigh" ? "high" : level;
+  // Legacy budget-based thinking for older models ("xhigh"/"max" treated as "high")
+  const effectiveLevel = level === "xhigh" || level === "max" ? "high" : level;
   const budgetMap: Record<"low" | "medium" | "high", number> = {
     low: Math.max(1024, Math.floor(maxTokens * 0.25)),
     medium: Math.max(2048, Math.floor(maxTokens * 0.5)),
@@ -514,13 +686,19 @@ export function toOpenAIMessages(
               };
             }
             if (part.type === "video") {
-              // GLM-5V Turbo accepts video via a non-standard `video_url` content part.
-              // This format is not in the OpenAI SDK types, so we cast through unknown.
+              // Moonshot/Kimi requires video uploaded to the file service and
+              // referenced by `ms://<id>` — inline base64 is rejected. The
+              // openai provider uploads first and caches `fileId` on the part.
+              // Match Kimi's wire shape exactly: when uploaded, include both
+              // `url` and `id`. GLM-5V Turbo accepts inline base64 via the same
+              // non-standard `video_url` part. Not in the OpenAI SDK types, so
+              // cast through unknown.
+              const videoUrl = part.fileId
+                ? { url: `ms://${part.fileId}`, id: part.fileId }
+                : { url: `data:${part.mediaType};base64,${part.data}` };
               return {
                 type: "video_url",
-                video_url: {
-                  url: `data:${part.mediaType};base64,${part.data}`,
-                },
+                video_url: videoUrl,
               } as unknown as OpenAI.ChatCompletionContentPart;
             }
             if (part.type === "document") {
@@ -601,11 +779,36 @@ export function toOpenAIMessages(
       // OpenAI's `tool` role only accepts text. Emit the tool message with the
       // text content, then (if any tool results carried images and the model
       // supports vision) a follow-up `user` message carrying image_url blocks.
+      //
+      // Moonshot/Kimi is the exception for VIDEO: its coding endpoint accepts a
+      // `video_url` content part ONLY inside the tool message itself (not in a
+      // user message). So for moonshot we emit the tool content as an array
+      // `[{text}, {video_url}]` carrying the uploaded `ms://<id>` reference —
+      // mirroring the official Kimi read-media tool. The provider uploads the
+      // clip and stamps `fileId` before this transform runs.
+      const isMoonshot = options?.provider === "moonshot";
       const imageBlocks: OpenAI.ChatCompletionContentPartImage[] = [];
       for (const result of msg.content) {
         const text = toolResultText(result.content);
         const images = toolResultImages(result.content);
+        const videos = isMoonshot ? toolResultVideos(result.content) : [];
         const hasText = text.length > 0;
+        if (videos.length > 0) {
+          const parts: OpenAI.ChatCompletionContentPartText[] = [];
+          if (hasText) parts.push({ type: "text", text });
+          const videoParts = videos.map((v) => {
+            const videoUrl = v.fileId
+              ? { url: `ms://${v.fileId}`, id: v.fileId }
+              : { url: `data:${v.mediaType};base64,${v.data}` };
+            return { type: "video_url", video_url: videoUrl };
+          });
+          out.push({
+            role: "tool",
+            tool_call_id: remapToolCallId(result.toolCallId, idMap),
+            content: [...parts, ...videoParts] as unknown as string,
+          });
+          continue;
+        }
         out.push({
           role: "tool",
           tool_call_id: remapToolCallId(result.toolCallId, idMap),
@@ -638,7 +841,7 @@ export function toOpenAITools(tools: Tool[]): OpenAI.ChatCompletionTool[] {
     function: {
       name: tool.name,
       description: tool.description,
-      parameters: tool.rawInputSchema ?? zodToJsonSchema(tool.parameters),
+      parameters: resolveToolSchema(tool),
     },
   }));
 }
@@ -654,7 +857,7 @@ export function toOpenAIReasoningEffort(
   level: ThinkingLevel,
   _model: string,
 ): "low" | "medium" | "high" | "xhigh" {
-  return level;
+  return level === "max" ? "xhigh" : level;
 }
 
 // ── Response Normalization ─────────────────────────────────

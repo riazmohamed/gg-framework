@@ -5,6 +5,7 @@ import { Spinner } from "./Spinner.js";
 import { ToolUseLoader } from "./ToolUseLoader.js";
 import { MessageResponse } from "./MessageResponse.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
+import { toolNameColor } from "../transcript/tool-presentation.js";
 
 interface ServerToolRunningProps {
   status: "running";
@@ -12,6 +13,7 @@ interface ServerToolRunningProps {
   input: unknown;
   startedAt: number;
   animateUntil?: number;
+  marginTop?: number;
 }
 
 interface ServerToolDoneProps {
@@ -20,6 +22,7 @@ interface ServerToolDoneProps {
   input: unknown;
   durationMs: number;
   resultType?: string;
+  marginTop?: number;
 }
 
 type ServerToolExecutionProps = ServerToolRunningProps | ServerToolDoneProps;
@@ -56,13 +59,17 @@ export function ServerToolExecution(props: ServerToolExecutionProps) {
 
   if (props.status === "running") {
     return (
-      <Box flexDirection="column" paddingLeft={RESPONSE_LEFT_PADDING} marginTop={1}>
+      <Box
+        flexDirection="column"
+        paddingLeft={RESPONSE_LEFT_PADDING}
+        marginTop={props.marginTop ?? 0}
+      >
         <Box flexDirection="row">
           <Box width={HEADER_PREFIX} flexShrink={0}>
             <Spinner staticDisplay={staticDisplay} />
           </Box>
           <Box flexGrow={1} width={headerContentWidth}>
-            {headerContent(theme.toolName)}
+            {headerContent(toolNameColor(theme, props.name))}
           </Box>
         </Box>
         <MessageResponse>
@@ -78,11 +85,15 @@ export function ServerToolExecution(props: ServerToolExecutionProps) {
   const duration = Math.round(props.durationMs / 1000);
 
   return (
-    <Box flexDirection="column" paddingLeft={RESPONSE_LEFT_PADDING} marginTop={1}>
+    <Box
+      flexDirection="column"
+      paddingLeft={RESPONSE_LEFT_PADDING}
+      marginTop={props.marginTop ?? 0}
+    >
       <Box flexDirection="row">
         <ToolUseLoader status={isAborted ? "error" : "done"} />
         <Box flexGrow={1} width={headerContentWidth}>
-          {headerContent(isAborted ? theme.error : theme.success)}
+          {headerContent(isAborted ? theme.error : toolNameColor(theme, props.name))}
         </Box>
       </Box>
       <MessageResponse>

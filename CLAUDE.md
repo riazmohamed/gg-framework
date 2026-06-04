@@ -181,8 +181,43 @@ To add a registry command: add an entry in `createBuiltinCommands()` array. If i
 - **resolveActiveProvider**: `cli.ts` helper that picks the logged-in provider at startup with fallback
 - **Zod schemas**: tool parameters defined with Zod, converted to JSON Schema at provider boundary
 
-## Organization Rules
+## MCP Servers
 
+`ogcoder mcp` adds and manages Model Context Protocol servers. Configs are stored in the same `{ "mcpServers": { … } }` shape Claude Code uses, so they're portable both directions.
+
+### Scopes & file locations
+
+- **Global** → `~/.gg/mcp.json` — available in all OG Coder sessions.
+- **Project** → `./.gg/mcp.json` — only the current project root.
+- On a name collision, **project wins**. Provider defaults (e.g. `kencode-search`) stay authoritative — a user server can only add a new name, never override a default.
+
+### Commands
+
+```bash
+ogcoder mcp                              # interactive dashboard (🟢/🔴 status, tool counts, scope)
+ogcoder mcp list                         # list servers with live connection status
+ogcoder mcp get <name>                   # show one server's config (secrets masked)
+ogcoder mcp add <args…>                  # add a server (claude-compatible grammar)
+ogcoder mcp remove <name> [--scope s]    # remove a server
+```
+
+The `add` grammar mirrors `claude mcp add` 1:1 — you can paste a `claude mcp add …` (or `ogcoder mcp add …`) line and the prefix is stripped automatically:
+
+```bash
+ogcoder mcp add --transport http notion https://mcp.notion.com/mcp
+ogcoder mcp add --transport sse asana https://mcp.asana.com/sse
+ogcoder mcp add --env AIRTABLE_API_KEY=key airtable -- npx -y airtable-mcp-server
+```
+
+`--scope user` maps to global; `local`/`project` map to project. Code lives in `core/mcp/` (`store.ts` persistence, `parse-add-command.ts` parser, `client.ts` `connectAllDetailed`/`probe`) and `cli/mcp.ts` + `ui/mcp.tsx`.
+
+### Caveats
+
+- **Connection is startup-only.** MCP connects once at launch (`connectInitialMcpTools` in `cli.ts`). Adding a server via `ogcoder mcp` mid-session won't hot-load it — restart ogcoder.
+- **WebSocket transport** is parsed but rejected (no WS client today).
+- **Env var expansion** (`${VAR}`) in `.mcp.json` is NOT expanded in v1 — values pass through literally.
+
+## Organization Rules
 - Types → `types.ts` in each package
 - Providers → `providers/` in gg-ai, one file per provider
 - Tools → `tools/` in ggcoder, one file per tool

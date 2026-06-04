@@ -259,40 +259,6 @@ describe("terminal history", () => {
     expect(rendered).not.toContain("| --- | --- | --- |");
   });
 
-  it("serializes goal progress rows with tool-style gutter and agent spacing", () => {
-    let output = "";
-    const stream = {
-      write(chunk: string) {
-        output += chunk;
-        return true;
-      },
-    } as NodeJS.WriteStream;
-    const printer = createTerminalHistoryPrinter({ stream });
-    const items: CompletedItem[] = [
-      { kind: "assistant", text: "Coordinator update", id: "assistant-before-goal" },
-      {
-        kind: "goal_progress",
-        phase: "worker_started",
-        title: "Worker started: Audit /goal role contracts",
-        detail: "Task is running in the background.",
-        workerId: "worker-1",
-        status: "running",
-        id: "goal-progress-worker",
-      },
-    ];
-
-    printer.print(items, context);
-    const rendered = stripAnsi(output);
-
-    expect(rendered).toMatch(
-      /Coordinator update\n\n [⏺●] Worker started: Audit \/goal role contracts/,
-    );
-    expect(rendered).not.toContain(" · Worker started");
-    expect(rendered).toContain(" · worker worker-1");
-    expect(rendered).toContain("  ⎿  Task is running in the background.");
-    expect(rendered).not.toContain("↻ Worker started");
-  });
-
   it("serializes subagent groups as the live tree panel shape", () => {
     const item: CompletedItem = {
       kind: "subagent_group",
@@ -331,7 +297,7 @@ describe("terminal history", () => {
       [
         {
           kind: "assistant",
-          text: "Published @kenkaiiii/ggcoder at 4.3.215.",
+          text: "Published @abukhaled/ogcoder at 4.3.215.",
           id: "assistant-before-notices",
         },
         {
@@ -345,7 +311,7 @@ describe("terminal history", () => {
         {
           kind: "update_notice",
           id: "update-notice",
-          text: "Ken just pushed a fresh update — 4.3.214 → 4.3.215! I'll grab it on next launch (or run npm install -g @kenkaiiii/ggcoder@latest if you can't wait).",
+          text: "Ken just pushed a fresh update — 4.3.214 → 4.3.215! I'll grab it on next launch (or run npm install -g @abukhaled/ogcoder@latest if you can't wait).",
         },
       ],
       context,
@@ -354,7 +320,8 @@ describe("terminal history", () => {
     const rendered = stripAnsi(output);
     expect(rendered).toMatch(/4\.3\.215\.\n\n │ ⟳ Conversation compacted/);
     expect(rendered).toMatch(/86% reduction\n\n ╭─+/);
-    expect(rendered).toContain(" │ ✨ Ken just pushed a fresh update");
+    expect(rendered).toContain(" │ KEN HAS PUSHED A NEW GG CODER UPDATE");
+    expect(rendered).not.toContain("Ken just pushed a fresh update");
     expect(rendered).toMatch(/╰─+╯\n$/);
   });
 
@@ -403,7 +370,7 @@ describe("terminal history", () => {
     expect(rendered).not.toMatch(/toggle thinking\n\n\n▄+/);
   });
 
-  it("prints one leading separator and no trailing blank after finalized rows", () => {
+  it("prints one trailing newline after finalized assistant rows", () => {
     let output = "";
     const stream = {
       write(chunk: string) {
@@ -416,6 +383,247 @@ describe("terminal history", () => {
     printer.print([{ kind: "assistant", text: "last answer", id: "assistant-1" }], context);
 
     expect(stripAnsi(output)).toMatch(/^ [⏺●] last answer\n$/);
+  });
+
+  it("does not add a blank separator between a submitted user row and finalized assistant row", () => {
+    let output = "";
+    const stream = {
+      write(chunk: string) {
+        output += chunk;
+        return true;
+      },
+    } as NodeJS.WriteStream;
+    const printer = createTerminalHistoryPrinter({ stream });
+
+    printer.print(
+      [
+        { kind: "user", text: "Fix it", id: "user-1" },
+        { kind: "assistant", text: "Fixed.", id: "assistant-1" },
+      ],
+      context,
+    );
+
+    expect(stripAnsi(output)).toMatch(/▀+\n [⏺●] Fixed\./);
+    expect(stripAnsi(output)).not.toMatch(/▀+\n\n [⏺●] Fixed\./);
+  });
+
+  it("reinserts the paragraph break before an assistant continuation chunk", () => {
+    let output = "";
+    const stream = {
+      write(chunk: string) {
+        output += chunk;
+        return true;
+      },
+    } as NodeJS.WriteStream;
+    const printer = createTerminalHistoryPrinter({ stream });
+
+    printer.print(
+      [
+        { kind: "assistant", text: "First chunk.", id: "assistant-1" },
+        { kind: "assistant", text: "Second chunk.", continuation: true, id: "assistant-2" },
+      ],
+      context,
+    );
+
+    // A continuation chunk is the next paragraph of a progressively-flushed
+    // response, so the blank line that separated the paragraphs is restored —
+    // this keeps reassembled scrollback identical to the whole response.
+    expect(stripAnsi(output)).toContain(" ⏺ First chunk.\n\n   Second chunk.");
+  });
+
+  it("omits tool rows from scrollback (shown in the live tool panel instead)", () => {
+    let output = "";
+    const stream = {
+      write(chunk: string) {
+        output += chunk;
+        return true;
+      },
+    } as NodeJS.WriteStream;
+    const printer = createTerminalHistoryPrinter({ stream });
+
+    printer.print(
+      [
+        { kind: "assistant", text: "I’ll inspect the files.", id: "assistant-1" },
+        {
+          kind: "tool_group",
+          id: "tool-group-1",
+          tools: [
+            {
+              toolCallId: "read-1",
+              name: "read",
+              args: { file_path: "src/a.ts" },
+              status: "done",
+              result: "ok",
+            },
+          ],
+        },
+      ],
+      context,
+    );
+
+    const text = stripAnsi(output);
+    expect(text).toContain("inspect the files.");
+    expect(text).not.toContain("Read");
+  });
+
+  it("omits consecutive tool_done rows from scrollback", () => {
+    let output = "";
+    const stream = {
+      write(chunk: string) {
+        output += chunk;
+        return true;
+      },
+    } as NodeJS.WriteStream;
+    const printer = createTerminalHistoryPrinter({ stream });
+
+    printer.print(
+      [
+        {
+          kind: "tool_done",
+          id: "tool-1",
+          name: "read",
+          args: { file_path: "src/a.ts" },
+          result: "ok",
+          isError: false,
+          durationMs: 1,
+        },
+        {
+          kind: "tool_done",
+          id: "tool-2",
+          name: "grep",
+          args: { pattern: "needle" },
+          result: "src/a.ts:1:needle\n1 match found",
+          isError: false,
+          durationMs: 1,
+        },
+      ],
+      context,
+    );
+
+    expect(output).toBe("");
+  });
+
+  it("does not add a blank separator above the next user row after an assistant", () => {
+    let output = "";
+    const stream = {
+      write(chunk: string) {
+        output += chunk;
+        return true;
+      },
+    } as NodeJS.WriteStream;
+    const printer = createTerminalHistoryPrinter({ stream });
+
+    printer.print(
+      [
+        { kind: "assistant", text: "Previous answer.", id: "assistant-1" },
+        { kind: "user", text: "Next prompt", id: "user-1" },
+      ],
+      context,
+    );
+
+    expect(stripAnsi(output)).toMatch(/Previous answer\.\n▄+/);
+    expect(stripAnsi(output)).not.toMatch(/Previous answer\.\n\n▄+/);
+  });
+
+  it("renders a screenshot result as a single Screenshot (media-type) line", () => {
+    const item: CompletedItem = {
+      kind: "tool_done",
+      id: "tool-screenshot-1",
+      name: "screenshot",
+      args: { url: "http://localhost:3000" },
+      result: "Captured http://localhost:3000 → /tmp/shot.png [image/png] (1280×800)",
+      isError: false,
+      durationMs: 1,
+    };
+
+    const rendered = stripAnsi(serializeCompletedItemToTerminalHistory(item, context));
+
+    expect(rendered).toMatch(/^ [⏺●] Screenshot\(image\/png\)$/);
+    expect(rendered).not.toContain("Captured");
+    expect(rendered).not.toContain("/tmp/shot.png");
+  });
+
+  it("writes an inline graphics sequence after an image-bearing item on kitty terminals", () => {
+    const prevKitty = process.env.KITTY_WINDOW_ID;
+    const prevTmux = process.env.TMUX;
+    process.env.KITTY_WINDOW_ID = "1";
+    delete process.env.TMUX;
+    const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    try {
+      let output = "";
+      const stream = {
+        write(chunk: string) {
+          output += chunk;
+          return true;
+        },
+      } as NodeJS.WriteStream;
+      const printer = createTerminalHistoryPrinter({ stream });
+      const item: CompletedItem = {
+        kind: "tool_done",
+        id: "tool-image-1",
+        name: "read",
+        args: { file_path: "shot.png" },
+        result: "Read image file shot.png [image/png]",
+        isError: false,
+        durationMs: 1,
+        imagePreviews: [{ base64: "QUJD", mediaType: "image/png" }],
+      };
+
+      printer.print([item], context);
+
+      expect(stripAnsi(output)).toContain("Read shot.png");
+      // kitty APC graphics sequence with the base64 payload.
+      expect(output).toContain("\u001b_Gf=100,a=T,m=0;QUJD\u001b\\");
+    } finally {
+      if (prevKitty === undefined) delete process.env.KITTY_WINDOW_ID;
+      else process.env.KITTY_WINDOW_ID = prevKitty;
+      if (prevTmux === undefined) delete process.env.TMUX;
+      else process.env.TMUX = prevTmux;
+      if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
+    }
+  });
+
+  it("writes only the text line for image items when no graphics terminal is detected", () => {
+    const prevKitty = process.env.KITTY_WINDOW_ID;
+    const prevTermProgram = process.env.TERM_PROGRAM;
+    const prevTerm = process.env.TERM;
+    delete process.env.KITTY_WINDOW_ID;
+    delete process.env.TERM_PROGRAM;
+    process.env.TERM = "xterm-256color";
+    try {
+      let output = "";
+      const stream = {
+        write(chunk: string) {
+          output += chunk;
+          return true;
+        },
+      } as NodeJS.WriteStream;
+      const printer = createTerminalHistoryPrinter({ stream });
+      const item: CompletedItem = {
+        kind: "tool_done",
+        id: "tool-image-2",
+        name: "read",
+        args: { file_path: "shot.png" },
+        result: "Read image file shot.png [image/png]",
+        isError: false,
+        durationMs: 1,
+        imagePreviews: [{ base64: "QUJD", mediaType: "image/png" }],
+      };
+
+      printer.print([item], context);
+
+      expect(stripAnsi(output)).toContain("Read shot.png");
+      expect(output).not.toContain("\u001b_G");
+      expect(output).not.toContain("\u001b]1337");
+    } finally {
+      if (prevKitty === undefined) delete process.env.KITTY_WINDOW_ID;
+      else process.env.KITTY_WINDOW_ID = prevKitty;
+      if (prevTermProgram === undefined) delete process.env.TERM_PROGRAM;
+      else process.env.TERM_PROGRAM = prevTermProgram;
+      if (prevTerm === undefined) delete process.env.TERM;
+      else process.env.TERM = prevTerm;
+    }
   });
 
   it("can intentionally clear printed ids for a fresh session", () => {

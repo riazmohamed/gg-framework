@@ -1,10 +1,10 @@
-# @kenkaiiii/ggcoder-eyes
+# @abukhaled/ggcoder-eyes
 
 Project-agnostic perception probes for coding agents: screenshots, logs, API checks, and capture sinks.
 
 ## Package surface
 
-- Library entry: `@kenkaiiii/ggcoder-eyes`
+- Library entry: `@abukhaled/ggcoder-eyes`
 - CLI: `ggcoder-eyes`
 - Additional packaged assets: `probes/`, `shared/`
 

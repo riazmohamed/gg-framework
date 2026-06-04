@@ -6,13 +6,10 @@ import type { ProcessManager } from "../core/process-manager.js";
 import type { MCPClientManager } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
 import type { Skill } from "../core/skills.js";
+import type { CheckpointStore } from "../core/checkpoint-store.js";
 import { App, type CompletedItem, type DoneStatus } from "./App.js";
 import { createTerminalHistoryPrinter } from "./terminal-history.js";
-import type { GoalStatusEntry } from "./components/GoalStatusBar.js";
-import { shutdownGoalWorkers } from "../core/goal-worker.js";
 import type { PlanStep } from "../utils/plan-steps.js";
-import type { GoalReference, GoalRun } from "../core/goal-store.js";
-import type { GoalMode } from "../core/runtime-mode.js";
 import { ThemeContext, SetThemeContext, loadTheme, type ThemeName } from "./theme/theme.js";
 import { detectTheme } from "./theme/detect-theme.js";
 import { AnimationProvider } from "./components/AnimationContext.js";
@@ -36,6 +33,7 @@ export interface RenderAppConfig {
   version: string;
   theme?: "auto" | ThemeName;
   showTokenUsage?: boolean;
+  idealReviewEnabled?: boolean;
   onSlashCommand?: (input: string) => Promise<string | null>;
   loggedInProviders?: Provider[];
   credentialsByProvider?: Record<
@@ -45,17 +43,20 @@ export interface RenderAppConfig {
   initialHistory?: CompletedItem[];
   sessionsDir?: string;
   sessionPath?: string;
+  sessionId?: string;
   processManager?: ProcessManager;
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
-  goalModeRef?: { current: GoalMode };
+  planModeRef?: { current: boolean };
   skills?: Skill[];
-  initialOverlay?: "goal";
-  goalReferencesRef?: { current: readonly GoalReference[] | undefined };
-  repoMapChangedFilesRef?: { current: Set<string> };
-  repoMapReadFilesRef?: { current: Set<string> };
+  checkpointStore?: CheckpointStore;
+  rebuildToolsForCwd?: (cwd: string) => AgentTool[];
   connectInitialMcpTools?: () => Promise<AgentTool[]>;
+  planCallbacks?: {
+    onEnterPlan?: (reason?: string) => void | Promise<void>;
+    onExitPlan?: (planPath: string) => Promise<string>;
+  };
 }
 
 /**
@@ -82,7 +83,7 @@ interface RuntimeState {
  * as our reset mechanism (the only thing that actually escapes Ink's
  * cumulative live-area drift).
  */
-type OverlayKind = "model" | "tasks" | "goal" | "skills" | "plan" | "theme" | "eyes" | null;
+type OverlayKind = "model" | "tasks" | "skills" | "plan" | "theme" | "eyes" | null;
 
 export interface SessionStore {
   messages: Message[];
@@ -94,9 +95,10 @@ export interface SessionStore {
   approvedPlanPath?: string;
   planSteps: PlanStep[];
   sessionPath?: string;
+  sessionId?: string;
   sessionTitle?: string;
   sessionTitleGenerated: boolean;
-  /** Which overlay (Tasks, Goal, Skills, Plan, Eyes, Theme, Model) is open. */
+  /** Which overlay (Tasks, Skills, Plan, Eyes, Theme, Model) is open. */
   overlay?: OverlayKind;
   /** Plan overlay auto-expand-newest flag (only meaningful when overlay==='plan'). */
   planAutoExpand?: boolean;
@@ -113,8 +115,6 @@ export interface SessionStore {
      *  plan_event item instead of the bland info row. */
     planEvent?: { event: "approved" | "rejected" | "dismissed"; detail?: string };
   };
-  /** Goal run to activate immediately after a visual remount clears review scrollback. */
-  pendingGoalRun?: GoalRun;
   /**
    * True while the agent loop is running. Mirrored by App.tsx so renderApp's
    * resize handler can skip the unmount/remount that would abort the agent
@@ -130,10 +130,10 @@ export interface SessionStore {
    * sessionStore.history before the unmount, so the chat isn't lost.
    */
   pendingResetUI?: boolean;
-  /** Active goal status bar entries. Preserved across Goal pane open/close remounts. */
-  goalStatusEntries?: GoalStatusEntry[];
-  /** Goal orchestration mode display state. */
-  goalMode?: GoalMode;
+  /** Plan mode display/restriction state. */
+  planMode?: boolean;
+  /** Whether pre-final ideal review is enabled for this UI session. */
+  idealReviewEnabled?: boolean;
 }
 
 export interface ResetUIOptions {
@@ -194,6 +194,35 @@ const INK_OPTIONS = {
   exitOnCtrlC: false,
 };
 
+// Fullscreen alt-screen render tuning. Two settings work together to make
+// scrolling smooth instead of jumpy/flickery:
+//
+//  - incrementalRendering: Ink's default "standard" renderer erases ALL of the
+//    previous frame's lines (ansiEscapes.eraseLines) and rewrites the whole
+//    frame every tick. For a full-height fullscreen frame that means redrawing
+//    the footer/input/status rows — which never change during a scroll — on
+//    every step, and that erase-then-refill is the visible flicker. Ink's
+//    incremental renderer rewrites ONLY the lines that actually changed (the
+//    transcript region), leaving the controls untouched. No erase pass = no
+//    flicker. It also has explicit handling for the no-trailing-newline
+//    fullscreen frame, so it's the intended mode for this layout.
+//
+//    NOTE: incremental rendering is fullscreen-ONLY. In the default scrollback
+//    path it desyncs against writeToStdout's log.clear()/scrollback flushes —
+//    the renderer's line cache no longer matches the terminal, so the input
+//    row gets re-emitted instead of diffed and the prompt duplicates down the
+//    screen. Keep it out of INK_OPTIONS.
+//
+//  - maxFps: the default 30fps cap (~33ms/frame) makes the coalesced scroll
+//    updates feel stepped. A higher cap lets paints keep up for a smooth glide;
+//    combined with incremental rendering each paint is cheap (only the changed
+//    rows are written). Ink wraps each frame in synchronized output (BSU/ESU)
+//    on a TTY, so higher fps doesn't tear.
+//
+// The legacy scrollback path keeps the conservative defaults (it appends to
+// native scrollback, so there's no repaint to optimize).
+const FULLSCREEN_INK_OPTIONS = { ...INK_OPTIONS, maxFps: 120, incrementalRendering: true };
+
 // XTMODKEYS "off" — turns off xterm's modifyOtherKeys=2 mode where Shift+Enter,
 // Ctrl+letters, etc. arrive as ESC[27;<mod>;<keycode>~. Some terminals
 // (Terminal.app, tmux passthrough, certain xterm configs) leave this enabled
@@ -208,6 +237,26 @@ const DISABLE_MODIFY_OTHER_KEYS = "\x1b[>4;0m";
 const DISABLE_FOCUS_REPORTING = "\x1b[?1004l";
 const SCREEN_CLEAR = DISABLE_MODIFY_OTHER_KEYS + "\x1b[2J\x1b[3J\x1b[H";
 const VIEWPORT_CLEAR = DISABLE_MODIFY_OTHER_KEYS + "\x1b[2J\x1b[H";
+// Alternate screen buffer (smcup/rmcup). Entering gives a fresh blank screen
+// with no native scrollback, so nothing can ever scroll Ink's live frame —
+// this is what makes the footer a truly fixed bottom region. Leaving restores
+// the user's original shell screen + scrollback intact.
+const ALT_SCREEN_ENTER = "\x1b[?1049h";
+const ALT_SCREEN_LEAVE = "\x1b[?1049l";
+
+/**
+ * Fullscreen alternate-screen viewport mode. Default OFF: native terminal
+ * scrollback is the default (smooth, GPU-accelerated, real mouse-wheel scroll).
+ * Set `GG_FULLSCREEN=1` to opt into the alternate-screen in-Ink viewport
+ * (pinned footer, but no native scrollback). Non-TTY / CI / print modes never
+ * use it.
+ */
+export function isFullscreenViewportEnabled(): boolean {
+  if (process.env.GG_FULLSCREEN === "1") {
+    return Boolean(process.stdout.isTTY && process.stdin.isTTY);
+  }
+  return false;
+}
 
 export function getResetClearMode(
   options: Pick<ResetUIOptions, "wipeSession" | "history" | "resizeRedraw"> | undefined,
@@ -218,10 +267,14 @@ export function getResetClearMode(
 export async function renderApp(config: RenderAppConfig): Promise<void> {
   const themeSetting = config.theme ?? "auto";
   const resolvedTheme = themeSetting === "auto" ? await detectTheme() : themeSetting;
+  const fullscreen = isFullscreenViewportEnabled();
 
   // Clear screen + scrollback so old commands don't appear above the TUI.
-  // Also disables modifyOtherKeys (see DISABLE_MODIFY_OTHER_KEYS).
-  process.stdout.write(SCREEN_CLEAR);
+  // Also disables modifyOtherKeys (see DISABLE_MODIFY_OTHER_KEYS). In fullscreen
+  // mode we first switch to the alternate screen buffer so the entire viewport
+  // (bounded transcript + pinned controls) is owned by Ink and nothing written
+  // around it can scroll the frame.
+  process.stdout.write((fullscreen ? ALT_SCREEN_ENTER : "") + SCREEN_CLEAR);
 
   // Belt-and-suspenders cleanup: tmux can re-enable modifyOtherKeys when it
   // forwards keyboard mode changes, and Ink's unmount path doesn't touch this
@@ -230,12 +283,43 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
   // that confuse the parent shell.
   const onProcessExit = (): void => {
     try {
-      process.stdout.write(DISABLE_MODIFY_OTHER_KEYS + DISABLE_FOCUS_REPORTING);
+      // Leave the alternate screen LAST so the user's original shell scrollback
+      // returns intact, with no leftover artifacts from the fullscreen viewport.
+      process.stdout.write(
+        DISABLE_MODIFY_OTHER_KEYS + DISABLE_FOCUS_REPORTING + (fullscreen ? ALT_SCREEN_LEAVE : ""),
+      );
     } catch {
       // stdout may already be torn down; nothing useful to do here.
     }
   };
   process.on("exit", onProcessExit);
+
+  // Safety net: when the TUI is frozen (e.g. the stream hung and abort didn't
+  // work), the user must still be able to get out. Ink's exitOnCtrlC is false
+  // so the app can handle graceful abort, but if the app itself is stuck we
+  // need a process-level escape hatch.
+  let sigintCount = 0;
+  let sigintTimer: ReturnType<typeof setTimeout> | null = null;
+  const onSigint = (): void => {
+    sigintCount++;
+    if (sigintTimer) clearTimeout(sigintTimer);
+    sigintTimer = setTimeout(() => {
+      sigintCount = 0;
+    }, 2000);
+    if (sigintCount === 1) {
+      // First Ctrl+C: try to gracefully exit by unmounting Ink
+      try {
+        ref.instance?.unmount();
+      } catch {
+        // ignored
+      }
+      setTimeout(() => process.exit(130), 250);
+    } else {
+      // Second Ctrl+C: force exit immediately (130 = 128 + SIGINT)
+      process.exit(130);
+    }
+  };
+  process.on("SIGINT", onSigint);
 
   // Runtime state lives in this closure so unmount/remount doesn't lose
   // the user's runtime model/provider/thinking choices.
@@ -260,17 +344,18 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     approvedPlanPath: undefined,
     planSteps: [],
     sessionPath: config.sessionPath,
+    sessionId: config.sessionId,
     sessionTitle: undefined,
     sessionTitleGenerated: false,
     overlay: null,
     planAutoExpand: false,
     pendingAction: undefined,
-    pendingGoalRun: undefined,
-    goalStatusEntries: [],
-    goalMode: config.goalModeRef?.current ?? "off",
+    planMode: config.planModeRef?.current ?? false,
+    idealReviewEnabled: config.idealReviewEnabled ?? true,
   };
 
   const terminalHistoryPrinter = createTerminalHistoryPrinter();
+  const inkOptions = fullscreen ? FULLSCREEN_INK_OPTIONS : INK_OPTIONS;
   const ref: { instance: InkInstance | null } = { instance: null };
 
   const buildElement = (): React.ReactElement =>
@@ -279,7 +364,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       { initial: resolvedTheme },
       React.createElement(
         TerminalSizeProvider,
-        { isAgentRunning: () => !!sessionStore.isAgentRunning },
+        { isAgentRunning: () => !!sessionStore.isAgentRunning, fullscreen },
         React.createElement(
           AnimationProvider,
           null,
@@ -298,24 +383,26 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             cwd: config.cwd,
             version: config.version,
             showTokenUsage: config.showTokenUsage,
+            idealReviewEnabled: sessionStore.idealReviewEnabled,
             onSlashCommand: config.onSlashCommand,
             loggedInProviders: config.loggedInProviders,
             credentialsByProvider: config.credentialsByProvider,
             initialHistory: sessionStore.history,
             sessionsDir: config.sessionsDir,
             sessionPath: sessionStore.sessionPath,
+            sessionId: sessionStore.sessionId,
             processManager: config.processManager,
             settingsFile: config.settingsFile,
             mcpManager: config.mcpManager,
             authStorage: config.authStorage,
-            goalModeRef: config.goalModeRef,
+            planModeRef: config.planModeRef,
             skills: config.skills,
-            initialOverlay: config.initialOverlay,
-            goalReferencesRef: config.goalReferencesRef,
-            repoMapChangedFilesRef: config.repoMapChangedFilesRef,
-            repoMapReadFilesRef: config.repoMapReadFilesRef,
+            checkpointStore: config.checkpointStore,
+            rebuildToolsForCwd: config.rebuildToolsForCwd,
             connectInitialMcpTools: config.connectInitialMcpTools,
+            planCallbacks: config.planCallbacks,
             terminalHistoryPrinter,
+            fullscreen,
             resetUI,
             onRuntimeStateChange,
             sessionStore,
@@ -343,8 +430,6 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       sessionStore.planSteps = [];
       sessionStore.sessionTitle = undefined;
       sessionStore.sessionTitleGenerated = false;
-      sessionStore.goalStatusEntries = [];
-      if (config.goalReferencesRef) config.goalReferencesRef.current = undefined;
     }
     if (options?.messages) sessionStore.messages = options.messages;
     if (options?.history) {
@@ -356,11 +441,22 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     }
     if (options?.planSteps !== undefined) sessionStore.planSteps = options.planSteps;
     if (options?.sessionPath !== undefined) sessionStore.sessionPath = options.sessionPath;
+    if (options?.sessionPath !== undefined && !sessionStore.sessionId) {
+      sessionStore.sessionId = config.sessionId;
+    }
     if (options?.pendingAction) sessionStore.pendingAction = options.pendingAction;
 
     old.unmount();
     if (options?.resizeRedraw) {
       terminalHistoryPrinter.resetPrinted();
+    }
+    // Fullscreen alt-screen mode owns the entire screen and renders the
+    // transcript inside Ink, so there is no native scrollback to preserve or
+    // repaint — "clear" is just a screen wipe + cursor home before re-render.
+    if (fullscreen) {
+      process.stdout.write(VIEWPORT_CLEAR);
+      ref.instance = render(buildElement(), inkOptions);
+      return;
     }
     // Resize can leave log-update frames at the old width in the visible viewport.
     // Repaint the durable transcript after a full clear so messages don't appear
@@ -377,10 +473,10 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
         cwd: config.cwd,
       });
     }
-    ref.instance = render(buildElement(), INK_OPTIONS);
+    ref.instance = render(buildElement(), inkOptions);
   }
 
-  ref.instance = render(buildElement(), INK_OPTIONS);
+  ref.instance = render(buildElement(), inkOptions);
 
   // Terminal resize → full unmount/remount. Completed transcript rows are real
   // terminal output now, so resetUI() only rebuilds the live Ink controls unless
@@ -389,6 +485,10 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
   // cancelled by its own useEffect cleanup when the old instance unmounts.
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
   const onTerminalResize = (): void => {
+    // Fullscreen alt-screen mode owns a full-height frame that Ink repaints in
+    // place on dimension changes (handled inside TerminalSizeProvider). No
+    // unmount/remount is needed — and doing one would flash the whole screen.
+    if (fullscreen) return;
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       resizeTimer = null;
@@ -424,12 +524,15 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     process.stdout.off("resize", onTerminalResize);
     if (resizeTimer) clearTimeout(resizeTimer);
     process.off("exit", onProcessExit);
-    shutdownGoalWorkers(config.cwd);
+    process.off("SIGINT", onSigint);
+    if (sigintTimer) clearTimeout(sigintTimer);
     // Final cleanup on normal exit — also covered by the "exit" handler,
     // but writing here ensures the disable lands before Node tears stdout
     // down on process termination.
     try {
-      process.stdout.write(DISABLE_MODIFY_OTHER_KEYS + DISABLE_FOCUS_REPORTING);
+      process.stdout.write(
+        DISABLE_MODIFY_OTHER_KEYS + DISABLE_FOCUS_REPORTING + (fullscreen ? ALT_SCREEN_LEAVE : ""),
+      );
     } catch {
       // ignored
     }

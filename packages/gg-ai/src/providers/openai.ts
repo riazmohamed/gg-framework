@@ -6,10 +6,11 @@ import type {
   StreamResponse,
   ToolCall,
 } from "../types.js";
-import { ProviderError } from "../errors.js";
+import { ProviderError, readHeader, isHardBillingMessage } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import {
   downgradeUnsupportedImages,
+  downgradeUnsupportedVideos,
   normalizeOpenAIStopReason,
   toOpenAIMessages,
   toOpenAIReasoningEffort,
@@ -17,20 +18,45 @@ import {
   toOpenAITools,
 } from "./transform.js";
 import { normalizePromptCacheKey } from "./prompt-cache-key.js";
+import { uploadMoonshotVideos } from "./moonshot-video.js";
+import { parseToolArguments } from "../utils/json.js";
+import { getEnvironment } from "../utils/env.js";
 
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return value != null && typeof value === "object" && !Array.isArray(value);
-}
-
-function parseToolArguments(argsJson: string): Record<string, unknown> {
-  if (!argsJson) return {};
-  try {
-    const parsed = JSON.parse(argsJson) as unknown;
-    const unwrapped = typeof parsed === "string" ? (JSON.parse(parsed) as unknown) : parsed;
-    return isJsonObject(unwrapped) ? unwrapped : {};
-  } catch {
-    return {};
+// Normalize OpenAI completion usage to the framework convention where
+// inputTokens excludes cache hits (matching Anthropic). Handles vendor-specific
+// cache reporting fields:
+// - Kimi K2/K2.5 / StepFun: top-level `cached_tokens`
+// - DeepSeek / SiliconFlow: `prompt_cache_hit_tokens`
+// - OpenAI / Zhipu (GLM) / MiniMax / Qwen / Mistral / xAI: standard
+//   `prompt_tokens_details.cached_tokens`
+function extractOpenAIUsage(usage: OpenAI.CompletionUsage): {
+  inputTokens: number;
+  outputTokens: number;
+  cacheRead: number;
+} {
+  let cacheRead = 0;
+  const details = usage.prompt_tokens_details;
+  if (details?.cached_tokens) {
+    cacheRead = details.cached_tokens;
   }
+  const usageAny = usage as unknown as Record<string, unknown>;
+  if (!cacheRead && typeof usageAny.cached_tokens === "number" && usageAny.cached_tokens > 0) {
+    cacheRead = usageAny.cached_tokens as number;
+  }
+  if (
+    !cacheRead &&
+    typeof usageAny.prompt_cache_hit_tokens === "number" &&
+    usageAny.prompt_cache_hit_tokens > 0
+  ) {
+    cacheRead = usageAny.prompt_cache_hit_tokens as number;
+  }
+  // OpenAI's prompt_tokens includes cached tokens; subtract to match
+  // Anthropic's convention where inputTokens excludes cache hits.
+  return {
+    inputTokens: usage.prompt_tokens - cacheRead,
+    outputTokens: usage.completion_tokens,
+    cacheRead,
+  };
 }
 
 function createClient(options: StreamOptions): OpenAI {
@@ -38,6 +64,7 @@ function createClient(options: StreamOptions): OpenAI {
     apiKey: options.apiKey,
     ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
     ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.defaultHeaders ? { defaultHeaders: options.defaultHeaders } : {}),
   });
 }
 
@@ -55,7 +82,23 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const usesThinkingParam =
     options.provider === "glm" || options.provider === "moonshot" || options.provider === "xiaomi";
 
-  const downgradedMessages = downgradeUnsupportedImages(options.messages, options.supportsImages);
+  const downgradedImages = downgradeUnsupportedImages(options.messages, options.supportsImages);
+  const downgradedMessages = downgradeUnsupportedVideos(downgradedImages, options.supportsVideo);
+  // Moonshot/Kimi requires video uploaded to the file service and referenced by
+  // `ms://<id>` — inline base64 is rejected. Kimi's endpoint also only accepts
+  // the resulting `video_url` part inside a tool result (not user content), so
+  // ggcoder routes attached video through the read tool. This uploads every
+  // video part (in user OR tool-result content) and caches the id so multi-turn
+  // sessions don't re-upload. Done in-place before the transform.
+  if (options.provider === "moonshot") {
+    try {
+      await uploadMoonshotVideos(client, downgradedMessages, options.signal);
+    } catch (err) {
+      // Surface upload failures through the same provider-error classification
+      // as the chat call (this runs before the stream try/catch below).
+      throw toError(err, providerName);
+    }
+  }
   const messages = toOpenAIMessages(downgradedMessages, {
     provider: options.provider,
     thinking: !!options.thinking,
@@ -122,11 +165,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   }
 
   // Dump request body for stall diagnosis when GGAI_DUMP_REQUEST is set
-  if (
-    (globalThis as Record<string, unknown>).process &&
-    ((globalThis as Record<string, unknown>).process as Record<string, Record<string, string>>).env
-      ?.GGAI_DUMP_REQUEST
-  ) {
+  if (getEnvironment()?.GGAI_DUMP_REQUEST) {
     const fs = await import("fs");
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     const dumpPath = `/tmp/ggai-request-${ts}.json`;
@@ -175,30 +214,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     const choice = chunk.choices?.[0];
 
     if (chunk.usage) {
-      outputTokens = chunk.usage.completion_tokens;
-      const details = chunk.usage.prompt_tokens_details;
-      if (details?.cached_tokens) {
-        cacheRead = details.cached_tokens;
-      }
-      // Vendor-specific cache reporting fields:
-      // - Kimi K2/K2.5 / StepFun: top-level `cached_tokens`
-      // - DeepSeek / SiliconFlow: `prompt_cache_hit_tokens`
-      // OpenAI / Zhipu (GLM) / MiniMax / Qwen / Mistral / xAI all use the
-      // standard `prompt_tokens_details.cached_tokens` handled above.
-      const usageAny = chunk.usage as unknown as Record<string, unknown>;
-      if (!cacheRead && typeof usageAny.cached_tokens === "number" && usageAny.cached_tokens > 0) {
-        cacheRead = usageAny.cached_tokens as number;
-      }
-      if (
-        !cacheRead &&
-        typeof usageAny.prompt_cache_hit_tokens === "number" &&
-        usageAny.prompt_cache_hit_tokens > 0
-      ) {
-        cacheRead = usageAny.prompt_cache_hit_tokens as number;
-      }
-      // OpenAI's prompt_tokens includes cached tokens; subtract to match
-      // Anthropic's convention where inputTokens excludes cache hits.
-      inputTokens = chunk.usage.prompt_tokens - cacheRead;
+      ({ inputTokens, outputTokens, cacheRead } = extractOpenAIUsage(chunk.usage));
     }
 
     if (!choice) continue;
@@ -399,21 +415,7 @@ function completionToResponse(completion: OpenAI.ChatCompletion): StreamResponse
   let outputTokens = 0;
   let cacheRead = 0;
   if (completion.usage) {
-    outputTokens = completion.usage.completion_tokens;
-    const details = completion.usage.prompt_tokens_details;
-    if (details?.cached_tokens) cacheRead = details.cached_tokens;
-    const usageAny = completion.usage as unknown as Record<string, unknown>;
-    if (!cacheRead && typeof usageAny.cached_tokens === "number" && usageAny.cached_tokens > 0) {
-      cacheRead = usageAny.cached_tokens as number;
-    }
-    if (
-      !cacheRead &&
-      typeof usageAny.prompt_cache_hit_tokens === "number" &&
-      usageAny.prompt_cache_hit_tokens > 0
-    ) {
-      cacheRead = usageAny.prompt_cache_hit_tokens as number;
-    }
-    inputTokens = completion.usage.prompt_tokens - cacheRead;
+    ({ inputTokens, outputTokens, cacheRead } = extractOpenAIUsage(completion.usage));
   }
 
   const stopReason = normalizeOpenAIStopReason(choice?.finish_reason ?? null);
@@ -426,6 +428,32 @@ function completionToResponse(completion: OpenAI.ChatCompletion): StreamResponse
     stopReason,
     usage: { inputTokens, outputTokens, ...(cacheRead > 0 && { cacheRead }) },
   };
+}
+
+/**
+ * Classify an OpenAI-compatible error as a hard usage/quota stop, a transient
+ * throttle, or neither. "hard" stops must NOT be retried (credit/balance/quota
+ * exhaustion); "transient" 429s are retriable (per-minute throttle).
+ */
+function classifyOpenAICompatLimit(args: {
+  status: number | undefined;
+  code: string | undefined;
+  type: string | undefined;
+  message: string;
+}): "hard" | "transient" | null {
+  const { status, code, type, message } = args;
+  const codeType = `${code ?? ""} ${type ?? ""}`.toLowerCase();
+  const isHard =
+    status === 402 || codeType.includes("insufficient_quota") || isHardBillingMessage(message);
+  if (isHard) return "hard";
+  if (
+    status === 429 ||
+    codeType.includes("rate_limit_exceeded") ||
+    codeType.includes("too_many_requests")
+  ) {
+    return "transient";
+  }
+  return null;
 }
 
 function toError(err: unknown, provider: string = "openai"): ProviderError {
@@ -446,6 +474,47 @@ function toError(err: unknown, provider: string = "openai"): ProviderError {
     const requestId =
       (err as unknown as { request_id?: string }).request_id ??
       (typeof body?.request_id === "string" ? body.request_id : undefined);
+
+    const code = typeof err.code === "string" ? err.code : undefined;
+    const type = typeof err.type === "string" ? err.type : undefined;
+    const limit = classifyOpenAICompatLimit({
+      status: err.status,
+      code,
+      type,
+      message: cleanMessage,
+    });
+
+    if (limit === "hard") {
+      // Stamp the canonical "usage limit reached" token so downstream retry
+      // logic surfaces it once instead of burning quota on doomed retries.
+      const message = /usage limit reached/i.test(cleanMessage)
+        ? cleanMessage
+        : `usage limit reached: ${cleanMessage}`;
+      return new ProviderError(provider, message, {
+        statusCode: err.status,
+        ...(requestId ? { requestId } : {}),
+        ...(hint ? { hint } : {}),
+        cause: err,
+      });
+    }
+
+    if (limit === "transient") {
+      // Honor a server-stated Retry-After (seconds) so the loop waits the right
+      // amount through the existing serverResetDelayMs() path.
+      const retryAfterRaw = readHeader(err.headers, "retry-after");
+      const retryAfterSec = retryAfterRaw != null ? Number(retryAfterRaw) : Number.NaN;
+      const resetsAt =
+        Number.isFinite(retryAfterSec) && retryAfterSec > 0
+          ? Math.floor(Date.now() / 1000) + retryAfterSec
+          : undefined;
+      return new ProviderError(provider, cleanMessage, {
+        statusCode: err.status,
+        ...(requestId ? { requestId } : {}),
+        ...(hint ? { hint } : {}),
+        ...(resetsAt ? { resetsAt } : {}),
+        cause: err,
+      });
+    }
 
     return new ProviderError(provider, cleanMessage, {
       statusCode: err.status,

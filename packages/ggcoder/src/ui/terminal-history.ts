@@ -4,14 +4,20 @@ import wrapAnsi from "wrap-ansi";
 import type { Provider } from "@abukhaled/gg-ai";
 import { getModel } from "../core/model-registry.js";
 import type { CompletedItem } from "./App.js";
+import { HOOK_TONE_COLOR, isPanelReplacedToolItem, type HookTone } from "./app-items.js";
 import type { PasteInfo } from "./components/InputArea.js";
 import { BLACK_CIRCLE, RETURN_SYMBOL } from "./constants/figures.js";
 import { SPINNER_FRAMES } from "./spinner-frames.js";
 import type { Theme } from "./theme/theme.js";
 import { getUserMessageDisplayParts } from "./utils/user-message-display.js";
-import { buildToolGroupSummary, segmentsToPlainText } from "./tool-group-summary.js";
+import { buildToolGroupSummary } from "./tool-group-summary.js";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { renderMarkdownToAnsiLines } from "./utils/markdown-renderer.js";
-import { isAgentSpacingKind } from "./terminal-history-spacing.js";
+import { detectGraphicsProtocol, encodeInlineImage } from "./utils/terminal-graphics.js";
+import { createHyperlink } from "./utils/hyperlink.js";
+import { supportsHyperlinks } from "./utils/supports-hyperlinks.js";
+import { shouldSeparateTranscriptItems } from "./transcript/spacing.js";
 import {
   MAX_OUTPUT_LINES,
   RESPONSE_LEFT_PADDING,
@@ -34,20 +40,43 @@ import {
   wrapPlain,
 } from "./terminal-history-format.js";
 import {
-  normalizeStatusText,
   renderCompacted,
   renderCompacting,
   renderError,
-  renderGoal,
-  renderPlanEvent,
   renderSetupHint,
   renderStatusLine,
   renderStepDone,
   renderStylePack,
   renderUpdateNotice,
 } from "./terminal-history-status-renderers.js";
+import {
+  presentDuration,
+  presentInfo,
+  presentModelTransition,
+  presentPlanEvent,
+  presentQueued,
+  presentStopped,
+  presentTask,
+  presentThemeTransition,
+} from "./transcript/presentation.js";
+import { toolTonePalette } from "./transcript/tool-presentation.js";
 
 const LOGO_LINES = [" ▄▀▀▄ ▄▀▀▀", " █  █ █ ▀█", " ▀▄▄▀ ▀▄▄▀"];
+const PLAN_MODE_LOGO = [
+  "▗▄▄▖ ▗▖    ▗▄▖ ▗▖  ▗▖    ▗▖  ▗▖ ▗▄▖ ▗▄▄▄ ▗▄▄▄▖",
+  "▐▌ ▐▌▐▌   ▐▌ ▐▌▐▛▚▖▐▌    ▐▛▚▞▜▌▐▌ ▐▌▐▌  █▐▌",
+  "▐▛▀▘ ▐▌   ▐▛▀▜▌▐▌ ▝▜▌    ▐▌  ▐▌▐▌ ▐▌▐▌  █▐▛▀▀▘",
+  "▐▌   ▐▙▄▄▖▐▌ ▐▌▐▌  ▐▌    ▐▌  ▐▌▝▚▄▞▘▐▙▄▄▀▐▙▄▄▖",
+];
+const PLAN_MODE_GRADIENT = [
+  "#f59e0b",
+  "#fbbf24",
+  "#f59e0b",
+  "#d97706",
+  "#f59e0b",
+  "#fbbf24",
+  "#d97706",
+];
 const GRADIENT = [
   "#60a5fa",
   "#6da1f9",
@@ -63,10 +92,13 @@ const GRADIENT = [
   "#6da1f9",
 ];
 const GAP = "   ";
-const LOGO_WIDTH = 9;
+const LOGO_WIDTH = 10;
 const SIDE_BY_SIDE_MIN = LOGO_WIDTH + GAP.length + 62;
+// Row index in the (taller) logo block where each info line is placed so the
+// text column reads vertically centered beside the art.
+const INFO_ANCHOR_ROW = 0;
 const COMPACT_TOOLS = new Set(["read", "grep", "find", "ls", "source_path"]);
-const STATE_TOOLS = new Set(["tasks", "goals"]);
+const STATE_TOOLS = new Set(["tasks"]);
 const SERVER_STYLE_TOOLS = new Set(["web_search"]);
 
 export interface TerminalHistoryPrinter {
@@ -93,38 +125,122 @@ export interface TerminalHistoryContext {
   cwd: string;
 }
 
+// How many recent assistant fingerprints to remember for retry de-dup. A
+// stream retry re-emits the SAME leading paragraphs it just flushed, always
+// adjacent in print order — so a small recency window catches retries while
+// still allowing a genuinely repeated short phrase (e.g. "Done.") to reappear
+// many turns later.
+const ASSISTANT_FINGERPRINT_WINDOW = 16;
+
 export function createTerminalHistoryPrinter({
   stream = process.stdout,
 }: TerminalHistoryPrinterOptions = {}): TerminalHistoryPrinter {
   const printed = new Set<string>();
+  // Ordered ring of recently printed assistant text fingerprints. The printer
+  // dedupes by item id, but progressive mid-stream flushing assigns a FRESH id
+  // to each flushed paragraph. On a stream stall/overload the agent loop emits
+  // a `retry`, the provider re-streams from scratch, and those same paragraphs
+  // get re-flushed under new ids — so id-dedup alone lets the identical text
+  // print again (N retries => N+1 stacked copies). Fingerprinting the content
+  // suppresses those re-emissions regardless of id.
+  const recentAssistantFingerprints: string[] = [];
   let previousPrintedKind: CompletedItem["kind"] | null = null;
+
+  const fingerprintOf = (item: CompletedItem): string | null => {
+    if (item.kind !== "assistant") return null;
+    const normalized = item.text.replace(/\s+/g, " ").trim();
+    return normalized.length > 0 ? normalized : null;
+  };
 
   return {
     print(items, context, options) {
       const writeOutput = options?.write ?? ((data: string) => void stream.write(data));
       for (const item of items) {
         if (!options?.force && printed.has(item.id)) continue;
+        // Tool activity is shown live in the pinned LiveToolPanel, not the
+        // scrollback transcript. Skip without touching spacing state so the
+        // surrounding non-tool rows keep their separators.
+        if (isPanelReplacedToolItem(item)) continue;
+        // Retry-driven duplicate: identical assistant text re-flushed under a
+        // new id after a stream restart. Mark the id printed so a later flush of
+        // the same item is a cheap id hit, then skip without writing.
+        const fingerprint = options?.force ? null : fingerprintOf(item);
+        if (fingerprint !== null && recentAssistantFingerprints.includes(fingerprint)) {
+          printed.add(item.id);
+          continue;
+        }
         const output = serializeCompletedItemToTerminalHistory(item, context);
         const endsWithBlankLine = item.kind === "banner";
+        // A continuation assistant chunk is the next paragraph of a response
+        // whose earlier paragraphs were already flushed mid-stream. Re-insert
+        // the blank line that separated them so the reassembled scrollback
+        // matches the whole response (assistant→assistant is otherwise compact).
+        const isContinuationParagraph =
+          item.kind === "assistant" &&
+          item.continuation === true &&
+          previousPrintedKind === "assistant";
         const formatted = formatHistoryWrite(output, {
           leadingSeparator:
-            previousPrintedKind !== null &&
-            isAgentSpacingKind(previousPrintedKind) &&
-            isAgentSpacingKind(item.kind),
+            item.kind === "plan_transition"
+              ? false
+              : isContinuationParagraph
+                ? true
+                : shouldSeparateTranscriptItems({
+                    previousKind: previousPrintedKind ?? undefined,
+                    currentKind: item.kind,
+                  }),
           trailingBlankLine: endsWithBlankLine,
+          trailingNewlines: item.kind === "user" ? 1 : undefined,
         });
         if (formatted.length === 0) continue;
         printed.add(item.id);
+        if (fingerprint !== null) {
+          recentAssistantFingerprints.push(fingerprint);
+          if (recentAssistantFingerprints.length > ASSISTANT_FINGERPRINT_WINDOW) {
+            recentAssistantFingerprints.shift();
+          }
+        }
         writeOutput(formatted);
+        // Inline image previews render in the Static scrollback region (straight
+        // to the stream, above Ink's live frame). Only emit graphics escapes on
+        // terminals that support them; everything else keeps the text-only line.
+        const previews =
+          (item.kind === "tool_done" || item.kind === "user") && item.imagePreviews
+            ? item.imagePreviews
+            : undefined;
+        if (previews && previews.length > 0) {
+          const protocol = detectGraphicsProtocol();
+          // Indent the image to the message text column (after the `⏺ ` dot),
+          // matching assistant/tool label alignment. Graphics protocols anchor
+          // the image at the cursor column, so leading spaces shift it right.
+          const imageLeftPad = "   ";
+          const canLink = supportsHyperlinks();
+          for (const preview of previews) {
+            if (protocol !== "none") {
+              writeOutput(`\n${imageLeftPad}${encodeInlineImage(preview.base64, protocol)}\n`);
+            }
+            // Clickable "open" affordance — Cmd/Ctrl-click opens the file in the
+            // OS default viewer. The pixels themselves aren't clickable, so the
+            // path is the open handle.
+            if (preview.path && canLink) {
+              const fileUrl = pathToFileURL(preview.path).href;
+              const linkLabel = `↗ ${path.basename(preview.path)}`;
+              const lead = protocol === "none" ? "\n" : "";
+              writeOutput(`${lead}${imageLeftPad}${createHyperlink(fileUrl, linkLabel)}\n`);
+            }
+          }
+        }
         previousPrintedKind = item.kind;
       }
     },
     clear() {
       printed.clear();
+      recentAssistantFingerprints.length = 0;
       previousPrintedKind = null;
     },
     resetPrinted() {
       printed.clear();
+      recentAssistantFingerprints.length = 0;
       previousPrintedKind = null;
     },
     get printedIds() {
@@ -141,14 +257,18 @@ export function serializeCompletedItemToTerminalHistory(
     case "banner":
       return renderBanner(context);
     case "user":
-      return renderUser(item.text, item.imageCount, item.pasteInfo, context);
+      return renderUser(item.text, item.imageCount, item.videoCount, item.pasteInfo, context);
     case "queued":
       return renderQueued(item.text, item.imageCount, context);
     case "assistant":
       return renderAssistant(item.text, context, item.continuation);
+    case "ideal_hook":
+      return renderIdealHook(item.text, item.tone ?? "review", context);
     case "tool_start":
+      if (item.name === "enter_plan") return "";
       return renderToolStart(item.name, item.args, item.progressOutput, context);
     case "tool_done":
+      if (item.name === "enter_plan") return "";
       return renderToolDone(
         item.name,
         item.args,
@@ -165,29 +285,29 @@ export function serializeCompletedItemToTerminalHistory(
       return renderServerToolDone(item.name, item.input, item.resultType, item.durationMs, context);
     case "subagent_group":
       return renderSubAgentGroup(item.agents, item.aborted, context);
-    case "goal":
-      return renderGoal(item.title, item.workerId, context);
-    case "task":
+    case "task": {
+      const presentation = presentTask(item);
       return renderStatusLine(
-        "▸",
-        `${dim(context, "Task: ")}${color(context.theme.commandColor, item.title, true)}`,
+        presentation.glyph.trim(),
+        `${dim(context, presentation.label ?? "")}${color(context.theme.commandColor, presentation.text, true)}`,
         context,
         context.theme.commandColor,
-        true,
+        presentation.bold,
         true,
       );
-    case "goal_progress":
-      return renderGoalProgress(item, context);
+    }
     case "error":
       return renderError(item.headline, item.message, item.guidance, context);
-    case "info":
+    case "info": {
+      const presentation = presentInfo(item);
       return renderStatusLine(
-        "○",
-        normalizeStatusText(item.text),
+        presentation.glyph.trim(),
+        presentation.text,
         context,
         context.theme.commandColor,
-        false,
+        presentation.bold,
       );
+    }
     case "style_pack":
       return renderStylePack(item.added, item.showSetupHint, context);
     case "setup_hint":
@@ -204,60 +324,106 @@ export function serializeCompletedItemToTerminalHistory(
         item.tokensAfter,
         context,
       );
-    case "duration":
+    case "duration": {
+      const presentation = presentDuration(item);
       return indent(
-        dim(context, `✻ ${item.verb} ${formatDuration(item.durationMs)}`),
+        dim(context, `${presentation.glyph}${presentation.text}`),
         RESPONSE_LEFT_PADDING,
       );
+    }
+    case "session_summary":
+      return renderSessionSummary(item.summary, context);
     case "plan_transition":
+      return renderPlanModeLogo(context);
+    case "model_transition": {
+      const presentation = presentModelTransition(item);
       return renderStatusLine(
-        BLACK_CIRCLE,
-        normalizeStatusText(item.text),
+        presentation.glyph.trim(),
+        `${dim(context, presentation.label ?? "")}${color(context.theme.commandColor, presentation.text, true)}`,
         context,
         context.theme.commandColor,
+        presentation.bold,
         true,
       );
-    case "goal_agent_transition":
+    }
+    case "theme_transition": {
+      const presentation = presentThemeTransition(item);
       return renderStatusLine(
-        BLACK_CIRCLE,
-        normalizeStatusText(item.text),
+        presentation.glyph.trim(),
+        `${dim(context, presentation.label ?? "")}${color(context.theme.commandColor, presentation.text, true)}`,
         context,
         context.theme.commandColor,
+        presentation.bold,
         true,
       );
-    case "model_transition":
+    }
+    case "plan_event": {
+      const presentation = presentPlanEvent(item);
       return renderStatusLine(
-        "▸",
-        `${dim(context, "Switched to ")}${color(context.theme.commandColor, item.modelName, true)}`,
+        presentation.glyph.trim(),
+        `${color(context.theme.commandColor, presentation.text, true)}${presentation.detail ? dim(context, presentation.detail) : ""}`,
         context,
         context.theme.commandColor,
-        true,
+        presentation.bold,
         true,
       );
-    case "theme_transition":
+    }
+    case "stopped": {
+      const presentation = presentStopped(item);
       return renderStatusLine(
-        "◐",
-        `${dim(context, "Theme switched to ")}${color(context.theme.commandColor, item.themeName, true)}`,
+        presentation.glyph.trim(),
+        presentation.text,
         context,
         context.theme.commandColor,
-        true,
-        true,
+        presentation.bold,
       );
-    case "plan_event":
-      return renderPlanEvent(item.event, item.detail, context);
-    case "stopped":
-      return renderStatusLine(
-        "⊘",
-        normalizeStatusText(item.text),
-        context,
-        context.theme.commandColor,
-        true,
-      );
+    }
     case "step_done":
       return renderStepDone(item.stepNum, item.description, context);
     case "tombstone":
       return "";
   }
+}
+
+function renderSessionSummary(
+  summary: Extract<CompletedItem, { kind: "session_summary" }>["summary"],
+  context: TerminalHistoryContext,
+): string {
+  const cacheTokens = (summary.usage.cacheRead ?? 0) + (summary.usage.cacheWrite ?? 0);
+  const successRate =
+    summary.tools.totalCalls > 0
+      ? (summary.tools.totalSuccess / summary.tools.totalCalls) * 100
+      : null;
+  const topTools = Object.entries(summary.tools.byName)
+    .sort(([, a], [, b]) => b.calls - a.calls || b.durationMs - a.durationMs)
+    .slice(0, 5)
+    .map(([name, stats]) => `${name} ×${stats.calls}`)
+    .join(", ");
+  const lines = [
+    color(context.theme.secondary, summary.title, true),
+    "",
+    `${color(context.theme.text, "Session", true)}`,
+    summary.sessionId
+      ? `${color(context.theme.link, "ID:")} ${dim(context, summary.sessionId)}`
+      : undefined,
+    `${color(context.theme.link, "Model:")} ${summary.provider}:${summary.model}`,
+    `${color(context.theme.link, "Directory:")} ${dim(context, summary.cwd)}`,
+    "",
+    `${color(context.theme.text, "Usage", true)}`,
+    `${color(context.theme.link, "Wall time:")} ${formatDuration(summary.wallDurationMs)}`,
+    `${color(context.theme.link, "Turns:")} ${summary.turns.toLocaleString()}`,
+    `${color(context.theme.link, "Tokens:")} ${summary.usage.inputTokens.toLocaleString()} in / ${summary.usage.outputTokens.toLocaleString()} out${cacheTokens > 0 ? dim(context, ` / ${cacheTokens.toLocaleString()} cache`) : ""}`,
+    "",
+    `${color(context.theme.text, "Work", true)}`,
+    `${color(context.theme.link, "Tool calls:")} ${summary.tools.totalCalls.toLocaleString()} (${color(context.theme.success, `✓ ${summary.tools.totalSuccess.toLocaleString()}`)} ${color(context.theme.error, `× ${summary.tools.totalFail.toLocaleString()}`)}${successRate == null ? "" : dim(context, ` · ${successRate.toFixed(1)}%`)})`,
+    `${color(context.theme.link, "Top tools:")} ${dim(context, topTools || "none")}`,
+    summary.linesChanged.added > 0 || summary.linesChanged.removed > 0
+      ? `${color(context.theme.link, "Code changes:")} ${color(context.theme.success, `+${summary.linesChanged.added.toLocaleString()}`)} ${color(context.theme.error, `-${summary.linesChanged.removed.toLocaleString()}`)}`
+      : undefined,
+    summary.footer ? "" : undefined,
+    summary.footer ? dim(context, summary.footer) : undefined,
+  ].filter((line): line is string => line !== undefined);
+  return indent(lines.join("\n"), RESPONSE_LEFT_PADDING);
 }
 
 function renderBanner(context: TerminalHistoryContext): string {
@@ -266,39 +432,53 @@ function renderBanner(context: TerminalHistoryContext): string {
   const home = process.env.HOME ?? "";
   const displayPath =
     home && context.cwd.startsWith(home) ? `~${context.cwd.slice(home.length)}` : context.cwd;
-  const logo = LOGO_LINES.map((lineText) => gradientLine(lineText, GRADIENT));
+  const logo = LOGO_LINES.map(
+    (lineText) => `${RESPONSE_LEFT_PADDING}${gradientLine(lineText, GRADIENT)}`,
+  );
 
-  const shortcuts = `${color(context.theme.primary, "/goal")} ${dim(context, "start goal · ")}${color(context.theme.primary, "Ctrl+T")} ${dim(context, "tasks · ")}${color(context.theme.primary, "Shift+Tab")} ${dim(context, "toggle thinking")}`;
+  const shortcuts = `${color(context.theme.primary, "Ctrl+T")} ${dim(context, "tasks · ")}${color(context.theme.primary, "Ctrl+S")} ${dim(context, "skills · ")}${color(context.theme.primary, "Shift+Tab")} ${dim(context, "toggle thinking")}`;
 
   if (context.columns < SIDE_BY_SIDE_MIN) {
     return block([
       "",
       ...logo,
       "",
-      `${color(context.theme.primary, "OG Coder", true)}${dim(context, ` v${context.version}`)}`,
-      `${color(context.theme.secondary, modelName)}  ${dim(context, truncatePlain(displayPath, context.columns))}`,
-      shortcuts,
+      `${RESPONSE_LEFT_PADDING}${color(context.theme.primary, "OG Coder", true)}${dim(context, ` v${context.version}`)}`,
+      `${RESPONSE_LEFT_PADDING}${color(context.theme.secondary, modelName)}  ${dim(context, truncatePlain(displayPath, context.columns))}`,
+      `${RESPONSE_LEFT_PADDING}${shortcuts}`,
       "",
     ]);
   }
 
-  return block([
-    "",
-    `${logo[0]}${GAP}${color(context.theme.primary, "OG Coder", true)}${dim(context, ` v${context.version} · By `)}${color(context.theme.text, "abukhaled", true)}`,
-    `${logo[1]}${GAP}${color(context.theme.secondary, modelName)}  ${dim(context, truncatePlain(displayPath, Math.max(10, context.columns - LOGO_WIDTH - GAP.length - stringWidth(modelName) - 2)))}`,
-    `${logo[2]}${GAP}${shortcuts}`,
-    "",
-  ]);
+  // Info lines rendered beside the logo, anchored at INFO_ANCHOR_ROW so the
+  // text column pairs 1:1 with the 3-line "OG" art.
+  const infoLines = [
+    `${color(context.theme.primary, "OG Coder", true)}${dim(context, ` v${context.version} · By `)}${color(context.theme.text, "abukhaled", true)}`,
+    `${color(context.theme.secondary, modelName)}  ${dim(context, truncatePlain(displayPath, Math.max(10, context.columns - LOGO_WIDTH - GAP.length - stringWidth(modelName) - 2)))}`,
+    shortcuts,
+  ];
+
+  const rows = logo.map((logoLine, i) => {
+    const infoIndex = i - INFO_ANCHOR_ROW;
+    const info = infoIndex >= 0 && infoIndex < infoLines.length ? infoLines[infoIndex] : undefined;
+    return info === undefined ? logoLine : `${logoLine}${GAP}${info}`;
+  });
+
+  return block(["", ...rows, ""]);
 }
 
 function renderUser(
   text: string,
   imageCount: number | undefined,
+  videoCount: number | undefined,
   pasteInfo: PasteInfo | undefined,
   context: TerminalHistoryContext,
 ): string {
   const imageBadges = Array.from({ length: imageCount ?? 0 }, (_, index) =>
     userChipSegment(`[Image #${index + 1}]`, context.theme.accent),
+  );
+  const videoBadges = Array.from({ length: videoCount ?? 0 }, (_, index) =>
+    userChipSegment(`[🎬 Video #${index + 1}]`, context.theme.accent),
   );
   const userMessageText = context.theme.commandColor;
   const separator = userChipSegment(" ", userMessageText);
@@ -307,6 +487,7 @@ function renderUser(
       userChipSegment(part.text, part.kind === "paste" ? context.theme.textDim : userMessageText),
     ),
     ...imageBadges,
+    ...videoBadges,
   ]
     .filter((part) => part.length > 0)
     .join(separator);
@@ -338,13 +519,13 @@ function renderQueued(
   imageCount: number | undefined,
   context: TerminalHistoryContext,
 ): string {
-  const suffix = imageCount ? ` (+${imageCount} image${imageCount > 1 ? "s" : ""})` : "";
+  const presentation = presentQueued({ kind: "queued", text, imageCount, id: "history-queued" });
   return prefixFirstLine(
     wrapPlain(
-      `${dim(context, "Queued: ")}${color(context.theme.text, text || "(empty)")}${color(context.theme.text, suffix)}`,
+      `${dim(context, presentation.label)}${color(context.theme.text, presentation.text)}${color(context.theme.text, presentation.suffix)}`,
       context.columns - 4,
     ),
-    ` ${color(context.theme.warning, "•", true)} `,
+    ` ${color(context.theme.warning, presentation.glyph.trim(), true)} `,
     "   ",
   );
 }
@@ -369,7 +550,20 @@ function renderAssistant(
         : prefixFirstLine(body, ` ${color(context.theme.primary, BLACK_CIRCLE)} `, "   "),
     );
   }
-  return block(lines);
+  return lines.join("\n");
+}
+
+function renderIdealHook(text: string, tone: HookTone, context: TerminalHistoryContext): string {
+  // Same dot prefix + indent as an assistant row, but in the tone's color
+  // (bold) so each agent hook visibly stands apart from normal output and
+  // from the other hooks.
+  const toneColor = context.theme[HOOK_TONE_COLOR[tone]];
+  const body = color(toneColor, text, true);
+  return prefixFirstLine(body, ` ${color(toneColor, BLACK_CIRCLE)} `, "   ");
+}
+
+function renderPlanModeLogo(_context: TerminalHistoryContext): string {
+  return PLAN_MODE_LOGO.map((line) => ` ${gradientLine(line, PLAN_MODE_GRADIENT)}`).join("\n");
 }
 
 function renderToolStart(
@@ -423,6 +617,14 @@ function renderToolDone(
     return toolHeader("done", getCompactDoneLabel(name, args, result), "", context);
   }
 
+  // Screenshot collapses to a single header line, e.g. `Screenshot (image/png)`.
+  // The inline image is appended separately by the printer; the multi-line
+  // "Captured …" text would be redundant above it.
+  if (name === "screenshot" && !isError) {
+    const mediaType = result.match(/\[(image\/[a-z0-9.+-]+)\]/i)?.[1] ?? "image";
+    return toolHeader("done", "Screenshot", mediaType, context);
+  }
+
   if (STATE_TOOLS.has(name)) {
     const { label, detail } = getToolHeaderParts(name, args);
     return stateToolHeader(
@@ -436,16 +638,16 @@ function renderToolDone(
 
   const { label, detail } = getToolHeaderParts(name, args);
   const inline = getInlineSummary(name, result, isError);
-  const suffix =
-    inline.length > 0 && toolResultPreview(name, result, isError, context).length === 0
-      ? inline
-      : "";
-  const header = toolHeader(isError ? "error" : "done", label, detail, context, { suffix });
   const preview = toolResultPreview(name, result, isError, context);
-  if (name === "edit" && !isError) {
-    const diff = extractDiff(result);
-    if (diff)
-      return block([header, ...messageResponse(renderDiffPreview(diff, args, context), context)]);
+  const editDiff = name === "edit" && !isError ? extractDiff(result) : undefined;
+  const hasBody = preview.length > 0 || editDiff !== undefined;
+  const suffix = inline.length > 0 && preview.length === 0 ? inline : "";
+  // Chips only ride the header when there is a body; the no-body bash path
+  // already surfaces the exit code via its inline suffix (matches live render).
+  const chip = hasBody ? renderHeaderChip(name, result, isError, context) : "";
+  const header = toolHeader(isError ? "error" : "done", label, detail, context, { suffix }) + chip;
+  if (editDiff !== undefined) {
+    return block([header, ...messageResponse(renderDiffPreview(editDiff, args, context), context)]);
   }
   return block(preview.length > 0 ? [header, ...messageResponse(preview, context)] : [header]);
 }
@@ -465,9 +667,12 @@ function renderToolGroup(
   const status = allDone ? (hasError ? "error" : "done") : "running";
   return toolHeader(
     status,
-    segmentsToPlainText(buildToolGroupSummary(tools, allDone)),
+    renderSummarySegments(buildToolGroupSummary(tools, allDone), context),
     "",
     context,
+    {
+      labelAlreadyStyled: true,
+    },
   );
 }
 
@@ -528,51 +733,6 @@ function renderSubAgentGroup(
     );
   });
   return block(lines);
-}
-
-function renderGoalProgress(
-  item: Extract<CompletedItem, { kind: "goal_progress" }>,
-  context: TerminalHistoryContext,
-): string {
-  const isError = item.status === "failed" || item.status === "fail" || item.status === "blocked";
-  const status = isError
-    ? "error"
-    : item.phase === "worker_finished" ||
-        item.phase === "verifier_finished" ||
-        item.phase === "terminal"
-      ? "done"
-      : "running";
-  const labelColor = isError
-    ? context.theme.error
-    : item.phase === "worker_finished" || item.phase === "terminal"
-      ? context.theme.success
-      : item.phase === "verifier_finished" || item.phase === "verifier_started"
-        ? context.theme.accent
-        : item.phase === "orchestrator_reviewing" || item.phase === "orchestrator_working"
-          ? context.theme.secondary
-          : item.phase === "continuing"
-            ? context.theme.warning
-            : context.theme.primary;
-  const header = `${toolHeader(status, color(labelColor, item.title, true), "", context, {
-    dotColor: labelColor,
-    indicator: BLACK_CIRCLE,
-  })}${item.workerId ? dim(context, ` · worker ${item.workerId}`) : ""}`;
-  const bodyLines: string[] = [];
-  if (item.detail) {
-    bodyLines.push(dim(context, wrapPlain(item.detail, context.columns - 8)));
-  }
-  for (const row of item.summaryRows ?? []) {
-    bodyLines.push(
-      `${dim(context, row.label.padEnd(12))}${color(context.theme.text, row.value)}${row.detail ? dim(context, ` · ${row.detail}`) : ""}`,
-    );
-  }
-  for (const section of item.summarySections ?? []) {
-    bodyLines.push(dim(context, section.title));
-    for (const sectionLine of section.lines) {
-      bodyLines.push(`${color(context.theme.text, "• ")}${color(context.theme.text, sectionLine)}`);
-    }
-  }
-  return block([header, ...messageResponse(bodyLines, context)]);
 }
 
 function renderServerStyleToolDone(
@@ -686,7 +846,13 @@ function toolHeader(
   label: string,
   detail: string,
   context: TerminalHistoryContext,
-  options: { suffix?: string; quoteDetail?: boolean; dotColor?: string; indicator?: string } = {},
+  options: {
+    suffix?: string;
+    quoteDetail?: boolean;
+    dotColor?: string;
+    indicator?: string;
+    labelAlreadyStyled?: boolean;
+  } = {},
 ): string {
   const dotColor =
     options.dotColor ??
@@ -709,7 +875,21 @@ function toolHeader(
       )
     : "";
   const suffixText = options.suffix ? dim(context, ` ${options.suffix}`) : "";
-  return `${RESPONSE_LEFT_PADDING}${color(dotColor, indicator)} ${color(labelColor, label, true)}${detailText}${suffixText}`;
+  const labelText = options.labelAlreadyStyled ? label : color(labelColor, label, true);
+  return `${RESPONSE_LEFT_PADDING}${color(dotColor, indicator)} ${labelText}${detailText}${suffixText}`;
+}
+
+function renderSummarySegments(
+  segments: ReturnType<typeof buildToolGroupSummary>,
+  context: TerminalHistoryContext,
+): string {
+  return segments
+    .map((segment) =>
+      segment.tone
+        ? color(toolTonePalette(context.theme, segment.tone).primary, segment.text, segment.bold)
+        : color(context.theme.text, segment.text, segment.bold),
+    )
+    .join("");
 }
 
 function stateToolHeader(
@@ -796,7 +976,6 @@ function getToolHeaderParts(
       return { label: displayName, detail: url.length > 60 ? `${url.slice(0, 57)}…` : url };
     }
     case "tasks":
-    case "goals":
       return { label: displayName, detail: String(args.action ?? "") };
     default:
       return { label: displayName, detail: name.startsWith("mcp__") ? getMCPDetailArg(args) : "" };
@@ -839,8 +1018,6 @@ function toolDisplayName(name: string): string {
       return "Source";
     case "tasks":
       return "Task";
-    case "goals":
-      return "Goal";
     default:
       return snakeToTitle(name);
   }
@@ -951,8 +1128,7 @@ function getInlineSummary(name: string, result: string, isError: boolean): strin
       return extractSourcePath(result) ? shortenPath(extractSourcePath(result) ?? "") : "resolved";
     case "task_stop":
       return result.split("\n")[0] ?? "stopped";
-    case "tasks":
-    case "goals": {
+    case "tasks": {
       const quoted = result.match(/"([^"]+)"/)?.[1];
       if (quoted) return quoted.length > 50 ? `${quoted.slice(0, 47)}…` : quoted;
       const firstLine = result.split("\n")[0] ?? "";
@@ -993,6 +1169,39 @@ function getServerToolHeaderParts(name: string, input: unknown): { label: string
 
 function getBashExitCode(result: string): string {
   return result.match(/^Exit code: (.+)/)?.[1]?.trim() ?? "0";
+}
+
+/**
+ * At-a-glance header chip mirroring the live ToolExecution chips:
+ *   - bash → exit-code chip (`✓ 0` / `✗ N`)
+ *   - edit → diff-stat chip (`+a −r`)
+ * Returns "" when no chip applies. Spacing (two leading spaces per segment)
+ * matches the live renderer so live/history parity holds.
+ */
+function renderHeaderChip(
+  name: string,
+  result: string,
+  isError: boolean,
+  context: TerminalHistoryContext,
+): string {
+  if (name === "bash" && !isError) {
+    const exitMatch = result.split("\n")[0]?.match(/^Exit code: (.+)/);
+    if (!exitMatch) return "";
+    const code = exitMatch[1].trim();
+    const ok = code === "0";
+    return color(ok ? context.theme.success : context.theme.error, ok ? "  ✓ 0" : `  ✗ ${code}`);
+  }
+  if (name === "edit" && !isError) {
+    const diff = extractDiff(result);
+    if (!diff) return "";
+    const added = (diff.match(/^\+[^+]/gm) ?? []).length;
+    const removed = (diff.match(/^-[^-]/gm) ?? []).length;
+    if (added === 0 && removed === 0) return "";
+    const addedPart = added > 0 ? color(context.theme.success, `  +${added}`) : "";
+    const removedPart = removed > 0 ? color(context.theme.error, `  −${removed}`) : "";
+    return `${addedPart}${removedPart}`;
+  }
+  return "";
 }
 
 function extractDiff(result: string): string | undefined {

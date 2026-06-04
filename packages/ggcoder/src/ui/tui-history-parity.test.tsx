@@ -3,7 +3,7 @@ import { Box, Text, renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 import stripAnsi from "strip-ansi";
 import stringWidth from "string-width";
-import type { CompletedItem } from "./app-items.js";
+import { UPDATE_NOTICE_TEXT, type CompletedItem } from "./app-items.js";
 import { serializeCompletedItemToTerminalHistory } from "./terminal-history.js";
 import { loadTheme, ThemeContext } from "./theme/theme.js";
 import type { Theme } from "./theme/theme.js";
@@ -11,15 +11,15 @@ import { TerminalSizeProvider } from "./hooks/useTerminalSize.js";
 import { ToolExecution } from "./components/ToolExecution.js";
 import { ToolGroupExecution } from "./components/ToolGroupExecution.js";
 import { ServerToolExecution } from "./components/ServerToolExecution.js";
-import { MessageResponse } from "./components/MessageResponse.js";
-import { ToolUseLoader } from "./components/ToolUseLoader.js";
 import { SubAgentPanel } from "./components/SubAgentPanel.js";
 import { CompactionDone, CompactionSpinner } from "./components/CompactionNotice.js";
 import { LANGUAGE_DISPLAY_NAMES } from "../core/language-detector.js";
 import { AssistantMessage } from "./components/AssistantMessage.js";
+import { IdealHookMessage } from "./components/IdealHookMessage.js";
 import { UserMessage } from "./components/UserMessage.js";
 import { Banner } from "./components/Banner.js";
-import { BLACK_CIRCLE } from "./constants/figures.js";
+import { SessionSummaryDisplay } from "./components/SessionSummary.js";
+import { PlanModeLogo } from "./components/PlanModeLogo.js";
 
 const TERMINAL_COLUMNS = 68;
 const theme = loadTheme("dark");
@@ -63,8 +63,22 @@ function renderHistory(item: CompletedItem): string[] {
   return cleanLines(serializeCompletedItemToTerminalHistory(item, context));
 }
 
+function normalizeSessionSummaryLine(line: string): string | null {
+  if (/^[\s╭╰─╮╯]+$/u.test(line)) return null;
+  const boxed = line.match(/│(.*)│/u)?.[1] ?? line;
+  const trimmed = boxed.trim();
+  if (!trimmed) return null;
+  return trimmed.replace(/\s{2,}/gu, ": ").replace(/^([^:]+): (.+)$/u, "$1: $2");
+}
+
 function normalizeParityLines(kind: CompletedItem["kind"], lines: readonly string[]): string[] {
-  if (kind === "user") return lines.map((line) => line.trimEnd());
+  // Banner art rows carry trailing padding spaces in the history serializer,
+  // but Ink trims trailing whitespace per line in the live render. Trailing
+  // whitespace is invisible, so compare both with trailing space stripped.
+  if (kind === "user" || kind === "banner") return lines.map((line) => line.trimEnd());
+  if (kind === "session_summary") {
+    return lines.map(normalizeSessionSummaryLine).filter((line): line is string => line !== null);
+  }
   if (kind === "style_pack" || kind === "setup_hint" || kind === "update_notice") {
     return lines.map((line) => line.replace(/─/g, "").replace(/ +(?=│$)/u, ""));
   }
@@ -72,9 +86,13 @@ function normalizeParityLines(kind: CompletedItem["kind"], lines: readonly strin
 }
 
 function renderQueuedLiveItem(item: Extract<CompletedItem, { kind: "queued" }>, itemTheme: Theme) {
-  const suffix = item.imageCount
+  const imageSuffix = item.imageCount
     ? ` (+${item.imageCount} image${item.imageCount > 1 ? "s" : ""})`
     : "";
+  const videoSuffix = item.videoCount
+    ? ` (+${item.videoCount} video${item.videoCount > 1 ? "s" : ""})`
+    : "";
+  const suffix = `${imageSuffix}${videoSuffix}`;
   return (
     <Box flexDirection="row" paddingLeft={1} marginTop={1} flexShrink={1}>
       <Box width={2} flexShrink={0}>
@@ -89,83 +107,6 @@ function renderQueuedLiveItem(item: Extract<CompletedItem, { kind: "queued" }>, 
           {suffix}
         </Text>
       </Box>
-    </Box>
-  );
-}
-
-function renderGoalProgressLive(
-  item: Extract<CompletedItem, { kind: "goal_progress" }>,
-  itemTheme: Theme,
-) {
-  const isError = item.status === "failed" || item.status === "fail" || item.status === "blocked";
-  const status = isError
-    ? "error"
-    : item.phase === "worker_finished" ||
-        item.phase === "verifier_finished" ||
-        item.phase === "terminal"
-      ? "done"
-      : "running";
-  const color = isError
-    ? itemTheme.error
-    : item.phase === "worker_finished" || item.phase === "terminal"
-      ? itemTheme.success
-      : item.phase === "verifier_finished" || item.phase === "verifier_started"
-        ? itemTheme.accent
-        : item.phase === "orchestrator_reviewing" || item.phase === "orchestrator_working"
-          ? itemTheme.secondary
-          : item.phase === "continuing"
-            ? itemTheme.warning
-            : itemTheme.primary;
-  const hasBody =
-    !!item.detail ||
-    (item.summaryRows !== undefined && item.summaryRows.length > 0) ||
-    (item.summarySections !== undefined && item.summarySections.length > 0);
-
-  return (
-    <Box flexDirection="column" paddingLeft={1} marginTop={1} flexShrink={1}>
-      <Box flexDirection="row">
-        <ToolUseLoader status={status} staticDisplay color={color} />
-        <Box flexGrow={1} width={Math.max(10, TERMINAL_COLUMNS - 3)}>
-          <Text wrap="wrap">
-            <Text color={color} bold>
-              {item.title}
-            </Text>
-            {item.workerId ? (
-              <Text color={itemTheme.textDim}> · worker {item.workerId}</Text>
-            ) : null}
-          </Text>
-        </Box>
-      </Box>
-      {hasBody ? (
-        <MessageResponse>
-          <Box flexDirection="column" flexShrink={1}>
-            {item.detail ? (
-              <Text color={itemTheme.textDim} wrap="wrap">
-                {item.detail}
-              </Text>
-            ) : null}
-            {item.summaryRows?.map((row) => (
-              <Text key={row.label} wrap="truncate">
-                <Text color={itemTheme.textDim}>{row.label.padEnd(12)}</Text>
-                <Text color={itemTheme.text}>{row.value}</Text>
-                {row.detail ? <Text color={itemTheme.textDim}> · {row.detail}</Text> : null}
-              </Text>
-            ))}
-            {item.summarySections?.map((section) => (
-              <Box key={section.title} flexDirection="column" marginTop={1} flexShrink={1}>
-                <Text color={itemTheme.textDim} bold>
-                  {section.title}
-                </Text>
-                {section.lines.map((line, index) => (
-                  <Text key={`${section.title}-${index}`} color={itemTheme.text} wrap="wrap">
-                    {`• ${line}`}
-                  </Text>
-                ))}
-              </Box>
-            ))}
-          </Box>
-        </MessageResponse>
-      ) : null}
     </Box>
   );
 }
@@ -279,15 +220,14 @@ function renderSetupHintLive(itemTheme: Theme) {
 }
 
 function renderUpdateNoticeLive(
-  item: Extract<CompletedItem, { kind: "update_notice" }>,
+  _item: Extract<CompletedItem, { kind: "update_notice" }>,
   itemTheme: Theme,
 ) {
   return (
     <Box paddingLeft={1} marginTop={1} flexShrink={1}>
       <Box flexShrink={1} borderStyle="round" borderColor={itemTheme.commandColor} paddingX={1}>
         <Text color={itemTheme.commandColor} bold wrap="wrap">
-          {"✨ "}
-          {item.text}
+          {UPDATE_NOTICE_TEXT}
         </Text>
       </Box>
     </Box>
@@ -311,25 +251,19 @@ function liveElementFor(item: CompletedItem): React.ReactElement | null {
       );
     case "user":
       return (
-        <UserMessage text={item.text} imageCount={item.imageCount} pasteInfo={item.pasteInfo} />
+        <UserMessage
+          text={item.text}
+          imageCount={item.imageCount}
+          videoCount={item.videoCount}
+          pasteInfo={item.pasteInfo}
+        />
       );
     case "assistant":
       return (
         <AssistantMessage text={item.text} thinking={item.thinking} thinkingMs={item.thinkingMs} />
       );
-    case "goal":
-      return (
-        <Box paddingLeft={1} marginTop={1}>
-          <Text wrap="wrap">
-            <Text color={theme.success} bold>
-              {"▶ "}
-            </Text>
-            <Text color={theme.textDim}>{"Goal: "}</Text>
-            <Text color={theme.success}>{item.title}</Text>
-            {item.workerId ? <Text color={theme.textDim}> · worker {item.workerId}</Text> : null}
-          </Text>
-        </Box>
-      );
+    case "ideal_hook":
+      return <IdealHookMessage text={item.text} />;
     case "task":
       return renderStatusLive(
         "▸ ",
@@ -390,8 +324,6 @@ function liveElementFor(item: CompletedItem): React.ReactElement | null {
       );
     case "subagent_group":
       return <SubAgentPanel agents={item.agents} aborted={item.aborted} />;
-    case "goal_progress":
-      return renderGoalProgressLive(item, theme);
     case "style_pack":
       return renderStylePackLive(item, theme);
     case "setup_hint":
@@ -435,21 +367,7 @@ function liveElementFor(item: CompletedItem): React.ReactElement | null {
     case "info":
       return renderStatusLive("○ ", item.text, theme.commandColor, theme, { muted: true });
     case "plan_transition":
-      return renderStatusLive(
-        `${BLACK_CIRCLE} `,
-        item.text.replace(/\\n/g, "\n").replace(/^\n+|\n+$/g, ""),
-        theme.commandColor,
-        theme,
-        { bold: true },
-      );
-    case "goal_agent_transition":
-      return renderStatusLive(
-        `${BLACK_CIRCLE} `,
-        item.text.replace(/\\n/g, "\n").replace(/^\n+|\n+$/g, ""),
-        theme.commandColor,
-        theme,
-        { bold: true },
-      );
+      return <PlanModeLogo />;
     case "model_transition":
       return renderStatusLive(
         "▸ ",
@@ -524,6 +442,8 @@ function liveElementFor(item: CompletedItem): React.ReactElement | null {
           <Text color={theme.textDim}>{`✻ ${item.verb} 2m 3s`}</Text>
         </Box>
       );
+    case "session_summary":
+      return <SessionSummaryDisplay summary={item.summary} />;
     case "tombstone":
       return null;
     default:
@@ -540,7 +460,11 @@ const parityCaseByKind = {
   banner: { kind: "banner", id: "banner" },
   user: { kind: "user", id: "user-1", text: "hello from user", imageCount: 1 },
   assistant: { kind: "assistant", id: "assistant-1", text: "Hello **world** from assistant" },
-  goal: { kind: "goal", id: "goal-1", title: "Ship the TUI polish", workerId: "worker-1" },
+  ideal_hook: {
+    kind: "ideal_hook",
+    id: "ideal-hook-1",
+    text: "Hook engaged \u2014 running an ideal review before finalizing.",
+  },
   task: { kind: "task", id: "task-1", title: "Restore task pane" },
   queued: { kind: "queued", id: "queued-1", text: "next prompt with wrapping words" },
   tool_start: {
@@ -607,17 +531,6 @@ const parityCaseByKind = {
       },
     ],
   },
-  goal_progress: {
-    kind: "goal_progress",
-    id: "goal-progress",
-    phase: "worker_finished",
-    title: "Worker finished",
-    detail: "Completed the audit.",
-    workerId: "worker-1",
-    status: "done",
-    summaryRows: [{ label: "tests", value: "passed", detail: "3 files" }],
-    summarySections: [{ title: "Evidence", lines: ["unit test passed"] }],
-  },
   style_pack: {
     kind: "style_pack",
     id: "style-pack",
@@ -628,7 +541,7 @@ const parityCaseByKind = {
   update_notice: {
     kind: "update_notice",
     id: "update-notice",
-    text: "Ken just pushed a fresh update — 4.3.214 → 4.3.215! I'll grab it on next launch (or run npm install -g @kenkaiiii/ggcoder@latest if you can't wait).",
+    text: "Ken just pushed a fresh update — 4.3.214 → 4.3.215! I'll grab it on next launch (or run npm install -g @abukhaled/ogcoder@latest if you can't wait).",
   },
   compacting: { kind: "compacting", id: "compacting" },
   compacted: {
@@ -648,7 +561,6 @@ const parityCaseByKind = {
   },
   info: { kind: "info", id: "info", text: "Configuration saved" },
   plan_transition: { kind: "plan_transition", id: "plan", text: "Plan mode ON", active: true },
-  goal_agent_transition: { kind: "goal_agent_transition", id: "goal-agent", text: "Goal agent ON" },
   model_transition: { kind: "model_transition", id: "model", modelName: "Claude Sonnet" },
   theme_transition: { kind: "theme_transition", id: "theme", themeName: "dark" },
   plan_event: { kind: "plan_event", id: "plan-event", event: "approved", detail: "ship it" },
@@ -660,6 +572,30 @@ const parityCaseByKind = {
     durationMs: 123000,
     toolsUsed: ["bash"],
     verb: "Executed commands for",
+  },
+  session_summary: {
+    kind: "session_summary",
+    id: "session-summary",
+    summary: {
+      title: "GG Coder is powering down. Goodbye!",
+      sessionId: "session.jsonl",
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
+      cwd: "/tmp/project",
+      wallDurationMs: 123000,
+      turns: 2,
+      usage: { inputTokens: 1000, outputTokens: 250, cacheRead: 50 },
+      tools: {
+        totalCalls: 2,
+        totalSuccess: 1,
+        totalFail: 1,
+        totalDurationMs: 3000,
+        byName: { bash: { calls: 2, success: 1, fail: 1, durationMs: 3000 } },
+      },
+      serverToolCalls: 0,
+      linesChanged: { added: 3, removed: 1 },
+      footer: "To resume this session: ggcoder --resume session.jsonl",
+    },
   },
 } satisfies ParityCaseByKind;
 

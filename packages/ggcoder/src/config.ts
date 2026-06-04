@@ -1,41 +1,17 @@
 import path from "node:path";
-import os from "node:os";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
+import { getAppPaths, type AppPaths } from "@abukhaled/gg-core";
 import type { ThemeName } from "./ui/theme/theme.js";
 
 export const APP_NAME = "ogcoder";
 export const VERSION = "0.0.1";
 
-export interface AppPaths {
-  agentDir: string;
-  sessionsDir: string;
-  settingsFile: string;
-  authFile: string;
-  telegramFile: string;
-  agentHomeFile: string;
-  logFile: string;
-  skillsDir: string;
-  extensionsDir: string;
-  agentsDir: string;
-}
-
-export function getAppPaths(): AppPaths {
-  const agentDir = path.join(os.homedir(), ".gg");
-  return {
-    agentDir,
-    sessionsDir: path.join(agentDir, "sessions"),
-    settingsFile: path.join(agentDir, "settings.json"),
-    authFile: path.join(agentDir, "auth.json"),
-    telegramFile: path.join(agentDir, "telegram.json"),
-    agentHomeFile: path.join(agentDir, "agent-home.json"),
-    logFile: path.join(agentDir, "debug.log"),
-    skillsDir: path.join(agentDir, "skills"),
-    extensionsDir: path.join(agentDir, "extensions"),
-    agentsDir: path.join(agentDir, "agents"),
-  };
-}
+// getAppPaths + AppPaths now live in @abukhaled/gg-core. Re-exported here so the
+// many `./config.js` importers keep resolving them unchanged.
+export { getAppPaths };
+export type { AppPaths };
 
 export async function ensureAppDirs(): Promise<AppPaths> {
   const paths = getAppPaths();
@@ -55,6 +31,7 @@ export interface SavedSettings {
   thinkingEnabled: boolean;
   thinkingLevel?: ThinkingLevel;
   theme: "auto" | ThemeName;
+  idealReviewEnabled: boolean;
 }
 
 const VALID_PROVIDERS = new Set<Provider>([
@@ -76,7 +53,11 @@ function isValidProvider(value: unknown): value is Provider {
 /** Load saved settings from the settings file. Returns defaults on missing/invalid file. */
 export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
   const filePath = settingsFilePath ?? getAppPaths().settingsFile;
-  const result: SavedSettings = { thinkingEnabled: false, theme: "auto" };
+  const result: SavedSettings = {
+    thinkingEnabled: false,
+    theme: "auto",
+    idealReviewEnabled: true,
+  };
   try {
     const raw = JSON.parse(fsSync.readFileSync(filePath, "utf-8"));
     // Only accept providers the current build actually supports. A stale
@@ -91,13 +72,14 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
     if (raw.thinkingEnabled === true) result.thinkingEnabled = true;
     if (isValidThinkingLevel(raw.thinkingLevel)) result.thinkingLevel = raw.thinkingLevel;
     if (typeof raw.theme === "string" && isValidThemeSetting(raw.theme)) result.theme = raw.theme;
+    if (raw.idealReviewEnabled === false) result.idealReviewEnabled = false;
   } catch {
     // No settings file or invalid JSON — use defaults
   }
   return result;
 }
 
-const VALID_THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh"]);
+const VALID_THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh", "max"]);
 
 function isValidThinkingLevel(value: unknown): value is ThinkingLevel {
   return typeof value === "string" && VALID_THINKING_LEVELS.has(value as ThinkingLevel);

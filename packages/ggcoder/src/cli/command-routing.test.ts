@@ -4,6 +4,7 @@ import { routeCliCommandInput, type CliSubcommandName } from "./command-routing.
 function handlers(calls: string[]): Record<CliSubcommandName, () => void> {
   return {
     eyes: () => calls.push("eyes"),
+    mcp: () => calls.push("mcp"),
     login: () => calls.push("login"),
     logout: () => calls.push("logout"),
     sessions: () => calls.push("sessions"),

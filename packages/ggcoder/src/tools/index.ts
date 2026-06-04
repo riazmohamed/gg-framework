@@ -1,6 +1,7 @@
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { ProcessManager } from "../core/process-manager.js";
 import { createReadTool } from "./read.js";
+import { getVideoByteLimit } from "../core/model-registry.js";
 import { createWriteTool } from "./write.js";
 import { createEditTool } from "./edit.js";
 import { createBashTool } from "./bash.js";
@@ -14,16 +15,14 @@ import { createSourcePathTool } from "./source-path.js";
 import { createTaskOutputTool } from "./task-output.js";
 import { createTaskStopTool } from "./task-stop.js";
 import { createTasksTool } from "./tasks.js";
-import { createGoalsTool } from "./goals.js";
 import { createSkillTool } from "./skill.js";
+import { createScreenshotTool } from "./screenshot.js";
 import { createEnterPlanTool } from "./enter-plan.js";
 import { createExitPlanTool } from "./exit-plan.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import type { ReadTracker } from "./read-tracker.js";
 import type { AgentDefinition } from "../core/agents.js";
 import type { Skill } from "../core/skills.js";
-import type { GoalReference } from "../core/goal-store.js";
-import type { GoalMode } from "../core/runtime-mode.js";
 
 export interface CreateToolsOptions {
   agents?: AgentDefinition[];
@@ -32,20 +31,22 @@ export interface CreateToolsOptions {
   model?: string;
   /** Custom I/O operations for remote execution (SSH, Docker, etc.). Defaults to local filesystem. */
   operations?: ToolOperations;
-  /** Ref for checking Goal orchestration mode inside tool execute functions. */
-  goalModeRef?: { current: GoalMode };
-  /** Ref tracking plan-mode state for windows-fork plan-tool gating. */
+  /** Ref for checking plan mode inside tool execute functions. */
   planModeRef?: { current: boolean };
-  /** Invoked when the agent calls enter_plan. */
-  onEnterPlan?: (reason?: string) => void;
-  /** Invoked when the agent calls exit_plan; returns "approved"/"rejected"/"dismissed". */
+  /** Callback when the LLM enters plan mode. */
+  onEnterPlan?: (reason?: string) => void | Promise<void>;
+  /** Callback when the LLM submits a plan for review. */
   onExitPlan?: (planPath: string) => Promise<string>;
   /** Callback after read tool successfully reads a text file. */
   onFileRead?: (filePath: string) => void | Promise<void>;
   /** Callback after write/edit tools successfully mutate a file. */
   onFileMutated?: (filePath: string) => void | Promise<void>;
-  /** Getter for active /goal reference context while setup persists durable Goal state. */
-  getGoalReferences?: () => readonly GoalReference[] | undefined;
+  /**
+   * Callback fired by write/edit BEFORE the on-disk write, so a checkpoint store
+   * can snapshot the file's prior content for /rewind. Receives the resolved
+   * absolute path.
+   */
+  onPreFileMutation?: (filePath: string) => void | Promise<void>;
   /**
    * Getter for parent's prompt-cache routing key, evaluated lazily at
    * sub-agent spawn time. Returning a stable key from this getter lets every
@@ -66,13 +67,18 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
   const readFiles: ReadTracker = new Map();
   const processManager = new ProcessManager();
   const ops = opts?.operations ?? localOperations;
-  const goalModeRef = opts?.goalModeRef;
+  const planModeRef = opts?.planModeRef;
 
+  // Enable native video returns from the read tool for any video-capable model
+  // (Kimi/Moonshot, Gemini, MiniMax), each with its own per-model byte cap that
+  // drives auto-compression. Non-video models get `undefined` — video falls back
+  // to the plain binary-file notice, never offered to models that can't watch it.
+  const videoByteLimit = opts?.model ? getVideoByteLimit(opts.model) : undefined;
   const tools: AgentTool[] = [
-    createReadTool(cwd, readFiles, ops, opts?.onFileRead),
-    createWriteTool(cwd, readFiles, ops, goalModeRef, opts?.onFileMutated),
-    createEditTool(cwd, readFiles, ops, goalModeRef, opts?.onFileMutated),
-    createBashTool(cwd, processManager, ops, goalModeRef),
+    createReadTool(cwd, readFiles, ops, opts?.onFileRead, videoByteLimit),
+    createWriteTool(cwd, readFiles, ops, planModeRef, opts?.onFileMutated, opts?.onPreFileMutation),
+    createEditTool(cwd, readFiles, ops, planModeRef, opts?.onFileMutated, opts?.onPreFileMutation),
+    createBashTool(cwd, processManager, ops, planModeRef),
     createFindTool(cwd),
     createGrepTool(cwd, ops),
     createLsTool(cwd, ops),
@@ -81,7 +87,7 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
     createTaskOutputTool(processManager),
     createTaskStopTool(processManager),
     createTasksTool(cwd),
-    createGoalsTool(cwd, goalModeRef, opts?.getGoalReferences),
+    createScreenshotTool(cwd),
   ];
 
   // Add web search tool for providers without reliable native web search
@@ -96,8 +102,8 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
         opts.agents,
         opts.provider,
         opts.model,
-        goalModeRef,
         opts.getCacheKey,
+        planModeRef,
       ),
     );
   }
@@ -130,7 +136,9 @@ export { createSourcePathTool } from "./source-path.js";
 export { createTaskOutputTool } from "./task-output.js";
 export { createTaskStopTool } from "./task-stop.js";
 export { createTasksTool } from "./tasks.js";
-export { createGoalsTool } from "./goals.js";
 export { createSkillTool } from "./skill.js";
+export { createScreenshotTool } from "./screenshot.js";
+export { createEnterPlanTool } from "./enter-plan.js";
+export { createExitPlanTool } from "./exit-plan.js";
 export { ProcessManager } from "../core/process-manager.js";
 export { localOperations, type ToolOperations } from "./operations.js";

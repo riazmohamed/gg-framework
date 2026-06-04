@@ -1,5 +1,6 @@
 export type CliSubcommandName =
   | "eyes"
+  | "mcp"
   | "login"
   | "logout"
   | "sessions"
@@ -25,6 +26,7 @@ export interface CliCommandRoutingOptions {
 
 const SUBCOMMANDS_THAT_KEEP_ARGV: ReadonlySet<CliSubcommandName> = new Set([
   "eyes",
+  "mcp",
   "login",
   "logout",
   "telegram",
@@ -35,6 +37,7 @@ const SUBCOMMANDS_THAT_KEEP_ARGV: ReadonlySet<CliSubcommandName> = new Set([
 function isCliSubcommandName(value: string | undefined): value is CliSubcommandName {
   return (
     value === "eyes" ||
+    value === "mcp" ||
     value === "login" ||
     value === "logout" ||
     value === "sessions" ||

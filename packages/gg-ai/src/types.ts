@@ -17,7 +17,7 @@ export type Provider =
 
 // ── Thinking ───────────────────────────────────────────────
 
-export type ThinkingLevel = "low" | "medium" | "high" | "xhigh";
+export type ThinkingLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 // ── Cache ─────────────────────────────────────────────────
 
@@ -44,8 +44,13 @@ export interface ImageContent {
 
 export interface VideoContent {
   type: "video";
-  mediaType: string;
+  mediaType: string; // e.g. "video/mp4"
   data: string; // base64
+  /** Moonshot/Kimi file id (e.g. "d4f0…") after uploading via the files API.
+   *  Moonshot rejects inline base64 video; the provider uploads the clip once
+   *  and caches the id here so later turns reference `ms://<fileId>` instead of
+   *  re-sending the bytes. */
+  fileId?: string;
 }
 
 export interface DocumentContent {
@@ -62,7 +67,7 @@ export interface ToolCall {
   args: Record<string, unknown>;
 }
 
-export type ToolResultContent = string | (TextContent | ImageContent)[];
+export type ToolResultContent = string | (TextContent | ImageContent | VideoContent)[];
 
 export interface ToolResult {
   type: "tool_result";
@@ -287,6 +292,10 @@ export interface StreamOptions {
    *  in user messages and tool_result messages is downgraded to a text placeholder
    *  before being sent to the provider. Default: true. */
   supportsImages?: boolean;
+  /** Whether the target model supports video input. When false, video content
+   *  in user messages is downgraded to a text placeholder before being sent to
+   *  the provider. Default: false. */
+  supportsVideo?: boolean;
   /** Use streaming transport (default: true). When false, providers issue a
    *  single non-streaming request and synthesize events from the full response.
    *  The agent loop flips this to `false` as a fallback after repeated stream
@@ -299,4 +308,9 @@ export interface StreamOptions {
    *  version should pass it here. Ignored for non-Anthropic providers and for
    *  Anthropic requests using a regular API key. */
   userAgent?: string;
+  /** Extra HTTP headers attached to every model request. Used by providers
+   *  whose endpoint gates on client identity (e.g. Kimi For Coding requires a
+   *  `User-Agent: kimi-code-cli/...` and `X-Msh-*` device headers). Merged
+   *  into the underlying SDK's default headers. */
+  defaultHeaders?: Record<string, string>;
 }

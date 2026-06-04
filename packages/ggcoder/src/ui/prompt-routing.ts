@@ -1,10 +1,9 @@
 import { writeFileSync } from "node:fs";
-import type { Message, TextContent, ImageContent } from "@abukhaled/gg-ai";
+import type { TextContent, ImageContent, VideoContent } from "@abukhaled/gg-ai";
 import type { ImageAttachment } from "../utils/image.js";
-import { PROMPT_COMMANDS, getPromptCommand } from "../core/prompt-commands.js";
+import { VIDEO_MEDIA_TYPES } from "../utils/image.js";
+import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
 import type { CustomCommand } from "../core/custom-commands.js";
-import type { GoalMode } from "../core/runtime-mode.js";
-import type { UserContent } from "./hooks/useAgentLoop.js";
 
 export function routePromptCommandInput(
   input: string,
@@ -28,88 +27,35 @@ export function routePromptCommandInput(
   };
 }
 
-const GOAL_PLANNER_OUTPUT_MAX_CHARS = 2400;
-
-function messageTextContent(message: Message): string {
-  if (typeof message.content === "string") return message.content;
-  return message.content
-    .filter((part): part is TextContent => part.type === "text")
-    .map((part) => part.text)
-    .join("\n");
-}
-
-export function collectAssistantTextSince(
-  messages: readonly Message[],
-  startIndex: number,
-  maxChars = GOAL_PLANNER_OUTPUT_MAX_CHARS,
-): string {
-  const text = messages
-    .slice(startIndex)
-    .filter((message) => message.role === "assistant")
-    .map(messageTextContent)
-    .join("\n")
-    .trim();
-  if (text.length <= maxChars) return text;
-  return text.slice(0, maxChars).trimEnd() + "\n[planner output truncated]";
-}
-
-export function buildGoalSetupPromptFromPlanner({
-  originalGoalPrompt,
-  plannerOutput,
-}: {
-  originalGoalPrompt: string;
-  plannerOutput: string;
-}): string {
-  const compactPlannerOutput = plannerOutput.trim() || "GOAL_PLAN\nresearch=none\nEND_GOAL_PLAN";
-  return (
-    `${originalGoalPrompt.trim()}\n\n` +
-    `## Goal Planner Output\n\n${compactPlannerOutput}\n\n` +
-    `Use the original objective plus this planner output to create durable Goal setup only. ` +
-    `Do not redo planner research unless the planner output is unusable.`
-  );
-}
-
-export function isGoalPromptCommandName(cmdName: string): boolean {
-  return getPromptCommand(cmdName)?.name === "goal";
-}
-
-export async function runGoalPromptSetupSequence({
-  userContent,
-  fullPrompt,
-  messagesRef,
-  setGoalModeAndPrompt,
-  runAgent,
-  onStage,
-}: {
-  userContent: UserContent;
-  fullPrompt: string;
-  messagesRef: { current: Message[] };
-  setGoalModeAndPrompt: (nextMode: GoalMode) => Promise<void>;
-  runAgent: (content: UserContent) => Promise<void>;
-  onStage?: (text: string) => void;
-}): Promise<void> {
-  onStage?.("Planning Goal setup");
-  await setGoalModeAndPrompt("planner");
-  const plannerStartIndex = messagesRef.current.length;
-  await runAgent(userContent);
-  const plannerOutput = collectAssistantTextSince(messagesRef.current, plannerStartIndex);
-  const setupPrompt = buildGoalSetupPromptFromPlanner({
-    originalGoalPrompt: fullPrompt,
-    plannerOutput,
-  });
-  await setGoalModeAndPrompt("setup");
-  onStage?.("Creating Goal run");
-  await runAgent(setupPrompt);
+/**
+ * Resolve a usable on-disk path for a video attachment. Prefers the original
+ * file path (set for any path-based attachment, works at any size). Falls back
+ * to persisting the in-memory base64 to a temp file for attachments that have
+ * no path (e.g. clipboard). Returns null if neither is available.
+ */
+function resolveVideoPath(img: ImageAttachment): string | null {
+  if (img.filePath) return img.filePath;
+  if (!img.data) return null;
+  const ext =
+    Object.entries(VIDEO_MEDIA_TYPES).find(([, mt]) => mt === img.mediaType)?.[0] ?? ".mp4";
+  const tmpPath = `/tmp/ggcoder-video-${Date.now()}${ext}`;
+  try {
+    writeFileSync(tmpPath, Buffer.from(img.data, "base64"));
+    return tmpPath;
+  } catch {
+    return null;
+  }
 }
 
 export function buildUserContentWithAttachments(
   text: string,
   inputImages: ImageAttachment[],
   modelSupportsImages: boolean,
-): string | (TextContent | ImageContent)[] {
+  modelSupportsVideo: boolean,
+): string | (TextContent | ImageContent | VideoContent)[] {
   if (inputImages.length === 0) return text;
 
-  const parts: (TextContent | ImageContent)[] = [];
+  const parts: (TextContent | ImageContent | VideoContent)[] = [];
   if (text) {
     parts.push({ type: "text", text });
   }
@@ -120,6 +66,31 @@ export function buildUserContentWithAttachments(
         type: "text",
         text: `<file name="${img.fileName}">\n${img.data}\n</file>`,
       });
+    } else if (img.kind === "video") {
+      const videoPath = resolveVideoPath(img);
+      if (modelSupportsVideo) {
+        // Video-capable models (Kimi/Gemini/MiniMax) watch video via the read
+        // tool, which auto-compresses to each model's cap and delivers it in the
+        // provider's required shape. Point at the real on-disk path (any size).
+        parts.push({
+          type: "text",
+          text: videoPath
+            ? `The user attached a video at ${videoPath}. You CAN watch it: call the read tool ` +
+              `on this exact path now, then answer based on what you see. Do not say you ` +
+              `cannot watch video — reading the file lets you analyze it.`
+            : `[User attached a video but it could not be saved for analysis]`,
+        });
+      } else {
+        // Models without video analysis: state the attachment plainly, with no
+        // "analyze this video" framing that would confuse a model that can't.
+        parts.push({
+          type: "text",
+          text: videoPath
+            ? `[User attached a video file at ${videoPath}. You cannot watch video directly; ` +
+              `if needed, use ffmpeg to extract frames or audio.]`
+            : `[User attached a video file.]`,
+        });
+      }
     } else if (modelSupportsImages) {
       parts.push({ type: "image", mediaType: img.mediaType, data: img.data });
     } else {

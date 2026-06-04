@@ -20,6 +20,7 @@ import {
   formatWelcome,
 } from "./utils/format.js";
 import { AuthStorage } from "./core/auth-storage.js";
+import { kimiCodingHeaders, isKimiCodingEndpoint } from "./core/oauth/kimi.js";
 import { ensureAppDirs } from "./config.js";
 import { discoverSkills } from "./core/skills.js";
 import path from "node:path";
@@ -57,6 +58,8 @@ export async function runInteractive(config: CliConfig): Promise<void> {
       false,
       undefined,
       tools.map((tool) => tool.name),
+      undefined,
+      provider,
     ));
   process.on("exit", () => processManager.shutdownAll());
   const authStorage = new AuthStorage(paths.authFile);
@@ -156,8 +159,20 @@ export async function runInteractive(config: CliConfig): Promise<void> {
 
     // Create abort controller for this run
     const ac = new AbortController();
+    let sigintCount = 0;
+    let sigintTimer: ReturnType<typeof setTimeout> | null = null;
     const onSigint = () => {
-      ac.abort();
+      sigintCount++;
+      if (sigintTimer) clearTimeout(sigintTimer);
+      sigintTimer = setTimeout(() => {
+        sigintCount = 0;
+      }, 2000);
+      if (sigintCount === 1) {
+        ac.abort();
+      } else {
+        // Second Ctrl+C: force exit immediately (130 = 128 + SIGINT)
+        process.exit(130);
+      }
     };
     process.on("SIGINT", onSigint);
 
@@ -171,10 +186,14 @@ export async function runInteractive(config: CliConfig): Promise<void> {
         tools,
         maxTokens: 16384,
         apiKey: creds.accessToken,
-        baseUrl: config.baseUrl,
+        baseUrl: config.baseUrl ?? creds.baseUrl,
         signal: ac.signal,
         accountId: creds.accountId,
         projectId: creds.projectId,
+        defaultHeaders:
+          provider === "moonshot" && isKimiCodingEndpoint(config.baseUrl ?? creds.baseUrl)
+            ? kimiCodingHeaders()
+            : undefined,
         // clearToolUses disabled — causes model to output unsolicited context summaries
       });
 
@@ -193,6 +212,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
       }
     } finally {
       process.removeListener("SIGINT", onSigint);
+      if (sigintTimer) clearTimeout(sigintTimer);
     }
 
     // Persist new messages added by agentLoop

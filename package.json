@@ -7,12 +7,13 @@
     "check": "pnpm -r check",
     "lint": "eslint 'packages/*/src/**/*.{ts,tsx}' && pnpm --filter matey lint",
     "lint:fix": "eslint 'packages/*/src/**/*.{ts,tsx}' --fix && pnpm --filter matey lint:fix",
-    "format": "prettier --write 'packages/*/src/**/*.{ts,tsx,py}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}'",
+    "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}'",
     "format:check": "prettier --check 'packages/*/src/**/*.{ts,tsx}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}'",
     "test": "pnpm -r test",
     "prepare": "pnpm build"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.31.0",
     "@eslint/js": "^10.0.1",
     "eslint": "^10.2.1",
     "eslint-config-prettier": "^10.1.8",
@@ -36,5 +37,8 @@
     "patchedDependencies": {
       "ink@6.8.0": "patches/ink@6.8.0.patch"
     }
+  },
+  "dependencies": {
+    "playwright": "^1.60.0"
   }
 }

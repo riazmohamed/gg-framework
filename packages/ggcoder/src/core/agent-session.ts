@@ -11,6 +11,7 @@ import { loadCustomCommands } from "./custom-commands.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage } from "./auth-storage.js";
 import { getClaudeCliUserAgent } from "./claude-code-version.js";
+import { kimiCodingHeaders, isKimiCodingEndpoint } from "./oauth/kimi.js";
 import { SessionManager, type MessageEntry, type BranchInfo } from "./session-manager.js";
 import { ExtensionLoader } from "./extensions/loader.js";
 import type { ExtensionContext } from "./extensions/types.js";
@@ -27,22 +28,10 @@ import { discoverSkills, type Skill } from "./skills.js";
 import { ensureAppDirs } from "../config.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import { createTools, createWebSearchTool, type ProcessManager } from "../tools/index.js";
-import { MCPClientManager, getMCPServers } from "./mcp/index.js";
+import { MCPClientManager, getMCPServers, getAllMcpServers } from "./mcp/index.js";
 import { log } from "./logger.js";
 import { setEstimatorModel } from "./compaction/token-estimator.js";
 import { discoverAgents } from "./agents.js";
-import {
-  buildRepoMap,
-  createRepoMapCache,
-  type RepoMapCache,
-  type RepoMapSnapshot,
-} from "./repomap.js";
-import { getRepoMapBudgetForContext } from "./repomap-budget.js";
-import {
-  getLatestUserText,
-  injectRepoMapContextMessages,
-  stripRepoMapContextMessages,
-} from "./repomap-context.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -107,14 +96,6 @@ export class AgentSession {
   private cacheKeyLogged = false;
   private processManager?: ProcessManager;
   private mcpManager?: MCPClientManager;
-  private repoMapInjectionEnabled = true;
-  private repoMapDirty = true;
-  private repoMapMarkdown = "";
-  private repoMapSnapshot?: RepoMapSnapshot;
-  private repoMapChangedFiles = new Set<string>();
-  private repoMapReadFiles = new Set<string>();
-  private repoMapCache: RepoMapCache = createRepoMapCache();
-
   private provider: Provider;
   private model: string;
   private cwd: string;
@@ -184,8 +165,6 @@ export class AgentSession {
       // Lazy — sessionId isn't assigned yet when createTools() runs, so we
       // must defer reading the cache key until the sub-agent actually fires.
       getCacheKey: () => this.getPromptCacheKey(),
-      onFileRead: (filePath) => this.markRepoMapRead(filePath),
-      onFileMutated: (filePath) => this.markRepoMapDirty(filePath),
     });
     this.tools = tools;
     this.processManager = processManager;
@@ -220,6 +199,8 @@ export class AgentSession {
         false,
         undefined,
         this.tools.map((tool) => tool.name),
+        undefined,
+        this.provider,
       ));
     this.messages = [{ role: "system", content: basePrompt }];
 
@@ -379,14 +360,14 @@ export class AgentSession {
 
     const userAgent = this.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined;
 
-    const latestUserPrompt = getLatestUserText(this.messages);
-    const loopMessages = await this.prepareDynamicContext(latestUserPrompt);
+    const loopMessages = await this.prepareDynamicContext();
 
     const runAgentLoop = async (apiKey: string, accountId?: string, projectId?: string) => {
       const modelInfo = getModel(this.model);
       // Build model router based on provider capabilities and user preference
       const modelRouter = createModelRouter(this.routerMode, this.provider, this.model);
 
+      const effectiveBaseUrl = this.baseUrl ?? creds.baseUrl;
       const generator = agentLoop(loopMessages, {
         provider: this.provider,
         model: this.model,
@@ -395,13 +376,20 @@ export class AgentSession {
         maxTokens: this.maxTokens,
         thinking: this.thinkingLevel,
         apiKey,
-        baseUrl: this.baseUrl,
+        baseUrl: effectiveBaseUrl,
         signal: this.opts.signal,
         accountId,
         projectId,
+        // Kimi For Coding gates the managed endpoint on coding-agent identity
+        // headers; attach them only when the Kimi OAuth token is in use.
+        defaultHeaders:
+          this.provider === "moonshot" && isKimiCodingEndpoint(effectiveBaseUrl)
+            ? kimiCodingHeaders()
+            : undefined,
         cacheRetention: "short",
         promptCacheKey: this.getPromptCacheKey(),
         supportsImages: modelInfo?.supportsImages,
+        supportsVideo: modelInfo?.supportsVideo,
         userAgent,
         // clearToolUses disabled — causes model to output unsolicited context summaries
         // Single tool result shouldn't exceed 30% of context window (in chars)
@@ -424,17 +412,12 @@ export class AgentSession {
         return;
       }
       if (err instanceof ProviderError && err.statusCode === 401) {
-        // API-key providers (GLM, Moonshot) have no refresh mechanism — retrying
-        // with the same key is pointless. Clear the credential and let the error
-        // surface so the user knows to re-login with a valid key.
-        if (
-          this.provider === "glm" ||
-          this.provider === "moonshot" ||
-          this.provider === "minimax" ||
-          this.provider === "xiaomi" ||
-          this.provider === "deepseek" ||
-          this.provider === "openrouter"
-        ) {
+        // Static API-key providers (GLM, Moonshot API key, etc.) have no refresh
+        // mechanism — retrying with the same key is pointless. Clear the
+        // credential and surface the error so the user re-logins. Kimi OAuth
+        // (active for `moonshot` when present) is refreshable, so it falls
+        // through to the force-refresh path below.
+        if (await this.authStorage.isStaticApiKey(this.provider)) {
           log("WARN", "auth", `Got 401 for ${this.provider} — API key is invalid or revoked`);
           await this.authStorage.clearCredentials(this.provider);
           throw err;
@@ -447,7 +430,7 @@ export class AgentSession {
       }
     }
 
-    this.messages = this.stripDynamicMessages(loopMessages);
+    this.messages = loopMessages;
 
     // Persist new messages
     for (let i = this.lastPersistedIndex; i < this.messages.length; i++) {
@@ -476,8 +459,13 @@ export class AgentSession {
         this.tools.push(createWebSearchTool());
       }
 
-      // Reconnect MCP servers (e.g. GLM needs Z.AI tools, others don't)
-      if (this.mcpManager) {
+      // Reconnect MCP servers ONLY when GLM is involved on either side — GLM
+      // is the only provider with a different server set (Z.AI tools), so a
+      // non-GLM switch keeps the identical set. Skipping the dispose/reconnect
+      // there avoids tearing down a live stdio child (e.g. kencode-search) and
+      // gambling on a `npx` re-spawn that could fail and drop the tools.
+      const glmInvolved = this.provider === "glm" || prevProvider === "glm";
+      if (this.mcpManager && glmInvolved) {
         // Remove old MCP tools
         this.tools = this.tools.filter((t) => !t.name.startsWith("mcp__"));
 
@@ -495,7 +483,9 @@ export class AgentSession {
               // GLM not configured — skip Z.AI MCP servers
             }
           }
-          const mcpTools = await this.mcpManager.connectAll(getMCPServers(this.provider, apiKey));
+          // Use getAllMcpServers so user-configured servers survive the reconnect.
+          const servers = await getAllMcpServers(this.provider, apiKey, this.cwd);
+          const mcpTools = await this.mcpManager.connectAll(servers);
           this.tools.push(...mcpTools);
         } catch (err) {
           log(
@@ -571,6 +561,8 @@ export class AgentSession {
         false,
         undefined,
         this.tools.map((tool) => tool.name),
+        undefined,
+        this.provider,
       ));
     this.messages = [{ role: "system", content: basePrompt }];
     await this.createNewSession();
@@ -663,35 +655,6 @@ export class AgentSession {
     return this.getPromptCacheKey();
   }
 
-  getRepoMapStatus(): { enabled: boolean; markdown: string; snapshot?: RepoMapSnapshot } {
-    return {
-      enabled: this.repoMapInjectionEnabled,
-      markdown: this.repoMapMarkdown,
-      snapshot: this.repoMapSnapshot,
-    };
-  }
-
-  async refreshRepoMap(
-    latestUserPrompt?: string,
-  ): Promise<{ markdown: string; snapshot: RepoMapSnapshot }> {
-    const rendered = await buildRepoMap({
-      cwd: this.cwd,
-      maxChars: this.getRepoMapBudget(),
-      changedFiles: [...this.repoMapChangedFiles],
-      readFiles: [...this.repoMapReadFiles],
-      focusTerms: latestUserPrompt ? [latestUserPrompt] : [],
-      cache: this.repoMapCache,
-    });
-    this.repoMapMarkdown = rendered.markdown;
-    this.repoMapSnapshot = rendered.snapshot;
-    this.repoMapDirty = false;
-    return { markdown: rendered.markdown, snapshot: rendered.snapshot };
-  }
-
-  setRepoMapInjectionEnabled(enabled: boolean): void {
-    this.repoMapInjectionEnabled = enabled;
-  }
-
   async dispose(): Promise<void> {
     this.processManager?.shutdownAll();
     await this.mcpManager?.dispose();
@@ -761,40 +724,8 @@ export class AgentSession {
     this.lastPersistedIndex = this.messages.length;
   }
 
-  private markRepoMapDirty(filePath: string): void {
-    const relativePath = this.relativeRepoMapPath(filePath);
-    this.repoMapChangedFiles.add(relativePath);
-    this.repoMapReadFiles.add(relativePath);
-    this.repoMapDirty = true;
-  }
-
-  private markRepoMapRead(filePath: string): void {
-    this.repoMapReadFiles.add(this.relativeRepoMapPath(filePath));
-    this.repoMapDirty = true;
-  }
-
-  private relativeRepoMapPath(filePath: string): string {
-    return path.relative(this.cwd, filePath).split(path.sep).join("/");
-  }
-
-  private getRepoMapBudget(): number {
-    return getRepoMapBudgetForContext({
-      messages: this.messages,
-      readFileCount: this.repoMapReadFiles.size,
-    });
-  }
-
-  private async prepareDynamicContext(latestUserPrompt?: string): Promise<Message[]> {
-    if (!this.repoMapInjectionEnabled) return this.stripDynamicMessages(this.messages);
-    if (this.repoMapDirty || !this.repoMapMarkdown) {
-      await this.refreshRepoMap(latestUserPrompt);
-    }
-    if (!this.repoMapMarkdown) return this.stripDynamicMessages(this.messages);
-    return injectRepoMapContextMessages(this.messages, this.repoMapMarkdown);
-  }
-
-  private stripDynamicMessages(messages: readonly Message[]): Message[] {
-    return stripRepoMapContextMessages(messages);
+  private async prepareDynamicContext(_latestUserPrompt?: string): Promise<Message[]> {
+    return this.messages;
   }
 
   private async persistMessage(message: Message): Promise<void> {
@@ -846,27 +777,6 @@ export class AgentSession {
         const result = await this.branch(stepsBack);
         return `Branched: rewound from ${result.branchedFrom} to ${result.messagesKept} messages. New messages will fork from here.`;
       },
-      repoMap: async (action = "show") => {
-        if (action === "on") {
-          this.setRepoMapInjectionEnabled(true);
-          return "Dynamic repo map injection is on.";
-        }
-        if (action === "off") {
-          this.setRepoMapInjectionEnabled(false);
-          return "Dynamic repo map injection is off for this session.";
-        }
-        if (action === "refresh") {
-          const latestUserPrompt = getLatestUserText(this.messages);
-          const refreshed = await this.refreshRepoMap(latestUserPrompt);
-          return formatRepoMapCommandOutput(this.repoMapInjectionEnabled, refreshed.markdown, true);
-        }
-        const status = this.getRepoMapStatus();
-        if (!status.markdown) {
-          const refreshed = await this.refreshRepoMap(getLatestUserText(this.messages));
-          return formatRepoMapCommandOutput(status.enabled, refreshed.markdown, false);
-        }
-        return formatRepoMapCommandOutput(status.enabled, status.markdown, false);
-      },
       listBranches: async () => {
         const branches = await this.listBranches();
         if (branches.length <= 1) return "No branches — conversation is linear.";
@@ -890,16 +800,4 @@ export class AgentSession {
       },
     };
   }
-}
-
-function formatRepoMapCommandOutput(
-  enabled: boolean,
-  markdown: string,
-  refreshed: boolean,
-): string {
-  const status = enabled ? "on" : "off";
-  const prefix = refreshed
-    ? `Dynamic repo map refreshed · injection: ${status}`
-    : `Dynamic repo map · injection: ${status}`;
-  return `${prefix}\n\n${markdown}`;
 }

@@ -9,6 +9,7 @@ import {
   type Usage,
   type ContentPart,
   type AssistantMessage,
+  isHardBillingMessage,
 } from "@abukhaled/gg-ai";
 import type {
   AgentEvent,
@@ -21,7 +22,7 @@ import type {
   StructuredToolResult,
 } from "./types.js";
 
-const DEFAULT_MAX_TURNS = 200;
+const DEFAULT_MAX_TURNS = 300;
 
 /**
  * Lightweight stream diagnostic callback. When set, the agent loop calls this
@@ -62,6 +63,12 @@ export function isAbortError(err: unknown): boolean {
  */
 export function isContextOverflow(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
+  // 402 is always credit/payment exhaustion — never a context overflow. Guards
+  // against e.g. OpenRouter's 402 "requires more credits, or fewer max_tokens...
+  // you requested up to N tokens" being misread as overflow and triggering
+  // futile compaction retries.
+  const overflowStatus = (err as Error & { statusCode?: unknown }).statusCode;
+  if (overflowStatus === 402) return false;
   if (isBillingError(err)) return false;
   const msg = err.message.toLowerCase();
   return (
@@ -137,19 +144,39 @@ export function extractContextOverflowDetails(err: unknown): ContextOverflowDeta
  */
 export function isBillingError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-  return (
-    msg.includes("insufficient balance") ||
-    msg.includes("no resource package") ||
-    msg.includes("quota exceeded") ||
-    msg.includes("billing") ||
-    msg.includes("recharge") ||
-    msg.includes("subscription plan") ||
-    msg.includes("does not yet include access") ||
-    msg.includes("token quota") ||
-    msg.includes("exceeded_current_quota_error") ||
-    msg.includes("check your account balance")
-  );
+  // HTTP 402 (Payment Required) is always a hard credit/payment stop across our
+  // provider set (DeepSeek, OpenRouter, ...). Never retriable.
+  const statusCode = (err as Error & { statusCode?: unknown }).statusCode;
+  if (statusCode === 402) return true;
+  // Shared marker list (single source of truth in @abukhaled/gg-ai) so the
+  // provider boundary and this classifier can't drift apart.
+  return isHardBillingMessage(err.message);
+}
+
+/**
+ * Detect subscription/plan usage-window exhaustion (e.g. an Anthropic OAuth
+ * plan running out of usage). Unlike a transient per-minute 429, this does NOT
+ * clear with a quick retry — the user must wait for the window to reset — so the
+ * loop surfaces it immediately instead of retrying for minutes. Matches the
+ * canonical message gg-ai stamps onto the provider error.
+ */
+export function isUsageLimitError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return /usage limit reached/i.test(err.message);
+}
+
+/**
+ * Read a provider-stated reset time off the error and convert it to a delay in
+ * milliseconds from now. Providers like Gemini return a short `retryDelay` for a
+ * transient per-minute throttle, which gg-ai stamps onto the ProviderError as
+ * `resetsAt` (unix seconds). Returns undefined when absent or already elapsed.
+ */
+export function serverResetDelayMs(err: unknown): number | undefined {
+  if (!(err instanceof Error)) return undefined;
+  const resetsAt = (err as Error & { resetsAt?: unknown }).resetsAt;
+  if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt)) return undefined;
+  const delayMs = resetsAt * 1000 - Date.now();
+  return delayMs > 0 ? delayMs : undefined;
 }
 
 /**
@@ -174,6 +201,26 @@ export function isToolPairingError(err: unknown): boolean {
 }
 
 /**
+ * Detect Anthropic's thinking-block integrity errors. These 400s fire when a
+ * signed `thinking`/`redacted_thinking` block in the latest assistant message
+ * can't be validated — typically a partial/invalid signature from an
+ * interrupted stream, or a block whose position shifted. Recoverable once by
+ * stripping thinking blocks from the message history and re-sending.
+ */
+export function isThinkingBlockError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  if (!msg.includes("thinking")) return false;
+  return (
+    msg.includes("cannot be modified") ||
+    msg.includes("must remain as they were") ||
+    (msg.includes("signature") && msg.includes("invalid")) ||
+    // "Expected `thinking` or `redacted_thinking`, but found `text`"
+    (msg.includes("expected") && msg.includes("but found"))
+  );
+}
+
+/**
  * Distinguish rate-limit (HTTP 429), server-side overload (HTTP 529), and
  * transient provider 5xx/API failures. Returns null for errors that should not
  * enter the retry bucket. All kinds use the same backoff schedule, but the UI
@@ -184,10 +231,14 @@ export function classifyOverload(
 ): "rate_limit" | "overloaded" | "provider_error" | null {
   if (!(err instanceof Error)) return null;
   if (isBillingError(err)) return null;
+  // Usage-window exhaustion is not retriable — keep it out of the backoff bucket.
+  if (isUsageLimitError(err)) return null;
   const msg = err.message.toLowerCase();
   const errorWithStatus = err as Error & { statusCode?: unknown };
   const statusCode =
     typeof errorWithStatus.statusCode === "number" ? errorWithStatus.statusCode : undefined;
+  // 402 is billing/credits — never retry, never treat as overload.
+  if (statusCode === 402) return null;
   if (
     statusCode === 429 ||
     msg.includes("rate_limit") ||
@@ -325,6 +376,7 @@ export async function* agentLoop(
   let lastRouterModel: string | undefined;
   let consecutivePauses = 0;
   let toolPairingRepaired = false;
+  let thinkingBlocksStripped = false;
   let overloadRetries = 0;
   let emptyResponseRetries = 0;
   let stallRetries = 0;
@@ -347,7 +399,13 @@ export async function* agentLoop(
   const OVERLOAD_BASE_DELAY_MS = 2_000;
   const OVERLOAD_MAX_DELAY_MS = 30_000;
   const STREAM_FIRST_EVENT_TIMEOUT_MS = 45_000; // 45s to get first event (Opus thinks long)
-  const STREAM_IDLE_TIMEOUT_MS = 30_000; // 30s between events once streaming starts
+  // 90s of true API silence between events once streaming starts. This measures
+  // only time the *API* was quiet -- the timer is armed after we finish yielding
+  // each event downstream, so slow UI/consumer render time is excluded (see the
+  // resetIdleTimer() call after the yield, below). 30s here previously caused
+  // false aborts on large `write`/`edit` tool-call streams when the Ink UI lagged
+  // tens of seconds behind. 90s matches Claude Code's default idle watchdog.
+  const STREAM_IDLE_TIMEOUT_MS = 90_000; // 90s of API silence between events
   // Anthropic models can pause 10-20s mid-stream while computing the next chunk
   // (e.g. generating tool call args for a large write).  10s was too aggressive
   // and caused false "stream stalled" errors, especially in plan mode.
@@ -578,9 +636,11 @@ export async function* agentLoop(
           promptCacheKey: options.promptCacheKey,
           serviceTier: options.serviceTier,
           supportsImages: options.supportsImages,
+          supportsVideo: options.supportsVideo,
           compaction: options.compaction,
           clearToolUses: options.clearToolUses,
           userAgent: options.userAgent,
+          defaultHeaders: options.defaultHeaders,
           // Flip to non-streaming fallback after repeated stream stalls.
           ...(useNonStreamingFallback ? { streaming: false } : {}),
         });
@@ -668,7 +728,14 @@ export async function* agentLoop(
             });
           }
           lastEventTime = now;
-          resetIdleTimer();
+          // The event is in hand -- the API has proven liveness, so stop the idle
+          // timer for the duration of downstream processing. We re-arm it after
+          // the yield completes (see below) so the idle window measures only API
+          // silence, never the time our consumer/UI spent rendering this event.
+          if (idleTimer) {
+            clearTimeout(idleTimer);
+            idleTimer = null;
+          }
           if (event.type === "text_delta") {
             yield { type: "text_delta" as const, text: event.text };
           } else if (event.type === "thinking_delta") {
@@ -714,6 +781,9 @@ export async function* agentLoop(
             };
           }
           lastYieldEndTime = Date.now();
+          // Re-arm the idle timer only now that we're done yielding -- the
+          // countdown to the next event excludes the render time above.
+          resetIdleTimer();
         }
 
         diag("stream_done", {
@@ -735,6 +805,18 @@ export async function* agentLoop(
           provider: options.provider,
           model: options.model,
         });
+        // Subscription/plan usage-window exhaustion (e.g. Anthropic OAuth plan
+        // out of usage). Not a transient throttle — retrying just burns minutes
+        // before failing, which looks like a hang. Surface immediately so the
+        // host UI shows a clear "usage finished" message. The conversation in
+        // `messages` is left intact so the user can resume once it resets.
+        if (isUsageLimitError(err)) {
+          diag("usage_limit_reached", {
+            provider: options.provider,
+            model: options.model,
+          });
+          throw err;
+        }
         // Context overflow: try a forced compaction before giving up.
         // The pre-turn transformContext check uses estimated tokens, which can
         // underestimate code-heavy content. When the API confirms overflow we
@@ -824,10 +906,18 @@ export async function* agentLoop(
         const overloadKind = classifyOverload(err);
         if (overloadRetries < MAX_OVERLOAD_RETRIES && overloadKind) {
           overloadRetries++;
-          const delayMs = Math.min(
-            OVERLOAD_BASE_DELAY_MS * 2 ** (overloadRetries - 1),
-            OVERLOAD_MAX_DELAY_MS,
-          );
+          // Honor a server-stated reset time (e.g. Gemini's RetryInfo.retryDelay)
+          // when present, so we wait exactly as long as the provider asked
+          // instead of guessing with blind exponential backoff. Fall back to
+          // exponential backoff otherwise.
+          const serverDelayMs = serverResetDelayMs(err);
+          const delayMs =
+            serverDelayMs !== undefined
+              ? Math.min(serverDelayMs, OVERLOAD_MAX_DELAY_MS)
+              : Math.min(
+                  OVERLOAD_BASE_DELAY_MS * 2 ** (overloadRetries - 1),
+                  OVERLOAD_MAX_DELAY_MS,
+                );
           diag("retry", {
             reason: overloadKind,
             attempt: overloadRetries,
@@ -938,6 +1028,17 @@ export async function* agentLoop(
           toolPairingRepaired = true;
           diag("tool_pairing_repair", { error: errMsg.slice(0, 200) });
           repairToolPairingAdjacent(messages);
+          turn--;
+          continue;
+        }
+        // Thinking-block integrity 400: a signed thinking block in the latest
+        // assistant message couldn't be validated (commonly a partial signature
+        // from an interrupted stream). Strip thinking from history — preserving
+        // the reasoning as text — and retry once.
+        if (isThinkingBlockError(err) && !thinkingBlocksStripped) {
+          thinkingBlocksStripped = true;
+          diag("thinking_block_repair", { error: errMsg.slice(0, 200) });
+          stripThinkingBlocks(messages);
           turn--;
           continue;
         }
@@ -1591,5 +1692,31 @@ function repairToolPairingAdjacent(messages: Message[]): void {
         (msg as { content: ToolResult[] }).content = filtered;
       }
     }
+  }
+}
+
+/**
+ * Strip thinking / redacted_thinking content from every assistant message in
+ * place. Last-resort recovery when Anthropic rejects the request for a
+ * thinking-block integrity violation (e.g. a corrupt signature from an
+ * interrupted stream). Reasoning text is preserved as a plain text block so no
+ * conversational context is lost; tool_call/tool_result pairing is untouched.
+ */
+function stripThinkingBlocks(messages: Message[]): void {
+  for (const msg of messages) {
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    const next: ContentPart[] = [];
+    for (const part of msg.content as ContentPart[]) {
+      if (part.type === "thinking") {
+        if (part.text) next.push({ type: "text", text: part.text });
+        continue;
+      }
+      if (part.type === "raw") {
+        const t = (part.data as { type?: string }).type;
+        if (t === "thinking" || t === "redacted_thinking") continue;
+      }
+      next.push(part);
+    }
+    (msg as { content: ContentPart[] }).content = next;
   }
 }

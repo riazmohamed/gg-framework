@@ -8,7 +8,11 @@ import { ThemeContext } from "./ui/theme/theme.js";
 import darkTheme from "./ui/theme/dark.json" with { type: "json" };
 
 function makeSink() {
-  const sink = new Writable({ write(_c, _e, cb) { cb(); } });
+  const sink = new Writable({
+    write(_c, _e, cb) {
+      cb();
+    },
+  });
   (sink as unknown as { columns: number }).columns = 100;
   (sink as unknown as { rows: number }).rows = 30;
   (sink as unknown as { isTTY: boolean }).isTTY = true;

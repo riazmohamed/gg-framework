@@ -8,21 +8,20 @@ import type {
   StreamResponse,
   ToolCall,
 } from "../types.js";
-import { ProviderError } from "../errors.js";
+import { ProviderError, readHeader, isHardBillingMessage } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import {
   downgradeUnsupportedImages,
   normalizeAnthropicStopReason,
   toAnthropicCacheControl,
   toAnthropicMessages,
+  downgradeUnsupportedVideos,
   toAnthropicThinking,
   toAnthropicToolChoice,
   toAnthropicTools,
+  isAdaptiveThinkingModel,
 } from "./transform.js";
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return value != null && typeof value === "object" && !Array.isArray(value);
-}
+import { isJsonObject } from "../utils/json.js";
 
 function createClient(options: StreamOptions): Anthropic {
   const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
@@ -62,7 +61,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const cacheControl = toAnthropicCacheControl(options.cacheRetention, options.baseUrl);
   const supportsFirstPartyToolExtras =
     !options.baseUrl || options.baseUrl.includes("api.anthropic.com");
-  const downgradedMessages = downgradeUnsupportedImages(options.messages, options.supportsImages);
+  const downgradedImages = downgradeUnsupportedImages(options.messages, options.supportsImages);
+  const downgradedMessages = downgradeUnsupportedVideos(downgradedImages, options.supportsVideo);
   const { system: rawSystem, messages } = toAnthropicMessages(downgradedMessages, cacheControl);
 
   // OAuth tokens require Claude Code identity in the system prompt
@@ -145,15 +145,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     stream: useStreaming,
   } as Anthropic.MessageCreateParams;
 
-  // Adaptive thinking models (Opus 4.7, Opus 4.6, Sonnet 4.6) don't need the
+  // Adaptive thinking models (Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6) don't need the
   // interleaved-thinking beta — they have it built in.
-  const hasAdaptiveThinking =
-    options.model.includes("opus-4-7") ||
-    options.model.includes("opus-4.7") ||
-    options.model.includes("opus-4-6") ||
-    options.model.includes("opus-4.6") ||
-    options.model.includes("sonnet-4-6") ||
-    options.model.includes("sonnet-4.6");
+  const hasAdaptiveThinking = isAdaptiveThinkingModel(options.model);
 
   const betaHeaders = [
     ...(isOAuth ? ["claude-code-20250219", "oauth-2025-04-20"] : []),
@@ -339,11 +333,26 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
               args: tc.args,
             };
           } else if (accum.type === "server_tool_use") {
+            // Server tools (e.g. native web_search) stream their input via
+            // input_json_delta the same way client tool_use does. The block-start
+            // `input` is empty `{}` and only the accumulated `argsJson` carries
+            // the real arguments (e.g. the search query). Prefer the parsed
+            // streamed JSON, falling back to the block-start input only when
+            // argsJson is absent/malformed -- otherwise the query is dropped and
+            // Anthropic rejects the call with `invalid_tool_input`.
+            let input: unknown = accum.input;
+            if (accum.argsJson) {
+              try {
+                input = JSON.parse(accum.argsJson);
+              } catch {
+                // malformed JSON -- keep the block-start input fallback
+              }
+            }
             const stc: ServerToolCall = {
               type: "server_tool_call",
               id: accum.toolId,
               name: accum.toolName,
-              input: accum.input,
+              input,
             };
             contentParts.push(stc);
             yield {
@@ -550,6 +559,25 @@ function messageToResponse(message: Anthropic.Message): StreamResponse {
   };
 }
 
+/**
+ * Read Anthropic's unified rate-limit headers — the subscription (OAuth) quota
+ * signal. `anthropic-ratelimit-unified-status: rejected` means the usage window
+ * is spent (not a transient per-minute throttle); `-reset` is the unix-seconds
+ * reset time. Works against a web `Headers` object or a plain header record.
+ */
+function readUnifiedRateLimit(headers: unknown): { rejected: boolean; resetsAt?: number } {
+  const status = readHeader(headers, "anthropic-ratelimit-unified-status");
+  const resetRaw = readHeader(
+    headers,
+    "anthropic-ratelimit-unified-reset",
+    "anthropic-ratelimit-unified-5h-reset",
+    "anthropic-ratelimit-unified-7d-reset",
+  );
+  const resetNum = resetRaw != null ? Number(resetRaw) : Number.NaN;
+  const resetsAt = Number.isFinite(resetNum) && resetNum > 0 ? resetNum : undefined;
+  return { rejected: status === "rejected", ...(resetsAt ? { resetsAt } : {}) };
+}
+
 function toError(err: unknown): ProviderError {
   if (err instanceof Anthropic.APIError) {
     // Anthropic exposes request IDs as `requestID` in current SDKs, `request_id`
@@ -578,6 +606,40 @@ function toError(err: unknown): ProviderError {
             : undefined;
     const message =
       bodyType && bodyMessage ? `${bodyType}: ${bodyMessage}` : (bodyMessage ?? err.message);
+
+    // Subscription (OAuth) usage-window exhaustion. Anthropic returns 429 with
+    // the unified rate-limit headers; a "rejected" status — or a reset stamp
+    // meaningfully in the future — means the plan's usage is spent, not a
+    // transient per-minute throttle. Stamp a canonical message so downstream
+    // retry logic stops instead of burning minutes retrying.
+    if (err.status === 429) {
+      const limit = readUnifiedRateLimit(err.headers);
+      const farOff = limit.resetsAt != null && limit.resetsAt * 1000 - Date.now() > 60_000;
+      if (limit.rejected || farOff) {
+        return new ProviderError("anthropic", "Claude usage limit reached", {
+          statusCode: 429,
+          ...(requestId ? { requestId } : {}),
+          ...(limit.resetsAt ? { resetsAt: limit.resetsAt } : {}),
+          cause: err,
+        });
+      }
+    }
+
+    // Hard billing/quota stop, regardless of status code. MiniMax (Anthropic
+    // transport) returns these as HTTP 500 `api_error` "insufficient balance";
+    // the Anthropic API key path returns a 400 "credit balance is too low".
+    // Both would otherwise be treated as transient and retried — stamp the
+    // canonical "usage limit reached" token so the loop surfaces it once.
+    if (isHardBillingMessage(message)) {
+      const usageMessage = /usage limit reached/i.test(message)
+        ? message
+        : `usage limit reached: ${message}`;
+      return new ProviderError("anthropic", usageMessage, {
+        statusCode: err.status,
+        ...(requestId ? { requestId } : {}),
+        cause: err,
+      });
+    }
 
     return new ProviderError("anthropic", message, {
       statusCode: err.status,
