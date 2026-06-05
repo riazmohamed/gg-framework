@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Last updated:** 2026-06-04 — Synced from main (main@e6c357e), version 4.5.0, with @abukhaled namespace preservation. Major upstream changes in this sync: **new `gg-core` package** — provider-agnostic, UI-free shared foundation extracted from ggcoder/gg-boss (model registry, thinking levels, app paths, OAuth + auth storage, file-writer logger core, telegram + voice transcription, self-updater). ggcoder keeps thin re-export shims (`core/model-registry.ts`, `core/auth-storage.ts`, `core/oauth/*`, etc.) so existing relative imports and subpath exports keep resolving. On this branch gg-core is published as **`@abukhaled/gg-core`**. Also new: **Changesets-based versioning/publishing** (`.changeset/`, fixed version group for the framework spine), **Kimi OAuth** (`oauth/kimi.ts`, `MOONSHOT_OAUTH_KEY` — OAuth preferred over the Moonshot API key when both exist), **error classification in gg-ai** (`classifyProviderError` in `error-classification.ts`), **Moonshot video file-service upload** (`providers/moonshot-video.ts`; uploaded clips referenced as `ms://<fileId>` via `VideoContent.fileId`), and `maxVideoBytes`/`getVideoByteLimit` in the model registry (per-transport video payload caps).
+**Last updated:** 2026-06-05 (audit pass: Related Docs section, Extensions + Style Packs, MCP default servers incl. grep.app fallback). Previous sync: 2026-06-04 from main (main@e6c357e), version 4.5.0, with @abukhaled namespace preservation. Major upstream changes in this sync: **new `gg-core` package** — provider-agnostic, UI-free shared foundation extracted from ggcoder/gg-boss (model registry, thinking levels, app paths, OAuth + auth storage, file-writer logger core, telegram + voice transcription, self-updater). ggcoder keeps thin re-export shims (`core/model-registry.ts`, `core/auth-storage.ts`, `core/oauth/*`, etc.) so existing relative imports and subpath exports keep resolving. On this branch gg-core is published as **`@abukhaled/gg-core`**. Also new: **Changesets-based versioning/publishing** (`.changeset/`, fixed version group for the framework spine), **Kimi OAuth** (`oauth/kimi.ts`, `MOONSHOT_OAUTH_KEY` — OAuth preferred over the Moonshot API key when both exist), **error classification in gg-ai** (`classifyProviderError` in `error-classification.ts`), **Moonshot video file-service upload** (`providers/moonshot-video.ts`; uploaded clips referenced as `ms://<fileId>` via `VideoContent.fileId`), and `maxVideoBytes`/`getVideoByteLimit` in the model registry (per-transport video payload caps).
 
 **@abukhaled-preserved feature: PDF documents.** gg-ai carries a `DocumentContent` block type (PDF base64) that upstream's `M3` video work does not have. It is wired through `transform.ts` (Anthropic `document` block; OpenAI `file` content part) and `UserMessage` content. When resolving future merges, keep `DocumentContent` in `types.ts`/`index.ts` and the document branches in `transform.ts` (`stripImages`/`stripVideos` strip it for non-vision/non-video models).
 
@@ -44,6 +44,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   2. **Phase 2 (future)**: Implement own features and improvements as expertise grows. Diverge from upstream where beneficial.
   3. **Phase 3 (long-term)**: Publish independently to npm under `@abukhaled` scope.
 
+## Related Docs
+
+Deep-dive guides at the repo root (this file stays the operational summary; link out for depth):
+
+- `README.md` — installation, quick start, package overview
+- `DESIGN_PATTERNS_GUIDE.md` — canonical reference for the core design patterns (Provider Registry, Dual-Nature Objects, EventStream, Async Generator loop, Error Recovery, Command Registry, …) summarized in **Key Patterns** below
+- `INK_ARCHITECTURE_GUIDE.md` — Ink 6 + React 19 terminal UI deep dive (rendering model, layout, input, performance)
+- `BUILD_GUIDE.md` — learning-track guide for rebuilding the framework from scratch (Phase 1–3 progression)
+- `AGENTS.md` — **legacy** Codex-targeted variant of this file; partially stale (predates gg-core). CLAUDE.md is authoritative.
 
 ## Commands
 
@@ -106,7 +115,7 @@ pnpm --filter matey lint                     # The Matey Electron app lints sepa
 - **Sessions** (`core/session-manager.ts`): Append-only JSONL with DAG structure (leafId for branching). Streams line-by-line for large files. `repairToolPairs()` fixes interrupted sessions on restore.
 - **Auth** (`core/auth-storage.ts`, `core/oauth/`): OAuth PKCE for Anthropic and OpenAI (with token refresh + 401 retry); static API keys for GLM, Moonshot, Xiaomi, MiniMax, DeepSeek, Ollama, and OpenRouter. All credentials stored in `~/.gg/auth.json`. Provider selection at startup uses `resolveActiveProvider()` in `cli.ts` — falls back to the first authenticated provider if the saved one isn't logged in.
 - **Themes** (`ui/theme/`): Six themes — `dark`, `light`, `dark-ansi`, `light-ansi`, `dark-daltonized`, `light-daltonized` — plus `auto` (detects from terminal). ANSI variants use 16-color palette for limited terminals; daltonized variants are color-blind friendly. `loadTheme(name)` in `theme.ts` returns the JSON config; `ThemeContext` + `useTheme()` for read, `SetThemeContext` + `useSetTheme()` for runtime switching.
-- **UI**: Ink 6 + React 19. `useAgentLoop` hook drives the agent and surfaces events to React state. Throttled streaming flush at ~16ms intervals to avoid saturating renders. Markdown rendering uses `utils/token-to-ansi.ts` (custom tokenizer → ANSI) instead of marked-terminal for theme-aware output. Terminal hyperlinks via `utils/hyperlink.ts` (gated by `supports-hyperlinks.ts`). Cross-component state (taskbar, etc.) lives in `ui/stores/` using a tiny `create-store` pattern. **Recent refactoring** splits rendering logic into focused modules: `app-items.ts` (unified item types), `layout-decisions.ts` (layout routing per state), `item-helpers.ts` (item transforms), `terminal-history-format.ts`/`terminal-history-spacing.ts`/`terminal-history-status-renderers.ts` (separated terminal rendering concerns). `ui/thinking-level.ts` manages thinking level cycling per model.
+- **UI**: Ink 6 + React 19. `useAgentLoop` hook drives the agent and surfaces events to React state. Throttled streaming flush at ~16ms intervals to avoid saturating renders. Markdown rendering uses `utils/token-to-ansi.ts` (custom tokenizer → ANSI) instead of marked-terminal for theme-aware output. Terminal hyperlinks via `utils/hyperlink.ts` (gated by `supports-hyperlinks.ts`). Cross-component state (taskbar, etc.) lives in `ui/stores/` using a tiny `create-store` pattern. **Recent refactoring** splits rendering logic into focused modules: `app-items.ts` (unified item types), `layout-decisions.ts` (layout routing per state), `item-helpers.ts` (item transforms), `terminal-history-format.ts`/`terminal-history-spacing.ts`/`terminal-history-status-renderers.ts` (separated terminal rendering concerns). `ui/thinking-level.ts` manages thinking level cycling per model. Other ui/ subdirs: `transcript/` (tool-call presentation in history), `hooks/`, `utils/`, `constants/`, `testing/`. See `INK_ARCHITECTURE_GUIDE.md` for the full rendering model.
 - **Live item flushing** (`ui/live-item-flush.ts`): Ink re-renders all live items on every state change, so unbounded growth causes expensive cursor math and visible jank. Items are flushed to `Static` history when safe — after turns complete, on overflow, or when tool-only turns finish. The `liveItems` state array is kept under ~8 items by aggressive overflow flushing. Flushed items' large payloads (tool results, server data) are trimmed to prevent multi-GB memory retention.
 - **Ink layout pitfalls**: Avoid `flexShrink={1}` on small status message items (info, error, plan_transition, etc.) — when combined with parent `flexGrow={1}`, it causes Ink's layout calculator to miscalculate available space, clipping subsequent items. These resolve only on window resize. Status messages should have no shrink directive.
 - **Static + history**: The `<Static>` component (Ink's write-once history area) is keyed with `resizeKey` and `staticKey` to handle terminal resize and overlay transitions. When overlays open, history is hidden by rendering an empty items array. Use `setStaticKey((k) => k + 1)` to force a Static re-mount (used when closing overlays or handling pixel fix transitions).
@@ -133,9 +142,9 @@ All modes live in `ggcoder/src/modes/` and are dispatched via command routing:
 
 The plan mode system lets the agent propose a structured plan before executing. Tools: `enter-plan` (agent enters plan-drafting state, pauses execution) and `exit-plan` (submits the plan for user approval). UI components `PlanApproval`, `PlanBanner`, `PlanOverlay`, and `PlanProgress` render the approval flow. `/plan` and `/plans` slash commands are UI-handled (need `agentLoop.reset()` access).
 
-### Extensibility: Agents, Skills, Custom Commands
+### Extensibility: Agents, Skills, Custom Commands, Extensions, Style Packs
 
-All three systems discover markdown files with YAML frontmatter from two locations (merged, project-local wins on conflict):
+The first three systems discover markdown files with YAML frontmatter from two locations (merged, project-local wins on conflict):
 - **Global**: `~/.gg/{agents,skills}/`
 - **Project-local**: `{cwd}/.gg/{agents,skills}/`
 
@@ -146,6 +155,10 @@ All three systems discover markdown files with YAML frontmatter from two locatio
 **Skills** (`core/skills.ts`): Frontmatter: `name`, `description`. Body is injected into context by the `skill` tool when the agent invokes it by name.
 
 **Custom Commands** (`core/custom-commands.ts`): User-defined slash commands loaded alongside built-ins. Frontmatter: `name`, `description`. Body defines behavior.
+
+**Extensions** (`core/extensions/`): JS plugin system — `ExtensionLoader.loadAll()` imports every `*.js` file in `~/.gg/extensions/` at `AgentSession` startup. Each file default-exports (or exports `createExtension`) a factory returning an `Extension` that receives an `ExtensionContext`.
+
+**Style Packs** (`core/style-packs/`): Per-language best-practice prompt sections. `core/language-detector.ts` detects project languages; `loadPack(id, cwd)` injects the matching pack into the system prompt — a project can override any bundled pack via `<cwd>/.gg/styles/<id>.md`. Verification commands for detected languages are injected alongside (`detectVerifyCommands`).
 
 ### Eyes — Perception Probes (`ggcoder-eyes`)
 
