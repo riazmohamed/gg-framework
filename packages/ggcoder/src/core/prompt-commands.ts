@@ -401,9 +401,9 @@ Report that /commit is now available with quality checks and AI-generated commit
     name: "compare",
     aliases: [],
     description: "Compare real-world code",
-    prompt: `Compare the code you just created or modified in this conversation against real-world implementations using the \`mcp__kencode-search__searchCode\` tool.
+    prompt: `Compare the code you just created or modified in this conversation against real-world implementations using the \`mcp__kencode-search__searchCode\` tool. If \`mcp__kencode-search__searchCode\` is not in your tool list, fall back to \`mcp__grep__searchGitHub\` (grep.app GitHub code search) and cite it as the evidence source instead.
 
-You already know what you just built. For each file you created or modified, use \`mcp__kencode-search__searchCode\` to search for how real projects implement the same patterns. Look at the specific APIs, hooks, functions, and architecture you used.
+You already know what you just built. For each file you created or modified, use \`mcp__kencode-search__searchCode\` (or the \`mcp__grep__searchGitHub\` fallback) to search for how real projects implement the same patterns. Look at the specific APIs, hooks, functions, and architecture you used.
 
 If you find something consistently done differently across real codebases, or something commonly included that you left out, report it:
 
@@ -411,10 +411,10 @@ If you find something consistently done differently across real codebases, or so
 [MISSING/DIVERGENT/INCOMPLETE] file:line - What it is
 Wrote: What was implemented
 Real-world: What real projects do instead/additionally
-Evidence: kencode-search - pattern seen in X out of Y repos searched
+Evidence: kencode-search (or grep.app) - pattern seen in X out of Y repos searched
 \`\`\`
 
-Style preferences and subjective improvements are not valid findings. Only report things backed by clear kencode-search evidence across multiple repos.
+Style preferences and subjective improvements are not valid findings. Only report things backed by clear search evidence across multiple repos.
 
 If the code aligns well with real-world patterns, say so. That's a good outcome.`,
   },

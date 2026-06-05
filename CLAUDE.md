@@ -209,7 +209,12 @@ Fix errors from checks you do run before continuing. Quick fixes:
 
 - **Global** → `~/.gg/mcp.json` — available in all OG Coder sessions.
 - **Project** → `./.gg/mcp.json` — only the current project root.
-- On a name collision, **project wins**. Provider defaults (e.g. `kencode-search`) stay authoritative — a user server can only add a new name, never override a default.
+- On a name collision, **project wins**. Provider defaults stay authoritative — a user server can only add a new name, never override a default.
+
+### Default servers (`core/mcp/defaults.ts`)
+
+- `kencode-search` — stdio, launched via `npx -y @kenkaiiii/kencode-search`. **Keep the `@kenkaiiii` scope**: this is an external published npm package, not part of the rebrand. An over-rename to `@abukhaled/kencode-search` 404'd at startup, the server never connected, and `/compare` failed with "mcp__kencode-search__searchCode is not available".
+- `grep` — HTTP, `https://mcp.grep.app` (grep.app public GitHub code search, tool `mcp__grep__searchGitHub`). Branch-only addition (not upstream); serves as the `/compare` fallback — the `/compare` prompt in `core/prompt-commands.ts` instructs falling back to `mcp__grep__searchGitHub` when kencode-search is unavailable. Preserve both in merges from main.
 
 ### Commands
 

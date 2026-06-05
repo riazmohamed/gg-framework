@@ -3,7 +3,11 @@ import type { MCPServerConfig } from "./types.js";
 import { loadServers } from "./store.js";
 
 export const DEFAULT_MCP_SERVERS: MCPServerConfig[] = [
-  { name: "kencode-search", command: "npx", args: ["-y", "@abukhaled/kencode-search"] },
+  // NOTE: kencode-search is an external published package, not part of this repo's
+  // rebrand — keep the @kenkaiiii scope until an @abukhaled fork is published.
+  { name: "kencode-search", command: "npx", args: ["-y", "@kenkaiiii/kencode-search"] },
+  // grep.app public GitHub code search — fallback for kencode-search.
+  { name: "grep", url: "https://mcp.grep.app", timeout: 60_000 },
 ];
 
 /**
