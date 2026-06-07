@@ -82,7 +82,16 @@ function toAnthropicAssistantPart(
     } as unknown as Anthropic.ContentBlockParam;
   if (part.type === "server_tool_result")
     return part.data as unknown as Anthropic.ContentBlockParam;
-  if (part.type === "raw") return part.data as unknown as Anthropic.ContentBlockParam;
+  if (part.type === "raw") {
+    // Raw parts round-trip Anthropic wire blocks byte-identical (e.g.
+    // redacted_thinking). Raw blocks captured from OTHER transports — OpenAI
+    // Codex encrypted `reasoning` items — are opaque to Anthropic and rejected
+    // by the API ("Input tag 'reasoning' ... does not match any of the
+    // expected tags"), so drop them when history is replayed against Anthropic
+    // after a model switch. They're encrypted, so there is no text to salvage.
+    if (part.data.type === "reasoning") return null;
+    return part.data as unknown as Anthropic.ContentBlockParam;
+  }
   // Unknown content type (e.g. image in assistant message) — drop it.
   return null;
 }
