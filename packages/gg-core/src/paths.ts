@@ -13,6 +13,7 @@ export interface AppPaths {
   skillsDir: string;
   extensionsDir: string;
   agentsDir: string;
+  commandsDir: string;
 }
 
 export function getAppPaths(): AppPaths {
@@ -29,5 +30,6 @@ export function getAppPaths(): AppPaths {
     skillsDir: path.join(agentDir, "skills"),
     extensionsDir: path.join(agentDir, "extensions"),
     agentsDir: path.join(agentDir, "agents"),
+    commandsDir: path.join(agentDir, "commands"),
   };
 }

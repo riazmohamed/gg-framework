@@ -145,8 +145,8 @@ The plan mode system lets the agent propose a structured plan before executing. 
 ### Extensibility: Agents, Skills, Custom Commands, Extensions, Style Packs
 
 The first three systems discover markdown files with YAML frontmatter from two locations (merged, project-local wins on conflict):
-- **Global**: `~/.gg/{agents,skills}/`
-- **Project-local**: `{cwd}/.gg/{agents,skills}/`
+- **Global**: `~/.gg/{agents,skills,commands}/`
+- **Project-local**: `{cwd}/.gg/{agents,skills,commands}/`
 
 **Agents** (`core/agents.ts`): Frontmatter keys: `name`, `description`, `tools` (comma-separated). Body is the system prompt. Two built-in agents seeded on first run (won't overwrite edits):
   - `owl` — read-only codebase explorer (tools: read, grep, find, ls, bash)
@@ -154,7 +154,7 @@ The first three systems discover markdown files with YAML frontmatter from two l
 
 **Skills** (`core/skills.ts`): Frontmatter: `name`, `description`. Body is injected into context by the `skill` tool when the agent invokes it by name.
 
-**Custom Commands** (`core/custom-commands.ts`): User-defined slash commands loaded alongside built-ins. Frontmatter: `name`, `description`. Body defines behavior.
+**Custom Commands** (`core/custom-commands.ts`): User-defined slash commands loaded alongside built-ins from `~/.gg/commands/` (global) and `{cwd}/.gg/commands/` (project wins on collision). Frontmatter: `name`, `description`. Body is the prompt injected into the agent; `/cmd <args>` appends args as a "User Instructions" section.
 
 **Extensions** (`core/extensions/`): JS plugin system — `ExtensionLoader.loadAll()` imports every `*.js` file in `~/.gg/extensions/` at `AgentSession` startup. Each file default-exports (or exports `createExtension`) a factory returning an `Extension` that receives an `ExtensionContext`.
 
