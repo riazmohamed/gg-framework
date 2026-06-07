@@ -349,21 +349,6 @@ export const MODELS: ModelInfo[] = [
     costTier: "medium",
     maxThinkingLevel: "high",
   },
-  // Legacy V2 Flash — no V2.5 equivalent yet; auto-routes upstream until the
-  // V2 line is fully retired on 2026-06-30.
-  {
-    id: "mimo-v2-flash",
-    name: "MiMo V2 Flash",
-    provider: "xiaomi",
-    contextWindow: 500_000,
-    maxOutputTokens: 128_000,
-    supportsThinking: true,
-    supportsImages: true,
-    supportsVideo: true,
-    supportsDocuments: true,
-    costTier: "low",
-    maxThinkingLevel: "high",
-  },
 ];
 
 export function getModel(id: string): ModelInfo | undefined {
