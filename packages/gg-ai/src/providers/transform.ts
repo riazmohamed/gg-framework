@@ -38,6 +38,41 @@ function isRawThinking(part: ContentPart): boolean {
 }
 
 /**
+ * Content block `type`s Anthropic accepts as message input. A `raw` part can
+ * originate from another provider (e.g. the OpenAI Codex provider round-trips its
+ * encrypted reasoning item as `{ type: "raw", data: { type: "reasoning", … } }`).
+ * Switching such a session to an Anthropic model would otherwise forward that
+ * foreign block verbatim and Anthropic rejects it ("Input tag 'reasoning' … does
+ * not match any of the expected tags"). Raw blocks whose wire type isn't in this
+ * set are dropped on the way out.
+ */
+const ANTHROPIC_INPUT_BLOCK_TYPES = new Set<string>([
+  "bash_code_execution_tool_result",
+  "code_execution_tool_result",
+  "connector_text",
+  "container_upload",
+  "document",
+  "image",
+  "mid_conv_system",
+  "redacted_thinking",
+  "search_result",
+  "server_tool_use",
+  "text",
+  "text_editor_code_execution_tool_result",
+  "thinking",
+  "tool_result",
+  "tool_search_tool_result",
+  "tool_use",
+  "web_fetch_tool_result",
+  "web_search_tool_result",
+]);
+
+/** True for a `raw` part Anthropic will accept as an input content block. */
+function isAnthropicCompatibleRaw(part: Extract<ContentPart, { type: "raw" }>): boolean {
+  return ANTHROPIC_INPUT_BLOCK_TYPES.has(part.data.type as string);
+}
+
+/**
  * True for content parts that Anthropic treats as position-sensitive reasoning
  * blocks in the latest assistant message: SIGNED `thinking` blocks and
  * `redacted_thinking` blocks (round-tripped as opaque `raw`). Unsigned thinking
@@ -82,16 +117,10 @@ function toAnthropicAssistantPart(
     } as unknown as Anthropic.ContentBlockParam;
   if (part.type === "server_tool_result")
     return part.data as unknown as Anthropic.ContentBlockParam;
-  if (part.type === "raw") {
-    // Raw parts round-trip Anthropic wire blocks byte-identical (e.g.
-    // redacted_thinking). Raw blocks captured from OTHER transports — OpenAI
-    // Codex encrypted `reasoning` items — are opaque to Anthropic and rejected
-    // by the API ("Input tag 'reasoning' ... does not match any of the
-    // expected tags"), so drop them when history is replayed against Anthropic
-    // after a model switch. They're encrypted, so there is no text to salvage.
-    if (part.data.type === "reasoning") return null;
-    return part.data as unknown as Anthropic.ContentBlockParam;
-  }
+  if (part.type === "raw")
+    return isAnthropicCompatibleRaw(part)
+      ? (part.data as unknown as Anthropic.ContentBlockParam)
+      : null;
   // Unknown content type (e.g. image in assistant message) — drop it.
   return null;
 }
@@ -800,14 +829,24 @@ export function toOpenAIMessages(
       // `[{text}, {video_url}]` carrying the uploaded `ms://<id>` reference —
       // mirroring the official Kimi read-media tool. The provider uploads the
       // clip and stamps `fileId` before this transform runs.
+      //
+      // Every OTHER OpenAI-compatible video model (e.g. Xiaomi MiMo-V2.5)
+      // rejects video inside a `tool` message ("`text` is not set", verified
+      // against the live API) — it accepts `video_url` only in `user` content.
+      // So those videos are carried out the same way images are: a follow-up
+      // `user` message after the tool result. Tool results only ever carry
+      // video when the active model is video-capable (the read tool returns
+      // native video solely for such models, and `stream()` rejects stray video
+      // for text-only models), so no extra capability guard is needed here.
       const isMoonshot = options?.provider === "moonshot";
-      const imageBlocks: OpenAI.ChatCompletionContentPartImage[] = [];
+      const followUpMediaBlocks: OpenAI.ChatCompletionContentPart[] = [];
+      let followUpHasVideo = false;
       for (const result of msg.content) {
         const text = toolResultText(result.content);
         const images = toolResultImages(result.content);
-        const videos = isMoonshot ? toolResultVideos(result.content) : [];
+        const videos = toolResultVideos(result.content);
         const hasText = text.length > 0;
-        if (videos.length > 0) {
+        if (isMoonshot && videos.length > 0) {
           const parts: OpenAI.ChatCompletionContentPartText[] = [];
           if (hasText) parts.push({ type: "text", text });
           const videoParts = videos.map((v) => {
@@ -826,21 +865,35 @@ export function toOpenAIMessages(
         out.push({
           role: "tool",
           tool_call_id: remapToolCallId(result.toolCallId, idMap),
-          content: hasText ? text : "(see attached image)",
+          content: hasText ? text : "(see attached media)",
         });
         if (images.length > 0 && options?.supportsImages !== false) {
           for (const img of images) {
-            imageBlocks.push({
+            followUpMediaBlocks.push({
               type: "image_url",
               image_url: { url: `data:${img.mediaType};base64,${img.data}` },
             });
           }
         }
+        // Non-Moonshot video models: deliver the clip in a follow-up user
+        // message as an inline base64 `video_url` (the shape MiMo accepts).
+        if (!isMoonshot && videos.length > 0) {
+          for (const v of videos) {
+            followUpMediaBlocks.push({
+              type: "video_url",
+              video_url: { url: `data:${v.mediaType};base64,${v.data}` },
+            } as unknown as OpenAI.ChatCompletionContentPart);
+            followUpHasVideo = true;
+          }
+        }
       }
-      if (imageBlocks.length > 0) {
+      if (followUpMediaBlocks.length > 0) {
+        const label = followUpHasVideo
+          ? "Attached media from tool result:"
+          : "Attached image(s) from tool result:";
         out.push({
           role: "user",
-          content: [{ type: "text", text: "Attached image(s) from tool result:" }, ...imageBlocks],
+          content: [{ type: "text", text: label }, ...followUpMediaBlocks],
         });
       }
     }

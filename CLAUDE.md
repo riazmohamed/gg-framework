@@ -32,6 +32,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Workspace globs** (`pnpm-workspace.yaml`): `packages/*`, `Matey`, `experiments/*`. The native pixel ports (`gg-pixel-{go,py,rb,rs,swift}`) have no `package.json`, so `pnpm -r` skips them.
 
+**Models & multimodal**: The MiniMax provider defaults to **MiniMax M3** (1M context, image + video). Video-capable models are Gemini 3.x, Kimi K2.6, MiniMax M3, and Xiaomi **MiMo-V2.5** (the omnimodal model; the coding-focused MiMo-V2.5-Pro is text-only — the legacy `mimo-v2-*` ids auto-route to v2.5 and are fully deprecated 2026-06-30). MiMo-V2.5 rides the OpenAI-compatible transport: video/image go as base64 data URLs (`video_url`/`image_url`); its base64 payload cap is 50 MB, so the registry's `maxVideoBytes` is ~36 MB raw to stay under it after base64 inflation. Video attachments work in the chat input (drag, paste, or type a path); for non-video models the clip is saved to a temp file and the model is told to inspect it with ffmpeg (mirrors the GLM image fallback). `supportsVideo`/`maxVideoBytes` (and this branch's `supportsDocuments`) live in `packages/gg-core/src/model-registry.ts`.
+
 ## Development Approach
 
 **og-framework** is being developed as an independent product under the `@abukhaled` scope. Currently in Phase 1 (learning-first development):

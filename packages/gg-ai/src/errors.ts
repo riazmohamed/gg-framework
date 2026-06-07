@@ -287,7 +287,9 @@ function finaliseBySource(
         headline: message,
         source,
         message: "",
-        guidance: hint ?? "Only Kimi, Gemini, and MiniMax can analyze video. Switch with /model.",
+        guidance:
+          hint ??
+          "Only Kimi, Gemini, MiniMax, and MiMo-V2.5 can analyze video. Switch with /model.",
         ...(requestId ? { requestId } : {}),
       };
     case "ggcoder":

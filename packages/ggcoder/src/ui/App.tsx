@@ -44,7 +44,7 @@ import type { ProcessManager } from "../core/process-manager.js";
 import { useTheme, useSetTheme, type ThemeName } from "./theme/theme.js";
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { getGitBranch } from "../utils/git.js";
-import { getModel } from "../core/model-registry.js";
+import { getModel, getVideoByteLimit } from "../core/model-registry.js";
 import { SessionManager } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
 import {
@@ -229,6 +229,9 @@ export interface AppProps {
   checkpointStore?: CheckpointStore;
   initialOverlay?: "pixel";
   rebuildToolsForCwd?: (cwd: string) => AgentTool[];
+  /** Rebuild the `read` tool for a model (reuses the read tracker). Used on
+   *  model switch so the tool's video capability tracks the active model. */
+  rebuildReadTool?: (model: string) => AgentTool;
   connectInitialMcpTools?: () => Promise<AgentTool[]>;
   planCallbacks?: {
     onEnterPlan?: (reason?: string) => void | Promise<void>;
@@ -2288,7 +2291,28 @@ export function App(props: AppProps) {
         return newProvider;
       });
 
-      setCurrentModel(newModelId);
+      // The `read` tool's video capability (its description + native-video
+      // execute path) is baked in at creation from the model's `maxVideoBytes`.
+      // Switching to/from a video-capable model (e.g. text-only MiMo-V2.5-Pro →
+      // omnimodal MiMo-V2.5) must rebuild it, or the tool keeps telling the model
+      // it can't watch video. Rebuild reuses the read tracker, so read-before-edit
+      // history survives. Provider-change rebuilds the prompt above; this covers
+      // same-provider model switches too.
+      setCurrentModel((prevModel) => {
+        if (
+          props.rebuildReadTool &&
+          getVideoByteLimit(prevModel) !== getVideoByteLimit(newModelId)
+        ) {
+          const newReadTool = props.rebuildReadTool(newModelId);
+          setCurrentTools((prev) => {
+            const next = prev.map((tool) => (tool.name === "read" ? newReadTool : tool));
+            currentToolsRef.current = next;
+            void replaceSystemPrompt({ tools: next });
+            return next;
+          });
+        }
+        return newModelId;
+      });
       const modelInfo = getModel(newModelId);
       const displayName = modelInfo?.name ?? newModelId;
       setLiveItems((prev) => [
@@ -2316,7 +2340,14 @@ export function App(props: AppProps) {
         });
       }
     },
-    [props.settingsFile, props.mcpManager, props.credentialsByProvider, props.authStorage],
+    [
+      props.settingsFile,
+      props.mcpManager,
+      props.credentialsByProvider,
+      props.authStorage,
+      props.rebuildReadTool,
+      replaceSystemPrompt,
+    ],
   );
 
   const handleThemeSelect = useCallback(

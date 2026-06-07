@@ -14,6 +14,7 @@ import { createWebSearchTool } from "./web-search.js";
 import { createSourcePathTool } from "./source-path.js";
 import { createTaskOutputTool } from "./task-output.js";
 import { createTaskStopTool } from "./task-stop.js";
+import { createTaskSendTool } from "./task-send.js";
 import { createTasksTool } from "./tasks.js";
 import { createSkillTool } from "./skill.js";
 import { createScreenshotTool } from "./screenshot.js";
@@ -61,6 +62,16 @@ export interface CreateToolsOptions {
 export interface CreateToolsResult {
   tools: AgentTool[];
   processManager: ProcessManager;
+  /**
+   * Rebuild the `read` tool for a different model, reusing the SAME read
+   * tracker so read-before-edit history survives. The read tool's video
+   * capability (description + native-video execute path) is baked in at
+   * creation from the model's `maxVideoBytes`, so switching to/from a
+   * video-capable model mid-session requires a fresh tool object. Returns the
+   * new tool; the caller swaps it into the live tool set and rebuilds the
+   * system prompt.
+   */
+  rebuildReadTool: (model: string) => AgentTool;
 }
 
 export function createTools(cwd: string, opts?: CreateToolsOptions): CreateToolsResult {
@@ -85,6 +96,7 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
     createSourcePathTool(cwd),
     createWebFetchTool(),
     createTaskOutputTool(processManager),
+    createTaskSendTool(processManager),
     createTaskStopTool(processManager),
     createTasksTool(cwd),
     createScreenshotTool(cwd),
@@ -120,7 +132,10 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
     tools.push(createExitPlanTool(cwd, opts.onExitPlan));
   }
 
-  return { tools, processManager };
+  const rebuildReadTool = (model: string): AgentTool =>
+    createReadTool(cwd, readFiles, ops, opts?.onFileRead, getVideoByteLimit(model));
+
+  return { tools, processManager, rebuildReadTool };
 }
 
 export { createReadTool } from "./read.js";
@@ -134,6 +149,7 @@ export { createWebFetchTool } from "./web-fetch.js";
 export { createWebSearchTool } from "./web-search.js";
 export { createSourcePathTool } from "./source-path.js";
 export { createTaskOutputTool } from "./task-output.js";
+export { createTaskSendTool } from "./task-send.js";
 export { createTaskStopTool } from "./task-stop.js";
 export { createTasksTool } from "./tasks.js";
 export { createSkillTool } from "./skill.js";

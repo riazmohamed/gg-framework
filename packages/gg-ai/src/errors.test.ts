@@ -63,6 +63,7 @@ describe("VideoUnsupportedError", () => {
     expect(f.guidance).toContain("Kimi");
     expect(f.guidance).toContain("Gemini");
     expect(f.guidance).toContain("MiniMax");
+    expect(f.guidance).toContain("MiMo");
     expect(f.guidance).toContain("/model");
   });
 

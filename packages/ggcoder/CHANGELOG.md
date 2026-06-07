@@ -1,5 +1,65 @@
 # @kenkaiiii/ggcoder
 
+## 4.7.0
+
+### Minor Changes
+
+- Add `task_send` tool for interactive control of background processes. Background processes started with `run_in_background` now spawn with a stdin pipe, and the agent can answer prompts, drive REPLs, and feed scaffolders via `task_send` (with optional Enter/EOF), pairing with the existing `task_output`/`task_stop` tools.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.7.0
+- @kenkaiiii/gg-agent@4.7.0
+- @kenkaiiii/gg-core@4.7.0
+
+## 4.6.3
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@4.6.3
+  - @kenkaiiii/gg-agent@4.6.3
+  - @kenkaiiii/gg-core@4.6.3
+
+## 4.6.2
+
+### Patch Changes
+
+- Fix OpenAI OAuth account switching by adding prompt=login to authorize URL. Previously, re-running `ggcoder login` with OpenAI would silently re-approve the cached browser session, preventing users from switching accounts.
+- Updated dependencies
+  - @kenkaiiii/gg-core@4.6.2
+  - @kenkaiiii/gg-ai@4.6.2
+  - @kenkaiiii/gg-agent@4.6.2
+
+## 4.6.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@4.6.1
+  - @kenkaiiii/gg-agent@4.6.1
+  - @kenkaiiii/gg-core@4.6.1
+
+## 4.6.0
+
+### Minor Changes
+
+- Add Xiaomi MiMo-V2.5 models with native video analysis. The text-only
+  `mimo-v2.5-pro` is now the Xiaomi default, and the omnimodal `mimo-v2.5`
+  supports native image and video understanding. Video read through the read
+  tool is now delivered to MiMo (and other non-Moonshot OpenAI-compatible video
+  models) in a follow-up user message as inline base64 `video_url`, the shape
+  the API accepts — fixing the fallback where the model resorted to ffmpeg frame
+  extraction. The read tool is also rebuilt on model switch so its video
+  capability tracks the active model.
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@4.6.0
+  - @kenkaiiii/gg-agent@4.6.0
+  - @kenkaiiii/gg-core@4.6.0
+
 ## 4.5.0
 
 ### Minor Changes

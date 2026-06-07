@@ -126,20 +126,17 @@ describe("Anthropic transform", () => {
     expect(content.map((b) => b.type)).toEqual(["text", "redacted_thinking", "tool_use"]);
   });
 
-  it("drops Codex encrypted reasoning (raw) blocks after a model switch", () => {
-    // OpenAI Codex stores encrypted reasoning items as raw parts. They are not
-    // valid Anthropic blocks ("Input tag 'reasoning' ... does not match"), so
-    // replaying history against Anthropic must drop them.
+  it("drops foreign raw blocks (e.g. Codex reasoning) Anthropic would reject", () => {
     const messages: Message[] = [
       {
         role: "assistant",
         content: [
           {
             type: "raw",
-            data: { type: "reasoning", id: "rs_1", encrypted_content: "opaque", summary: [] },
+            data: { type: "reasoning", id: "rs_1", encrypted_content: "abc", summary: [] },
           },
           { type: "text", text: "answer" },
-          { type: "tool_call", id: "call_1", name: "read_file", args: { filePath: "c.ts" } },
+          { type: "tool_call", id: "toolu_3", name: "read_file", args: { filePath: "c.ts" } },
         ],
       },
     ];

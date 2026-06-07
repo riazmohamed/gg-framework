@@ -23,6 +23,8 @@ export interface ModelInfo {
    *   - Moonshot/Kimi: 100 MB (file-service upload cap)
    *   - MiniMax: 50 MB (Anthropic-compatible base64 inline cap)
    *   - Gemini: 20 MB (inlineData per-request cap)
+   *   - Xiaomi (MiMo): ~36 MB raw — the API caps the base64 STRING at 50 MB,
+   *     and base64 inflates bytes by ~4/3, so 36 MB raw ≈ 48 MB encoded.
    * Only meaningful when `supportsVideo` is true.
    */
   maxVideoBytes?: number;
@@ -313,36 +315,42 @@ export const MODELS: ModelInfo[] = [
     maxThinkingLevel: "high",
   },
   // ── Xiaomi MiMo ────────────────────────────────────────
-  // Note: MiMo V2 Pro is text-only in practice — even though Xiaomi markets
-  // it as multimodal, the endpoint we hit doesn't accept image content. The
-  // vision router will auto-switch to mimo-v2-omni for image/video/document
-  // turns and snap back to pro afterward.
+  // Pro series: text-only coding/agentic flagship. The legacy mimo-v2-pro
+  // auto-routes to v2.5 on 2026-06-01 and is fully deprecated by 2026-06-30.
+  // The vision router will auto-switch to mimo-v2.5 (omni) for
+  // image/video/document turns and snap back to pro afterward.
   {
-    id: "mimo-v2-pro",
-    name: "MiMo V2 Pro",
+    id: "mimo-v2.5-pro",
+    name: "MiMo-V2.5-Pro",
     provider: "xiaomi",
     contextWindow: 1_000_000,
-    maxOutputTokens: 128_000,
+    maxOutputTokens: 131_072,
     supportsThinking: true,
     supportsImages: false,
     supportsVideo: false,
     supportsDocuments: false,
-    costTier: "high",
+    costTier: "medium",
     maxThinkingLevel: "high",
   },
+  // Omni series: native full-modal understanding (image + audio + video).
+  // Video/image ride the OpenAI-compatible transport as base64 data URLs
+  // (`video_url`/`image_url`), which the shared transform already emits.
   {
-    id: "mimo-v2-omni",
-    name: "MiMo V2 Omni",
+    id: "mimo-v2.5",
+    name: "MiMo-V2.5",
     provider: "xiaomi",
     contextWindow: 1_000_000,
-    maxOutputTokens: 128_000,
+    maxOutputTokens: 131_072,
     supportsThinking: true,
     supportsImages: true,
     supportsVideo: true,
+    maxVideoBytes: 36 * 1024 * 1024,
     supportsDocuments: true,
-    costTier: "high",
+    costTier: "medium",
     maxThinkingLevel: "high",
   },
+  // Legacy V2 Flash — no V2.5 equivalent yet; auto-routes upstream until the
+  // V2 line is fully retired on 2026-06-30.
   {
     id: "mimo-v2-flash",
     name: "MiMo V2 Flash",
@@ -367,7 +375,7 @@ export function getModelsForProvider(provider: Provider): ModelInfo[] {
 }
 
 export function getDefaultModel(provider: Provider): ModelInfo {
-  if (provider === "xiaomi") return MODELS.find((m) => m.id === "mimo-v2-pro")!;
+  if (provider === "xiaomi") return MODELS.find((m) => m.id === "mimo-v2.5-pro")!;
   if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.5")!;
   if (provider === "gemini") return MODELS.find((m) => m.id === "gemini-3.1-flash-lite-preview")!;
   if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.1")!;
