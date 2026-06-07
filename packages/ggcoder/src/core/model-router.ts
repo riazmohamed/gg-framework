@@ -84,13 +84,13 @@ function capabilityFor(kind: MediaKind, provider: Provider): ModelInfo | undefin
 /**
  * Cross-provider preference order for vision fallback. Claude is intentionally
  * excluded: it's far more expensive than open-weight vision models, and for
- * coding workflows the user wants GLM-4.6V or MiMo Omni as their default
+ * coding workflows the user wants GLM-4.6V or MiMo-V2.5 (omni) as their default
  * image scanner, not Opus/Sonnet. Users who want Claude for an image turn
  * can still switch manually with `/model`.
  */
 const CROSS_PROVIDER_VISION_PREFERENCE: Provider[] = [
   "glm", // GLM-4.6V — cheap, vision-native
-  "xiaomi", // MiMo V2 Omni — multimodal, high context
+  "xiaomi", // MiMo-V2.5 (omni) — multimodal, high context
   "moonshot", // Kimi K2.5 — supports images
   "openai", // GPT-5.4 etc. — last resort
 ];
