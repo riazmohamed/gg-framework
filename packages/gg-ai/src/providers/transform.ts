@@ -561,13 +561,13 @@ export function toAnthropicToolChoice(choice: ToolChoice): Anthropic.ToolChoice 
 }
 
 /**
- * Anthropic models with built-in adaptive thinking (Opus 4.8/4.7/4.6,
+ * Anthropic models with built-in adaptive thinking (Fable 5, Opus 4.8/4.7/4.6,
  * Sonnet 4.6). Matches both dashed (`opus-4-8`) and dotted (`opus-4.8`) forms
  * so callers don't have to enumerate variants. These models don't need the
  * `interleaved-thinking` beta header — it's built in.
  */
 export function isAdaptiveThinkingModel(model: string): boolean {
-  return /opus-4[-.]8|opus-4[-.]7|opus-4[-.]6|sonnet-4[-.]6/.test(model);
+  return /fable-5|opus-4[-.]8|opus-4[-.]7|opus-4[-.]6|sonnet-4[-.]6/.test(model);
 }
 
 export function toAnthropicThinking(
@@ -583,9 +583,10 @@ export function toAnthropicThinking(
     // Adaptive thinking — model decides when/how much to think.
     // budget_tokens is deprecated on Opus 4.8 / Opus 4.7 / Opus 4.6 / Sonnet 4.6.
     // Anthropic's output_config.effort accepts low, medium, high, xhigh, and max.
-    // xhigh is Opus 4.8/4.7-only; max is supported by Opus 4.8/4.7/4.6 and Sonnet 4.6.
+    // xhigh is Fable 5 / Opus 4.8 / 4.7-only; max is supported by Fable 5,
+    // Opus 4.8/4.7/4.6 and Sonnet 4.6.
     let effort: string = level;
-    if (effort === "xhigh" && !/opus-4-8|opus-4-7/.test(model)) {
+    if (effort === "xhigh" && !/fable-5|opus-4-8|opus-4-7/.test(model)) {
       effort = "high";
     }
     return {
