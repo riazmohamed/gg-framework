@@ -232,6 +232,7 @@ Fix errors from checks you do run before continuing. Quick fixes:
 
 - `kencode-search` — stdio, launched via `npx -y @kenkaiiii/kencode-search`. **Keep the `@kenkaiiii` scope**: this is an external published npm package, not part of the rebrand. An over-rename to `@abukhaled/kencode-search` 404'd at startup, the server never connected, and `/compare` failed with "mcp__kencode-search__searchCode is not available".
 - `grep` — HTTP, `https://mcp.grep.app` (grep.app public GitHub code search, tool `mcp__grep__searchGitHub`). Branch-only addition (not upstream); serves as the `/compare` fallback — the `/compare` prompt in `core/prompt-commands.ts` instructs falling back to `mcp__grep__searchGitHub` when kencode-search is unavailable. Preserve both in merges from main.
+- `refero` — HTTP, `https://api.refero.design/mcp` (design system API). Global scope. Provides 8 tools for design system exploration and interaction (e.g., design tokens, component catalog, guidance access). Bearer auth via `Authorization: Bearer` header stored in `~/.gg/mcp.json`.
 
 ### Commands
 

@@ -11,5 +11,5 @@ export {
   projectMcpPath,
 } from "./store.js";
 export type { MCPScope, ScopedServer } from "./store.js";
-export { parseMcpAddCommand } from "./parse-add-command.js";
+export { parseMcpAddCommand, parseMcpAddTokens } from "./parse-add-command.js";
 export type { ParsedAddCommand } from "./parse-add-command.js";

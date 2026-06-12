@@ -10,6 +10,7 @@ import {
   globalMcpPath,
   projectMcpPath,
   parseMcpAddCommand,
+  parseMcpAddTokens,
   type MCPScope,
   type MCPServerConfig,
 } from "../core/mcp/index.js";
@@ -215,7 +216,7 @@ function parseScopeArgValue(rest: string[]): string | undefined {
 }
 
 async function runAdd(rest: string[], cwd: string): Promise<void> {
-  const parsed = parseMcpAddCommand(rest.join(" "));
+  const parsed = parseMcpAddTokens(rest);
   if (!parsed.ok) {
     process.stderr.write(bad(`✗ ${parsed.error}\n`));
     process.exit(1);

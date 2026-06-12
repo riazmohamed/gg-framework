@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseMcpAddCommand } from "./parse-add-command.js";
+import { parseMcpAddCommand, parseMcpAddTokens } from "./parse-add-command.js";
 
 describe("parseMcpAddCommand", () => {
   it("parses an http server (Notion docs example)", () => {
@@ -90,5 +90,44 @@ describe("parseMcpAddCommand", () => {
   it("rejects an unsafe name", () => {
     const r = parseMcpAddCommand("bad/name -- node x.js");
     expect(r.ok).toBe(false);
+  });
+});
+
+describe("parseMcpAddTokens", () => {
+  it("keeps a shell-quoted bearer header intact (Refero docs example)", () => {
+    // The shell delivers `--header "Authorization: Bearer tok"` as ONE argv
+    // token; joining argv back into a string used to split it and save "".
+    const r = parseMcpAddTokens([
+      "--transport",
+      "http",
+      "refero",
+      "https://api.refero.design/mcp",
+      "--header",
+      "Authorization: Bearer mcp-tok",
+    ]);
+    expect(r).toEqual({
+      ok: true,
+      value: {
+        config: {
+          name: "refero",
+          url: "https://api.refero.design/mcp",
+          headers: { Authorization: "Bearer mcp-tok" },
+        },
+      },
+    });
+  });
+
+  it("preserves spaces in --env values from argv", () => {
+    const r = parseMcpAddTokens(["api", "--env", "GREETING=hello world", "--", "node", "x.js"]);
+    expect(r.ok && r.value.config.env).toEqual({ GREETING: "hello world" });
+  });
+
+  it("strips a pasted claude mcp add prefix arriving as argv tokens", () => {
+    const r = parseMcpAddTokens(["claude", "mcp", "add", "--transport", "http", "n", "https://x"]);
+    expect(r).toEqual({ ok: true, value: { config: { name: "n", url: "https://x" } } });
+  });
+
+  it("errors on empty token list", () => {
+    expect(parseMcpAddTokens([]).ok).toBe(false);
   });
 });

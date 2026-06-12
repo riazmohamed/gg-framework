@@ -98,7 +98,26 @@ export function parseMcpAddCommand(input: string): Result<ParsedAddCommand, stri
 
   const tokenized = tokenize(stripped);
   if (!tokenized.ok) return tokenized;
-  const tokens = tokenized.value;
+  return parseMcpAddTokens(tokenized.value);
+}
+
+/**
+ * Parse already-split tokens (e.g. `process.argv` slices, where the shell has
+ * resolved quoting). Joining argv back into a string would lose quotes around
+ * values with spaces (`--header "Authorization: Bearer xyz"`), so CLI callers
+ * must use this instead of parseMcpAddCommand.
+ */
+export function parseMcpAddTokens(rawTokens: string[]): Result<ParsedAddCommand, string> {
+  // Tolerate a pasted `claude mcp add …` prefix arriving as separate argv tokens.
+  const tokens =
+    /^(claude|ggcoder|ogcoder)$/i.test(rawTokens[0] ?? "") &&
+    rawTokens[1]?.toLowerCase() === "mcp" &&
+    rawTokens[2]?.toLowerCase() === "add"
+      ? rawTokens.slice(3)
+      : rawTokens;
+  if (tokens.length === 0) {
+    return { ok: false, error: "Nothing to parse — provide a server name and command or URL." };
+  }
 
   let transport: Transport | "ws" | undefined;
   const env: Record<string, string> = {};
