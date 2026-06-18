@@ -99,8 +99,6 @@ describe("buildSystemPrompt", () => {
     expect(sectionIndex(prompt, "## Research & Verification")).toBeLessThan(
       sectionIndex(prompt, "## Code Quality"),
     );
-    expect(prompt).toContain("Woops I just farted!");
-    expect(prompt).toContain("don't force it, overuse it, or repeat one hardcoded line");
     expect(prompt).not.toContain(
       "Do not default to generic tests, scripts, screenshots, benchmarks, or simulations",
     );

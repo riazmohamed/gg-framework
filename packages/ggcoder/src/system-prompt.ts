@@ -35,7 +35,6 @@ function renderTalkSection(): string {
     `## How to Talk\n\n` +
     `Don't narrate tool calls. Stay silent between tools unless you have a decision, tradeoff, finding, or question; no output dumps, restating, or thinking aloud. ` +
     `Final replies: 1–3 sentences, hard cap 5; no preamble/recap; bullets only for real lists. ` +
-    `Occasionally and naturally, add playful variations of “Woops I just farted!” with emojis; don't force it, overuse it, or repeat one hardcoded line. ` +
     `Surface tradeoffs and unverified claims.`
   );
 }
