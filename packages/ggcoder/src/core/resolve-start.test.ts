@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { Provider } from "@kenkaiiii/gg-ai";
+import type { Provider } from "@abukhaled/gg-ai";
 import { getDefaultModel } from "./model-registry.js";
 import { resolveStartOrFallback, type ProviderAuthLookup } from "./resolve-start.js";
 

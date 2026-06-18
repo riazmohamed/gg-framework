@@ -1,6 +1,6 @@
 import React from "react";
 import wrapAnsi from "wrap-ansi";
-import { log } from "@kenkaiiii/gg-core";
+import { log } from "@abukhaled/gg-core";
 import { render, type Instance as InkInstance } from "ink";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { AgentTool } from "@abukhaled/gg-agent";

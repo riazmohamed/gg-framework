@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { log } from "@kenkaiiii/gg-core";
+import { log } from "@abukhaled/gg-core";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import type { Provider } from "@abukhaled/gg-ai";

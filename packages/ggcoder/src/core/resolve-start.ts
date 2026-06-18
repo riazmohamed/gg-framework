@@ -1,4 +1,4 @@
-import type { Provider } from "@kenkaiiii/gg-ai";
+import type { Provider } from "@abukhaled/gg-ai";
 import { getDefaultModel, getModel } from "./model-registry.js";
 
 /** A resolved startup provider + model for an AgentSession. */
