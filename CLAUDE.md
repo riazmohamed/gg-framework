@@ -15,7 +15,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `packages/gg-ai` | `@abukhaled/gg-ai` | Unified LLM streaming API (Anthropic + OpenAI-compatible providers) |
 | `packages/gg-agent` | `@abukhaled/gg-agent` | Agent loop with tool execution |
 | `packages/gg-core` | `@abukhaled/gg-core` | Provider-agnostic, UI-free shared foundation: model registry, thinking levels, app paths, OAuth + auth storage, file-writer logger core, telegram + voice transcription, self-updater |
-| `packages/ggcoder` | `@abukhaled/ogcoder` | CLI coding agent (`ogcoder` binary) |
+| `packages/ggcoder` | `@abukhaled/ogcoder` | CLI coding agent (`ogcoder` binary) + `app-sidecar` (the gg-app backend) |
+| `gg-app` | (private — Tauri desktop app) | **The desktop app — primary product** (wraps the ogcoder agent spine) |
 | `packages/ggcoder-eyes` | `@abukhaled/ggcoder-eyes` | Project-agnostic perception probes — screenshots, logs, HTTP, capture sinks |
 | `packages/gg-voice` | `@kenkaiiii/gg-voice` | Provider-agnostic realtime voice orchestration for GG tools/agents |
 | `packages/gg-pixel` | `@kenkaiiii/gg-pixel` | Universal error tracking SDK (Node + Browser + Deno + Workers) |
@@ -26,13 +27,83 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `packages/gg-boss` | `@kenkaiiii/gg-boss` | Orchestrator (`ggboss` binary) — drives multiple ogcoder workers across projects from one chat |
 | `Matey` | `matey` (private) | Electron desktop app (top-level dir, not under `packages/`); included in lint/format/build scope |
 
-**Dependency chain**: `gg-ai` → `gg-agent` → `gg-core` → { `ogcoder`, `gg-boss`, `gg-editor`, `gg-voice` } (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`). `gg-boss` consumes `gg-ai` + `gg-agent` + `gg-core` + `ogcoder` to spawn worker sessions. `gg-voice` provides voice transcription consumed by ogcoder's serve mode.
+**Dependency chain**: `gg-ai` → `gg-agent` → `gg-core` → { `ogcoder`, `gg-boss`, `gg-editor`, `gg-voice` } (with `ggcoder-eyes` as a sibling perception layer consumed by `ogcoder`). `gg-boss` consumes `gg-ai` + `gg-agent` + `gg-core` + `ogcoder` to spawn worker sessions. `gg-voice` provides voice transcription consumed by ogcoder's serve mode. The **gg-app** Tauri desktop app wraps the same `ogcoder` agent spine via a per-window `app-sidecar`.
 
 **One home for provider-coupled code**: anything coupled to provider behavior — model registry, context windows, thinking levels, app paths, auth/OAuth — has exactly one home in `@abukhaled/gg-core` (depends only on gg-ai for `Provider`/`ThinkingLevel` types; must NOT import gg-agent or React/Ink). Raw provider error *wording* lives in `@abukhaled/gg-ai` (`classifyProviderError`, `isHardBillingMessage`). Fix a model entry or error string once and ogcoder, gg-boss, gg-editor, and gg-voice all inherit it on their next build — do not re-add per-app copies. The logger's `attachToEventBus` bridge (needs the gg-agent `EventBus` type) stays in the apps; only the pure file-writer logger core lives in gg-core.
 
-**Workspace globs** (`pnpm-workspace.yaml`): `packages/*`, `Matey`, `experiments/*`. The native pixel ports (`gg-pixel-{go,py,rb,rs,swift}`) have no `package.json`, so `pnpm -r` skips them.
+**Workspace globs** (`pnpm-workspace.yaml`): `packages/*`, `Matey`, `gg-app`, `experiments/*`. The native pixel ports (`gg-pixel-{go,py,rb,rs,swift}`) have no `package.json`, so `pnpm -r` skips them.
 
-**Models & multimodal**: The MiniMax provider defaults to **MiniMax M3** (1M context, image + video). Video-capable models are Gemini 3.x, Kimi K2.6, MiniMax M3, and Xiaomi **MiMo-V2.5** (the omnimodal model; the coding-focused MiMo-V2.5-Pro is text-only — the legacy `mimo-v2-*` ids auto-route to v2.5 and are fully deprecated 2026-06-30). MiMo-V2.5 rides the OpenAI-compatible transport: video/image go as base64 data URLs (`video_url`/`image_url`); its base64 payload cap is 50 MB, so the registry's `maxVideoBytes` is ~36 MB raw to stay under it after base64 inflation. Video attachments work in the chat input (drag, paste, or type a path); for non-video models the clip is saved to a temp file and the model is told to inspect it with ffmpeg (mirrors the GLM image fallback). `supportsVideo`/`maxVideoBytes` (and this branch's `supportsDocuments`) live in `packages/gg-core/src/model-registry.ts`.
+**Models & multimodal**: The MiniMax provider defaults to **MiniMax M3** (1M context, image + video). Video-capable models are Gemini 3.x, Kimi K2.7, MiniMax M3, and Xiaomi **MiMo-V2.5** (the omnimodal model; the coding-focused MiMo-V2.5-Pro is text-only — the legacy `mimo-v2-*` ids auto-route to v2.5 and are fully deprecated 2026-06-30). MiMo-V2.5 rides the OpenAI-compatible transport: video/image go as base64 data URLs (`video_url`/`image_url`); its base64 payload cap is 50 MB, so the registry's `maxVideoBytes` is ~36 MB raw to stay under it after base64 inflation. Video attachments work in the chat input (drag, paste, or type a path); for non-video models the clip is saved to a temp file and the model is told to inspect it with ffmpeg (mirrors the GLM image fallback). `supportsVideo`/`maxVideoBytes` (and this branch's `supportsDocuments`) live in `packages/gg-core/src/model-registry.ts`.
+
+## gg-app — Desktop App (primary product)
+
+`gg-app/` is the **Tauri 2 desktop app** — a React 19 + Vite webview shell over the full
+ogcoder agent. This is the main product shipped to users; the CLI is the engine, the
+app is the face. Reuse the agent spine unchanged — never fork agent logic into the app.
+
+**Run**: `cd gg-app && pnpm tauri dev` (rebuild `@abukhaled/ogcoder` first if you touched the
+sidecar: `pnpm --filter @abukhaled/ogcoder build`). Restart the app after Rust/sidecar
+changes; pure webview edits hot-reload via Vite HMR.
+
+### Architecture: per-window sidecar
+
+Each window runs its **own** Node agent sidecar (`packages/ggcoder/src/app-sidecar.ts`) bound
+to its **own project cwd** — separate agents, separate projects, fully isolated. This is the
+core model: multiple windows = multiple projects open at once (one could be ogcoder, another
+Claude Code, another Codex).
+
+```
+React webview ──invoke()──▶ Rust commands ──HTTP──▶ Node sidecar (AgentSession)
+     ▲                          │                         │
+     └────── emit_to(window) ◀──┴──── SSE /events ◀────────┘
+```
+
+- **`gg-app/src-tauri/src/lib.rs`** — Rust shell. Owns a `Sidecars` registry keyed by window
+  label (`main`, `project-1`, …). Each command (`agent_prompt`, `agent_state`, `select_project`,
+  …) resolves the calling window's sidecar port via `port_for(&webview)`. SSE frames are
+  re-emitted with `emit_to(webview_window(label))` so **windows never see each other's events**.
+  Window background is painted `#111317` before first frame (no white flash). New windows are
+  tiled like macOS fill&arrange (`setup_windows` → `arrange_windows`, 2-up halves / 4-up quads).
+- **`gg-app/src/agent.ts`** — the ONLY bridge to Rust. Listens on the **current** webview target
+  (`getCurrentWebviewWindow().listen`) — a global `listen` would miss window-scoped events. All
+  IPC wrappers (`sendPrompt`, `listProjects`, `selectProject`, `createProject`, …) live here.
+- **`app-sidecar.ts`** — HTTP+SSE seam over `AgentSession`. Endpoints: `/state`, `/events`,
+  `/prompt`, `/cancel`, `/thinking`, `/model(s)`, `/commands`, `/projects`, `/sessions`,
+  `/settings`, `/create-project`. Slash-command expansion is delegated to `AgentSession.prompt()`
+  (single source of truth — built-in + `.gg/commands` custom). Env: `GG_APP_CWD` (project root),
+  `GG_APP_PORT` (0 = ephemeral), `GG_APP_SESSION_ID` (resume a session file).
+
+### UI components (`gg-app/src/`)
+
+One component per file; mirror the TUI's look. Reusable primitives: `Modal`, `BackButton`
+(chevron), `Badge` + `sourceStyle` (ogcoder=blue, Claude Code=clay `#d97757`, Codex=green
+`#10a37f`). Key screens/controls: `ProjectPicker` (shown per window on load — lists discovered
+projects + their recent 5 sessions, New Project, Settings), `NewProjectModal`,
+`SettingsModal` (projects-root folder), `ModelMenu`, `SlashMenu`, `LiveToolPanel`,
+`ActivityBar` (spinner + thinking timer + tokens), `PlanModeLogo` (amber ASCII banner),
+`WindowLayoutButton` (2/4 tiling), `Markdown`. Theme mirrors `ui/theme/dark.json` in `theme.ts`.
+
+### Project discovery + app settings
+
+- **Discovery** lives in `packages/ggcoder/src/core/project-discovery.ts` (one home — gg-boss
+  re-exports it via `discover.ts`). `discoverProjects()` scans ggcoder + Claude Code + Codex
+  session stores; `listRecentSessions(cwd)` fast-paths the newest 5 ggcoder sessions (mtime sort
+  → single-pass parse, no full-store scan). Decoded ggcoder paths are `path.resolve`d so
+  traversal segments don't surface as a stray `..` project.
+- **App settings** are app-specific in `~/.gg/gg-app.json` (separate from the CLI's
+  `~/.gg/settings.json`). Currently `projectsRoot` — the folder new projects are created inside
+  (default `~/gg-projects`). New projects: name validated to `^[a-z0-9]+(?:-[a-z0-9]+)*$`, folder
+  created under the root, then the window re-points at it via `select_project`.
+
+### Rules
+
+- The agent spine (gg-ai → gg-agent → gg-core → ggcoder `AgentSession`) is reused **verbatim**.
+  App-only concerns (windows, IPC, picker, settings) live in `gg-app/`; anything provider- or
+  agent-coupled stays in its existing home and the app consumes it.
+- New IPC = add a Rust `#[tauri::command]` that proxies the sidecar + register it in
+  `invoke_handler!`, expose a typed wrapper in `agent.ts`, never `fetch` the sidecar from the
+  webview (mixed-content blocked on the `tauri://` origin).
+- Webview calls that hit the sidecar must `await waitForReady()` first (startup/respawn race).
 
 > **Adding/changing an Anthropic model is a two-package edit.** The `MODELS` entry in `gg-core/src/model-registry.ts` is necessary but not sufficient — thinking transport is gated separately by `isAdaptiveThinkingModel()` (a model-ID regex) in `gg-ai/src/providers/transform.ts`. That regex decides `adaptive` thinking + `output_config.effort` vs. legacy `budget_tokens`, whether the `interleaved-thinking-2025-05-14` beta header is sent (`anthropic.ts`), and `xhigh` effort eligibility. New adaptive-thinking models (Fable 5, Opus 4.6+, Sonnet 4.6) must be added to that regex too. Note Fable 5 also rejects an explicit `thinking: {type: "disabled"}` (omit the param instead) — the provider already omits `thinking` when it's off, so no change is needed there.
 
@@ -217,6 +288,36 @@ Fix errors from checks you do run before continuing. Quick fixes:
 - **agentLoop**: pure async generator — call LLM, yield deltas, execute tools, loop on tool_use
 - **resolveActiveProvider**: `cli.ts` helper that picks the logged-in provider at startup with fallback
 - **Zod schemas**: tool parameters defined with Zod, converted to JSON Schema at provider boundary
+
+## LSP Inline Edit Diagnostics
+
+Successful `edit`/`write` tool results get compiler-grade error diagnostics appended
+(`Diagnostics in src/a.ts (informational …): L42:7 Type 'string' is not assignable …`)
+so the model self-corrects type errors in the same turn it creates them. Code lives in
+`packages/ggcoder/src/core/lsp/` (`jsonrpc.ts` zero-dep Content-Length framing,
+`servers.ts` catalog + root detection, `client.ts` document sync + push/pull race,
+`manager.ts` lazy pool, `format.ts` rendering).
+
+Hard rules:
+
+- **TS/JS works for every user out of the box.** `typescript-language-server` + `typescript`
+  ship as ggcoder dependencies (~26MB unpacked) — no postinstall, no downloads, no runtime
+  `npx -y`. Resolution order: project's `node_modules` (walking up, its own TS version wins) →
+  ggcoder's bundled copy → PATH. Node-based servers spawn via `process.execPath` + the real
+  bin script (never `.bin` shims, which need `node` on PATH). Other servers
+  (`pyright-langserver`, `gopls`, `rust-analyzer`, `clangd`) resolve from project/PATH only —
+  they ship with their language toolchains.
+- **Silent graceful degradation.** Missing/crashed/slow server ⇒ tool output is byte-identical
+  to before (debug-log only). A failed spawn marks `(server, root)` broken for the session.
+- **Lazy + budgeted.** Nothing spawns until the first edit of a matching file; diagnostics are
+  capped at 3s warm / 8s first-touch — overruns return nothing and leave the server warm.
+- **Errors only, capped at 5**, framed as informational so multi-file sequences aren't derailed.
+- Opt out with `"lspDiagnostics": false` in `~/.gg/settings.json`. Pools are per tool set:
+  `rebuildToolsForCwd` (pixel chdir) shuts the old one down; exit handlers call
+  `lspManager.shutdownAll()` alongside `processManager`.
+- Tests: `src/core/lsp/*.test.ts` run against a fake stdio server fixture
+  (`src/tools/__fixtures__/fake-lsp-server.mjs`) — CI never needs real language servers.
+  Opt-in real-tsserver test: `GG_LSP_INTEGRATION=1 npx vitest run src/core/lsp/integration.test.ts`.
 
 ## MCP Servers
 

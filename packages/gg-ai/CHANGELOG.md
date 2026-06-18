@@ -1,5 +1,49 @@
 # @kenkaiiii/gg-ai
 
+## 4.11.3
+
+## 4.11.2
+
+## 4.11.1
+
+## 4.11.0
+
+## 4.10.2
+
+## 4.10.1
+
+## 4.10.0
+
+### Minor Changes
+
+- Update Kimi to K2.7 (`kimi-k2.7-code`) as the Moonshot default model, replacing Kimi K2.6 across the registry, CLI, login UI, and docs.
+
+  Harden Kimi OAuth token refresh so it no longer silently falls back to a paid Moonshot API key: refresh reuses the existing refresh token when the server doesn't rotate it, tokens are renewed proactively before expiry (60s skew), `baseUrl` is preserved across refreshes, and a genuinely-dead OAuth credential now logs a warning instead of switching billing silently.
+
+## 4.9.1
+
+## 4.9.0
+
+## 4.8.7
+
+## 4.8.6
+
+## 4.8.5
+
+## 4.8.4
+
+## 4.8.3
+
+## 4.8.2
+
+## 4.8.1
+
+## 4.8.0
+
+### Minor Changes
+
+- Add Claude Fable 5 (`claude-fable-5`) and Claude Mythos 5 (`claude-mythos-5`) to the model registry with adaptive thinking (low→max), correct beta-header handling in the Anthropic provider, footer short names, and a clear invite-only (Project Glasswing) error for Mythos instead of the raw `not_found_error`.
+
 ## 4.7.0
 
 ## 4.6.3

@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, render, renderToString } from "ink";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import stringWidth from "string-width";
 import stripAnsi from "strip-ansi";
 import { AssistantMessage } from "./AssistantMessage.js";
@@ -9,6 +9,14 @@ import { ToolExecution } from "./ToolExecution.js";
 import { ToolGroupExecution } from "./ToolGroupExecution.js";
 import { ServerToolExecution } from "./ServerToolExecution.js";
 import { TerminalSizeProvider } from "../hooks/useTerminalSize.js";
+import type * as figures from "../constants/figures.js";
+
+// BLACK_CIRCLE is platform-dependent (⏺ on macOS, ● elsewhere); pin it so
+// the hardcoded frame expectations pass on Linux/Windows CI too.
+vi.mock("../constants/figures.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof figures>()),
+  BLACK_CIRCLE: "\u23FA",
+}));
 import {
   createTerminalHistoryPrinter,
   serializeCompletedItemToTerminalHistory,
@@ -78,6 +86,24 @@ function renderWithTerminal(element: React.ReactElement): string[] {
 
 function renderAssistantFrame(streaming: boolean, text = LONG_STREAMING_TEXT): string[] {
   return renderWithTerminal(<AssistantMessage text={text} streaming={streaming} />);
+}
+
+/** Like renderWithTerminal but keeps blank rows — needed for alignment checks. */
+function renderWithTerminalRaw(element: React.ReactElement): string[] {
+  const originalColumns = process.stdout.columns;
+  const originalRows = process.stdout.rows;
+  process.stdout.columns = TERMINAL_COLUMNS;
+  process.stdout.rows = 20;
+  try {
+    return rawLinesOf(
+      renderToString(<TerminalSizeProvider>{element}</TerminalSizeProvider>, {
+        columns: TERMINAL_COLUMNS,
+      }),
+    );
+  } finally {
+    process.stdout.columns = originalColumns;
+    process.stdout.rows = originalRows;
+  }
 }
 
 function renderTerminalHistoryAssistantText(text = LONG_STREAMING_TEXT): string {
@@ -290,6 +316,19 @@ describe("AssistantMessage live layout", () => {
     );
 
     expect(lines.length).toBeLessThanOrEqual(5);
+  });
+
+  it("REGRESSION: dot stays inline when the height clamp slices at a blank line", () => {
+    // 3 paragraphs render as [p1, "", p2, "", p3]. availableTerminalHeight=4
+    // tail-slices to ["", p2, "", p3] — the ⏺ prefix sits in a sibling box
+    // aligned to the first row, so a leading blank row left the dot floating
+    // one row above the text (alignment varied with the slice boundary).
+    const text = "First paragraph here.\n\nSecond paragraph here.\n\nThird paragraph here.";
+    const lines = renderWithTerminalRaw(
+      <AssistantMessage text={text} availableTerminalHeight={4} />,
+    );
+
+    expect(lines[0]).toBe(" \u23FA Second paragraph here.");
   });
 
   it("renders the streaming frame with the same line structure as finalized history", () => {

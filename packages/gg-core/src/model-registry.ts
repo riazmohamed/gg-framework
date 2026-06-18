@@ -34,7 +34,8 @@ export interface ModelInfo {
    * enabled to pick the strongest setting per model:
    *   - OpenAI GPT-5.5-era: `xhigh`
    *   - OpenAI Pro/Codex/old: clamped to what the model accepts
-   *   - Claude Fable 5 and Opus 4.8 / 4.7 / 4.6 and Sonnet 4.6: `max`
+   *   - Claude Fable 5 / Mythos 5, Opus 4.8 / 4.7 / 4.6 and Sonnet 4.6: `max`
+   *     (Fable 5 / Mythos 5 use always-on adaptive thinking, low→max ladder)
    *   - Claude Haiku 4.5: `high` (no adaptive `max` tier)
    *   - GLM / Moonshot / Xiaomi / MiniMax / Qwen: `high` — binary-thinking
    *     providers ignore the level on the wire, so the value is cosmetic
@@ -47,6 +48,37 @@ export interface ModelInfo {
 // /model selector and login selector sort models identically.
 export const MODELS: ModelInfo[] = [
   // ── Anthropic ──────────────────────────────────────────
+  // NOTE: Claude Fable 5 (`claude-fable-5`) and Claude Mythos 5
+  // (`claude-mythos-5`) are temporarily unavailable, so they're commented out
+  // here to keep them out of the /model selector and avoid user confusion.
+  // Re-enable once they're generally available again.
+  // {
+  //   id: "claude-fable-5",
+  //   name: "Claude Fable 5",
+  //   provider: "anthropic",
+  //   contextWindow: 1_000_000,
+  //   maxOutputTokens: 128_000,
+  //   supportsThinking: true,
+  //   supportsImages: true,
+  //   supportsVideo: false,
+  //   costTier: "high",
+  //   maxThinkingLevel: "max",
+  // },
+  // {
+  //   // Mythos-class model offered through Project Glasswing (limited
+  //   // availability, invitation-only). Same underlying model as Fable 5 with
+  //   // some safeguards lifted; kept here so approved accounts can select it.
+  //   id: "claude-mythos-5",
+  //   name: "Claude Mythos 5",
+  //   provider: "anthropic",
+  //   contextWindow: 1_000_000,
+  //   maxOutputTokens: 128_000,
+  //   supportsThinking: true,
+  //   supportsImages: true,
+  //   supportsVideo: false,
+  //   costTier: "high",
+  //   maxThinkingLevel: "max",
+  // },
   {
     id: "claude-fable-5",
     name: "Claude Fable 5",
@@ -175,8 +207,8 @@ export const MODELS: ModelInfo[] = [
   },
   // ── Moonshot (Kimi) ────────────────────────────────────
   {
-    id: "kimi-k2.6",
-    name: "Kimi K2.6",
+    id: "kimi-k2.7-code",
+    name: "Kimi K2.7",
     provider: "moonshot",
     contextWindow: 262_144,
     maxOutputTokens: 262_144,
@@ -188,6 +220,20 @@ export const MODELS: ModelInfo[] = [
     maxThinkingLevel: "high",
   },
   // ── Z.AI (GLM) ─────────────────────────────────────────
+  // GLM-5.2: coding-first flagship with a usable 1M-token context window
+  // (5x jump over GLM-5.1's ~200K) and 131K max output. Released 2026-06-13.
+  {
+    id: "glm-5.2",
+    name: "GLM-5.2",
+    provider: "glm",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 131_072,
+    supportsThinking: true,
+    supportsImages: false,
+    supportsVideo: false,
+    costTier: "medium",
+    maxThinkingLevel: "high",
+  },
   {
     id: "glm-5.1",
     name: "GLM-5.1",
@@ -371,18 +417,6 @@ export function getModelsForProvider(provider: Provider): ModelInfo[] {
   return MODELS.filter((m) => m.provider === provider);
 }
 
-export function getDefaultModel(provider: Provider): ModelInfo {
-  if (provider === "xiaomi") return MODELS.find((m) => m.id === "mimo-v2.5-pro")!;
-  if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.5")!;
-  if (provider === "gemini") return MODELS.find((m) => m.id === "gemini-3.1-flash-lite-preview")!;
-  if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.1")!;
-  if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k2.6")!;
-  if (provider === "minimax") return MODELS.find((m) => m.id === "MiniMax-M3")!;
-  if (provider === "deepseek") return MODELS.find((m) => m.id === "deepseek-v4-pro")!;
-  if (provider === "openrouter") return MODELS.find((m) => m.id === "qwen/qwen3.6-plus")!;
-  return MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
-}
-
 /** Default video payload cap (bytes) when a video model doesn't declare one. */
 export const DEFAULT_MAX_VIDEO_BYTES = 20 * 1024 * 1024;
 
@@ -395,6 +429,18 @@ export function getVideoByteLimit(modelId: string): number | undefined {
   const model = getModel(modelId);
   if (!model?.supportsVideo) return undefined;
   return model.maxVideoBytes ?? DEFAULT_MAX_VIDEO_BYTES;
+}
+
+export function getDefaultModel(provider: Provider): ModelInfo {
+  if (provider === "xiaomi") return MODELS.find((m) => m.id === "mimo-v2.5-pro")!;
+  if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.5")!;
+  if (provider === "gemini") return MODELS.find((m) => m.id === "gemini-3.1-flash-lite-preview")!;
+  if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.2")!;
+  if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k2.7-code")!;
+  if (provider === "minimax") return MODELS.find((m) => m.id === "MiniMax-M3")!;
+  if (provider === "deepseek") return MODELS.find((m) => m.id === "deepseek-v4-pro")!;
+  if (provider === "openrouter") return MODELS.find((m) => m.id === "qwen/qwen3.6-plus")!;
+  return MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
 }
 
 export interface ContextWindowOptions {

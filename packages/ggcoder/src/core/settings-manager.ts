@@ -37,7 +37,11 @@ const SettingsSchema = z.object({
     .default("auto"),
   showTokenUsage: z.boolean().default(true),
   idealReviewEnabled: z.boolean().default(true),
+  /** Append LSP diagnostics to edit/write tool results. */
+  lspDiagnostics: z.boolean().default(true),
   enabledTools: z.array(z.string()).optional(),
+  /** Delete session transcripts older than this many days at startup. 0 disables pruning. */
+  sessionRetentionDays: z.number().int().min(0).default(30),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -51,6 +55,8 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "auto",
   showTokenUsage: true,
   idealReviewEnabled: true,
+  lspDiagnostics: true,
+  sessionRetentionDays: 30,
 };
 
 // ── Settings Manager ───────────────────────────────────────

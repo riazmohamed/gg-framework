@@ -1,5 +1,126 @@
 # @kenkaiiii/gg-voice
 
+## 4.3.220
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.11.3
+- @kenkaiiii/gg-agent@4.11.3
+
+## 4.3.219
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.11.2
+- @kenkaiiii/gg-agent@4.11.2
+
+## 4.3.218
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.11.1
+- @kenkaiiii/gg-agent@4.11.1
+
+## 4.3.217
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.11.0
+- @kenkaiiii/gg-agent@4.11.0
+
+## 4.3.216
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.10.2
+- @kenkaiiii/gg-agent@4.10.2
+
+## 4.3.215
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.10.1
+- @kenkaiiii/gg-agent@4.10.1
+
+## 4.3.214
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@4.10.0
+  - @kenkaiiii/gg-agent@4.10.0
+
+## 4.3.213
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.9.1
+- @kenkaiiii/gg-agent@4.9.1
+
+## 4.3.212
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.9.0
+- @kenkaiiii/gg-agent@4.9.0
+
+## 4.3.211
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.8.7
+- @kenkaiiii/gg-agent@4.8.7
+
+## 4.3.210
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.8.6
+- @kenkaiiii/gg-agent@4.8.6
+
+## 4.3.209
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.8.5
+- @kenkaiiii/gg-agent@4.8.5
+
+## 4.3.208
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.8.4
+- @kenkaiiii/gg-agent@4.8.4
+
+## 4.3.207
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.8.3
+- @kenkaiiii/gg-agent@4.8.3
+
+## 4.3.206
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.8.2
+- @kenkaiiii/gg-agent@4.8.2
+
+## 4.3.205
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.8.1
+- @kenkaiiii/gg-agent@4.8.1
+
+## 4.3.204
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@4.8.0
+  - @kenkaiiii/gg-agent@4.8.0
+
 ## 4.3.203
 
 ### Patch Changes

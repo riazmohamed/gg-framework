@@ -1,5 +1,157 @@
 # Changelog
 
+## 0.7.32
+
+### Patch Changes
+
+- Updated dependencies [1c37b11]
+  - @kenkaiiii/ggcoder@4.11.3
+  - @kenkaiiii/gg-ai@4.11.3
+  - @kenkaiiii/gg-agent@4.11.3
+
+## 0.7.31
+
+### Patch Changes
+
+- Updated dependencies [a2da1f8]
+  - @kenkaiiii/ggcoder@4.11.2
+  - @kenkaiiii/gg-ai@4.11.2
+  - @kenkaiiii/gg-agent@4.11.2
+
+## 0.7.30
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/ggcoder@4.11.1
+  - @kenkaiiii/gg-ai@4.11.1
+  - @kenkaiiii/gg-agent@4.11.1
+
+## 0.7.29
+
+### Patch Changes
+
+- @kenkaiiii/ggcoder@4.11.0
+- @kenkaiiii/gg-ai@4.11.0
+- @kenkaiiii/gg-agent@4.11.0
+
+## 0.7.28
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/ggcoder@4.10.2
+  - @kenkaiiii/gg-ai@4.10.2
+  - @kenkaiiii/gg-agent@4.10.2
+
+## 0.7.27
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/ggcoder@4.10.1
+  - @kenkaiiii/gg-ai@4.10.1
+  - @kenkaiiii/gg-agent@4.10.1
+
+## 0.7.26
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@4.10.0
+  - @kenkaiiii/gg-agent@4.10.0
+  - @kenkaiiii/ggcoder@4.10.0
+
+## 0.7.25
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/ggcoder@4.9.1
+  - @kenkaiiii/gg-ai@4.9.1
+  - @kenkaiiii/gg-agent@4.9.1
+
+## 0.7.24
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/ggcoder@4.9.0
+  - @kenkaiiii/gg-ai@4.9.0
+  - @kenkaiiii/gg-agent@4.9.0
+
+## 0.7.23
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/ggcoder@4.8.7
+  - @kenkaiiii/gg-ai@4.8.7
+  - @kenkaiiii/gg-agent@4.8.7
+
+## 0.7.22
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/ggcoder@4.8.6
+  - @kenkaiiii/gg-ai@4.8.6
+  - @kenkaiiii/gg-agent@4.8.6
+
+## 0.7.21
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/ggcoder@4.8.5
+  - @kenkaiiii/gg-ai@4.8.5
+  - @kenkaiiii/gg-agent@4.8.5
+
+## 0.7.20
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/ggcoder@4.8.4
+  - @kenkaiiii/gg-ai@4.8.4
+  - @kenkaiiii/gg-agent@4.8.4
+
+## 0.7.19
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/ggcoder@4.8.3
+  - @kenkaiiii/gg-ai@4.8.3
+  - @kenkaiiii/gg-agent@4.8.3
+
+## 0.7.18
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/ggcoder@4.8.2
+  - @kenkaiiii/gg-ai@4.8.2
+  - @kenkaiiii/gg-agent@4.8.2
+
+## 0.7.17
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/ggcoder@4.8.1
+  - @kenkaiiii/gg-ai@4.8.1
+  - @kenkaiiii/gg-agent@4.8.1
+
+## 0.7.16
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@4.8.0
+  - @kenkaiiii/gg-agent@4.8.0
+  - @kenkaiiii/ggcoder@4.8.0
+
 ## 0.7.15
 
 ### Patch Changes

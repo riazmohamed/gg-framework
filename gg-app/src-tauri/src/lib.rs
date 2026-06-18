@@ -1,0 +1,2826 @@
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+use futures_util::StreamExt;
+use tauri::{Emitter, EventTarget, Manager, RunEvent, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri_plugin_opener::OpenerExt;
+
+/// One Node agent sidecar, owned by a single window. Each window runs its own
+/// agent against its own project cwd, so windows never share state. `cwd` and
+/// `session_path` mirror what the window's sidecar was spawned with, so the
+/// workspace snapshot (restore-on-restart) can be written from this map alone.
+#[derive(Default)]
+struct SidecarInstance {
+    child: Option<Child>,
+    port: Option<u16>,
+    cwd: Option<PathBuf>,
+    session_path: Option<String>,
+}
+
+/// Per-window sidecar registry, keyed by window label.
+#[derive(Default)]
+struct Sidecars {
+    map: Mutex<HashMap<String, SidecarInstance>>,
+}
+
+/// True once the app has begun quitting. Set on `ExitRequested` so the cascade
+/// of per-window `Destroyed` events during shutdown does NOT prune the workspace
+/// snapshot — the last full snapshot is what we restore next launch.
+#[derive(Default)]
+struct AppExiting(AtomicBool);
+
+/// One restored window's target (cwd + optional session), handed to the webview
+/// once via `window_restore_target` so it skips the project picker on boot.
+#[derive(Clone, serde::Serialize)]
+struct RestoreEntry {
+    cwd: String,
+    #[serde(rename = "sessionPath")]
+    session_path: Option<String>,
+}
+
+/// Pending per-window restore targets, consumed once by the webview on mount.
+#[derive(Default)]
+struct RestoreTargets {
+    map: Mutex<HashMap<String, RestoreEntry>>,
+}
+
+fn sidecar_base(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Gracefully terminate a sidecar child AND its entire process tree so MCP/LSP
+/// children (spawned without `detached`, so they share the sidecar's process
+/// group) die with it — no orphans on window-close/project-switch/quit.
+///
+/// On Unix the sidecar is spawned as a process-group leader (see
+/// `spawn_sidecar_with_session`), so sending signals to `-pid` (negative pid =
+/// the whole group) reaps every descendant in one shot. We SIGTERM the group so
+/// the sidecar's SIGTERM handler can run `session.dispose()`, poll `try_wait()`
+/// for up to ~3s, then SIGKILL the group and `wait()` to reap the direct child
+/// (std `Child` never auto-reaps).
+///
+/// On Windows there is no process-group kill, so we tree-kill via
+/// `taskkill /T /F` (kills the descendant tree), then `wait()` to reap.
+fn terminate_child(mut child: Child) {
+    let pid = child.id() as i32;
+    #[cfg(unix)]
+    unsafe {
+        // Negative pid = signal the entire process group. The sidecar is its
+        // own group leader (pgid == sidecar pid), so this reaches every
+        // non-detached descendant (MCP stdio children, LSP servers).
+        libc::kill(-pid, libc::SIGTERM);
+    }
+    std::thread::spawn(move || {
+        #[cfg(unix)]
+        {
+            for _ in 0..30 {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            // Grace period expired — force-kill the whole group.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Tree-kill on Windows: /T kills the descendant tree, /F forces it.
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            // Fall back to direct kill if taskkill is unavailable.
+            let _ = child.kill();
+        }
+        let _ = child.wait(); // reap the direct child (avoid zombie)
+    });
+}
+
+// ── Startup orphan sweeper ─────────────────────────────────────────────────
+// When the app is force-quit, crashes, or is killed during a dev run, the
+// sidecar process tree (Node sidecar + MCP stdio children + LSP servers) is
+// orphaned — reparented to init (pid 1) or an orphan-reaper. Rust only kills
+// the direct sidecar PID, so children survive. Without a startup sweep these
+// accumulate forever. We run once at the top of `.setup`, before new sidecars
+// are spawned.
+//
+// Cross-platform: the pure classifier (`orphan_killset`) is OS-agnostic; only
+// the process-table snapshot and the force-kill primitive differ between
+// Unix (`ps` + `libc::kill`) and Windows (PowerShell CIM + `taskkill`).
+
+/// One process row from the OS process table (pid, parent pid, full command).
+struct ProcInfo {
+    pid: i32,
+    ppid: i32,
+    command: String,
+}
+
+/// Command substrings that identify GG Coder sidecar trees. `app-sidecar`
+/// matches both bundled `app-sidecar.mjs` and dev `app-sidecar.js`;
+/// `kencode-search` catches long-dead MCP children already reparented to init.
+const ORPHAN_COMMAND_PATTERNS: &[&str] = &["app-sidecar", "kencode-search"];
+
+/// Pure (no I/O): given a process-table snapshot and the current app's pid,
+/// return the set of orphaned sidecar-tree PIDs that should be SIGKILLed.
+///
+/// An orphan is a process whose command matches a known pattern AND whose
+/// parent is dead (`ppid == 1` or `ppid` absent from the snapshot). We then
+/// transitively include descendants of each orphan root (catches MCP/LSP trees
+/// still linked to a freshly-dead sidecar) plus any pattern-matching process
+/// with a dead parent not already collected (catches children reparented to
+/// init before the snapshot). The current app pid and its live sidecars are
+/// never matched — a live sidecar's parent is the still-running `gg-app`, so
+/// its `ppid` is alive in the snapshot.
+fn orphan_killset(snapshot: &[ProcInfo], self_pid: i32) -> Vec<i32> {
+    let live_pids: HashSet<i32> = snapshot.iter().map(|p| p.pid).collect();
+    let mut parent_children: HashMap<i32, Vec<i32>> = HashMap::new();
+    for p in snapshot {
+        parent_children.entry(p.ppid).or_default().push(p.pid);
+    }
+
+    let matches_pattern = |cmd: &str| ORPHAN_COMMAND_PATTERNS.iter().any(|pat| cmd.contains(pat));
+    let parent_dead = |ppid: i32| ppid == 1 || !live_pids.contains(&ppid);
+
+    // Roots: pattern-matching processes with a dead parent (not self).
+    let mut killset: HashSet<i32> = HashSet::new();
+    for p in snapshot {
+        if p.pid == self_pid {
+            continue;
+        }
+        if matches_pattern(&p.command) && parent_dead(p.ppid) {
+            killset.insert(p.pid);
+        }
+    }
+
+    // Descendants: transitively collect children of each root via the map.
+    // This catches freshly-orphaned MCP/LSP trees still linked to the dead
+    // sidecar in this snapshot.
+    let mut stack: Vec<i32> = killset.iter().copied().collect();
+    while let Some(parent) = stack.pop() {
+        if let Some(children) = parent_children.get(&parent) {
+            for &child in children {
+                if child != self_pid && killset.insert(child) {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+
+    // Reparented: any pattern-matching process with a dead parent NOT already
+    // collected (e.g. kencode-search reparented to pid 1 before the snapshot,
+    // whose original sidecar parent may be gone entirely).
+    for p in snapshot {
+        if p.pid == self_pid {
+            continue;
+        }
+        if matches_pattern(&p.command) && parent_dead(p.ppid) {
+            killset.insert(p.pid);
+        }
+    }
+
+    let mut result: Vec<i32> = killset.into_iter().collect();
+    result.sort_unstable();
+    result
+}
+
+/// Pure parser for `ps -eo pid=,ppid=,command=` output (one row per line).
+/// Column padding (multiple spaces) is collapsed by `split_whitespace`.
+/// Available on all platforms so the parsing can be unit-tested.
+fn parse_ps_output(stdout: &str) -> Vec<ProcInfo> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid: i32 = parts.next()?.parse().ok()?;
+            let ppid: i32 = parts.next()?.parse().ok()?;
+            // The rest of the line is the full command (may contain spaces).
+            // Pattern matching uses .contains(), so rejoining with single
+            // spaces is fine.
+            let command = parts.collect::<Vec<_>>().join(" ");
+            Some(ProcInfo { pid, ppid, command })
+        })
+        .collect()
+}
+
+/// Pure parser for PowerShell CIM output: one line per process as
+/// `pid|ppid|command` (see `process_snapshot` on Windows). The command field
+/// may contain `|` and spaces — `splitn(3, '|')` captures it verbatim.
+/// Available on all platforms so the parsing can be unit-tested.
+/// `allow(dead_code)`: on Unix its only caller is `#[cfg(not(unix))]`, so the
+/// compiler flags it as dead; on Windows it IS used by `process_snapshot`.
+#[allow(dead_code)]
+fn parse_cim_output(stdout: &str) -> Vec<ProcInfo> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            // splitn(3, '|') — the command field may itself contain '|',
+            // but only the first two fields matter and the third captures
+            // everything else verbatim.
+            let mut parts = line.splitn(3, '|');
+            let pid: i32 = parts.next()?.trim().parse().ok()?;
+            let ppid: i32 = parts.next()?.trim().parse().ok()?;
+            let command = parts.next()?.trim().to_string();
+            Some(ProcInfo { pid, ppid, command })
+        })
+        .collect()
+}
+
+/// Snapshot the OS process table into `ProcInfo` rows (pid, ppid, command).
+/// Returns `None` if the process-listing command is unavailable — the sweep
+/// then silently does nothing.
+#[cfg(unix)]
+fn process_snapshot() -> Option<Vec<ProcInfo>> {
+    let output = Command::new("ps")
+        .args(["-eo", "pid=,ppid=,command="])
+        .output()
+        .ok()?;
+    Some(parse_ps_output(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Windows snapshot via PowerShell CIM — the modern replacement for the
+/// deprecated `wmic`. Emits one line per process: `pid|ppid|command`, using
+/// `|` as a field delimiter. CommandLine may be empty for kernel processes;
+/// those won't match any pattern so they're harmless.
+#[cfg(not(unix))]
+fn process_snapshot() -> Option<Vec<ProcInfo>> {
+    // Single-quoted '|' inside the script is a literal separator, not a pipe.
+    // The script string uses Rust line continuations (\) so it reads as one
+    // logical line of PowerShell.
+    let script = "Get-CimInstance Win32_Process | ForEach-Object { \
+        [string]$_.ProcessId + '|' + [string]$_.ParentProcessId + '|' + [string]$_.CommandLine \
+    }";
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .ok()?;
+    Some(parse_cim_output(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Force-kill a single PID (best-effort, errors ignored).
+#[cfg(unix)]
+fn force_kill_pid(pid: i32) {
+    unsafe {
+        let _ = libc::kill(pid, libc::SIGKILL);
+    }
+}
+
+/// Force-kill a single PID via `taskkill /F` (no descendant tree walk needed —
+/// the sweeper kills every orphan-tree member individually from the snapshot).
+#[cfg(not(unix))]
+fn force_kill_pid(pid: i32) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Snapshot the process table, classify orphaned sidecar trees, and force-kill
+/// each. Best-effort + logged; never panics. Runs once at startup before any
+/// sidecar is spawned.
+fn sweep_orphan_sidecars() {
+    let Some(snapshot) = process_snapshot() else {
+        log::warn!("orphan sweep: process listing unavailable, skipping");
+        return;
+    };
+    let self_pid = std::process::id() as i32;
+
+    let killset = orphan_killset(&snapshot, self_pid);
+    if killset.is_empty() {
+        log::info!("orphan sweep: no stale sidecars found");
+        return;
+    }
+
+    log::info!("orphan sweep: killing {} stale process(es)", killset.len());
+    for pid in &killset {
+        let cmd = snapshot
+            .iter()
+            .find(|p| &p.pid == pid)
+            .map(|p| p.command.as_str())
+            .unwrap_or("?");
+        log::info!("orphan sweep: killing pid {pid}: {cmd}");
+        force_kill_pid(*pid);
+    }
+}
+
+/// Resolve the sidecar port for the window that issued a command.
+fn port_for(webview: &WebviewWindow) -> Option<u16> {
+    let state: State<Sidecars> = webview.state();
+    let map = state.map.lock().unwrap();
+    map.get(webview.label()).and_then(|i| i.port)
+}
+
+fn cwd_for(webview: &WebviewWindow) -> Option<PathBuf> {
+    let state: State<Sidecars> = webview.state();
+    let map = state.map.lock().unwrap();
+    map.get(webview.label()).and_then(|i| i.cwd.clone())
+}
+
+/// Frontend polls this until it returns a port (mirrors the `sidecar-ready` event).
+#[tauri::command]
+fn sidecar_port(webview: WebviewWindow) -> Option<u16> {
+    port_for(&webview)
+}
+
+fn strip_file_location_suffix(path: &str) -> &str {
+    let mut end = path.len();
+    for _ in 0..2 {
+        let Some(colon) = path[..end].rfind(':') else {
+            break;
+        };
+        let suffix = &path[colon + 1..end];
+        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+            break;
+        }
+        let last_sep = path[..colon].rfind(|c| c == '/' || c == '\\').unwrap_or(0);
+        if colon <= last_sep {
+            break;
+        }
+        end = colon;
+    }
+    &path[..end]
+}
+
+/// Open a project file linked from the chat. Relative paths resolve against this
+/// window's sidecar cwd; `:line[:col]` and `#Lline` decorations are tolerated.
+#[tauri::command]
+fn open_project_path(webview: WebviewWindow, path: String) -> Result<(), String> {
+    let cwd = cwd_for(&webview).ok_or("sidecar not ready")?;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("empty path".into());
+    }
+    if trimmed.contains("://") && !trimmed.starts_with("file://") {
+        return Err("not a file path".into());
+    }
+
+    let without_file_scheme = trimmed.strip_prefix("file://").unwrap_or(trimmed);
+    let without_anchor = without_file_scheme
+        .split_once("#L")
+        .map(|(p, _)| p)
+        .unwrap_or(without_file_scheme);
+    let without_query = without_anchor
+        .split_once('?')
+        .map(|(p, _)| p)
+        .unwrap_or(without_anchor);
+    let cleaned = strip_file_location_suffix(without_query);
+    let candidate = PathBuf::from(cleaned);
+    let resolved = if candidate.is_absolute() {
+        candidate
+    } else {
+        cwd.join(candidate)
+    };
+    let canonical = resolved
+        .canonicalize()
+        .map_err(|_| format!("file not found: {}", cleaned))?;
+
+    webview
+        .opener()
+        .open_path(canonical.to_string_lossy().to_string(), None::<String>)
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: current agent/session state.
+#[tauri::command]
+async fn agent_state(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .get(format!("{}/state", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: submit a prompt (optionally with attachments). The reply streams back
+/// via the `agent-event` event. `attachments` is passed through opaquely.
+#[tauri::command]
+async fn agent_prompt(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    text: String,
+    attachments: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    client
+        .post(format!("{}/prompt", sidecar_base(port)))
+        .json(&serde_json::json!({
+            "text": text,
+            "attachments": attachments.unwrap_or(serde_json::Value::Array(vec![])),
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Proxy: resumed conversation history (user + assistant text) for hydration.
+#[tauri::command]
+async fn agent_history(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .get(format!("{}/history", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: start a fresh session (clears history) for this window's project.
+#[tauri::command]
+async fn agent_new_session(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<(), String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    client
+        .post(format!("{}/new-session", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Proxy: store an API key for a provider.
+#[tauri::command]
+async fn agent_auth_apikey(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    provider: String,
+    key: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/auth/apikey", sidecar_base(port)))
+        .json(&serde_json::json!({ "provider": provider, "key": key }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: begin an OAuth login. Progress streams back via `agent-event`
+/// (`auth_url`, `auth_status`, `auth_need_code`, `auth_done`, `auth_error`).
+#[tauri::command]
+async fn agent_auth_oauth_start(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    provider: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/auth/oauth/start", sidecar_base(port)))
+        .json(&serde_json::json!({ "provider": provider }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: submit a pasted OAuth code to an in-flight login.
+#[tauri::command]
+async fn agent_auth_oauth_code(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    code: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/auth/oauth/code", sidecar_base(port)))
+        .json(&serde_json::json!({ "code": code }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: disconnect a provider (clear its stored credentials).
+#[tauri::command]
+async fn agent_auth_logout(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    provider: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/auth/logout", sidecar_base(port)))
+        .json(&serde_json::json!({ "provider": provider }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: stop a background task by id. Returns `{ message }`.
+#[tauri::command]
+async fn agent_kill_task(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/kill", sidecar_base(port)))
+        .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: radio state for THIS window's sidecar — `{ stations, current }`.
+/// Playback lives in the per-window sidecar process, so each window's radio is
+/// independent (opening more windows never duplicates audio).
+#[tauri::command]
+async fn agent_radio_state(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .get(format!("{}/radio", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: play a station by id, or stop with `station = "off"`. Returns
+/// `{ current }` on success, an error message (e.g. no player installed) on 4xx.
+#[tauri::command]
+async fn agent_radio_set(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    station: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/radio", sidecar_base(port)))
+        .json(&serde_json::json!({ "station": station }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("radio request failed")
+            .to_string();
+        return Err(msg);
+    }
+    Ok(body)
+}
+
+/// Proxy: list this project's task list (the ~/.gg-tasks store for its cwd).
+#[tauri::command]
+async fn agent_tasks(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .get(format!("{}/tasks", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: run one task (`id`) or run-all (`all = true`, starting from the next
+/// pending task). Progress streams back via `agent-event` (session_reset,
+/// task_start, run_start/run_end, tasks_list, tasks_run_done).
+#[tauri::command]
+async fn agent_run_tasks(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    id: Option<String>,
+    all: bool,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/tasks/run", sidecar_base(port)))
+        .json(&serde_json::json!({ "id": id, "all": all }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: delete a task by id. Returns the remaining `{ tasks }`.
+#[tauri::command]
+async fn agent_delete_task(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/tasks/delete", sidecar_base(port)))
+        .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: accept the pending plan — bakes its `## Steps` into the system prompt
+/// so the agent emits `[DONE:n]` progress markers while implementing. Call
+/// before sending the "implement it now" prompt.
+#[tauri::command]
+async fn agent_accept_plan(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    plan_path: Option<String>,
+) -> Result<(), String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    client
+        .post(format!("{}/plan/accept", sidecar_base(port)))
+        .json(&serde_json::json!({ "planPath": plan_path }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Proxy: cancel the in-flight run.
+#[tauri::command]
+async fn agent_cancel(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<(), String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    client
+        .post(format!("{}/cancel", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Proxy: list workflow (prompt-template) slash commands.
+#[tauri::command]
+async fn agent_commands(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .get(format!("{}/commands", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: list models available to the logged-in providers.
+#[tauri::command]
+async fn agent_models(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .get(format!("{}/models", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: switch the active model. Returns the new provider/model + thinking state.
+#[tauri::command]
+async fn agent_switch_model(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    model: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/model", sidecar_base(port)))
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: cycle the reasoning/thinking level to the next supported value.
+/// Returns the new `{ thinkingLevel, supportedThinkingLevels }`.
+#[tauri::command]
+async fn agent_cycle_thinking(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/thinking", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: read gg-app settings (e.g. the projects root folder).
+#[tauri::command]
+async fn agent_settings(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .get(format!("{}/settings", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: save gg-app settings.
+#[tauri::command]
+async fn agent_save_settings(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    projects_root: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/settings", sidecar_base(port)))
+        .json(&serde_json::json!({ "projectsRoot": projects_root }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+// ── Native app settings (~/.gg/gg-app.json) ───────────────────────────────
+// The project folder is a plain home-dir file with NOTHING to do with the
+// agent, so Rust reads/writes it directly. This makes the home-screen Settings
+// + New project flow independent of the Node sidecar's boot — a slow or crashed
+// sidecar used to make "Save project folder" silently fail or time out even on
+// up-to-date builds. (The sidecar keeps its own /settings endpoint for its
+// internal use; this is the authoritative path for the webview.)
+
+/// Absolute path to ~/.gg/gg-app.json.
+fn app_settings_path() -> PathBuf {
+    home_dir().join(".gg").join("gg-app.json")
+}
+
+/// Default projects root: ~/gg-projects.
+fn default_projects_root() -> PathBuf {
+    home_dir().join("gg-projects")
+}
+
+/// Validate a project folder name: lowercase letters, digits, single dashes
+/// between segments (mirrors the sidecar's isValidProjectName).
+fn is_valid_project_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    // ^[a-z0-9]+(?:-[a-z0-9]+)*$ — no leading/trailing/double dashes.
+    let bytes = name.as_bytes();
+    if bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
+        return false;
+    }
+    let mut prev_dash = false;
+    for &b in bytes {
+        match b {
+            b'a'..=b'z' | b'0'..=b'9' => prev_dash = false,
+            b'-' => {
+                if prev_dash {
+                    return false;
+                }
+                prev_dash = true;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Native: read gg-app settings directly from ~/.gg/gg-app.json. `configured`
+/// is true only when the file exists with a non-empty projectsRoot (so the home
+/// screen's "Your Projects" gate matches the sidecar's semantics). Never needs
+/// the sidecar.
+#[tauri::command]
+fn app_settings_get() -> serde_json::Value {
+    let raw = std::fs::read_to_string(app_settings_path()).ok();
+    let parsed = raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    let configured = parsed
+        .as_ref()
+        .and_then(|v| v.get("projectsRoot"))
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let projects_root = parsed
+        .as_ref()
+        .and_then(|v| v.get("projectsRoot"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| default_projects_root().to_string_lossy().to_string());
+    serde_json::json!({ "projectsRoot": projects_root, "configured": configured })
+}
+
+/// Native: write gg-app settings directly to ~/.gg/gg-app.json. Creates the
+/// ~/.gg directory if needed. Never needs the sidecar.
+#[tauri::command]
+fn app_settings_save(projects_root: String) -> Result<serde_json::Value, String> {
+    let trimmed = projects_root.trim();
+    if trimmed.is_empty() {
+        return Err("projectsRoot is required".to_string());
+    }
+    let path = app_settings_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let body = serde_json::json!({ "projectsRoot": trimmed });
+    let pretty = serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?;
+    std::fs::write(&path, pretty).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "projectsRoot": trimmed }))
+}
+
+/// Native: create a new project folder under the configured projects root.
+/// Returns `{ path }` on success, an error message on invalid name / conflict.
+/// Never needs the sidecar.
+#[tauri::command]
+fn app_create_project(name: String) -> Result<serde_json::Value, String> {
+    let name = name.trim();
+    if !is_valid_project_name(name) {
+        return Err(
+            "Project name must be lowercase letters, digits, and dashes (e.g. my-project)."
+                .to_string(),
+        );
+    }
+    // Resolve the projects root the same way app_settings_get does.
+    let settings = app_settings_get();
+    let root = settings
+        .get("projectsRoot")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .unwrap_or_else(default_projects_root);
+    let dir = root.join(name);
+    if dir.exists() {
+        return Err(format!("A folder named \"{name}\" already exists."));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "path": dir.to_string_lossy() }))
+}
+
+// ── Workspace snapshot (~/.gg/gg-app-workspace.json) ──────────────────────
+// Records which project/session is open in each window (plus geometry) so a
+// restart — especially the updater's relaunch() — can reopen every window where
+// it left off instead of dropping back to a single picker window. Owned by Rust
+// (same pattern as gg-app.json), written on project-select / window-close /
+// app-exit, replayed in `setup`.
+
+/// One saved window: the project cwd, an optional session file to resume, and
+/// optional last-known geometry (physical pixels).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct WorkspaceEntry {
+    cwd: String,
+    #[serde(rename = "sessionPath", default, skip_serializing_if = "Option::is_none")]
+    session_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    x: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    y: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
+}
+
+/// The whole snapshot: an ordered list of open windows (main first).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Workspace {
+    #[serde(default)]
+    windows: Vec<WorkspaceEntry>,
+}
+
+/// Absolute path to ~/.gg/gg-app-workspace.json.
+fn app_workspace_path() -> PathBuf {
+    home_dir().join(".gg").join("gg-app-workspace.json")
+}
+
+/// Read the workspace snapshot; missing/invalid file → an empty workspace.
+fn read_workspace() -> Workspace {
+    std::fs::read_to_string(app_workspace_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Workspace>(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Write the workspace snapshot (creating ~/.gg if needed). Best-effort.
+fn write_workspace(ws: &Workspace) {
+    let path = app_workspace_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(pretty) = serde_json::to_string_pretty(ws) {
+        let _ = std::fs::write(&path, pretty);
+    }
+}
+
+/// Pure: is this window worth snapshotting? A window still sitting on the picker
+/// has no project chosen (its cwd is None or equals the default boot cwd) and
+/// must be excluded so it doesn't restore as an empty home window.
+fn keep_for_snapshot(cwd: Option<&Path>, default_cwd: &Path) -> bool {
+    match cwd {
+        Some(c) => c != default_cwd,
+        None => false,
+    }
+}
+
+/// Pure: drop restore entries that can't be opened (empty cwd, or a cwd that no
+/// longer exists). `exists` is injected so this is testable without the fs.
+fn filter_restorable<F: Fn(&str) -> bool>(
+    windows: Vec<WorkspaceEntry>,
+    exists: F,
+) -> Vec<WorkspaceEntry> {
+    windows
+        .into_iter()
+        .filter(|w| !w.cwd.trim().is_empty() && exists(&w.cwd))
+        .collect()
+}
+
+/// Walk every live window + its `Sidecars` entry and write a fresh snapshot.
+/// Picker-only windows (still at the default boot cwd) are excluded. Geometry is
+/// captured from each window's current outer position + inner size.
+fn snapshot_workspace(app: &tauri::AppHandle) {
+    let default = default_cwd();
+    let windows = app.webview_windows();
+    let state: State<Sidecars> = app.state();
+    let map = state.map.lock().unwrap();
+
+    // Deterministic order: main first, then project-N ascending, so the first
+    // restored window reclaims the `main` label.
+    let mut labels: Vec<String> = windows.keys().cloned().collect();
+    labels.sort_by_key(|a| label_rank(a));
+
+    let mut entries: Vec<WorkspaceEntry> = Vec::new();
+    for label in &labels {
+        let Some(inst) = map.get(label) else { continue };
+        let cwd = inst.cwd.as_deref();
+        if !keep_for_snapshot(cwd, &default) {
+            continue;
+        }
+        let cwd = cwd.unwrap().to_string_lossy().to_string();
+        let (mut x, mut y, mut width, mut height) = (None, None, None, None);
+        if let Some(win) = windows.get(label) {
+            if let Ok(pos) = win.outer_position() {
+                x = Some(pos.x);
+                y = Some(pos.y);
+            }
+            if let Ok(size) = win.inner_size() {
+                width = Some(size.width);
+                height = Some(size.height);
+            }
+        }
+        entries.push(WorkspaceEntry {
+            cwd,
+            session_path: inst.session_path.clone(),
+            x,
+            y,
+            width,
+            height,
+        });
+    }
+    drop(map);
+    write_workspace(&Workspace { windows: entries });
+}
+
+/// Remove one window's entry from the snapshot (deliberate user close). Keyed by
+/// the window's recorded cwd, since the snapshot has no labels.
+fn remove_window_from_workspace(app: &tauri::AppHandle, label: &str) {
+    let cwd = {
+        let state: State<Sidecars> = app.state();
+        let map = state.map.lock().unwrap();
+        map.get(label)
+            .and_then(|i| i.cwd.as_ref())
+            .map(|c| c.to_string_lossy().to_string())
+    };
+    let Some(cwd) = cwd else { return };
+    let mut ws = read_workspace();
+    // Remove a SINGLE matching entry (not retain-by-cwd): two windows can have
+    // the same project open, and closing one must not prune the other's restore.
+    if let Some(idx) = ws.windows.iter().position(|w| w.cwd == cwd) {
+        ws.windows.remove(idx);
+        write_workspace(&ws);
+    }
+}
+
+/// Consume-once: hand the calling window its restore target (cwd + session) so
+/// the webview skips the picker on boot. Returns null for a normal (non-restored)
+/// window. The entry is removed after the first read.
+#[tauri::command]
+fn window_restore_target(webview: WebviewWindow) -> Option<RestoreEntry> {
+    let state: State<RestoreTargets> = webview.state();
+    let mut map = state.map.lock().unwrap();
+    map.remove(webview.label())
+}
+
+// ── Native provider auth status (~/.gg/auth.json) ─────────────────────────
+// The AI-providers list is STATIC metadata and the "connected" badge only needs
+// to read which provider keys exist in ~/.gg/auth.json — neither needs the Node
+// agent. Reading it natively means the login hub always renders even when the
+// sidecar is slow/crashed (it used to show a blank list, identical in spirit to
+// the project-folder bug). The login ACTIONS (OAuth flow, key storage, logout)
+// still go through the sidecar — those genuinely need the agent.
+//
+// This list mirrors packages/ggcoder/src/core/auth-providers.ts (AUTH_PROVIDERS).
+// Keep the two in sync when adding a provider.
+
+/// Absolute path to ~/.gg/auth.json.
+fn auth_file_path() -> PathBuf {
+    home_dir().join(".gg").join("auth.json")
+}
+
+/// Static metadata for one AI provider in the login hub. Mirrors
+/// packages/ggcoder/src/core/auth-providers.ts (AUTH_PROVIDERS) — keep in sync.
+struct ProviderMeta {
+    /// Storage key in auth.json + the value the webview passes back.
+    value: &'static str,
+    label: &'static str,
+    description: &'static str,
+    /// Supported auth methods, e.g. `["oauth"]`, `["apikey"]`, or both.
+    methods: &'static [&'static str],
+    api_key_label: Option<&'static str>,
+    /// Custom API base URL stored alongside an API-key credential.
+    api_key_base_url: Option<&'static str>,
+}
+
+/// The provider catalog (single source of truth for app_auth_status +
+/// app_auth_apikey). Order is the display order in the login hub.
+const AUTH_PROVIDERS: &[ProviderMeta] = &[
+    ProviderMeta {
+        value: "anthropic",
+        label: "Anthropic",
+        description: "Claude Opus 4.8, Sonnet 4.6, Haiku 4.5",
+        methods: &["oauth"],
+        api_key_label: None,
+        api_key_base_url: None,
+    },
+    ProviderMeta {
+        value: "openai",
+        label: "OpenAI",
+        description: "GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex",
+        methods: &["oauth"],
+        api_key_label: None,
+        api_key_base_url: None,
+    },
+    ProviderMeta {
+        value: "gemini",
+        label: "Gemini",
+        description: "Gemini 3.1 Flash Lite Preview",
+        methods: &["oauth"],
+        api_key_label: None,
+        api_key_base_url: None,
+    },
+    ProviderMeta {
+        value: "moonshot",
+        label: "Moonshot",
+        description: "Kimi K2.7 · OAuth or API key",
+        methods: &["oauth", "apikey"],
+        api_key_label: Some("Moonshot"),
+        api_key_base_url: None,
+    },
+    ProviderMeta {
+        value: "glm",
+        label: "Z.AI (GLM)",
+        description: "GLM-5.1, GLM-4.7, GLM-4.7 Flash",
+        methods: &["apikey"],
+        api_key_label: Some("Z.AI"),
+        api_key_base_url: None,
+    },
+    ProviderMeta {
+        value: "minimax",
+        label: "MiniMax",
+        description: "MiniMax M3",
+        methods: &["apikey"],
+        api_key_label: Some("MiniMax"),
+        api_key_base_url: None,
+    },
+    ProviderMeta {
+        value: "xiaomi",
+        label: "Xiaomi (MiMo)",
+        description: "MiMo-V2-Pro",
+        methods: &["apikey"],
+        api_key_label: Some("Xiaomi MiMo"),
+        api_key_base_url: Some("https://token-plan-sgp.xiaomimimo.com/v1"),
+    },
+    ProviderMeta {
+        value: "deepseek",
+        label: "DeepSeek",
+        description: "DeepSeek V4 Pro, V4 Flash",
+        methods: &["apikey"],
+        api_key_label: Some("DeepSeek"),
+        api_key_base_url: None,
+    },
+    ProviderMeta {
+        value: "openrouter",
+        label: "OpenRouter",
+        description: "Qwen3.6-Plus, multi-provider gateway",
+        methods: &["apikey"],
+        api_key_label: Some("OpenRouter"),
+        api_key_base_url: None,
+    },
+];
+
+/// Pure: if `value` is a known provider that supports API-key auth, return
+/// `Some(api_key_base_url)` (the inner Option is the custom base URL, if any).
+/// `None` means the provider is unknown or doesn't support API keys.
+fn provider_apikey_meta(value: &str) -> Option<Option<&'static str>> {
+    AUTH_PROVIDERS
+        .iter()
+        .find(|p| p.value == value && p.methods.contains(&"apikey"))
+        .map(|p| p.api_key_base_url)
+}
+
+/// Native: provider list + live connection status, read directly from
+/// ~/.gg/auth.json. `connected` is true when a credential key is present
+/// (moonshot is satisfied by either its OAuth key `moonshot-oauth` or the
+/// `moonshot` API key, mirroring AuthStorage.hasProviderAuth). Never needs the
+/// sidecar.
+#[tauri::command]
+fn app_auth_status() -> serde_json::Value {
+    // Parse the auth file into a JSON object; missing/invalid → empty (no creds).
+    let creds = std::fs::read_to_string(auth_file_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let has_key = |key: &str| -> bool {
+        creds
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .map(|v| !v.is_null())
+            .unwrap_or(false)
+    };
+    let connected = |value: &str| -> bool {
+        if value == "moonshot" {
+            has_key("moonshot-oauth") || has_key("moonshot")
+        } else {
+            has_key(value)
+        }
+    };
+
+    let list: Vec<serde_json::Value> = AUTH_PROVIDERS
+        .iter()
+        .map(|p| {
+            let mut obj = serde_json::json!({
+                "value": p.value,
+                "label": p.label,
+                "description": p.description,
+                "methods": p.methods,
+                "connected": connected(p.value),
+            });
+            if let Some(l) = p.api_key_label {
+                obj["apiKeyLabel"] = serde_json::json!(l);
+            }
+            if let Some(u) = p.api_key_base_url {
+                obj["apiKeyBaseUrl"] = serde_json::json!(u);
+            }
+            obj
+        })
+        .collect();
+
+    serde_json::json!({ "providers": list })
+}
+
+// ── Native API-key auth writes (~/.gg/auth.json) ──────────────────────────
+// Storing/removing an API key is a pure mutation of auth.json — the SAME file
+// app_auth_status reads. Doing it natively (not via the sidecar) means a fresh
+// user can log in even though their not-yet-configured sidecar may not be up:
+// the sidecar used to crash on boot when no provider was configured, so a
+// sidecar-routed key write would hang forever. Mirrors AuthStorage on the Node
+// side (the credential shape + moonshot's dual-key logout).
+
+/// API-key credentials never expire in practice; mirror the sidecar's ~100-year
+/// horizon (365d * 100) so refresh logic never treats them as stale.
+const API_KEY_TTL_MS: i64 = 365 * 24 * 60 * 60 * 1000 * 100;
+
+/// Pure: build the OAuthCredentials JSON object for an API key (matches
+/// AuthStorage's shape: accessToken + empty refreshToken + far-future expiry +
+/// optional baseUrl). `now_ms` is injected for testability.
+fn apikey_credential_json(key: &str, base_url: Option<&str>, now_ms: i64) -> serde_json::Value {
+    let mut obj = serde_json::json!({
+        "accessToken": key,
+        "refreshToken": "",
+        "expiresAt": now_ms + API_KEY_TTL_MS,
+    });
+    if let Some(url) = base_url {
+        obj["baseUrl"] = serde_json::json!(url);
+    }
+    obj
+}
+
+/// Pure: upsert an API-key credential into the existing auth.json text
+/// (read-modify-write), preserving every other provider's entry. Returns the
+/// new pretty-printed JSON. `existing` is the current file contents (None when
+/// the file is missing). Errors only on a malformed (non-object) existing file.
+fn apply_apikey(
+    existing: Option<&str>,
+    provider: &str,
+    base_url: Option<&str>,
+    now_ms: i64,
+    key: &str,
+) -> Result<String, String> {
+    let mut root = parse_auth_object(existing)?;
+    if let Some(map) = root.as_object_mut() {
+        map.insert(
+            provider.to_string(),
+            apikey_credential_json(key, base_url, now_ms),
+        );
+    }
+    serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
+}
+
+/// Pure: remove a provider's credential from the existing auth.json text.
+/// Moonshot also drops its distinct OAuth key (`moonshot-oauth`) so a single
+/// "disconnect" fully removes Kimi OAuth + the Moonshot API key. Returns the new
+/// pretty-printed JSON (an empty object `{}` when nothing remains / no file).
+fn apply_logout(existing: Option<&str>, provider: &str) -> Result<String, String> {
+    let mut root = parse_auth_object(existing)?;
+    if let Some(map) = root.as_object_mut() {
+        map.remove(provider);
+        if provider == "moonshot" {
+            map.remove("moonshot-oauth");
+        }
+    }
+    serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
+}
+
+/// Parse auth.json text into a JSON object value. Missing file → empty object.
+/// A present-but-malformed/non-object file is an error (refuse to clobber it).
+fn parse_auth_object(existing: Option<&str>) -> Result<serde_json::Value, String> {
+    match existing {
+        None => Ok(serde_json::json!({})),
+        Some(s) if s.trim().is_empty() => Ok(serde_json::json!({})),
+        Some(s) => {
+            let v: serde_json::Value =
+                serde_json::from_str(s).map_err(|e| format!("auth.json is not valid JSON: {e}"))?;
+            if v.is_object() {
+                Ok(v)
+            } else {
+                Err("auth.json is not a JSON object".to_string())
+            }
+        }
+    }
+}
+
+/// Atomically write auth.json (temp file + rename), creating ~/.gg if needed.
+/// On unix the file is mode 0600 (credentials). Mirrors gg-core's atomicWriteFile.
+fn write_auth_file(contents: &str) -> Result<(), String> {
+    let path = auth_file_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&tmp, contents).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })?;
+    Ok(())
+}
+
+/// Native: store an API key for a provider directly in ~/.gg/auth.json. Never
+/// touches the sidecar, so it can't hang on a not-yet-booted agent. Validates
+/// that the provider exists and supports API-key auth, and that the key is
+/// non-empty. Returns `{ ok: true }`.
+#[tauri::command]
+fn app_auth_apikey(provider: String, key: String) -> Result<serde_json::Value, String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("API key is required".to_string());
+    }
+    let base_url = provider_apikey_meta(&provider)
+        .ok_or_else(|| "provider does not support API key auth".to_string())?;
+    let existing = std::fs::read_to_string(auth_file_path()).ok();
+    let now_ms = current_unix_millis();
+    let next = apply_apikey(existing.as_deref(), &provider, base_url, now_ms, key)?;
+    write_auth_file(&next)?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+/// Native: disconnect a provider (remove its credential from ~/.gg/auth.json).
+/// Moonshot also clears its OAuth key. Never touches the sidecar. Returns
+/// `{ ok: true }`.
+#[tauri::command]
+fn app_auth_logout(provider: String) -> Result<serde_json::Value, String> {
+    let existing = std::fs::read_to_string(auth_file_path()).ok();
+    // Nothing to remove and no file → succeed silently (idempotent).
+    if existing.is_none() {
+        return Ok(serde_json::json!({ "ok": true }));
+    }
+    let next = apply_logout(existing.as_deref(), &provider)?;
+    write_auth_file(&next)?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+/// Current unix time in milliseconds (wall clock; fine for an expiry stamp).
+fn current_unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Proxy: read Telegram config status (configured + masked preview).
+#[tauri::command]
+async fn agent_telegram_get(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .get(format!("{}/telegram", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: save Telegram config (bot token + user id). Verifies the token via
+/// getMe sidecar-side; returns an error message on rejection.
+#[tauri::command]
+async fn agent_telegram_save(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    bot_token: String,
+    user_id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/telegram", sidecar_base(port)))
+        .json(&serde_json::json!({ "botToken": bot_token, "userId": user_id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("failed to save Telegram config");
+        return Err(msg.to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: Telegram serve status (`{ running, configured }`).
+#[tauri::command]
+async fn agent_serve_status(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .get(format!("{}/serve", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: start the Telegram serve loop. Returns `{ running }` or an error.
+#[tauri::command]
+async fn agent_serve_start(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/serve/start", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("failed to start serve");
+        return Err(msg.to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: stop the Telegram serve loop. Returns `{ running: false }`.
+#[tauri::command]
+async fn agent_serve_stop(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/serve/stop", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: create a new project folder under the configured projects root.
+/// Returns `{ path }` on success, or an error message on validation/conflict.
+#[tauri::command]
+async fn agent_create_project(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .post(format!("{}/create-project", sidecar_base(port)))
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("failed to create project");
+        return Err(msg.to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: discover known projects across ggcoder/Claude Code/Codex stores.
+#[tauri::command]
+async fn agent_projects(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let res = client
+        .get(format!("{}/projects", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: list recent sessions for a project cwd.
+#[tauri::command]
+async fn agent_sessions(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    cwd: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let encoded = urlencoding(&cwd);
+    let res = client
+        .get(format!("{}/sessions?cwd={}", sidecar_base(port), encoded))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Proxy: search project files for the chat input's `@` picker. Empty `query`
+/// returns the most-recently-modified files; a query returns fuzzy matches.
+#[tauri::command]
+async fn agent_files(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    query: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let encoded = urlencoding(&query);
+    let res = client
+        .get(format!("{}/files?q={}", sidecar_base(port), encoded))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+}
+
+/// Minimal percent-encoding for a filesystem path in a query string.
+fn urlencoding(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// App background (#111317) painted on the native window + webview BEFORE the
+/// first frame, so opening a new window never flashes white.
+const APP_BG: tauri::window::Color = tauri::window::Color(15, 17, 21, 255);
+
+/// Per-OS window chrome decision. macOS uses the Overlay title bar (webview
+/// draws under the traffic lights); every other OS keeps native decorations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowChrome {
+    MacOverlay,
+    Native,
+}
+
+/// Compile-time chrome selection: Overlay only on macOS, native elsewhere.
+fn window_chrome() -> WindowChrome {
+    if cfg!(target_os = "macos") {
+        WindowChrome::MacOverlay
+    } else {
+        WindowChrome::Native
+    }
+}
+
+/// Apply the macOS Overlay title bar + hidden title to a window builder. Kept
+/// behind `#[cfg(target_os = "macos")]` because `TitleBarStyle::Overlay` and
+/// `hidden_title` are macOS-only builder methods.
+#[cfg(target_os = "macos")]
+fn apply_mac_overlay<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
+    builder: WebviewWindowBuilder<'a, R, M>,
+) -> WebviewWindowBuilder<'a, R, M> {
+    builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+}
+
+/// No-op on non-macOS: native chrome is the default, nothing to apply.
+#[cfg(not(target_os = "macos"))]
+fn apply_mac_overlay<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
+    builder: WebviewWindowBuilder<'a, R, M>,
+) -> WebviewWindowBuilder<'a, R, M> {
+    builder
+}
+
+/// Build an app window with the standard chrome. On macOS this includes the
+/// Overlay title bar + `hidden_title(true)` so the native title text never
+/// shows — the in-app `chat-head-title` is the ONLY title. Building via the
+/// builder (rather than the config + a runtime patch) is the only way to hide
+/// the native title, since there's no runtime `set_hidden_title` setter.
+fn build_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow, String> {
+    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+        .title("GG Coder")
+        .inner_size(1024.0, 720.0)
+        .min_inner_size(480.0, 360.0)
+        .background_color(APP_BG)
+        // Let the webview's HTML drop handler receive files (Tauri's native
+        // drag-drop would otherwise intercept them).
+        .disable_drag_drop_handler();
+    if matches!(window_chrome(), WindowChrome::MacOverlay) {
+        builder = apply_mac_overlay(builder);
+    }
+    builder.build().map_err(|e| e.to_string())
+}
+
+/// Open enough new project windows to reach `count` total (each with its own
+/// agent sidecar at the default cwd), then tile the first `count` windows across
+/// the work area like macOS fill&arrange. Project selection per window happens
+/// in-app via the picker; windows open immediately.
+#[tauri::command]
+fn setup_windows(app: tauri::AppHandle, count: usize) -> Result<(), String> {
+    let existing = app.webview_windows().len();
+    let to_create = count.saturating_sub(existing);
+    for _ in 0..to_create {
+        let label = next_window_label(&app);
+        // macOS-only chrome: the Overlay title bar + hidden title lets the
+        // webview draw under the traffic lights. Windows/Linux keep native
+        // chrome (Overlay is a no-op / unsupported there) and the webview CSS
+        // drops the mac traffic-light insets via the `.platform-*` class.
+        let win = build_app_window(&app, &label)?;
+        spawn_sidecar(app.clone(), label, default_cwd());
+        let _ = win.set_focus();
+    }
+    arrange_windows(&app, count);
+    Ok(())
+}
+
+/// Open a single new project window with its own agent sidecar (default cwd) and
+/// focus it. Unlike `setup_windows`, this never re-tiles existing windows — it's
+/// the Cmd/Ctrl+N "new window" shortcut. Project selection happens per-window.
+#[tauri::command]
+fn new_window(app: tauri::AppHandle) -> Result<(), String> {
+    let label = next_window_label(&app);
+    let win = build_app_window(&app, &label)?;
+    spawn_sidecar(app.clone(), label, default_cwd());
+    let _ = win.set_focus();
+    Ok(())
+}
+
+/// Re-point THIS window's agent at a chosen project: kill its sidecar and spawn
+/// a fresh one at `cwd`, optionally resuming the session file `session_path`.
+/// The webview re-runs its ready flow against the new sidecar.
+#[tauri::command]
+fn select_project(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    cwd: String,
+    session_path: Option<String>,
+) -> Result<(), String> {
+    let label = webview.label().to_string();
+    {
+        let state: State<Sidecars> = app.state();
+        let mut map = state.map.lock().unwrap();
+        if let Some(inst) = map.get_mut(&label) {
+            inst.port = None;
+            if let Some(child) = inst.child.take() {
+                terminate_child(child);
+            }
+        }
+    }
+    spawn_sidecar_with_session(app.clone(), label, PathBuf::from(cwd), session_path);
+    // The map now reflects this window's new project/session; persist the
+    // workspace so a restart reopens it here.
+    snapshot_workspace(&app);
+    Ok(())
+}
+
+/// Map a normalized gaze point to a window and (optionally) focus it.
+///
+/// The webview can't see other windows' screen rectangles, so the gaze tracker
+/// (which only knows a normalized point across the primary monitor) hands the
+/// point to Rust. We convert it to physical coordinates using the primary
+/// monitor work area, hit-test every open window's outer rect, then:
+///   - emit `gaze-target { target, committed }` to ALL windows so each paints
+///     its own border: the `committed` (currently focused) window holds a solid
+///     ring, the `target` window a soft "dwelling here" highlight, and
+///   - call `set_focus()` on the hit window only when `commit` is true (after
+///     the controller's dwell), so a glance never steals keyboard focus.
+///
+/// `committed` is the controller's currently-focused window label, passed every
+/// frame so the focused border PERSISTS rather than flashing for one frame.
+///
+/// Returns the hit window's label (or null when the point lands on no window).
+#[tauri::command]
+fn gaze_focus(
+    app: tauri::AppHandle,
+    nx: f64,
+    ny: f64,
+    commit: bool,
+    committed: Option<String>,
+) -> Result<Option<String>, String> {
+    let windows = app.webview_windows();
+    let Some(any) = windows.values().next() else {
+        return Ok(None);
+    };
+    let Some(monitor) = any.primary_monitor().ok().flatten() else {
+        return Ok(None);
+    };
+    let area = monitor.work_area();
+    let nx = nx.clamp(0.0, 1.0);
+    let ny = ny.clamp(0.0, 1.0);
+    let px = area.position.x as f64 + nx * area.size.width as f64;
+    let py = area.position.y as f64 + ny * area.size.height as f64;
+
+    // Hit-test: first window whose outer rect contains the point.
+    let mut target: Option<String> = None;
+    for (label, win) in windows.iter() {
+        let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) else {
+            continue;
+        };
+        let x0 = pos.x as f64;
+        let y0 = pos.y as f64;
+        let x1 = x0 + size.width as f64;
+        let y1 = y0 + size.height as f64;
+        if px >= x0 && px < x1 && py >= y0 && py < y1 {
+            target = Some(label.clone());
+            break;
+        }
+    }
+
+    // Broadcast both labels to every window; each computes its own border style.
+    for (label, win) in windows.iter() {
+        let _ = app.emit_to(
+            EventTarget::webview_window(label.clone()),
+            "gaze-target",
+            serde_json::json!({ "target": target, "committed": committed }),
+        );
+        if commit {
+            if let Some(t) = &target {
+                if t == label {
+                    let _ = win.set_focus();
+                }
+            }
+        }
+    }
+    Ok(target)
+}
+
+/// Allocate a unique `project-N` window label.
+fn next_window_label(app: &tauri::AppHandle) -> String {
+    let mut n = 1;
+    loop {
+        let label = format!("project-{n}");
+        if app.get_webview_window(&label).is_none() {
+            return label;
+        }
+        n += 1;
+    }
+}
+
+/// Tile the first `count` windows into a grid filling the primary work area:
+/// 2 → side-by-side halves, 4 → 2×2 quadrants, 6 → 3×2. "main" is placed first.
+fn arrange_windows(app: &tauri::AppHandle, count: usize) {
+    let mut windows: Vec<WebviewWindow> = app.webview_windows().into_values().collect();
+    // Deterministic order: main first, then project-N ascending.
+    windows.sort_by(|a, b| label_rank(a.label()).cmp(&label_rank(b.label())));
+    let tiles: Vec<WebviewWindow> = windows.into_iter().take(count).collect();
+    if tiles.is_empty() {
+        return;
+    }
+
+    let Some(monitor) = tiles[0].primary_monitor().ok().flatten() else {
+        return;
+    };
+    let area = monitor.work_area();
+    let (ox, oy) = (area.position.x, area.position.y);
+    let (w, h) = (area.size.width as i32, area.size.height as i32);
+
+    // Column count: 2-up → 2×1, 4-up → 2×2, 6-up → 3×2 (wide displays read
+    // better with 3 columns than 2). Falls back to 2 columns otherwise.
+    let cols: i32 = if count <= 2 {
+        count.max(1) as i32
+    } else if count >= 6 {
+        3
+    } else {
+        2
+    };
+    let rows: i32 = ((count as i32) + cols - 1) / cols;
+    let cell_w = w / cols;
+    let cell_h = h / rows;
+
+    for (i, win) in tiles.iter().enumerate() {
+        let col = (i as i32) % cols;
+        let row = (i as i32) / cols;
+        let x = ox + col * cell_w;
+        let y = oy + row * cell_h;
+        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+        let _ = win.set_size(tauri::PhysicalSize::new(cell_w as u32, cell_h as u32));
+    }
+}
+
+fn label_rank(label: &str) -> (u8, u32) {
+    if label == "main" {
+        (0, 0)
+    } else if let Some(n) = label.strip_prefix("project-").and_then(|s| s.parse().ok()) {
+        (1, n)
+    } else {
+        (2, 0)
+    }
+}
+
+/// Connect to a window's sidecar SSE stream and re-emit each frame ONLY to that
+/// window (`emit_to` the window label) as `agent-event`, so windows never see
+/// each other's agent activity. Rust has no mixed-content restriction, so the
+/// webview never touches plain HTTP directly. Reconnects on stream end.
+fn start_event_bridge(app: tauri::AppHandle, label: String, port: u16) {
+    // Reuse the app's shared HTTP client (cheap Arc clone) so the SSE connect
+    // shares the connection pool with the proxy commands.
+    let client = app.state::<reqwest::Client>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            // Stop once this window's active sidecar port has moved on (project
+            // switch respawned the sidecar) or the window is gone — otherwise the
+            // old bridge would reconnect to a dead port forever.
+            {
+                let state: State<Sidecars> = app.state();
+                let map = state.map.lock().unwrap();
+                if map.get(&label).and_then(|i| i.port) != Some(port) {
+                    log::debug!("event bridge for {label}:{port} retired");
+                    return;
+                }
+            }
+            let url = format!("{}/events", sidecar_base(port));
+            match client.get(&url).send().await {
+                Ok(res) => {
+                    let mut stream = res.bytes_stream();
+                    let mut buf = String::new();
+                    while let Some(chunk) = stream.next().await {
+                        let Ok(bytes) = chunk else { break };
+                        buf.push_str(&String::from_utf8_lossy(&bytes));
+                        // SSE frames are separated by a blank line.
+                        while let Some(idx) = buf.find("\n\n") {
+                            let frame = buf[..idx].to_string();
+                            buf.drain(..idx + 2);
+                            for line in frame.lines() {
+                                if let Some(payload) = line.strip_prefix("data: ") {
+                                    if let Ok(value) =
+                                        serde_json::from_str::<serde_json::Value>(payload)
+                                    {
+                                        let _ = app.emit_to(
+                                            EventTarget::webview_window(label.clone()),
+                                            "agent-event",
+                                            value,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    log::warn!("agent event stream ended, reconnecting");
+                }
+                Err(e) => {
+                    log::error!("failed to connect to event stream: {e}");
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        }
+    });
+}
+
+/// Resolve the Node runtime used to run the sidecar.
+///
+/// Dev (debug build, or `GG_NODE_BIN` set): use `GG_NODE_BIN`, else bare
+/// `"node"` from PATH — matches the workspace developer flow.
+///
+/// Bundled (release): use the per-platform Node staged as a Tauri `externalBin`,
+/// which Tauri places next to the app executable named `ggnode` (`.exe` on
+/// Windows). This removes any dependency on a Node install on the user's PATH
+/// (a Finder/Dock-launched `.app` gets a minimal PATH without nvm/homebrew).
+fn resolve_node(_app: &tauri::AppHandle) -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.to_path_buf()));
+    pick_node(
+        std::env::var("GG_NODE_BIN").ok(),
+        cfg!(debug_assertions),
+        exe_dir.as_deref(),
+    )
+}
+
+/// Pure node-path decision (testable without an AppHandle).
+/// - `env_override` (GG_NODE_BIN) always wins.
+/// - dev build → bare `"node"` from PATH.
+/// - bundled → `ggnode(.exe)` next to the executable if present, else `"node"`.
+fn pick_node(env_override: Option<String>, is_dev: bool, exe_dir: Option<&Path>) -> PathBuf {
+    if let Some(p) = env_override {
+        return PathBuf::from(p);
+    }
+    if is_dev {
+        return PathBuf::from("node");
+    }
+    let name = if cfg!(target_os = "windows") {
+        "ggnode.exe"
+    } else {
+        "ggnode"
+    };
+    match exe_dir.map(|d| d.join(name)) {
+        Some(p) if p.exists() => p,
+        _ => PathBuf::from("node"),
+    }
+}
+
+/// Resolve the built sidecar JS.
+///
+/// Dev (debug build, or `GG_SIDECAR_PATH` set): use `GG_SIDECAR_PATH`, else the
+/// workspace `dist/app-sidecar.js` relative to this crate.
+///
+/// Bundled (release): resolve the single-file ESM sidecar shipped under
+/// `bundle.resources` via the Tauri resource directory.
+fn resolve_sidecar(app: &tauri::AppHandle) -> PathBuf {
+    let resource = app
+        .path()
+        .resolve("sidecar/app-sidecar.mjs", tauri::path::BaseDirectory::Resource)
+        .ok();
+    pick_sidecar(
+        std::env::var("GG_SIDECAR_PATH").ok(),
+        cfg!(debug_assertions),
+        resource.as_deref(),
+    )
+}
+
+/// Path to the workspace dev sidecar, relative to this crate.
+fn workspace_sidecar() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/ggcoder/dist/app-sidecar.js")
+}
+
+/// Pure sidecar-path decision (testable without an AppHandle).
+/// - `env_override` (GG_SIDECAR_PATH) always wins.
+/// - dev build → workspace `dist/app-sidecar.js`.
+/// - bundled → the resolved bundle resource, falling back to the workspace path.
+fn pick_sidecar(env_override: Option<String>, is_dev: bool, resource: Option<&Path>) -> PathBuf {
+    if let Some(p) = env_override {
+        return PathBuf::from(p);
+    }
+    if is_dev {
+        return workspace_sidecar();
+    }
+    match resource {
+        Some(p) => p.to_path_buf(),
+        None => workspace_sidecar(),
+    }
+}
+
+/// Default working directory for the main window. Override with GG_APP_CWD;
+/// otherwise the workspace root in dev, or the user's home dir in release.
+/// Canonicalized so traversal segments (`../..`) don't leak into the session
+/// store path and surface as a stray ".." project in the picker.
+fn default_cwd() -> PathBuf {
+    let raw = pick_cwd(
+        std::env::var("GG_APP_CWD").ok(),
+        cfg!(debug_assertions),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        home_dir(),
+    );
+    std::fs::canonicalize(&raw).unwrap_or(raw)
+}
+
+/// The current user's home directory, from HOME (Unix) / USERPROFILE (Windows).
+/// Falls back to "/" only if neither is set (effectively never on a real OS).
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// Pure cwd decision (testable without touching env/filesystem).
+/// - `env_override` (GG_APP_CWD) always wins.
+/// - dev build → the workspace root (`CARGO_MANIFEST_DIR/../..`).
+/// - bundled (release) → `home`. `CARGO_MANIFEST_DIR` is baked in at COMPILE
+///   time, so in a shipped binary it's the CI build machine's path (e.g.
+///   `/Users/runner/work/...`) which doesn't exist on the user's machine — the
+///   sidecar would crash with EACCES trying to use it. Home always exists and
+///   is writable; the project picker re-points the window immediately anyway.
+fn pick_cwd(env_override: Option<String>, is_dev: bool, dev_root: PathBuf, home: PathBuf) -> PathBuf {
+    if let Some(p) = env_override {
+        return PathBuf::from(p);
+    }
+    if is_dev {
+        return dev_root;
+    }
+    home
+}
+
+/// Spawn a Node agent sidecar bound to one window (`label`) + project `cwd`.
+/// Port/ready/error/event traffic is routed only to that window.
+fn spawn_sidecar(app: tauri::AppHandle, label: String, cwd: PathBuf) {
+    spawn_sidecar_with_session(app, label, cwd, None);
+}
+
+/// Like `spawn_sidecar`, but optionally resumes an existing session file.
+fn spawn_sidecar_with_session(
+    app: tauri::AppHandle,
+    label: String,
+    cwd: PathBuf,
+    session_path: Option<String>,
+) {
+    let script = resolve_sidecar(&app);
+    let node = resolve_node(&app);
+    log::info!(
+        "spawning sidecar for {label}: {} {} (cwd={})",
+        node.display(),
+        script.display(),
+        cwd.display()
+    );
+
+    let mut cmd = Command::new(node);
+    cmd.arg(&script)
+        // Port 0 → the OS assigns a free port, reported back via the
+        // GG_APP_LISTENING handshake. Avoids EADDRINUSE across windows.
+        .env("GG_APP_PORT", "0")
+        .env("GG_APP_CWD", &cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Make the sidecar a process-group leader so a single group-kill
+    // (`kill(-pid)`) in `terminate_child` reaps its entire descendant tree
+    // (MCP stdio children, LSP servers) — no orphans on close/switch/quit.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    if let Some(sp) = &session_path {
+        cmd.env("GG_APP_SESSION_ID", sp);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("failed to spawn sidecar: {e}");
+            let _ = app.emit_to(
+                EventTarget::webview_window(label.clone()),
+                "sidecar-error",
+                format!("failed to spawn sidecar: {e}"),
+            );
+            return;
+        }
+    };
+
+    if let Some(stdout) = child.stdout.take() {
+        let app2 = app.clone();
+        let label2 = label.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Some(rest) = line.strip_prefix("GG_APP_LISTENING ") {
+                    if let Ok(port) = rest.trim().parse::<u16>() {
+                        log::info!("sidecar for {label2} listening on port {port}");
+                        {
+                            let state: State<Sidecars> = app2.state();
+                            let mut map = state.map.lock().unwrap();
+                            map.entry(label2.clone()).or_default().port = Some(port);
+                        }
+                        start_event_bridge(app2.clone(), label2.clone(), port);
+                        let _ = app2.emit_to(
+                            EventTarget::webview_window(label2.clone()),
+                            "sidecar-ready",
+                            port,
+                        );
+                    }
+                } else {
+                    log::debug!("[sidecar:{label2}] {line}");
+                }
+            }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        let app3 = app.clone();
+        let label3 = label.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                log::error!("[sidecar:{label3}:stderr] {line}");
+                if line.starts_with("GG_APP_FATAL") {
+                    let _ = app3.emit_to(
+                        EventTarget::webview_window(label3.clone()),
+                        "sidecar-error",
+                        line,
+                    );
+                }
+            }
+        });
+    }
+
+    let state: State<Sidecars> = app.state();
+    let mut map = state.map.lock().unwrap();
+    let inst = map.entry(label).or_default();
+    inst.child = Some(child);
+    inst.cwd = Some(cwd);
+    inst.session_path = session_path;
+}
+
+/// Boot the app's windows. If a workspace snapshot has restorable windows (each
+/// with a cwd that still exists on disk), reopen one window per entry — pointed
+/// at its project + session, with saved geometry — and record a per-window
+/// restore target so the webview skips the picker. Otherwise fall back to the
+/// single default `main` window at the boot cwd (the picker then shows).
+fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
+    let ws = read_workspace();
+    let entries = filter_restorable(ws.windows, |c| Path::new(c).exists());
+    if entries.is_empty() {
+        // Fresh boot / nothing to restore: the usual single main window.
+        build_app_window(app, "main")?;
+        spawn_sidecar(app.clone(), "main".into(), default_cwd());
+        return Ok(());
+    }
+
+    let count = entries.len();
+    let mut any_geometry = false;
+    for (i, entry) in entries.into_iter().enumerate() {
+        // First restored window reclaims `main`; the rest get project-N.
+        let label = if i == 0 {
+            "main".to_string()
+        } else {
+            format!("project-{i}")
+        };
+        let win = build_app_window(app, &label)?;
+        spawn_sidecar_with_session(
+            app.clone(),
+            label.clone(),
+            PathBuf::from(&entry.cwd),
+            entry.session_path.clone(),
+        );
+        // Tell this window which project/session it was restored to, so it skips
+        // the picker and hydrates straight away.
+        {
+            let state: State<RestoreTargets> = app.state();
+            state.map.lock().unwrap().insert(
+                label,
+                RestoreEntry {
+                    cwd: entry.cwd.clone(),
+                    session_path: entry.session_path.clone(),
+                },
+            );
+        }
+        // Apply saved geometry when present; else we tile after the loop.
+        if let (Some(x), Some(y)) = (entry.x, entry.y) {
+            any_geometry = true;
+            let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+        }
+        if let (Some(w), Some(h)) = (entry.width, entry.height) {
+            any_geometry = true;
+            let _ = win.set_size(tauri::PhysicalSize::new(w, h));
+        }
+    }
+    if !any_geometry {
+        arrange_windows(app, count);
+    }
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("gg-app".into()),
+                    },
+                ))
+                .build(),
+        )
+        .manage(Sidecars::default())
+        .manage(RestoreTargets::default())
+        .manage(AppExiting::default())
+        .manage(reqwest::Client::new())
+        .invoke_handler(tauri::generate_handler![
+            sidecar_port,
+            open_project_path,
+            agent_state,
+            agent_prompt,
+            agent_cancel,
+            agent_accept_plan,
+            agent_new_session,
+            agent_history,
+            agent_auth_apikey,
+            agent_auth_oauth_start,
+            agent_auth_oauth_code,
+            agent_auth_logout,
+            agent_kill_task,
+            agent_radio_state,
+            agent_radio_set,
+            agent_tasks,
+            agent_run_tasks,
+            agent_delete_task,
+            agent_cycle_thinking,
+            agent_models,
+            agent_switch_model,
+            agent_commands,
+            setup_windows,
+            new_window,
+            select_project,
+            agent_projects,
+            agent_sessions,
+            agent_files,
+            agent_settings,
+            agent_save_settings,
+            agent_create_project,
+            app_settings_get,
+            app_settings_save,
+            app_create_project,
+            app_auth_status,
+            app_auth_apikey,
+            app_auth_logout,
+            agent_telegram_get,
+            agent_telegram_save,
+            agent_serve_status,
+            agent_serve_start,
+            agent_serve_stop,
+            gaze_focus,
+            window_restore_target
+        ])
+        .setup(|app| {
+            // Sweep orphaned sidecars from previous (crashed/force-quit) app
+            // instances BEFORE spawning any new sidecars — they'd otherwise
+            // accumulate forever across launches. Best-effort + logged.
+            // Cross-platform: uses `ps` on Unix, PowerShell CIM on Windows.
+            sweep_orphan_sidecars();
+            // Restore the previous session's windows (each at its project +
+            // session) when a workspace snapshot exists; otherwise build the
+            // single default `main` window. Windows are built in code (not from
+            // config) so macOS gets `hidden_title(true)` via the builder.
+            restore_or_default_windows(&app.handle().clone())?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                let app = window.app_handle();
+                // A deliberate close (app NOT quitting) drops this window from the
+                // workspace so it doesn't reopen next launch. During quit the
+                // AppExiting flag is set, so the snapshot is preserved intact.
+                let exiting = app.state::<AppExiting>().0.load(Ordering::SeqCst);
+                if !exiting {
+                    remove_window_from_workspace(app, window.label());
+                }
+                // Kill only THIS window's sidecar so other projects keep running.
+                let state: State<Sidecars> = window.state();
+                let child = state
+                    .map
+                    .lock()
+                    .unwrap()
+                    .remove(window.label())
+                    .and_then(|mut i| i.child.take());
+                if let Some(child) = child {
+                    terminate_child(child);
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            if let RunEvent::ExitRequested { .. } = event {
+                // Mark the quit BEFORE windows start tearing down, so the
+                // Destroyed handlers preserve the snapshot, then write the final
+                // snapshot (current geometry + each window's live cwd/session).
+                app.state::<AppExiting>().0.store(true, Ordering::SeqCst);
+                refresh_live_sessions(app);
+                snapshot_workspace(app);
+            }
+        });
+}
+
+/// Before the final exit snapshot, re-read each live sidecar's `/state` so a
+/// window that started a new session mid-run (changing its session file) is
+/// recorded at its CURRENT session, not the one it was spawned with. Best-effort
+/// + time-boxed: any window we can't reach keeps its last-known session_path.
+fn refresh_live_sessions(app: &tauri::AppHandle) {
+    let ports: Vec<(String, u16)> = {
+        let state: State<Sidecars> = app.state();
+        let map = state.map.lock().unwrap();
+        map.iter()
+            .filter_map(|(label, inst)| inst.port.map(|p| (label.clone(), p)))
+            .collect()
+    };
+    if ports.is_empty() {
+        return;
+    }
+    let client = app.state::<reqwest::Client>().inner().clone();
+    // The exit callback runs on the main event-loop thread (outside the async
+    // runtime), so block_on is safe here. Each request is time-boxed so a hung
+    // sidecar can't stall quit.
+    let results: Vec<(String, Option<String>, Option<PathBuf>)> =
+        tauri::async_runtime::block_on(async {
+            let mut out = Vec::with_capacity(ports.len());
+            for (label, port) in ports {
+                let url = format!("{}/state", sidecar_base(port));
+                let req = client
+                    .get(&url)
+                    .timeout(std::time::Duration::from_millis(400))
+                    .send()
+                    .await;
+                let Ok(res) = req else {
+                    continue;
+                };
+                let Ok(body) = res.json::<serde_json::Value>().await else {
+                    continue;
+                };
+                let session_path = body
+                    .get("sessionPath")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let cwd = body
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from);
+                out.push((label, session_path, cwd));
+            }
+            out
+        });
+    let state: State<Sidecars> = app.state();
+    let mut map = state.map.lock().unwrap();
+    for (label, session_path, cwd) in results {
+        if let Some(inst) = map.get_mut(&label) {
+            if session_path.is_some() {
+                inst.session_path = session_path;
+            }
+            if let Some(cwd) = cwd {
+                inst.cwd = Some(cwd);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keep_for_snapshot_excludes_picker_windows() {
+        let default = Path::new("/home/user");
+        // No project chosen yet → excluded.
+        assert!(!keep_for_snapshot(None, default));
+        // Still on the default boot cwd (picker) → excluded.
+        assert!(!keep_for_snapshot(Some(Path::new("/home/user")), default));
+        // A real project → kept.
+        assert!(keep_for_snapshot(Some(Path::new("/home/user/proj")), default));
+    }
+
+    #[test]
+    fn filter_restorable_drops_missing_and_empty() {
+        let windows = vec![
+            WorkspaceEntry {
+                cwd: "/exists/a".into(),
+                ..Default::default()
+            },
+            WorkspaceEntry {
+                cwd: "   ".into(),
+                ..Default::default()
+            },
+            WorkspaceEntry {
+                cwd: "/gone/b".into(),
+                ..Default::default()
+            },
+        ];
+        let kept = filter_restorable(windows, |c| c == "/exists/a");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].cwd, "/exists/a");
+    }
+
+    #[test]
+    fn workspace_roundtrips_through_json() {
+        let ws = Workspace {
+            windows: vec![
+                WorkspaceEntry {
+                    cwd: "/p/a".into(),
+                    session_path: Some("/s/a.jsonl".into()),
+                    x: Some(0),
+                    y: Some(25),
+                    width: Some(1280),
+                    height: Some(800),
+                },
+                WorkspaceEntry {
+                    cwd: "/p/b".into(),
+                    ..Default::default()
+                },
+            ],
+        };
+        let json = serde_json::to_string(&ws).unwrap();
+        let back: Workspace = serde_json::from_str(&json).unwrap();
+        assert_eq!(ws, back);
+        // The second entry omits optional fields entirely (skip_serializing_if).
+        assert!(!json.contains("\"sessionPath\":null"));
+    }
+
+    #[test]
+    fn workspace_parses_minimal_entry() {
+        // Forward/backward compat: a bare { cwd } entry still loads.
+        let ws: Workspace =
+            serde_json::from_str(r#"{ "windows": [{ "cwd": "/p/a" }] }"#).unwrap();
+        assert_eq!(ws.windows.len(), 1);
+        assert_eq!(ws.windows[0].cwd, "/p/a");
+        assert_eq!(ws.windows[0].session_path, None);
+    }
+
+    #[test]
+    fn empty_or_missing_workspace_is_default() {
+        let ws: Workspace = serde_json::from_str("{}").unwrap();
+        assert!(ws.windows.is_empty());
+    }
+
+    #[test]
+    fn provider_apikey_meta_gates_on_apikey_support() {
+        // OAuth-only provider → not an API-key provider.
+        assert!(provider_apikey_meta("anthropic").is_none());
+        // Unknown provider → None.
+        assert!(provider_apikey_meta("nope").is_none());
+        // API-key provider with no custom base URL.
+        assert_eq!(provider_apikey_meta("glm"), Some(None));
+        // Xiaomi carries a custom base URL.
+        assert_eq!(
+            provider_apikey_meta("xiaomi"),
+            Some(Some("https://token-plan-sgp.xiaomimimo.com/v1")),
+        );
+        // Moonshot supports both oauth + apikey.
+        assert_eq!(provider_apikey_meta("moonshot"), Some(None));
+    }
+
+    #[test]
+    fn apikey_credential_has_far_future_expiry_and_optional_base_url() {
+        let now = 1_000_000_000_000i64;
+        let cred = apikey_credential_json("sk-test", None, now);
+        assert_eq!(cred["accessToken"], "sk-test");
+        assert_eq!(cred["refreshToken"], "");
+        assert_eq!(cred["expiresAt"].as_i64().unwrap(), now + API_KEY_TTL_MS);
+        assert!(cred.get("baseUrl").is_none());
+
+        let with_url = apikey_credential_json("k", Some("https://x/v1"), now);
+        assert_eq!(with_url["baseUrl"], "https://x/v1");
+    }
+
+    #[test]
+    fn apply_apikey_creates_file_when_missing() {
+        let out = apply_apikey(None, "glm", None, 0, "sk-1").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["glm"]["accessToken"], "sk-1");
+    }
+
+    #[test]
+    fn apply_apikey_preserves_other_providers() {
+        let existing = r#"{ "anthropic": { "accessToken": "oauth-tok", "refreshToken": "r", "expiresAt": 5 } }"#;
+        let out = apply_apikey(Some(existing), "glm", None, 0, "sk-1").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // New provider added.
+        assert_eq!(v["glm"]["accessToken"], "sk-1");
+        // Existing provider untouched.
+        assert_eq!(v["anthropic"]["accessToken"], "oauth-tok");
+        assert_eq!(v["anthropic"]["refreshToken"], "r");
+    }
+
+    #[test]
+    fn apply_apikey_carries_base_url() {
+        let out = apply_apikey(None, "xiaomi", Some("https://x/v1"), 0, "sk-2").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["xiaomi"]["baseUrl"], "https://x/v1");
+    }
+
+    #[test]
+    fn apply_apikey_rejects_malformed_file() {
+        assert!(apply_apikey(Some("not json"), "glm", None, 0, "k").is_err());
+        assert!(apply_apikey(Some("[1,2,3]"), "glm", None, 0, "k").is_err());
+    }
+
+    #[test]
+    fn apply_logout_removes_provider() {
+        let existing = r#"{ "glm": { "accessToken": "k", "refreshToken": "", "expiresAt": 1 }, "openai": { "accessToken": "o", "refreshToken": "", "expiresAt": 1 } }"#;
+        let out = apply_logout(Some(existing), "glm").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("glm").is_none());
+        assert_eq!(v["openai"]["accessToken"], "o");
+    }
+
+    #[test]
+    fn apply_logout_moonshot_drops_both_keys() {
+        let existing = r#"{ "moonshot": { "accessToken": "key", "refreshToken": "", "expiresAt": 1 }, "moonshot-oauth": { "accessToken": "oauth", "refreshToken": "r", "expiresAt": 1 } }"#;
+        let out = apply_logout(Some(existing), "moonshot").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("moonshot").is_none());
+        assert!(v.get("moonshot-oauth").is_none());
+    }
+
+    #[test]
+    fn apply_logout_missing_file_is_empty_object() {
+        let out = apply_logout(None, "glm").unwrap();
+        assert_eq!(out.trim(), "{}");
+    }
+
+    #[test]
+    fn pick_node_env_override_wins() {
+        let got = pick_node(Some("/opt/node".into()), true, None);
+        assert_eq!(got, PathBuf::from("/opt/node"));
+        // ...even in bundled mode with a present exe dir.
+        let got = pick_node(Some("/opt/node".into()), false, Some(Path::new("/app")));
+        assert_eq!(got, PathBuf::from("/opt/node"));
+    }
+
+    #[test]
+    fn pick_node_dev_uses_path() {
+        let got = pick_node(None, true, Some(Path::new("/app")));
+        assert_eq!(got, PathBuf::from("node"));
+    }
+
+    #[test]
+    fn pick_node_bundled_uses_exe_dir_when_present() {
+        let tmp = std::env::temp_dir().join(format!("ggnode-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let name = if cfg!(target_os = "windows") {
+            "ggnode.exe"
+        } else {
+            "ggnode"
+        };
+        let staged = tmp.join(name);
+        std::fs::write(&staged, b"").unwrap();
+        let got = pick_node(None, false, Some(&tmp));
+        assert_eq!(got, staged);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn pick_node_bundled_falls_back_when_missing() {
+        let got = pick_node(None, false, Some(Path::new("/nonexistent-dir-xyz")));
+        assert_eq!(got, PathBuf::from("node"));
+    }
+
+    #[test]
+    fn pick_sidecar_env_override_wins() {
+        let got = pick_sidecar(Some("/x/side.mjs".into()), true, None);
+        assert_eq!(got, PathBuf::from("/x/side.mjs"));
+        let got = pick_sidecar(
+            Some("/x/side.mjs".into()),
+            false,
+            Some(Path::new("/res/sidecar/app-sidecar.mjs")),
+        );
+        assert_eq!(got, PathBuf::from("/x/side.mjs"));
+    }
+
+    #[test]
+    fn pick_sidecar_dev_uses_workspace() {
+        let got = pick_sidecar(None, true, Some(Path::new("/res/app-sidecar.mjs")));
+        assert_eq!(got, workspace_sidecar());
+    }
+
+    #[test]
+    fn pick_sidecar_bundled_uses_resource() {
+        let res = Path::new("/res/sidecar/app-sidecar.mjs");
+        let got = pick_sidecar(None, false, Some(res));
+        assert_eq!(got, res.to_path_buf());
+    }
+
+    #[test]
+    fn pick_sidecar_bundled_falls_back_without_resource() {
+        let got = pick_sidecar(None, false, None);
+        assert_eq!(got, workspace_sidecar());
+    }
+
+    #[test]
+    fn pick_cwd_env_override_wins() {
+        let got = pick_cwd(
+            Some("/work/proj".into()),
+            true,
+            PathBuf::from("/repo"),
+            PathBuf::from("/home/user"),
+        );
+        assert_eq!(got, PathBuf::from("/work/proj"));
+        // ...even in release mode.
+        let got = pick_cwd(
+            Some("/work/proj".into()),
+            false,
+            PathBuf::from("/repo"),
+            PathBuf::from("/home/user"),
+        );
+        assert_eq!(got, PathBuf::from("/work/proj"));
+    }
+
+    #[test]
+    fn pick_cwd_dev_uses_workspace_root() {
+        let got = pick_cwd(None, true, PathBuf::from("/repo"), PathBuf::from("/home/user"));
+        assert_eq!(got, PathBuf::from("/repo"));
+    }
+
+    #[test]
+    fn pick_cwd_release_uses_home_not_build_path() {
+        // The crux of the release bug: in a shipped binary the dev_root is the CI
+        // build machine's path; release must ignore it and use the home dir.
+        let got = pick_cwd(
+            None,
+            false,
+            PathBuf::from("/Users/runner/work/gg-framework/gg-framework"),
+            PathBuf::from("/home/user"),
+        );
+        assert_eq!(got, PathBuf::from("/home/user"));
+    }
+
+    #[test]
+    fn window_chrome_matches_target_os() {
+        let got = window_chrome();
+        if cfg!(target_os = "macos") {
+            assert_eq!(got, WindowChrome::MacOverlay);
+        } else {
+            assert_eq!(got, WindowChrome::Native);
+        }
+    }
+
+    // ── orphan_killset classifier tests ──────────────────────────────────────
+
+    /// Helper: build a ProcInfo row.
+    fn proc(pid: i32, ppid: i32, command: &str) -> ProcInfo {
+        ProcInfo {
+            pid,
+            ppid,
+            command: command.to_string(),
+        }
+    }
+
+    #[test]
+    fn orphan_sidecar_with_ppid_1_is_killed() {
+        // A sidecar reparented to init is an orphan.
+        let snap = vec![proc(500, 1, "node /app/sidecar/app-sidecar.mjs")];
+        let ks = orphan_killset(&snap, 100);
+        assert_eq!(ks, vec![500]);
+    }
+
+    #[test]
+    fn live_sidecar_with_alive_parent_is_excluded() {
+        // The current gg-app (pid 100) is the parent of a live sidecar (pid 200).
+        let snap = vec![
+            proc(100, 1, "/Applications/GG Coder.app/Contents/MacOS/gg-app"),
+            proc(200, 100, "ggnode app-sidecar.mjs"),
+        ];
+        let ks = orphan_killset(&snap, 100);
+        assert!(ks.is_empty(), "live sidecar must not be killed: {ks:?}");
+    }
+
+    #[test]
+    fn orphan_sidecar_with_dead_parent_not_in_snapshot() {
+        // Parent pid 999 is absent from the snapshot and ≠ 1 → dead → orphan.
+        let snap = vec![proc(300, 999, "node app-sidecar.js")];
+        let ks = orphan_killset(&snap, 100);
+        assert!(ks.contains(&300));
+    }
+
+    #[test]
+    fn reparented_kencode_is_killed() {
+        // kencode-search reparented to init.
+        let snap = vec![proc(700, 1, "node kencode-search")];
+        let ks = orphan_killset(&snap, 100);
+        assert_eq!(ks, vec![700]);
+    }
+
+    #[test]
+    fn orphan_descendant_tree_is_collected() {
+        // sidecar(500, orphaned) → npm exec(501) → node kencode-search(502)
+        let snap = vec![
+            proc(500, 1, "node app-sidecar.js"),
+            proc(501, 500, "npm exec @kenkaiiii/kencode-search"),
+            proc(502, 501, "node kencode-search"),
+        ];
+        let ks = orphan_killset(&snap, 100);
+        assert!(ks.contains(&500));
+        assert!(ks.contains(&501));
+        assert!(ks.contains(&502));
+        assert_eq!(ks.len(), 3);
+    }
+
+    #[test]
+    fn current_app_pid_never_killed() {
+        // Even if self somehow matches a pattern and has a dead parent, exclude it.
+        let snap = vec![proc(100, 1, "node app-sidecar.js")];
+        let ks = orphan_killset(&snap, 100);
+        assert!(ks.is_empty(), "self pid must never be in killset: {ks:?}");
+    }
+
+    #[test]
+    fn unrelated_node_with_dead_parent_excluded() {
+        // A vite process with a dead parent does NOT match any pattern → excluded.
+        let snap = vec![proc(800, 1, "node vite")];
+        let ks = orphan_killset(&snap, 100);
+        assert!(ks.is_empty(), "non-matching process must not be killed: {ks:?}");
+    }
+
+    #[test]
+    fn dedup_when_descendant_also_matches_pattern() {
+        // sidecar(500, orphaned) → kencode-search(501). Both match patterns,
+        // but 501 is both a descendant AND a reparented-pattern candidate.
+        // It must appear exactly once.
+        let snap = vec![
+            proc(500, 1, "node app-sidecar.js"),
+            proc(501, 500, "node kencode-search"),
+        ];
+        let ks = orphan_killset(&snap, 100);
+        let count_501 = ks.iter().filter(|&&p| p == 501).count();
+        assert_eq!(count_501, 1, "pid 501 must appear exactly once: {ks:?}");
+        assert_eq!(ks.len(), 2);
+    }
+
+    #[test]
+    fn multi_instance_concurrent_dev_runs_safe() {
+        // Two gg-app instances each with their own sidecar — neither is orphaned.
+        let snap = vec![
+            proc(100, 1, "gg-app"),
+            proc(200, 100, "node app-sidecar.js"),
+            proc(300, 1, "gg-app"),
+            proc(400, 300, "node app-sidecar.js"),
+        ];
+        // Instance 1 sweeps.
+        assert!(orphan_killset(&snap, 100).is_empty());
+        // Instance 2 sweeps.
+        assert!(orphan_killset(&snap, 300).is_empty());
+    }
+
+    // ── Output parser tests (cross-platform) ────────────────────────────────
+    // These verify the parsing of real OS process-listing output so the Windows
+    // CIM path is exercised on macOS (where the Windows snapshot command can't
+    // run, but the parser can).
+
+    #[test]
+    fn parse_ps_handles_column_padding_and_spaces_in_command() {
+        // Real `ps -eo pid=,ppid=,command=` output: multiple spaces between fields.
+        let raw = "    1     0 /sbin/launchd\n\
+                   11541     1 /Applications/GG Coder.app/Contents/MacOS/gg-app\n\
+                   11553 11541 /Applications/GG Coder.app/Contents/MacOS/ggnode app-sidecar.mjs";
+        let rows = parse_ps_output(raw);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].pid, 1);
+        assert_eq!(rows[0].ppid, 0);
+        assert_eq!(rows[0].command, "/sbin/launchd");
+        // Command with spaces is rejoined correctly.
+        assert!(rows[2].command.contains("app-sidecar.mjs"));
+        assert!(rows[2].command.contains("ggnode"));
+    }
+
+    #[test]
+    fn parse_ps_skips_unparseable_lines() {
+        let raw = "pid ppid command\n\
+                   abc def not-a-number\n\
+                   42 1 node";
+        let rows = parse_ps_output(raw);
+        // Header + garbage lines are skipped; only the valid row survives.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 42);
+    }
+
+    #[test]
+    fn parse_cim_handles_pipe_delimited_output() {
+        // Real PowerShell CIM output: pid|ppid|CommandLine.
+        let raw = "4|0|\n\
+                   5204|5200|C:\\Program Files\\nodejs\\node.exe app-sidecar.mjs\n\
+                   5300|5204|C:\\Program Files\\nodejs\\node.exe kencode-search";
+        let rows = parse_cim_output(raw);
+        assert_eq!(rows.len(), 3);
+        // Kernel process with empty CommandLine.
+        assert_eq!(rows[0].pid, 4);
+        assert_eq!(rows[0].ppid, 0);
+        assert_eq!(rows[0].command, "");
+        // Sidecar with full path.
+        assert!(rows[1].command.contains("app-sidecar.mjs"));
+        // kencode grandchild.
+        assert_eq!(rows[2].ppid, 5204);
+        assert!(rows[2].command.contains("kencode-search"));
+    }
+
+    #[test]
+    fn parse_cim_command_with_pipe_is_preserved() {
+        // A command line containing a pipe character must not be split further.
+        let raw = "100|1|cmd /c echo hi | findstr foo";
+        let rows = parse_cim_output(raw);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 100);
+        assert_eq!(rows[0].ppid, 1);
+        // The third field captures everything after the second '|'.
+        assert_eq!(rows[0].command, "cmd /c echo hi | findstr foo");
+    }
+
+    #[test]
+    fn parse_cim_skips_blank_and_garbage_lines() {
+        let raw = "\n\
+                   \r\n\
+                   abc|def|garbage\n\
+                   42|1|node app-sidecar.mjs";
+        let rows = parse_cim_output(raw);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 42);
+    }
+
+    #[test]
+    fn full_windows_sweep_pipeline() {
+        // End-to-end: CIM output → parse → classify → killset. Simulates a
+        // Windows machine where a previous gg-app instance was force-quit,
+        // orphaning its sidecar tree (parent PIDs absent from the snapshot).
+        let raw = "4|0|\n\
+                   1000|4|C:\\Windows\\System32\\cmd.exe\n\
+                   5000|9999|C:\\nodejs\\node.exe app-sidecar.mjs\n\
+                   5001|5000|C:\\nodejs\\node.exe kencode-search\n\
+                   6000|4|C:\\Program Files\\GG Coder\\gg-app.exe\n\
+                   6001|6000|C:\\nodejs\\node.exe app-sidecar.mjs";
+        let snapshot = parse_cim_output(raw);
+        assert_eq!(snapshot.len(), 6);
+        // Self = the new gg-app (pid 6000). Its sidecar (6001) has a live parent.
+        let killset = orphan_killset(&snapshot, 6000);
+        // Orphaned sidecar (5000, parent 9999 dead) + its kencode child (5001).
+        assert!(killset.contains(&5000));
+        assert!(killset.contains(&5001));
+        // Live sidecar (6001) must NOT be killed.
+        assert!(!killset.contains(&6001));
+        assert_eq!(killset.len(), 2);
+    }
+}

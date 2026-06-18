@@ -1,5 +1,6 @@
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { ProcessManager } from "../core/process-manager.js";
+import { LspManager } from "../core/lsp/manager.js";
 import { createReadTool } from "./read.js";
 import { getVideoByteLimit } from "../core/model-registry.js";
 import { createWriteTool } from "./write.js";
@@ -57,6 +58,15 @@ export interface CreateToolsOptions {
    * only assigned after `createTools()` runs during session init.
    */
   getCacheKey?: () => string | undefined;
+  /** Current parent provider/model, evaluated lazily when spawning a sub-agent. */
+  getProvider?: () => string;
+  getModel?: () => string;
+  /**
+   * Append LSP diagnostics to edit/write results (default true). Servers are
+   * resolved from the project/PATH only and spawn lazily on the first edit of
+   * a matching file — disabling this is a pure opt-out, not a capability loss.
+   */
+  lspDiagnostics?: boolean;
 }
 
 export interface CreateToolsResult {
@@ -72,6 +82,12 @@ export interface CreateToolsResult {
    * system prompt.
    */
   rebuildReadTool: (model: string) => AgentTool;
+  /**
+   * Language-server pool backing edit/write diagnostics. Present only when
+   * enabled and running against the local filesystem; callers wire
+   * `shutdownAll()` into their exit/cleanup paths alongside processManager.
+   */
+  lspManager?: LspManager;
 }
 
 export function createTools(cwd: string, opts?: CreateToolsOptions): CreateToolsResult {
@@ -80,6 +96,16 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
   const ops = opts?.operations ?? localOperations;
   const planModeRef = opts?.planModeRef;
 
+  // LSP diagnostics only make sense against the local filesystem — remote
+  // operations (SSH/Docker) would point local language servers at paths that
+  // don't exist here. Lazy: no server spawns until the first matching edit.
+  const lspEnabled = (opts?.lspDiagnostics ?? true) && ops === localOperations;
+  const lspManager = lspEnabled ? new LspManager(cwd) : undefined;
+  const getDiagnostics = lspManager
+    ? (filePath: string, content: string): Promise<string> =>
+        lspManager.diagnosticsAfterWrite(filePath, content)
+    : undefined;
+
   // Enable native video returns from the read tool for any video-capable model
   // (Kimi/Moonshot, Gemini, MiniMax), each with its own per-model byte cap that
   // drives auto-compression. Non-video models get `undefined` — video falls back
@@ -87,8 +113,24 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
   const videoByteLimit = opts?.model ? getVideoByteLimit(opts.model) : undefined;
   const tools: AgentTool[] = [
     createReadTool(cwd, readFiles, ops, opts?.onFileRead, videoByteLimit),
-    createWriteTool(cwd, readFiles, ops, planModeRef, opts?.onFileMutated, opts?.onPreFileMutation),
-    createEditTool(cwd, readFiles, ops, planModeRef, opts?.onFileMutated, opts?.onPreFileMutation),
+    createWriteTool(
+      cwd,
+      readFiles,
+      ops,
+      planModeRef,
+      opts?.onFileMutated,
+      opts?.onPreFileMutation,
+      getDiagnostics,
+    ),
+    createEditTool(
+      cwd,
+      readFiles,
+      ops,
+      planModeRef,
+      opts?.onFileMutated,
+      opts?.onPreFileMutation,
+      getDiagnostics,
+    ),
     createBashTool(cwd, processManager, ops, planModeRef),
     createFindTool(cwd),
     createGrepTool(cwd, ops),
@@ -112,8 +154,8 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
       createSubAgentTool(
         cwd,
         opts.agents,
-        opts.provider,
-        opts.model,
+        () => opts.getProvider?.() ?? opts.provider!,
+        () => opts.getModel?.() ?? opts.model!,
         opts.getCacheKey,
         planModeRef,
       ),
@@ -135,7 +177,7 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
   const rebuildReadTool = (model: string): AgentTool =>
     createReadTool(cwd, readFiles, ops, opts?.onFileRead, getVideoByteLimit(model));
 
-  return { tools, processManager, rebuildReadTool };
+  return { tools, processManager, rebuildReadTool, lspManager };
 }
 
 export { createReadTool } from "./read.js";
@@ -157,4 +199,5 @@ export { createScreenshotTool } from "./screenshot.js";
 export { createEnterPlanTool } from "./enter-plan.js";
 export { createExitPlanTool } from "./exit-plan.js";
 export { ProcessManager } from "../core/process-manager.js";
+export { LspManager } from "../core/lsp/manager.js";
 export { localOperations, type ToolOperations } from "./operations.js";

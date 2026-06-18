@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { log } from "@kenkaiiii/gg-core";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import type { Provider } from "@abukhaled/gg-ai";
@@ -14,7 +15,7 @@ import { buildToolGroupSummary } from "./tool-group-summary.js";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { renderMarkdownToAnsiLines } from "./utils/markdown-renderer.js";
-import { detectGraphicsProtocol, encodeInlineImage } from "./utils/terminal-graphics.js";
+import { detectGraphicsProtocol, encodeInlineImageBlock } from "./utils/terminal-graphics.js";
 import { createHyperlink } from "./utils/hyperlink.js";
 import { supportsHyperlinks } from "./utils/supports-hyperlinks.js";
 import { shouldSeparateTranscriptItems } from "./transcript/spacing.js";
@@ -105,7 +106,7 @@ export interface TerminalHistoryPrinter {
   print(
     items: readonly CompletedItem[],
     context: TerminalHistoryContext,
-    options?: { force?: boolean; write?: (data: string) => void },
+    options?: { force?: boolean; write?: (data: string) => void; reason?: string },
   ): void;
   clear(): void;
   resetPrinted(): void;
@@ -155,8 +156,19 @@ export function createTerminalHistoryPrinter({
   return {
     print(items, context, options) {
       const writeOutput = options?.write ?? ((data: string) => void stream.write(data));
+      // Diagnostic counters: a scrollback duplicate manifests as `wrote > 0`
+      // for content already on screen. The reason tag identifies which path
+      // (flush / history-effect / resize-redraw / shrink-backfill) wrote it,
+      // and skippedFingerprint vs skippedId separates the two dedup layers.
+      let wrote = 0;
+      let skippedId = 0;
+      let skippedFingerprint = 0;
+      let skippedEmpty = 0;
       for (const item of items) {
-        if (!options?.force && printed.has(item.id)) continue;
+        if (!options?.force && printed.has(item.id)) {
+          skippedId++;
+          continue;
+        }
         // Tool activity is shown live in the pinned LiveToolPanel, not the
         // scrollback transcript. Skip without touching spacing state so the
         // surrounding non-tool rows keep their separators.
@@ -167,6 +179,7 @@ export function createTerminalHistoryPrinter({
         const fingerprint = options?.force ? null : fingerprintOf(item);
         if (fingerprint !== null && recentAssistantFingerprints.includes(fingerprint)) {
           printed.add(item.id);
+          skippedFingerprint++;
           continue;
         }
         const output = serializeCompletedItemToTerminalHistory(item, context);
@@ -192,8 +205,12 @@ export function createTerminalHistoryPrinter({
           trailingBlankLine: endsWithBlankLine,
           trailingNewlines: item.kind === "user" ? 1 : undefined,
         });
-        if (formatted.length === 0) continue;
+        if (formatted.length === 0) {
+          skippedEmpty++;
+          continue;
+        }
         printed.add(item.id);
+        wrote++;
         if (fingerprint !== null) {
           recentAssistantFingerprints.push(fingerprint);
           if (recentAssistantFingerprints.length > ASSISTANT_FINGERPRINT_WINDOW) {
@@ -217,7 +234,12 @@ export function createTerminalHistoryPrinter({
           const canLink = supportsHyperlinks();
           for (const preview of previews) {
             if (protocol !== "none") {
-              writeOutput(`\n${imageLeftPad}${encodeInlineImage(preview.base64, protocol)}\n`);
+              // Fixed-height block whose newline count equals its visual rows —
+              // a raw escape (many rows, zero newlines) desyncs Ink's live-frame
+              // erase math and strands orphaned rows around the image.
+              writeOutput(
+                `\n${encodeInlineImageBlock(preview.base64, protocol, { leftPad: imageLeftPad })}\n`,
+              );
             }
             // Clickable "open" affordance — Cmd/Ctrl-click opens the file in the
             // OS default viewer. The pixels themselves aren't clickable, so the
@@ -232,13 +254,27 @@ export function createTerminalHistoryPrinter({
         }
         previousPrintedKind = item.kind;
       }
+      if (wrote > 0 || options?.force) {
+        log("INFO", "scrollback", "print", {
+          reason: options?.reason ?? "unknown",
+          items: items.length,
+          wrote,
+          skippedId,
+          skippedFingerprint,
+          skippedEmpty,
+          force: String(Boolean(options?.force)),
+          printedSetSize: printed.size,
+        });
+      }
     },
     clear() {
+      log("INFO", "scrollback", "clear", { printedSetSize: printed.size });
       printed.clear();
       recentAssistantFingerprints.length = 0;
       previousPrintedKind = null;
     },
     resetPrinted() {
+      log("INFO", "scrollback", "resetPrinted", { printedSetSize: printed.size });
       printed.clear();
       recentAssistantFingerprints.length = 0;
       previousPrintedKind = null;
