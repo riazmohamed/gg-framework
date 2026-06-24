@@ -117,6 +117,7 @@ describe("parseMcpAddTokens", () => {
         config: {
           name: "refero",
           url: "https://api.refero.design/mcp",
+          transport: "http",
           headers: { Authorization: "Bearer mcp-tok" },
         },
       },
@@ -130,7 +131,10 @@ describe("parseMcpAddTokens", () => {
 
   it("strips a pasted claude mcp add prefix arriving as argv tokens", () => {
     const r = parseMcpAddTokens(["claude", "mcp", "add", "--transport", "http", "n", "https://x"]);
-    expect(r).toEqual({ ok: true, value: { config: { name: "n", url: "https://x" } } });
+    expect(r).toEqual({
+      ok: true,
+      value: { config: { name: "n", url: "https://x", transport: "http" } },
+    });
   });
 
   it("errors on empty token list", () => {

@@ -17,7 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
-import type { ToolResultContent } from "@kenkaiiii/gg-ai";
+import type { ToolResultContent } from "@abukhaled/gg-ai";
 import type { AddressInfo } from "node:net";
 import { runJsonMode } from "./modes/json-mode.js";
 import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";

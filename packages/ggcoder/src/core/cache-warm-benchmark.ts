@@ -19,7 +19,7 @@
  *        GG_CW_REPS (default 4)
  */
 
-import { stream, type Message, type StreamEvent, type Usage } from "@kenkaiiii/gg-ai";
+import { stream, type Message, type StreamEvent, type Usage } from "@abukhaled/gg-ai";
 import { AuthStorage } from "./auth-storage.js";
 
 /** Build a large, realistic coding-agent system prompt (~well above 2048 tok). */

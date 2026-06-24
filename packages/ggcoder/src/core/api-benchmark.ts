@@ -15,7 +15,7 @@
  *   GG_BENCH_TURNS     — number of turns (default: 5)
  */
 
-import { stream, type Message, type StreamEvent, type Usage } from "@kenkaiiii/gg-ai";
+import { stream, type Message, type StreamEvent, type Usage } from "@abukhaled/gg-ai";
 import { AuthStorage } from "./auth-storage.js";
 
 // ── Types ───────────────────────────────────────────────────
@@ -430,7 +430,7 @@ async function main(): Promise<void> {
 
   // Fire a prewarm request before the optimized run (same as AgentSession does).
   if (provider === "anthropic") {
-    const { prewarmAnthropicCache } = await import("@kenkaiiii/gg-ai");
+    const { prewarmAnthropicCache } = await import("@abukhaled/gg-ai");
     await prewarmAnthropicCache({
       apiKey,
       model,

@@ -22,7 +22,7 @@ import {
   type StreamOptions,
   type StreamEvent,
   type StreamResponse,
-} from "@kenkaiiii/gg-ai";
+} from "@abukhaled/gg-ai";
 import { z } from "zod";
 
 // ── Mock Provider Config ────────────────────────────────────

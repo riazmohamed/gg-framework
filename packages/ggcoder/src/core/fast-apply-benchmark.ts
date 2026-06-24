@@ -23,7 +23,7 @@
  *   GG_FA_APPLY_PROVIDER     / GG_FA_APPLY_MODEL      (default gemini / gemini-3.1-flash-lite-preview)
  */
 
-import { stream, type Message, type StreamEvent, type Usage } from "@kenkaiiii/gg-ai";
+import { stream, type Message, type StreamEvent, type Usage } from "@abukhaled/gg-ai";
 import { AuthStorage } from "./auth-storage.js";
 
 // ── Edit tasks: synthetic TS files of controlled sizes + a concrete edit ──

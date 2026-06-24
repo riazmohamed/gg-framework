@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import { mkdtemp, rm, readFile, writeFile, mkdir } from "node:fs/promises";
-import type { StructuredToolResult, ToolContext } from "@kenkaiiii/gg-agent";
+import type { StructuredToolResult, ToolContext } from "@abukhaled/gg-agent";
 import type { GenerateImageAuth } from "./generate-image.js";
 
 // A real, decodable 1×1 PNG so sharp (shrinkToFit / downscaleForPreview) works.

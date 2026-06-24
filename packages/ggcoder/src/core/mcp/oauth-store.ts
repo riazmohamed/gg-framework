@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { getAppPaths } from "@kenkaiiii/gg-core";
+import { getAppPaths } from "@abukhaled/gg-core";
 import type {
   OAuthClientInformationFull,
   OAuthTokens,
