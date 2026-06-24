@@ -201,7 +201,7 @@ describe("buildSystemPrompt", () => {
     for (const required of [
       "works directly in the user's codebase",
       "completing tasks end-to-end",
-      "Final replies: 1–3 sentences, hard cap 5",
+      "Final replies: 1–2 sentences, hard cap 5",
       "Read before `edit`/`write`",
       "re-read after formatters",
       "Compute in bash; write with `edit`/`write`",

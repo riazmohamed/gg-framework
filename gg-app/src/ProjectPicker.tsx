@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import {
   waitForReady,
@@ -6,6 +7,8 @@ import {
   listSessions,
   selectProject,
   getSettings,
+  focusWindowByOffset,
+  arrangeAllWindows,
   type DiscoveredProject,
   type RecentSession,
 } from "./agent";
@@ -54,6 +57,24 @@ export function ProjectPicker({
   const filteredProjects = q
     ? projects.filter((p) => p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q))
     : projects;
+
+  // Multi-window shortcuts work from the picker too, so you can cycle/arrange
+  // before choosing a project.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const meta = e.metaKey || e.ctrlKey;
+      if (!meta) return;
+      if (e.code === "Backquote" && !e.altKey) {
+        e.preventDefault();
+        void focusWindowByOffset(e.shiftKey ? -1 : 1);
+      } else if (e.shiftKey && (e.key === "a" || e.key === "A") && !e.altKey) {
+        e.preventDefault();
+        void arrangeAllWindows();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -112,6 +133,22 @@ export function ProjectPicker({
       .catch(() => setBusy(false));
   }
 
+  // Open an existing folder from disk as a project. The native folder picker is
+  // directories-only (that's where projects live); a chosen path re-points this
+  // window's agent exactly like selecting a discovered project.
+  function openExisting(): void {
+    if (busy) return;
+    void openFolderDialog({
+      directory: true,
+      multiple: false,
+      title: "Open existing project",
+    })
+      .then((picked) => {
+        if (typeof picked === "string") choose(picked);
+      })
+      .catch(() => {});
+  }
+
   return (
     <div className="picker">
       <div className="picker-head" data-tauri-drag-region>
@@ -142,9 +179,19 @@ export function ProjectPicker({
               {"+ New session"}
             </button>
           ) : (
-            <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
-              {"+ New project"}
-            </button>
+            <>
+              <button
+                className="btn btn-ghost btn-sm"
+                disabled={busy}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={openExisting}
+              >
+                {"Open existing"}
+              </button>
+              <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
+                {"+ New project"}
+              </button>
+            </>
           )}
           <RadioButton />
           <WindowLayoutButton />
@@ -157,9 +204,19 @@ export function ProjectPicker({
           {!loading && projects.length === 0 && (
             <div className="picker-empty">
               <span style={{ color: theme.textMuted }}>No projects yet.</span>
-              <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
-                {"+ New project"}
-              </button>
+              <span style={{ display: "flex", gap: 8 }}>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={openExisting}
+                >
+                  {"Open existing"}
+                </button>
+                <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
+                  {"+ New project"}
+                </button>
+              </span>
             </div>
           )}
           {!loading && projects.length > 0 && filteredProjects.length === 0 && (

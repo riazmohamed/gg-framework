@@ -220,6 +220,15 @@ export interface HistoryEntry {
   /** True when this user message is a post-compaction summary marker, so the
    *  webview renders the quiet compaction notice instead of the summary body. */
   compacted?: boolean;
+  /** Tool-produced images rendered inline (same as live `images` items),
+   *  reconstructed from ImageContent blocks in persisted tool results. */
+  toolImages?: Array<{ src: string; path?: string }>;
+  /** Sub-agent delegation group (same as live `subagent_group` items). */
+  subagentGroup?: Array<{
+    agentName?: string;
+    status: "done" | "error";
+    toolUseCount: number;
+  }>;
 }
 
 /** Fetch the resumed session's prior messages so the transcript can hydrate. */
@@ -575,6 +584,44 @@ export async function newWindow(): Promise<void> {
   }
 }
 
+/**
+ * Cycle keyboard focus by `offset` positions (wraps around) through windows in
+ * reading order. +1 = forward (Cmd/Ctrl+`), -1 = backward (Cmd/Ctrl+Shift+`).
+ * No-op when ≤1 window is open.
+ */
+export async function focusWindowByOffset(offset: number): Promise<void> {
+  try {
+    await invoke("focus_window_by_offset", { offset });
+  } catch (e) {
+    await logError(`focus_window_by_offset failed: ${String(e)}`);
+  }
+}
+
+/** Re-tile every open window into a clean grid (no create/destroy). */
+export async function arrangeAllWindows(): Promise<void> {
+  try {
+    await invoke("arrange_all");
+  } catch (e) {
+    await logError(`arrange_all failed: ${String(e)}`);
+  }
+}
+
+/**
+ * Payload of the `window-order` broadcast: window labels in reading order
+ * (rows top→bottom, left→right within a row) and the label of the
+ * currently-focused window (or null).
+ */
+export interface WindowOrderEvent {
+  order: string[];
+  focused: string | null;
+}
+
+/** Subscribe THIS window to reading-order broadcasts. Returns an unlisten fn. */
+export async function onWindowOrder(cb: (e: WindowOrderEvent) => void): Promise<() => void> {
+  const un = await appWindow.listen<WindowOrderEvent>("window-order", (e) => cb(e.payload));
+  return un;
+}
+
 // ── Telegram serve (remote control via Telegram) ───────────
 
 /** Telegram config status. `configured` is false until a bot token + user id
@@ -630,6 +677,96 @@ export async function startServe(): Promise<void> {
 export async function stopServe(): Promise<void> {
   await waitForReady();
   await invoke("agent_serve_stop");
+}
+
+// ── MCP server management (mirrors `ggcoder mcp`) ────────────
+
+/** One configured MCP server joined with its live connection status. */
+export interface McpServerRow {
+  name: string;
+  scope: "global" | "project";
+  ok: boolean;
+  toolCount: number;
+  error?: string;
+  /** "http" for http/sse transports, "stdio" for spawned processes. */
+  kind: "stdio" | "http";
+  /** Transport summary for display (URL or command+args). */
+  summary: string;
+  /** True when the server returned 401 and needs an interactive OAuth login. */
+  requiresAuth?: boolean;
+}
+
+/** Outcome of adding an MCP server from a pasted command line. */
+export interface AddMcpResult {
+  ok: boolean;
+  name: string;
+  /** Whether the probe connection succeeded (the config is saved regardless). */
+  connected: boolean;
+  toolCount: number;
+  error?: string;
+  /** True when the server needs an interactive OAuth login before it connects. */
+  requiresAuth?: boolean;
+}
+
+/** List configured MCP servers with live connection status + tool counts.
+ *  `cwd` scopes the project servers to a specific project path (global servers
+ *  always show); omit for the window's current project. */
+export async function listMcpServers(cwd?: string): Promise<McpServerRow[]> {
+  try {
+    await waitForReady();
+    const res = await invoke<{ servers: McpServerRow[] }>("agent_mcp_list", {
+      cwd: cwd ?? null,
+    });
+    return res.servers ?? [];
+  } catch (e) {
+    await logError(`agent_mcp_list failed: ${String(e)}`);
+    return [];
+  }
+}
+
+/** Add an MCP server from a pasted `claude mcp add …` line. `cwd` is required
+ *  for project scope (the target project path). Throws with a user-facing
+ *  message on parse/save failure. */
+export async function addMcpServer(
+  line: string,
+  scope: "global" | "project",
+  cwd?: string,
+): Promise<AddMcpResult> {
+  await waitForReady();
+  return invoke<AddMcpResult>("agent_mcp_add", { line, scope, cwd: cwd ?? null });
+}
+
+/** Begin an interactive OAuth login for a remote (HTTP) MCP server. Returns
+ *  immediately; progress + outcome arrive via subscribe() `mcp_auth_*` events.
+ *  `cwd` is required for project scope. Throws a user-facing message on failure
+ *  to start (e.g. not an HTTP server, server not found). */
+export async function loginMcpServer(
+  name: string,
+  scope: "global" | "project",
+  cwd?: string,
+): Promise<void> {
+  await waitForReady();
+  await invoke("agent_mcp_login", { name, scope, cwd: cwd ?? null });
+}
+
+/** Remove an MCP server by name. `cwd` is required for project scope. Returns
+ *  whether it existed. */
+export async function removeMcpServer(
+  name: string,
+  scope: "global" | "project",
+  cwd?: string,
+): Promise<{ removed: boolean }> {
+  try {
+    await waitForReady();
+    return await invoke<{ removed: boolean }>("agent_mcp_remove", {
+      name,
+      scope,
+      cwd: cwd ?? null,
+    });
+  } catch (e) {
+    await logError(`agent_mcp_remove failed: ${String(e)}`);
+    return { removed: false };
+  }
 }
 
 // Single Tauri listener for the whole app, fanned out to local subscribers.

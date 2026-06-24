@@ -229,6 +229,7 @@ export function parseMcpAddTokens(rawTokens: string[]): Result<ParsedAddCommand,
       };
     }
     config.url = url;
+    config.transport = effectiveTransport;
     if (Object.keys(headers).length > 0) config.headers = headers;
   } else {
     // stdio

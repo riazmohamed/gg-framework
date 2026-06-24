@@ -5,6 +5,11 @@ import { loadServers } from "./store.js";
 export const DEFAULT_MCP_SERVERS: MCPServerConfig[] = [
   // NOTE: kencode-search is an external published package, not part of this repo's
   // rebrand — keep the @kenkaiiii scope until an @abukhaled fork is published.
+  // It ships as a ggcoder dependency, so `connectServer` rewrites this `npx -y`
+  // form to a direct `node <binScript>` invocation at connect time (see
+  // core/mcp/resolve-stdio.ts) — skipping the ~100 MB npx wrapper process. The
+  // `npx` form is kept here so it still works if the dependency is ever
+  // unavailable (graceful fallback to npx resolution).
   { name: "kencode-search", command: "npx", args: ["-y", "@kenkaiiii/kencode-search"] },
   // grep.app public GitHub code search — fallback for kencode-search.
   { name: "grep", url: "https://mcp.grep.app", timeout: 60_000 },
