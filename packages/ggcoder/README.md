@@ -79,18 +79,18 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 
 | Provider | Models | Auth |
 |---|---|---|
-| **Anthropic** | Claude Opus 4.8, Sonnet 4.6, Haiku 4.5 | OAuth |
+| **Anthropic** | Claude Opus 4.8, Sonnet 5, Haiku 4.5 | OAuth |
 | **OpenAI** | GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex | OAuth |
-| **Moonshot** | Kimi K2.7 | API key |
+| **Moonshot** | Kimi K3, Kimi K2.7 Code | OAuth or API key |
 | **Z.AI (GLM)** | GLM-5.1, GLM-4.7, GLM-4.7 Flash | API key |
 | **MiniMax** | MiniMax M3 (image + video) | API key |
-| **Xiaomi (MiMo)** | MiMo-V2.5-Pro, MiMo-V2.5 (image + video) | API key |
+| **Xiaomi (MiMo)** | MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 (image + video) | API key |
 | **DeepSeek** | DeepSeek V4 Pro, V4 Flash | API key |
 | **OpenRouter** | Qwen3.6-Plus + multi-provider gateway | API key |
 
 The same conversation, the same tools, the same project context — only the model changes. Use a strong reasoning model when you need it, swap to a fast cheap one for grunt work, never restart your session.
 
-**Attachments.** Drag, paste, or type a path to attach images and video in the chat input. Video is sent natively to models that support it (Gemini 3.x, Kimi K2.7, MiniMax M3, MiMo-V2.5); for other models the video is saved to a temp file and the model is told to inspect it with ffmpeg or its own tools.
+**Attachments.** Drag, paste, or type a path to attach images and video in the chat input. Video is sent natively to models that support it (Gemini 3.x, Kimi K3/K2.7 Code, MiniMax M3, MiMo-V2.5); for other models the video is saved to a temp file and the model is told to inspect it with ffmpeg or its own tools.
 
 ---
 
@@ -160,22 +160,35 @@ Plus built-in workflows that ship with the binary:
 
 OG Coder comes with a focused set of tools. Each one is small, well-described, and earns its place in the prompt.
 
-| Tool | What it does |
-|---|---|
-| `bash` | Run shell commands |
-| `read` | Read file contents |
-| `write` | Write files |
-| `edit` | Surgical string replacements |
-| `grep` | Search file contents (regex) |
-| `find` | Find files by glob pattern |
-| `ls` | List directory contents |
-| `web_fetch` | Fetch URL content |
-| `screenshot` | Open a URL / dev server in a headless browser and capture a PNG so the agent can see the rendered page |
-| `subagent` | Spawn parallel sub-agents |
+| Tool                              | What it does                                                                                           |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `bash`                            | Run shell commands                                                                                     |
+| `read`                            | Read file contents                                                                                     |
+| `write`                           | Write files                                                                                            |
+| `edit`                            | Surgical string replacements                                                                           |
+| `grep`                            | Search file contents (regex)                                                                           |
+| `find`                            | Find files by glob pattern                                                                             |
+| `ls`                              | List directory contents                                                                                |
+| `web_fetch`                       | Fetch URL content                                                                                      |
+| `screenshot`                      | Open a URL / dev server in a headless browser and capture a PNG so the agent can see the rendered page |
+| `subagent`                        | Run one blocking, isolated child task (backward-compatible)                                            |
+| `spawn_agent` / `wait_agent`      | Launch persistent child turns concurrently and collect results                                         |
+| `send_message` / `followup_task`  | Steer a running child or reuse an idle child's context                                                 |
+| `list_agents` / `interrupt_agent` | Inspect or interrupt persistent children                                                               |
 
 The `screenshot` tool needs the optional `playwright` dependency plus a one-time `npx playwright install chromium`. Without it the tool returns an install hint instead of failing the turn. Captured images render inline in graphics-capable terminals (kitty, Ghostty, WezTerm, iTerm2); other terminals show a text line.
 
 Plus the [Grep MCP](https://grep.dev) for searching across 1M+ public GitHub repos. Add your own MCPs in settings if you need more — but start lean.
+
+### Async subagent lifecycle
+
+`subagent` remains blocking. The async suite launches persistent NDJSON worker processes, so a parent can start up to four active child turns, keep working, steer them, and wait for any or all results. Up to eight idle workers remain available for follow-up; bounded snapshots retain the latest 20 agents.
+
+Only GPT-5.6 Sol/Terra at **Ultra** delegates proactively. Lower Sol/Terra levels use async agents only when the user or project/skill instructions request delegation; other models receive no proactive policy.
+
+Children share the parent working directory, not isolated worktrees. Parallel writes must target disjoint files or subsystems. Async fan-out is one level deep, child output is bounded, idle workers reap after 10 minutes, and workers are not resumable after a CLI/app restart.
+
+Parent cancellation interrupts active children. Session disposal shuts down every worker process alongside background commands, LSP servers, and MCP connections.
 
 ---
 

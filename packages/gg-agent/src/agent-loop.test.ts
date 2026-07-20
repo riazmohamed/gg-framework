@@ -3,6 +3,7 @@ import { z } from "zod";
 import { ProviderError } from "@abukhaled/gg-ai";
 import {
   agentLoop,
+  capTurnToolResults,
   classifyOverload,
   extractContextOverflowDetails,
   isBillingError,
@@ -11,8 +12,8 @@ import {
   isUsageLimitError,
   serverResetDelayMs,
 } from "./agent-loop.js";
-import type { AgentEvent, AgentResult, AgentTool } from "./types.js";
-import type { Message, StreamOptions } from "@abukhaled/gg-ai";
+import type { AgentEvent, AgentResult, AgentTool, TransformContextOptions } from "./types.js";
+import type { Message, StreamOptions, Usage } from "@abukhaled/gg-ai";
 
 // ── Mock stream ────────────────────────────────────────────
 
@@ -45,6 +46,22 @@ function mockOkResult(text: string) {
       for (const e of events) yield e;
     },
     response: Promise.resolve(resp),
+  };
+}
+
+function mockToolCallResult(name: string, usage: Usage, id = "t1") {
+  return {
+    [Symbol.asyncIterator]: async function* () {
+      yield* [];
+    },
+    response: Promise.resolve({
+      message: {
+        role: "assistant" as const,
+        content: [{ type: "tool_call" as const, id, name, args: {} }],
+      },
+      stopReason: "tool_use" as const,
+      usage,
+    }),
   };
 }
 
@@ -175,17 +192,29 @@ describe("isContextOverflow", () => {
 });
 
 describe("classifyOverload", () => {
-  it("classifies provider 5xx and api_error as transient provider errors", () => {
+  it("classifies transient provider 5xx and api_error as provider errors", () => {
     const cases = [
       new ProviderError("anthropic", "api_error: Internal server error", { statusCode: undefined }),
       new ProviderError("anthropic", "Internal server error", { statusCode: 500 }),
       new ProviderError("anthropic", "Bad Gateway", { statusCode: 502 }),
       new ProviderError("anthropic", "Service Unavailable", { statusCode: 503 }),
       new ProviderError("anthropic", "Gateway Timeout", { statusCode: 504 }),
+      new ProviderError("openai", "exceeded request buffer limit while retrying upstream", {
+        statusCode: 507,
+      }),
+      new ProviderError("openai", "exceeded request buffer limit while retrying upstream"),
     ];
 
     for (const error of cases) {
       expect(classifyOverload(error)).toBe("provider_error");
+    }
+  });
+
+  it("does not retry permanent 5xx responses", () => {
+    for (const statusCode of [501, 505, 511]) {
+      expect(
+        classifyOverload(new ProviderError("openai", "Permanent server response", { statusCode })),
+      ).toBeNull();
     }
   });
 
@@ -310,6 +339,38 @@ describe("agentLoop", () => {
     expect(result.totalTurns).toBe(1);
     expect(result.totalUsage.inputTokens).toBe(100);
     expect(result.totalUsage.outputTokens).toBe(50);
+    const turnEnd = events.find((event) => event.type === "turn_end");
+    expect(turnEnd?.type === "turn_end" ? turnEnd.timing : undefined).toMatchObject({
+      startedAt: expect.any(Number),
+      firstProviderEventAt: expect.any(Number),
+      completedAt: expect.any(Number),
+      providerDurationMs: expect.any(Number),
+      ttftMs: expect.any(Number),
+    });
+    if (turnEnd?.type === "turn_end") {
+      expect(turnEnd.timing.completedAt).toBeGreaterThanOrEqual(turnEnd.timing.startedAt);
+      expect(turnEnd.timing.providerDurationMs).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("forwards Codex transport identity separately from prompt cache routing", async () => {
+    mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "openai",
+      model: "gpt-5.6-luna",
+      transportSessionId: "transport-session",
+      promptCacheKey: "shared-cache-family",
+      toolChoice: "none",
+    });
+
+    expect(mockStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transportSessionId: "transport-session",
+        promptCacheKey: "shared-cache-family",
+        toolChoice: "none",
+      }),
+    );
   });
 
   it("calls transformContext before each LLM call", async () => {
@@ -329,7 +390,155 @@ describe("agentLoop", () => {
     });
 
     expect(transformContext).toHaveBeenCalledTimes(1);
-    expect(transformContext).toHaveBeenCalledWith(messages);
+    expect(transformContext).toHaveBeenCalledWith(messages, {
+      usage: undefined,
+      pendingMessages: [],
+    });
+  });
+
+  it("passes provider usage and pending tool results to the next transform", async () => {
+    const usage: Usage = {
+      inputTokens: 70,
+      outputTokens: 30,
+      cacheRead: 11,
+      cacheWrite: 7,
+    };
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("context_probe", usage) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    const transformContext = vi.fn((msgs: Message[], _options: TransformContextOptions) => msgs);
+    await collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "run the tool" },
+      ],
+      {
+        provider: "anthropic",
+        model: "test",
+        tools: [
+          {
+            name: "context_probe",
+            description: "returns pending context",
+            parameters: emptyParams,
+            execute: () => "pending tool output",
+          },
+        ],
+        transformContext,
+      },
+    );
+
+    expect(transformContext).toHaveBeenCalledTimes(2);
+    const secondOptions = transformContext.mock.calls[1]![1] as TransformContextOptions;
+    expect(secondOptions.usage).toEqual(usage);
+    expect(secondOptions.pendingMessages).toHaveLength(1);
+    expect(secondOptions.pendingMessages[0]).toMatchObject({ role: "tool" });
+    expect(JSON.stringify(secondOptions.pendingMessages[0]?.content)).toContain(
+      "pending tool output",
+    );
+  });
+
+  it("uses transformed history for the next provider call", async () => {
+    const providerPrompts: Message[][] = [];
+    mockStream
+      .mockImplementationOnce((options: StreamOptions) => {
+        providerPrompts.push(structuredClone(options.messages));
+        return mockToolCallResult("context_probe", {
+          inputTokens: 70,
+          outputTokens: 30,
+        }) as unknown as ReturnType<typeof stream>;
+      })
+      .mockImplementationOnce((options: StreamOptions) => {
+        providerPrompts.push(structuredClone(options.messages));
+        return mockOkResult("done") as unknown as ReturnType<typeof stream>;
+      });
+
+    const compacted: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "compacted history" },
+    ];
+    let transformCall = 0;
+    const transformContext = vi.fn((msgs: Message[]) => {
+      transformCall++;
+      return transformCall === 2 ? compacted : msgs;
+    });
+
+    await collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "old history" },
+      ],
+      {
+        provider: "anthropic",
+        model: "test",
+        tools: [
+          {
+            name: "context_probe",
+            description: "returns context",
+            parameters: emptyParams,
+            execute: () => "large pending result",
+          },
+        ],
+        transformContext,
+      },
+    );
+
+    expect(providerPrompts).toHaveLength(2);
+    expect(providerPrompts[1]).toEqual(compacted);
+  });
+
+  it("clears the usage anchor when a transform replaces history", async () => {
+    const firstUsage: Usage = { inputTokens: 80, outputTokens: 20, cacheRead: 5 };
+    const overflow = new Error("prompt is too long: 250000 tokens > 200000 maximum");
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("context_probe", firstUsage) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(mockErrorResult(overflow) as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(mockOkResult("recovered") as unknown as ReturnType<typeof stream>);
+
+    let transformCall = 0;
+    const transformContext = vi.fn((msgs: Message[], options: TransformContextOptions) => {
+      transformCall++;
+      if (transformCall === 2) {
+        return [
+          { role: "system" as const, content: "sys" },
+          { role: "user" as const, content: "compacted history" },
+        ];
+      }
+      if (options.force) return msgs.slice(0, 1);
+      return msgs;
+    });
+
+    await collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "old history" },
+      ],
+      {
+        provider: "anthropic",
+        model: "test",
+        tools: [
+          {
+            name: "context_probe",
+            description: "returns context",
+            parameters: emptyParams,
+            execute: () => "pending result",
+          },
+        ],
+        transformContext,
+      },
+    );
+
+    expect((transformContext.mock.calls[1]![1] as TransformContextOptions).usage).toEqual(
+      firstUsage,
+    );
+    const forcedOptions = transformContext.mock.calls.find(
+      (call) => (call[1] as TransformContextOptions).force,
+    )?.[1] as TransformContextOptions;
+    expect(forcedOptions).toEqual({ force: true, usage: undefined, pendingMessages: [] });
   });
 
   it("replaces messages when transformContext returns a new array", async () => {
@@ -772,6 +981,129 @@ describe("agentLoop", () => {
 
     expect(events.some((e) => e.type === "agent_done")).toBe(true);
     expect(result.totalTurns).toBe(1); // stall retries don't count as turns
+    const turnEnd = events.find((event) => event.type === "turn_end");
+    expect(turnEnd?.type === "turn_end" ? turnEnd.timing.ttftMs : 0).toBeGreaterThanOrEqual(90_000);
+    expect(
+      turnEnd?.type === "turn_end" ? turnEnd.timing.providerDurationMs : 0,
+    ).toBeGreaterThanOrEqual(90_000);
+  }, 30_000);
+
+  it("preserves partial streamed text across a transport-failure retry", async () => {
+    vi.useFakeTimers();
+
+    // >= 200 chars so the partial clears MIN_PARTIAL_PRESERVE_CHARS.
+    const partial = "Here is the first half of the answer. ".repeat(8);
+    let callIndex = 0;
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      callIndex++;
+      if (callIndex === 1) {
+        // Streams the partial, then stalls until the idle timeout aborts it.
+        const abortPromise = new Promise<never>((_, reject) => {
+          opts.signal?.addEventListener(
+            "abort",
+            () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            { once: true },
+          );
+        });
+        abortPromise.catch(() => {});
+        return {
+          [Symbol.asyncIterator]: async function* () {
+            yield { type: "text_delta" as const, text: partial };
+            await abortPromise;
+          },
+          response: abortPromise,
+        } as unknown as ReturnType<typeof stream>;
+      }
+      return mockOkResult("and the second half.") as unknown as ReturnType<typeof stream>;
+    });
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "hi" },
+    ];
+
+    const loopPromise = collectLoop(messages, { provider: "anthropic", model: "test" });
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(50_000);
+    }
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    // The retry event advertises the preserved chars so UIs skip the rollback.
+    const retry = events.find((e) => e.type === "retry" && e.reason === "stream_stall");
+    expect(retry && "preservedChars" in retry ? retry.preservedChars : 0).toBe(partial.length);
+
+    // History keeps the partial as an assistant message, then a continuation
+    // instruction, then the retry's completion — nothing regenerated.
+    const texts = messages.map((m) =>
+      typeof m.content === "string"
+        ? m.content
+        : (m.content as { type: string; text?: string }[])
+            .filter((p) => p.type === "text")
+            .map((p) => p.text)
+            .join(""),
+    );
+    const partialIdx = texts.findIndex((t) => t === partial);
+    expect(partialIdx).toBeGreaterThan(-1);
+    expect(messages[partialIdx].role).toBe("assistant");
+    expect(messages[partialIdx + 1].role).toBe("user");
+    expect(texts[partialIdx + 1]).toContain("cut off");
+    expect(texts.some((t) => t === "and the second half.")).toBe(true);
+  }, 30_000);
+
+  it("discards a sub-threshold partial on transport-failure retry", async () => {
+    vi.useFakeTimers();
+
+    const tiny = "Short."; // < MIN_PARTIAL_PRESERVE_CHARS — replay is cheaper
+    let callIndex = 0;
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      callIndex++;
+      if (callIndex === 1) {
+        const abortPromise = new Promise<never>((_, reject) => {
+          opts.signal?.addEventListener(
+            "abort",
+            () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            { once: true },
+          );
+        });
+        abortPromise.catch(() => {});
+        return {
+          [Symbol.asyncIterator]: async function* () {
+            yield { type: "text_delta" as const, text: tiny };
+            await abortPromise;
+          },
+          response: abortPromise,
+        } as unknown as ReturnType<typeof stream>;
+      }
+      return mockOkResult("Full answer.") as unknown as ReturnType<typeof stream>;
+    });
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "hi" },
+    ];
+
+    const loopPromise = collectLoop(messages, { provider: "anthropic", model: "test" });
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(50_000);
+    }
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    const retry = events.find((e) => e.type === "retry" && e.reason === "stream_stall");
+    expect(retry && "preservedChars" in retry ? retry.preservedChars : undefined).toBeUndefined();
+    // No preserved-partial assistant message in history.
+    const assistantTexts = messages
+      .filter((m) => m.role === "assistant")
+      .map((m) =>
+        typeof m.content === "string"
+          ? m.content
+          : (m.content as { type: string; text?: string }[])
+              .filter((p) => p.type === "text")
+              .map((p) => p.text)
+              .join(""),
+      );
+    expect(assistantTexts).not.toContain(tiny);
   }, 30_000);
 
   it("runs parallel tools concurrently by default", async () => {
@@ -896,11 +1228,99 @@ describe("agentLoop", () => {
     expect(calls).toEqual(["mutate:start", "mutate:end", "read_after"]);
   });
 
-  it("stops after repeated invalid tool arguments", async () => {
+  it("redacts successful tool output before events and provider context", async () => {
+    const canary = "sk-ant-api03-canarysecret123456";
+    mockStream
+      .mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve({
+          message: {
+            role: "assistant" as const,
+            content: [{ type: "tool_call" as const, id: "t1", name: "secret", args: {} }],
+          },
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        }),
+      } as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+    ];
+    const { events } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      tools: [
+        {
+          name: "secret",
+          description: "returns a canary",
+          parameters: emptyParams,
+          execute: () => ({ content: `result ${canary}`, details: { apiKey: canary } }),
+        },
+      ],
+    });
+
+    const serializedEvents = JSON.stringify(events);
+    const serializedMessages = JSON.stringify(messages);
+    expect(serializedEvents).not.toContain(canary);
+    expect(serializedMessages).not.toContain(canary);
+    expect(serializedEvents).toContain("[REDACTED]");
+    expect(serializedMessages).toContain("[REDACTED]");
+  });
+
+  it("redacts failed tool output before events and provider context", async () => {
+    const canary = "sk-ant-api03-failuresecret123456";
+    mockStream
+      .mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve({
+          message: {
+            role: "assistant" as const,
+            content: [{ type: "tool_call" as const, id: "t1", name: "secret", args: {} }],
+          },
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        }),
+      } as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+    ];
+    const { events } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      tools: [
+        {
+          name: "secret",
+          description: "throws a canary",
+          parameters: emptyParams,
+          execute: () => {
+            throw new Error(`request failed with ${canary}`);
+          },
+        },
+      ],
+    });
+
+    expect(JSON.stringify(events)).not.toContain(canary);
+    expect(JSON.stringify(messages)).not.toContain(canary);
+    expect(JSON.stringify(messages)).toContain("[REDACTED]");
+  });
+
+  it("stops after repeated invalid tool arguments with non-empty args", async () => {
+    // Non-empty (but wrong-typed) args mean the model actually attempted a
+    // value -- not a provider stream glitch -- so this stays non-recoverable
+    // and stops immediately after 3 identical failures, as before.
     const toolResponse = (id: string) => ({
       message: {
         role: "assistant" as const,
-        content: [{ type: "tool_call" as const, id, name: "bash", args: {} }],
+        content: [{ type: "tool_call" as const, id, name: "bash", args: { command: 123 } }],
       },
       stopReason: "tool_use",
       usage: { inputTokens: 50, outputTokens: 25 },
@@ -954,7 +1374,71 @@ describe("agentLoop", () => {
         }),
       }),
     );
+    // Non-recoverable fatal — no auto-continue retry event.
+    expect(events.filter((e) => e.type === "retry")).toHaveLength(0);
     expect(result.totalTurns).toBe(3);
+  });
+
+  it("auto-continues once after repeated EMPTY tool arguments, then stops if it recurs", async () => {
+    // Empty args (`{}`) is the signature of a provider stream that closed the
+    // tool_use block before ever sending argument tokens -- recoverable, so
+    // the loop gets exactly one bounded auto-continue before treating a
+    // repeat as fatal.
+    const emptyArgsResponse = (id: string) => ({
+      message: {
+        role: "assistant" as const,
+        content: [{ type: "tool_call" as const, id, name: "bash", args: {} }],
+      },
+      stopReason: "tool_use",
+      usage: { inputTokens: 50, outputTokens: 25 },
+    });
+
+    for (const id of ["t1", "t2", "t3", "t4", "t5", "t6"]) {
+      mockStream.mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve(emptyArgsResponse(id)),
+      } as unknown as ReturnType<typeof stream>);
+    }
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+    ];
+
+    const { events, result } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      tools: [
+        {
+          name: "bash",
+          description: "test",
+          parameters: z.object({ command: z.string() }),
+          execute: () => "should not execute",
+        },
+      ],
+    });
+
+    // 3 failures trip the recoverable path and auto-continue (no stop yet);
+    // 3 more failures after the fresh budget trip the fatal path for real.
+    expect(mockStream).toHaveBeenCalledTimes(6);
+    expect(events.filter((e) => e.type === "tool_call_end" && e.isError)).toHaveLength(6);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "retry", reason: "tool_argument_glitch" }),
+    );
+    expect(
+      events.filter((e) => e.type === "retry" && e.reason === "tool_argument_glitch"),
+    ).toHaveLength(1);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "error",
+        error: expect.objectContaining({
+          message: expect.stringContaining("repeatedly issued invalid arguments"),
+        }),
+      }),
+    );
+    expect(result.totalTurns).toBe(6);
   });
 
   it("respects maxTurns", async () => {
@@ -996,5 +1480,292 @@ describe("agentLoop", () => {
     });
 
     expect(result.totalTurns).toBe(2);
+  });
+
+  it("emits a terminal max_turns signal when the turn budget is exhausted mid-task", async () => {
+    // Model never stops calling tools, so the loop can only end by hitting the cap.
+    const toolResponse = {
+      message: {
+        role: "assistant" as const,
+        content: [{ type: "tool_call" as const, id: "t1", name: "test_tool", args: {} }],
+      },
+      stopReason: "tool_use",
+      usage: { inputTokens: 50, outputTokens: 25 },
+    };
+    mockStream.mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        // no text events
+      },
+      response: Promise.resolve(toolResponse),
+    } as unknown as ReturnType<typeof stream>);
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+    ];
+
+    const { events } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 3,
+      tools: [
+        {
+          name: "test_tool",
+          description: "test",
+          parameters: { parse: () => ({}) } as never,
+          execute: () => "result",
+        },
+      ],
+    });
+
+    const maxTurnsEvents = events.filter((e) => e.type === "max_turns");
+    expect(maxTurnsEvents).toHaveLength(1);
+    expect(maxTurnsEvents[0]).toMatchObject({ type: "max_turns", totalTurns: 3, maxTurns: 3 });
+
+    // It must be terminal: the final agent_done comes AFTER the max_turns signal.
+    const maxTurnsIndex = events.findIndex((e) => e.type === "max_turns");
+    const doneIndex = events.findIndex((e) => e.type === "agent_done");
+    expect(maxTurnsIndex).toBeGreaterThanOrEqual(0);
+    expect(doneIndex).toBeGreaterThan(maxTurnsIndex);
+  });
+
+  it("does NOT emit max_turns when the agent finishes cleanly under budget", async () => {
+    mockStream.mockReturnValue(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+    ];
+
+    const { events } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 5,
+    });
+
+    expect(events.some((e) => e.type === "max_turns")).toBe(false);
+    expect(events.some((e) => e.type === "agent_done")).toBe(true);
+  });
+});
+
+describe("agentLoop truncation handling", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  function mockStopResult(text: string, stopReason: string) {
+    const resp = makeResponse(text, stopReason);
+    const events = text ? [{ type: "text_delta" as const, text }] : [];
+    return {
+      [Symbol.asyncIterator]: async function* () {
+        for (const e of events) yield e;
+      },
+      response: Promise.resolve(resp),
+    };
+  }
+
+  const truncatedEvents = (events: AgentEvent[]) =>
+    events.filter((e): e is Extract<AgentEvent, { type: "truncated" }> => e.type === "truncated");
+
+  it("injects a continuation after a max_tokens stop and resumes the output", async () => {
+    mockStream
+      .mockReturnValueOnce(
+        mockStopResult("first half", "max_tokens") as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(
+        mockStopResult("second half", "end_turn") as unknown as ReturnType<typeof stream>,
+      );
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "go" },
+    ];
+
+    const { events, result } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+    });
+
+    const truncated = truncatedEvents(events);
+    expect(truncated).toEqual([{ type: "truncated", reason: "max_tokens", continued: true }]);
+    expect(events.some((e) => e.type === "agent_done")).toBe(true);
+    expect(result.totalTurns).toBe(2);
+
+    // The continuation user message was injected between the two assistant parts.
+    const continuation = messages.find(
+      (m) =>
+        m.role === "user" &&
+        typeof m.content === "string" &&
+        m.content.includes("output-token limit"),
+    );
+    expect(continuation).toBeDefined();
+    // Both parts are preserved in history — no replay.
+    const assistantTexts = messages
+      .filter((m) => m.role === "assistant")
+      .map((m) =>
+        Array.isArray(m.content)
+          ? m.content
+              .filter((p): p is { type: "text"; text: string } => p.type === "text")
+              .map((p) => p.text)
+              .join("")
+          : m.content,
+      );
+    expect(assistantTexts).toEqual(["first half", "second half"]);
+  });
+
+  it("stops continuing after two max_tokens continuations and warns", async () => {
+    mockStream.mockReturnValue(
+      mockStopResult("partial", "max_tokens") as unknown as ReturnType<typeof stream>,
+    );
+
+    const { events } = await collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+    });
+
+    const truncated = truncatedEvents(events);
+    expect(truncated).toEqual([
+      { type: "truncated", reason: "max_tokens", continued: true },
+      { type: "truncated", reason: "max_tokens", continued: true },
+      { type: "truncated", reason: "max_tokens", continued: false },
+    ]);
+    expect(events.some((e) => e.type === "agent_done")).toBe(true);
+  });
+
+  it("emits a provider_error truncated warning on an error stop", async () => {
+    mockStream.mockReturnValueOnce(
+      mockStopResult("degraded", "error") as unknown as ReturnType<typeof stream>,
+    );
+
+    const { events } = await collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+    });
+
+    const truncated = truncatedEvents(events);
+    expect(truncated).toEqual([{ type: "truncated", reason: "provider_error", continued: false }]);
+    expect(events.some((e) => e.type === "agent_done")).toBe(true);
+  });
+
+  it("emits a refusal truncated warning on a refusal stop", async () => {
+    mockStream.mockReturnValueOnce(
+      mockStopResult("no", "refusal") as unknown as ReturnType<typeof stream>,
+    );
+
+    const { events } = await collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+    });
+
+    expect(truncatedEvents(events)).toEqual([
+      { type: "truncated", reason: "refusal", continued: false },
+    ]);
+  });
+
+  it("executes tools normally on max_tokens with tool calls — no truncated event", async () => {
+    const toolResp = {
+      [Symbol.asyncIterator]: async function* () {
+        yield* [];
+      },
+      response: Promise.resolve({
+        message: {
+          role: "assistant" as const,
+          content: [{ type: "tool_call" as const, id: "t1", name: "echo", args: {} }],
+        },
+        stopReason: "max_tokens" as const,
+        usage: { inputTokens: 100, outputTokens: 50 },
+      }),
+    };
+    mockStream
+      .mockReturnValueOnce(toolResp as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(
+        mockStopResult("done", "end_turn") as unknown as ReturnType<typeof stream>,
+      );
+
+    const echo: AgentTool = {
+      name: "echo",
+      description: "echo",
+      parameters: emptyParams,
+      execute: vi.fn().mockResolvedValue("ok"),
+    };
+
+    const { events } = await collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+      tools: [echo],
+    });
+
+    expect(truncatedEvents(events)).toEqual([]);
+    expect(echo.execute).toHaveBeenCalledTimes(1);
+    expect(events.some((e) => e.type === "agent_done")).toBe(true);
+  });
+});
+
+describe("capTurnToolResults", () => {
+  const result = (id: string, content: string) => ({
+    type: "tool_result" as const,
+    toolCallId: id,
+    content,
+  });
+
+  it("leaves results untouched when the turn total fits the budget", () => {
+    const toolResults = [result("a", "x".repeat(400)), result("b", "y".repeat(500))];
+    capTurnToolResults(toolResults, 1_000);
+    expect(toolResults[0].content).toBe("x".repeat(400));
+    expect(toolResults[1].content).toBe("y".repeat(500));
+  });
+
+  it("is a no-op when no budget is configured", () => {
+    const toolResults = [result("a", "x".repeat(5_000))];
+    capTurnToolResults(toolResults, undefined);
+    expect(toolResults[0].content).toBe("x".repeat(5_000));
+  });
+
+  it("trims only the largest results and preserves small ones (water-filling)", () => {
+    const small = result("small", "s".repeat(200));
+    const medium = result("medium", "m".repeat(2_000));
+    const large = result("large", "l".repeat(20_000));
+    const toolResults = [large, small, medium];
+    capTurnToolResults(toolResults, 6_000);
+
+    expect(small.content).toBe("s".repeat(200));
+    expect(medium.content).toBe("m".repeat(2_000));
+    expect(large.content).not.toBe("l".repeat(20_000));
+    expect(large.content).toContain("characters trimmed");
+    expect(large.content).toContain("offset/limit");
+    // Trimmed large result keeps head and tail around the notice.
+    expect(large.content.startsWith("l")).toBe(true);
+    expect(large.content.endsWith("l")).toBe(true);
+    // Total payload (minus notices) respects the budget.
+    const kept = toolResults.reduce(
+      (sum, r) => sum + (r.content as string).replace(/\n\n\[\.\.\..*\.\.\.\]\n\n/s, "").length,
+      0,
+    );
+    expect(kept).toBeLessThanOrEqual(6_000);
+  });
+
+  it("splits the budget across several oversized parallel results", () => {
+    const toolResults = [
+      result("a", "a".repeat(50_000)),
+      result("b", "b".repeat(50_000)),
+      result("c", "c".repeat(50_000)),
+    ];
+    capTurnToolResults(toolResults, 30_000);
+    for (const r of toolResults) {
+      expect((r.content as string).length).toBeLessThan(50_000);
+      expect(r.content).toContain("characters trimmed");
+    }
+  });
+
+  it("ignores structured (non-string) results", () => {
+    const structured = {
+      type: "tool_result" as const,
+      toolCallId: "img",
+      content: [{ type: "text" as const, text: "t".repeat(10_000) }],
+    };
+    const text = result("txt", "x".repeat(10_000));
+    capTurnToolResults([structured, text], 5_000);
+    expect(structured.content[0].text).toBe("t".repeat(10_000));
+    expect(text.content).toContain("characters trimmed");
   });
 });

@@ -6,7 +6,7 @@ import { getAppPaths } from "../config.js";
 
 const SettingsSchema = z.object({
   autoCompact: z.boolean().default(true),
-  compactThreshold: z.number().min(0.1).max(1.0).default(0.8),
+  compactThreshold: z.number().min(0.1).max(1.0).default(0.85),
   defaultProvider: z
     .enum([
       "anthropic",
@@ -19,12 +19,13 @@ const SettingsSchema = z.object({
       "deepseek",
       "openrouter",
       "sakana",
+      "xai",
     ])
     .default("anthropic"),
   defaultModel: z.string().optional(),
   maxTokens: z.number().int().min(256).default(16384),
   thinkingEnabled: z.boolean().default(false),
-  thinkingLevel: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+  thinkingLevel: z.enum(["low", "medium", "high", "xhigh", "max", "ultra"]).optional(),
   theme: z
     .enum([
       "auto",
@@ -40,6 +41,15 @@ const SettingsSchema = z.object({
   idealReviewEnabled: z.boolean().default(true),
   /** Append LSP diagnostics to edit/write tool results. */
   lspDiagnostics: z.boolean().default(true),
+  /** Allow write/edit outside the workspace (cwd, tmpdir, ~/.gg). Off by
+   *  default — outside writes return a guard error asking for user approval. */
+  allowOutsideWorkspaceWrites: z.boolean().default(false),
+  /** Defer MCP tool schemas out of the prompt until discovered via tool_search.
+   *  Cuts ~8k tokens/cache-miss turn with two MCP servers (bench/RESULTS.md). */
+  deferredMcpTools: z.boolean().default(true),
+  /** Max concurrent subagents per resolved child model. Unset = only the
+   *  global limit applies. Can only REDUCE concurrency, never raise it. */
+  subagentMaxPerModel: z.number().int().min(1).max(4).optional(),
   enabledTools: z.array(z.string()).optional(),
   /** Delete session transcripts older than this many days at startup. 0 disables pruning. */
   sessionRetentionDays: z.number().int().min(0).default(30),
@@ -53,7 +63,7 @@ export type Settings = z.infer<typeof SettingsSchema>;
 
 export const DEFAULT_SETTINGS: Settings = {
   autoCompact: true,
-  compactThreshold: 0.8,
+  compactThreshold: 0.85,
   defaultProvider: "anthropic",
   maxTokens: 16384,
   thinkingEnabled: false,
@@ -61,6 +71,8 @@ export const DEFAULT_SETTINGS: Settings = {
   showTokenUsage: true,
   idealReviewEnabled: true,
   lspDiagnostics: true,
+  allowOutsideWorkspaceWrites: false,
+  deferredMcpTools: true,
   sessionRetentionDays: 30,
   speedProfile: "optimized",
 };

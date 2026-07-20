@@ -25,9 +25,57 @@ export function setWindowTitle(title: string): void {
   void appWindow.setTitle(title).catch(() => {});
 }
 
+export interface SubAgentStatePayload {
+  agent_id: string;
+  task_name: string;
+  state: "starting" | "running" | "completed" | "failed" | "interrupted" | "closed";
+  started_at: number;
+  updated_at: number;
+  elapsed_ms: number;
+  current_activity?: string;
+  turn_count: number;
+  tool_use_count: number;
+  token_usage: {
+    input: number;
+    output: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
+  output?: string;
+  error?: string;
+}
+
 export interface SidecarEvent {
   type: string;
   data: unknown;
+}
+
+export interface MemoryChangeEvent extends SidecarEvent {
+  type: "memory_change";
+  data: { count: number };
+}
+
+export function isMemoryChangeEvent(event: SidecarEvent): event is MemoryChangeEvent {
+  return (
+    event.type === "memory_change" &&
+    typeof event.data === "object" &&
+    event.data !== null &&
+    typeof (event.data as { count?: unknown }).count === "number"
+  );
+}
+
+export interface JiwaChangeEvent extends SidecarEvent {
+  type: "jiwa_change";
+  data: { count: number };
+}
+
+export function isJiwaChangeEvent(event: SidecarEvent): event is JiwaChangeEvent {
+  return (
+    event.type === "jiwa_change" &&
+    typeof event.data === "object" &&
+    event.data !== null &&
+    typeof (event.data as { count?: unknown }).count === "number"
+  );
 }
 
 /** A background process (bash run_in_background), mirrored from the sidecar. */
@@ -40,11 +88,63 @@ export interface BackgroundTask {
   exitCode: number | null;
 }
 
+export type WorkspaceMode = "code" | "chat";
+export type ChatAgentId = "general" | "therapist" | "research";
+
+export type MemoryCategory =
+  | "identity"
+  | "preference"
+  | "project"
+  | "relationship"
+  | "health"
+  | "other";
+
+export interface Memory {
+  id: string;
+  text: string;
+  category: MemoryCategory;
+  importance: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MemorySnapshot {
+  memories: Memory[];
+  softLimit: number;
+  hardLimit: number;
+}
+
+export type JiwaCategory =
+  | "identity"
+  | "voice"
+  | "interaction"
+  | "boundaries"
+  | "workflow"
+  | "other";
+
+export interface JiwaEntry {
+  id: string;
+  text: string;
+  category: JiwaCategory;
+  importance: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface JiwaSnapshot {
+  jiwa: JiwaEntry[];
+  softLimit: number;
+  hardLimit: number;
+}
+
 export interface AgentState {
   provider: string;
   model: string;
   cwd: string;
+  mode: WorkspaceMode;
+  chatAgent?: ChatAgentId;
   running: boolean;
+  runState?: "idle" | "running" | "cancelling";
   /** Current reasoning level, or null when thinking is off. May be absent on
    * frames from older sidecars / partial model_change spreads. */
   thinkingLevel?: string | null;
@@ -58,8 +158,20 @@ export interface AgentState {
   gitBranch?: string | null;
   /** True when the project cwd is inside a git work tree. */
   isGitRepo?: boolean;
+  /** Tracked, staged, and untracked files not yet committed. */
+  gitDirtyFileCount?: number;
   /** True when the active model can accept native video input. */
   supportsVideo?: boolean;
+  /** Autopilot (auto-review) toggle for this window's project. Per-window,
+   *  persisted server-side; absent on frames from older sidecars. */
+  autopilot?: boolean;
+  /** Provider of the model Ken (mentor + autopilot) uses next turn. */
+  kenProvider?: string;
+  /** The model Ken uses next turn — his pin when set, else GG Coder's model.
+   *  Absent on frames from older sidecars (footer falls back to `model`). */
+  kenModel?: string;
+  /** True when Ken is pinned to his own model (not following GG Coder). */
+  kenModelOverride?: boolean;
   /** Live background tasks (footer indicator). */
   tasks?: BackgroundTask[];
 }
@@ -105,6 +217,26 @@ export async function deleteTask(id: string): Promise<ProjectTask[]> {
   }
 }
 
+export async function listMemories(): Promise<MemorySnapshot> {
+  await waitForReady();
+  return invoke<MemorySnapshot>("agent_memories");
+}
+
+export async function deleteMemory(id: string): Promise<MemorySnapshot> {
+  await waitForReady();
+  return invoke<MemorySnapshot>("agent_delete_memory", { id });
+}
+
+export async function listJiwa(): Promise<JiwaSnapshot> {
+  await waitForReady();
+  return invoke<JiwaSnapshot>("agent_jiwa");
+}
+
+export async function deleteJiwa(id: string): Promise<JiwaSnapshot> {
+  await waitForReady();
+  return invoke<JiwaSnapshot>("agent_delete_jiwa", { id });
+}
+
 export interface ThinkingState {
   thinkingLevel: string | null;
   supportedThinkingLevels: string[];
@@ -137,6 +269,7 @@ export interface RecentSession {
   preview: string;
   lastActiveDisplay: string;
   messageCount: number;
+  chatAgent?: ChatAgentId;
 }
 
 export interface SwitchModelResult extends ThinkingState {
@@ -144,8 +277,117 @@ export interface SwitchModelResult extends ThinkingState {
   model: string;
 }
 
+/** Result of pinning/clearing Ken's model — his effective model afterward. */
+export interface SwitchKenModelResult {
+  kenProvider: string;
+  kenModel: string;
+  kenModelOverride: boolean;
+}
+
 export async function getState(): Promise<AgentState> {
   return invoke<AgentState>("agent_state");
+}
+
+// ── Progress (Ranks) ─────────────────────────────────────────────────────
+
+/** One rung of the 50-rank ladder, as computed by the sidecar. */
+export interface RankLadderEntry {
+  level: number;
+  name: string;
+  tier: number;
+  tierName: string;
+  effectId: string;
+  xpRequired: number;
+}
+
+export interface LevelUpEvent {
+  from: number;
+  to: number;
+  rankName: string;
+}
+
+/** XP/rank snapshot — fully computed sidecar-side; the webview renders it verbatim. */
+export interface ProgressSnapshot {
+  level: number;
+  rankName: string;
+  tier: number;
+  tierName: string;
+  tierGlyph: string;
+  effectId: string;
+  xp: number;
+  xpIntoLevel: number;
+  xpForLevel: number;
+  percent: number;
+  streak: { current: number; best: number };
+  totals: { prompts: number; commits: number; linesShipped: number; projects: number };
+  xpBySource: { prompts: number; commits: number; streakBonus: number };
+  memberSince: string;
+  ladder: RankLadderEntry[];
+  levelUp: LevelUpEvent | null;
+  eventNonce: string | null;
+  /** True only on the frame sent to the window whose run earned the XP —
+   *  gates window-local feedback (sounds, XP chips). Absent on GET /progress. */
+  origin?: boolean;
+}
+
+/** Fetch the current XP/rank snapshot (initial paint; live updates ride `progress` frames). */
+export async function getProgress(): Promise<ProgressSnapshot> {
+  await waitForReady();
+  return invoke<ProgressSnapshot>("agent_progress");
+}
+
+export type SubscriptionUsageProvider = "anthropic" | "openai";
+
+export interface SubscriptionUsageWindow {
+  kind: "current" | "weekly";
+  label: string;
+  usedPercent: number;
+  /** Unix epoch milliseconds. */
+  resetsAt?: number;
+}
+
+export interface SubscriptionUsageProviderSnapshot {
+  provider: SubscriptionUsageProvider;
+  displayName: string;
+  connected: boolean;
+  windows: SubscriptionUsageWindow[];
+  fetchedAt: number;
+  error?: string;
+}
+
+/** Fetch OAuth subscription quota. Tokens never leave the sidecar. */
+export async function getSubscriptionUsage(
+  provider: SubscriptionUsageProvider,
+): Promise<SubscriptionUsageProviderSnapshot> {
+  await waitForReady();
+  return invoke<SubscriptionUsageProviderSnapshot>("agent_usage", { provider });
+}
+
+/**
+ * One piece of an enhanced prompt. A `text` segment is verbatim prose; a `term`
+ * segment is a corrected technical term the model swapped in, carrying the
+ * user's `original` phrasing (and an optional `note`) so the UI can teach the
+ * difference via a tooltip. Mirrors the sidecar's PromptSegment.
+ */
+export type PromptSegment =
+  | { kind: "text"; text: string }
+  | { kind: "term"; text: string; original: string; note?: string };
+
+export interface EnhanceResult {
+  /** The plain rewritten prompt — exactly what gets sent to the agent. */
+  enhanced: string;
+  /** The same prompt split into prose + corrected-term segments for the UI. */
+  segments: PromptSegment[];
+}
+
+/**
+ * Rewrite the current draft into a tighter, terminology-correct prompt using
+ * the active model. Throws with a user-facing message on failure (the caller
+ * surfaces it via toast).
+ */
+export async function enhancePrompt(text: string): Promise<EnhanceResult> {
+  await waitForReady();
+  return invoke<EnhanceResult>("agent_enhance_prompt", { text });
 }
 
 export async function openProjectPath(path: string): Promise<void> {
@@ -162,6 +404,21 @@ export async function openProjectPath(path: string): Promise<void> {
   }
 }
 
+export interface DroppedPathInfo {
+  path: string;
+  isDir: boolean;
+}
+
+export async function getDroppedPathInfo(paths: string[]): Promise<DroppedPathInfo[]> {
+  if (paths.length === 0) return [];
+  try {
+    return await invoke<DroppedPathInfo[]>("dropped_path_info", { paths });
+  } catch (e) {
+    await logError(`dropped_path_info failed: ${String(e)}`);
+    return paths.map((path) => ({ path, isDir: false }));
+  }
+}
+
 /** A chat-input attachment (image / video / other file) sent with a prompt. */
 export interface Attachment {
   kind: "image" | "video" | "file";
@@ -171,23 +428,161 @@ export interface Attachment {
   data: string;
 }
 
-export async function sendPrompt(text: string, attachments: Attachment[] = []): Promise<void> {
+/** Read a natively-dropped (non-directory) file's bytes as base64, since a
+ *  native drag-drop only gives us a path — no browser File object. Returns
+ *  null (logging) on failure (e.g. permission denied, file too large) so one
+ *  bad file in a multi-file drop doesn't block the rest. */
+export async function readDroppedFileAttachment(path: string): Promise<Attachment | null> {
+  try {
+    const res = await invoke<{ name: string; mediaType: string; data: string }>(
+      "read_dropped_file_attachment",
+      { path },
+    );
+    const kind: Attachment["kind"] = res.mediaType.startsWith("image/")
+      ? "image"
+      : res.mediaType.startsWith("video/")
+        ? "video"
+        : "file";
+    return { kind, name: res.name, mediaType: res.mediaType, data: res.data };
+  } catch (e) {
+    await logError(`read_dropped_file_attachment failed for ${path}: ${String(e)}`);
+    return null;
+  }
+}
+
+/** Display hints for the user bubble this prompt creates — persisted by the
+ *  sidecar so a resumed session re-renders the same bubble (Ken "Sent to GG
+ *  Coder" label, enhancer term highlights). */
+export interface PromptMeta {
+  kenSent?: boolean;
+  enhancements?: PromptSegment[];
+}
+
+export async function sendPrompt(
+  text: string,
+  attachments: Attachment[] = [],
+  meta?: PromptMeta,
+): Promise<void> {
   await logInfo(
     `prompt: ${text.slice(0, 80)}${attachments.length ? ` (+${attachments.length} att)` : ""}`,
   );
   try {
-    await invoke("agent_prompt", { text, attachments });
+    await invoke("agent_prompt", { text, attachments, meta: meta ?? null });
   } catch (e) {
     await logError(`agent_prompt failed: ${String(e)}`);
     throw e;
   }
 }
 
-export async function cancel(): Promise<void> {
+export interface CancelResult {
+  cancelled: boolean;
+  runState: "idle" | "running" | "cancelling";
+  drained: string;
+}
+
+export interface CancelFailure {
+  error: "cancel_failed";
+  reason?: "timeout";
+  runState?: "running" | "cancelling";
+  message?: string;
+  drained?: string;
+}
+
+export class AgentCancelError extends Error {
+  constructor(readonly failure: CancelFailure) {
+    super(failure.message ?? `Cancellation failed${failure.reason ? `: ${failure.reason}` : ""}.`);
+    this.name = "AgentCancelError";
+  }
+}
+
+export function parseCancelFailure(error: unknown): CancelFailure {
+  if (typeof error === "object" && error !== null && "error" in error) {
+    return error as CancelFailure;
+  }
+  const text = String(error);
   try {
-    await invoke("agent_cancel");
+    const parsed = JSON.parse(text) as Partial<CancelFailure>;
+    if (parsed.error === "cancel_failed") return parsed as CancelFailure;
+  } catch {
+    // Tauri/native transport failures are not JSON; normalize below.
+  }
+  return { error: "cancel_failed", message: text };
+}
+
+export async function cancel(): Promise<CancelResult> {
+  try {
+    return await invoke<CancelResult>("agent_cancel");
+  } catch (error) {
+    const failure = parseCancelFailure(error);
+    await logError(`agent_cancel failed: ${JSON.stringify(failure)}`);
+    throw new AgentCancelError(failure);
+  }
+}
+
+// ── Ken Kai (mentor agent) ──────────────────────────────────
+// Ken is a second, read-only agent in this window. The user reaches him with
+// `@Ken …`; he reads GG Coder's transcript and hands back runnable prompts +
+// blunt mentorship. His replies stream over the SAME SSE channel as GG Coder's
+// but with `ken_`-prefixed event types, so the webview routes them to a separate
+// magenta bubble:
+//   ken_run_start { text }         — Ken started thinking
+//   ken_text_delta { text }        — streaming reply text
+//   ken_thinking_delta { text }    — streaming reasoning
+//   ken_tool_call_start/_update/_end — Ken's read-only tool activity
+//   ken_turn_end { … }            — a turn finished
+//   ken_run_end { cancelled? }     — Ken finished (or was cancelled)
+//   ken_error { message }          — Ken failed
+//
+// Autopilot Ken (auto-reviewer) is a SEPARATE, non-chatty mode of the same Ken.
+// When autopilot is on, after each GG Coder run the sidecar silently drives a
+// review→prompt→review loop and emits the `autopilot_*` family (no chat bubble,
+// no new IPC — cancel reuses agent_cancel). All ride the same generic
+// `agent-event` SSE channel:
+//   autopilot_review_start {}       — Ken started an auto-review (spinner)
+//   autopilot_prompted { round }    — Ken fed GG Coder another prompt (marker)
+//   autopilot_done {}               — Ken gave the all-clear, loop stops
+//   autopilot_ignored {}            — nothing worth reviewing, loop stops SILENTLY (no marker)
+//   autopilot_human { reason }      — Ken needs a human decision, loop stops
+//   autopilot_capped { rounds }     — round cap hit, loop paused
+//   autopilot_plan_accepted {}      — Ken approved a submitted plan; broadcast
+//                                     BEFORE the session_reset that follows so
+//                                     the webview can seed the plan-progress
+//                                     widget from the still-open plan modal
+//   autopilot_error { headline, … } — a review failed (structured, like error)
+
+/** Ask Ken Kai. Fires the read-only mentor run; reply arrives via `ken_*`
+ *  SSE events. Lazily boots Ken's session on first use. */
+export async function sendKenPrompt(text: string): Promise<void> {
+  await logInfo(`ken prompt: ${text.slice(0, 80)}`);
+  try {
+    await waitForReady();
+    await invoke("agent_ken_prompt", { text });
   } catch (e) {
-    await logError(`agent_cancel failed: ${String(e)}`);
+    await logError(`agent_ken_prompt failed: ${String(e)}`);
+    throw e;
+  }
+}
+
+/** Cancel Ken's in-flight run (does not touch GG Coder's run). */
+export async function cancelKen(): Promise<void> {
+  try {
+    await waitForReady();
+    await invoke("agent_ken_cancel");
+  } catch (e) {
+    await logError(`agent_ken_cancel failed: ${String(e)}`);
+  }
+}
+
+/** Toggle autopilot (auto-review) for this window's project. Persisted
+ *  server-side (~/.gg/gg-app.json, keyed by cwd). Returns the new value. */
+export async function setAutopilot(enabled: boolean): Promise<boolean> {
+  try {
+    await waitForReady();
+    const res = await invoke<{ autopilot?: boolean }>("agent_autopilot_set", { enabled });
+    return res.autopilot ?? enabled;
+  } catch (e) {
+    await logError(`agent_autopilot_set failed: ${String(e)}`);
+    return enabled;
   }
 }
 
@@ -220,6 +615,36 @@ export interface HistoryEntry {
   /** True when this user message is a post-compaction summary marker, so the
    *  webview renders the quiet compaction notice instead of the summary body. */
   compacted?: boolean;
+  /** Persisted counts for a compacted row's "N → M messages" summary. */
+  compactionCounts?: { originalCount: number; newCount: number };
+  /** True when this entry is a persisted Ken Kai (mentor) turn: a `user` row is
+   *  the `@Ken` question, an `assistant` row is Ken's reply. Rendered in Ken's
+   *  color (user bubble tinted, assistant as a Ken bubble) on resume. */
+  ken?: boolean;
+  /** Present when this entry is a persisted autopilot verdict marker. Rendered
+   *  identically to the live `autopilot` item (Ken-tinted bubble), never as
+   *  the raw verdict keyword the model replied with (e.g. `ALL_CLEAR`). */
+  autopilot?: {
+    phase: "prompted" | "done" | "human" | "capped" | "plan_approved";
+    reason?: string;
+    body?: string;
+    /** Stable seed from persisted marker data so resumed all-clear copy doesn't flicker. */
+    copySeed?: string;
+  };
+  /** True when this user prompt came from a Ken "Send to GG Coder" button —
+   *  render the shimmering label instead of the prompt body (matches live). */
+  kenSent?: boolean;
+  /** Enhancer highlight segments, restored for unedited enhanced sends. */
+  enhancements?: PromptSegment[];
+  /** Plan-mode entry banner (reason), persisted at plan_enter. */
+  plan?: { reason: string };
+  /** Task header row (title), persisted at task_start. */
+  task?: { title: string };
+  /** Error row persisted by the sidecar's broadcastError. `scope` selects the
+   *  live headline prefix (ken_error → "Ken: ", autopilot_error → "Autopilot: "). */
+  error?: { scope: string; headline: string; message?: string; guidance?: string };
+  /** Webview-copy info row marker (e.g. the video-capability warning). */
+  infoKind?: "video_warning";
   /** Tool-produced images rendered inline (same as live `images` items),
    *  reconstructed from ImageContent blocks in persisted tool results. */
   toolImages?: Array<{ src: string; path?: string }>;
@@ -245,6 +670,18 @@ export async function listHistory(): Promise<HistoryEntry[]> {
 // ── Provider auth (login) ──────────────────────────────────
 export type AuthMethod = "oauth" | "apikey";
 
+/**
+ * One API-key option for a provider that splits auth across multiple distinct
+ * endpoints/credentials (currently only Xiaomi: Token Plan vs. API Credits).
+ */
+export interface ApiKeyVariant {
+  /** Storage key in auth.json (distinct from the provider `value`). */
+  key: string;
+  /** Display label, e.g. "Token Plan" or "API Credits". */
+  label: string;
+  baseUrl?: string;
+}
+
 export interface AuthProvider {
   value: string;
   label: string;
@@ -252,6 +689,8 @@ export interface AuthProvider {
   methods: AuthMethod[];
   apiKeyLabel?: string;
   apiKeyBaseUrl?: string;
+  /** When set, the API-key flow must ask which variant before submitting. */
+  apiKeyVariants?: ApiKeyVariant[];
   /** Live connection status from ~/.gg/auth.json. */
   connected: boolean;
 }
@@ -280,8 +719,8 @@ export async function authStatus(): Promise<AuthProvider[]> {
  * user's sidecar may not have booted yet, and a sidecar round-trip would hang.
  * Throws with a user-facing message on error.
  */
-export async function authApiKey(provider: string, key: string): Promise<void> {
-  await invoke("app_auth_apikey", { provider, key });
+export async function authApiKey(provider: string, key: string, variant?: string): Promise<void> {
+  await invoke("app_auth_apikey", { provider, key, variant });
 }
 
 /**
@@ -331,29 +770,36 @@ export interface RadioStation {
 
 export interface RadioState {
   stations: RadioStation[];
-  /** Currently-playing station id for THIS window, or null when off. */
+  /** Currently-playing station id app-wide, or null when paused. */
   current: string | null;
+  volume: number;
 }
 
-/** Read this window's radio state (available stations + what's playing). */
+/** Read app-wide radio state (stations, playback, and volume). */
 export async function getRadioState(): Promise<RadioState> {
   try {
     const res = await invoke<RadioState>("agent_radio_state");
-    return { stations: res.stations ?? [], current: res.current ?? null };
+    return {
+      stations: res.stations ?? [],
+      current: res.current ?? null,
+      volume: Number.isFinite(res.volume) ? res.volume : 70,
+    };
   } catch (e) {
     await logError(`agent_radio_state failed: ${String(e)}`);
-    return { stations: [], current: null };
+    return { stations: [], current: null, volume: 70 };
   }
 }
 
-/**
- * Play a station by id, or stop with "off". Playback is isolated to this
- * window's sidecar. Returns the now-playing id (null when stopped). Throws with
- * a user-facing message when no player is installed.
- */
+/** Play a station by id, or pause with "off". */
 export async function setRadio(station: string): Promise<string | null> {
   const res = await invoke<{ current: string | null }>("agent_radio_set", { station });
   return res.current ?? null;
+}
+
+/** Set app-wide radio volume from 0 to 100. */
+export async function setRadioVolume(volume: number): Promise<number> {
+  const res = await invoke<{ volume: number }>("agent_radio_volume", { volume });
+  return Number.isFinite(res.volume) ? res.volume : volume;
 }
 
 /** Stop a background task by id. Returns the sidecar's status message, if any. */
@@ -409,6 +855,17 @@ export async function switchModel(model: string): Promise<SwitchModelResult | nu
   }
 }
 
+/** Pin Ken (mentor + autopilot) to a model, or pass null to clear the pin so
+ *  he follows GG Coder's model again. Returns his effective model. */
+export async function switchKenModel(model: string | null): Promise<SwitchKenModelResult | null> {
+  try {
+    return await invoke<SwitchKenModelResult>("agent_switch_ken_model", { model });
+  } catch (e) {
+    await logError(`agent_switch_ken_model failed: ${String(e)}`);
+    return null;
+  }
+}
+
 /** App settings. `configured` is true only when the user explicitly set a
  * projects root (not the default fallback). */
 export interface AppSettings {
@@ -439,6 +896,41 @@ export async function getSettings(): Promise<AppSettings | null> {
  */
 export async function saveSettings(projectsRoot: string): Promise<void> {
   await invoke("app_settings_save", { projectsRoot });
+}
+
+export interface PermissionsStatus {
+  /** False on platforms with nothing to grant (Windows/Linux today) — the
+   *  caller should hide the permissions row entirely rather than show a
+   *  badge for a permission that doesn't exist. */
+  applicable: boolean;
+  granted: boolean;
+}
+
+/**
+ * OS permission needed for sub-agents to run without repeat "Allow" prompts:
+ * each subagent call spawns a fresh `ggnode` process, and macOS re-triggers
+ * its per-folder privacy prompt (Desktop/Documents/Downloads/iCloud) for every
+ * newly-spawned binary unless Full Disk Access is granted. Handled NATIVELY in
+ * Rust so it works even before the sidecar is up. Falls back to "not
+ * applicable" on any failure so the row degrades to hidden, never stuck open.
+ */
+export async function getPermissionsStatus(): Promise<PermissionsStatus> {
+  try {
+    return await invoke<PermissionsStatus>("permissions_status");
+  } catch (e) {
+    await logError(`permissions_status failed: ${String(e)}`);
+    return { applicable: false, granted: false };
+  }
+}
+
+/** Open the OS's permission-grant screen (macOS: System Settings → Privacy &
+ *  Security → Full Disk Access). No-op on platforms where it's not applicable. */
+export async function openPermissionsSettings(): Promise<void> {
+  try {
+    await invoke("open_permissions_settings");
+  } catch (e) {
+    await logError(`open_permissions_settings failed: ${String(e)}`);
+  }
 }
 
 /**
@@ -486,10 +978,16 @@ export async function searchFiles(query: string): Promise<FileHit[]> {
   }
 }
 
-/** List the latest sessions for a project cwd (newest first, with previews). */
-export async function listSessions(cwd: string): Promise<RecentSession[]> {
+/** List the latest sessions for a project, one chat agent, or every chat agent. */
+export async function listSessions(
+  cwd: string,
+  chatAgent?: ChatAgentId | "all",
+): Promise<RecentSession[]> {
   try {
-    const res = await invoke<{ sessions: RecentSession[] }>("agent_sessions", { cwd });
+    const res = await invoke<{ sessions: RecentSession[] }>("agent_sessions", {
+      cwd,
+      chatAgent: chatAgent ?? null,
+    });
     return res.sessions ?? [];
   } catch (e) {
     await logError(`agent_sessions failed: ${String(e)}`);
@@ -498,15 +996,32 @@ export async function listSessions(cwd: string): Promise<RecentSession[]> {
 }
 
 /**
- * Re-point this window's agent at a project: respawns the sidecar at `cwd`,
+ * Re-point this window's agent at a workspace: respawns the sidecar at `cwd`,
  * optionally resuming `sessionPath`. The caller re-runs the ready flow after.
  */
+export async function selectWorkspace(
+  mode: WorkspaceMode,
+  cwd: string,
+  sessionPath?: string,
+  chatAgent: ChatAgentId = "general",
+): Promise<void> {
+  await invoke("select_project", {
+    mode,
+    chatAgent,
+    cwd,
+    sessionPath: sessionPath ?? null,
+  });
+}
+
+/** Re-point this window at a coding project. */
 export async function selectProject(cwd: string, sessionPath?: string): Promise<void> {
-  await invoke("select_project", { cwd, sessionPath: sessionPath ?? null });
+  await selectWorkspace("code", cwd, sessionPath);
 }
 
 /** The project/session a window was restored to on app boot (workspace restore). */
 export interface RestoreTarget {
+  mode: WorkspaceMode;
+  chatAgent?: ChatAgentId;
   cwd: string;
   sessionPath: string | null;
 }
@@ -536,6 +1051,18 @@ export async function setupWindows(count: number): Promise<void> {
     await invoke("setup_windows", { count });
   } catch (e) {
     await logError(`setup_windows failed: ${String(e)}`);
+    throw e;
+  }
+}
+
+/** Open the dedicated, screen-centered "What's new" window (or refocus it if it's
+ *  already open). Only the main window calls this, exactly once per update — see
+ *  WhatsNewTrigger. */
+export async function openWhatsNewWindow(): Promise<void> {
+  try {
+    await invoke("open_whatsnew_window");
+  } catch (e) {
+    await logError(`open_whatsnew_window failed: ${String(e)}`);
     throw e;
   }
 }

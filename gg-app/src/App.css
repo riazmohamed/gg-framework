@@ -26,6 +26,11 @@
   --user-text: #818cf8;
   --user-bg: #313a49;
 
+  /* Ken Kai (mentor agent) — soft cyan/green. Single source of truth with
+     theme.ken in theme.ts; both MUST match or the inline-styled @Ken input
+     drifts from the CSS-styled chat bubbles. Marks every Ken element. */
+  --ken: #5ad1e6;
+
   /* Shape system (Linear capsule-vs-card + Warp three radii). */
   --radius-button: 6px;
   --radius-card: 10px;
@@ -131,6 +136,15 @@
   padding: 0;
   border-radius: var(--radius-pill);
   flex: 0 0 auto;
+}
+/* Nav icon buttons (Radio, Windows, …) hold a stroked lucide SVG. Animating the
+   .btn-ghost `filter: brightness()` over a stroked icon re-rasterizes it on a
+   filter layer every frame → visible shimmer/jitter. Brighten the icon via
+   `color` instead (lucide strokes use currentColor): same hover read as the
+   text buttons, zero re-raster, zero movement. */
+.btn-nav-icon:hover:not(:disabled) {
+  filter: none;
+  color: var(--text);
 }
 
 * {
@@ -456,7 +470,8 @@ body {
 .home > .home-byline,
 .home > .home-actions,
 .home > .home-update,
-.home > .home-version {
+.home > .home-version,
+.home > .home-version-row {
   position: relative;
   z-index: 1;
 }
@@ -465,6 +480,7 @@ body {
    shimmer, so it gets BOTH animations (reveal-up once + ggshimmer looping). */
 .home > .home-update,
 .home > .home-version,
+.home > .home-version-row,
 .home > .home-tagline,
 .home > .home-byline,
 .home > .home-actions {
@@ -477,7 +493,8 @@ body {
   animation-delay: 120ms, 0s;
 }
 .home > .home-update,
-.home > .home-version {
+.home > .home-version,
+.home > .home-version-row {
   animation-delay: 40ms;
 }
 .home > .home-tagline {
@@ -492,6 +509,7 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .home > .home-update,
   .home > .home-version,
+  .home > .home-version-row,
   .home > .home-tagline,
   .home > .home-byline,
   .home > .home-actions {
@@ -526,6 +544,110 @@ body {
 .ascii-logo-line {
   white-space: pre;
 }
+
+/* ── Ken power banner (Autopilot on/off) ──────────────────────────────────
+   Takeover of the chat BODY only — lives inside `.transcript-frame`, the
+   non-scrolling sibling wrapping `.transcript` (see that rule below), so it
+   stays pinned to the visible viewport at any scroll position instead of the
+   scrolled chat content. The chat head/nav above and the tool
+   panel/activity bar/input footer below stay visible and untouched. A "KEN IS
+   ON"/"KEN IS OFF" ASCII banner
+   (same ANSI-Shadow block font as the GG CODER home logo) materializes with
+   the same scale+fade "flash" the app already uses for the zoom-level HUD
+   (see `.zoom-overlay-card`/`zoom-overlay-in`) instead of sliding across the
+   pane — a small, on-brand pop in place, held, then a soft dissolve out. Sits
+   over the same dark surface as the chat background so it reads as an
+   overlay, not a new screen. Purely decorative — clicks pass through to
+   whatever is underneath. */
+.ken-power-overlay {
+  position: absolute;
+  /* Bleed 1px past every edge (clipped by `.transcript-frame`'s `overflow:
+     hidden`) rather than a flush `inset: 0` — under CSS `zoom` the absolutely
+     positioned overlay's content box can round a hair narrower than its
+     positioned ancestor, leaving a hairline sliver of chat text visible along
+     the top edge. The 1px bleed guarantees full coverage regardless of the
+     rounding direction. */
+  inset: -1px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--bg);
+  pointer-events: none;
+}
+.ken-power-banner {
+  font-family: var(--mono);
+  font-size: clamp(7px, 1.7vw, 12px);
+  line-height: 1.05;
+  white-space: pre;
+  text-align: center;
+  animation: ken-power-flash 1150ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.ken-power-banner-line {
+  white-space: pre;
+}
+/* ON: vibrant Ken-teal shimmer sweep + soft glow, mirroring the home logo's
+   gradient treatment but in Ken's color. */
+.ken-power-banner-on {
+  background: linear-gradient(
+    100deg,
+    #3fa9bd 0%,
+    #5ad1e6 25%,
+    #a6f0ff 50%,
+    #5ad1e6 75%,
+    #3fa9bd 100%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--ken) 45%, transparent));
+  animation:
+    ken-power-flash 1150ms cubic-bezier(0.22, 1, 0.36, 1) both,
+    ggshimmer 1.4s linear infinite;
+}
+/* OFF: flat, dim — no shimmer, signals the loop is stopped. */
+.ken-power-banner-off {
+  color: var(--text-dim);
+}
+/* Scale-and-fade "power flash": pops in slightly undersized (like the zoom
+   HUD), rests at full size while held, then grows a touch further as it
+   dissolves out — a gentle energize/derez feel with zero lateral motion. */
+@keyframes ken-power-flash {
+  0% {
+    transform: scale(0.92);
+    opacity: 0;
+  }
+  16% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  82% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.05);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ken-power-banner,
+  .ken-power-banner-on {
+    animation: ken-power-fade 900ms ease both;
+  }
+}
+@keyframes ken-power-fade {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  15%,
+  80% {
+    opacity: 1;
+  }
+}
 .home-tagline {
   margin-top: -12px;
   font-size: 13px;
@@ -554,16 +676,16 @@ body {
 .home-actions {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  width: min(320px, 80vw);
+  gap: 10px;
+  width: min(280px, 80vw);
 }
-/* Home actions are the brand showcase — full-width pills, a touch taller. */
+/* Home navigation uses the same compact sizing as modal actions. */
 .home-btn {
   width: 100%;
-  font-size: 15px;
-  padding: 14px 22px;
+  font-size: 13px;
+  padding: 8px 16px;
 }
-/* Projects + its settings icon sit on one row; the pill flexes, icon is fixed. */
+/* Home action rows share width; primary row fits Code, Chat, and Settings. */
 .home-projects-row {
   display: flex;
   gap: 10px;
@@ -572,10 +694,17 @@ body {
 .home-projects-row .home-btn {
   flex: 1 1 auto;
 }
+.home-primary-row {
+  gap: 8px;
+}
+.home-primary-row .home-btn {
+  min-width: 0;
+  padding-inline: 12px;
+}
 .home-settings {
   flex: 0 0 auto;
-  width: 48px;
-  height: 48px;
+  width: 36px;
+  height: 36px;
 }
 /* Serve button while live: glossy green pill, so "on" reads at a glance. */
 .home-serve-active {
@@ -745,19 +874,32 @@ body {
 .platform-macos .chat-head-strip {
   padding: 0 14px 0 82px;
 }
-/* The window title (session title once generated, else "GG Coder"). The native
-   overlay title is hidden (hiddenTitle), so this is the ONLY title. It grows to
-   take the slack and truncates with an ellipsis on small windows, so it never
-   overlaps the toggle. */
+/* The visible window title shows project context: cwd, current branch, then the
+   uncommitted-file count. It grows into available space and truncates as one
+   unit on narrow windows so the usage meter and controls remain reachable. */
 .chat-head-title {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: var(--mono);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text);
+}
+.chat-head-cwd {
+  color: var(--text-dim);
+}
+.chat-head-sep {
+  margin: 0 8px;
+  color: var(--border);
+}
+.chat-head-branch {
+  color: var(--secondary);
+}
+.chat-head-dirty {
+  color: var(--warning);
 }
 /* Position pill — "1/4" reading-order indicator for multi-window orientation.
    Shown only when >1 window is open. Dimmed when this window is not focused. */
@@ -884,6 +1026,7 @@ body {
   margin-bottom: 20px;
 }
 .modal-title {
+  margin: 0;
   font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.02em;
@@ -983,12 +1126,115 @@ body {
   gap: 10px;
   margin-top: 26px;
 }
+
+/* Internet radio reuses the modal system, with a larger version of the title
+   usage meter as its volume control. */
+.radio-modal {
+  width: min(480px, 90vw);
+}
+.radio-station-select {
+  appearance: auto;
+  cursor: pointer;
+}
+.radio-station-description {
+  min-height: 19px;
+  word-break: normal;
+}
+.radio-player-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 22px;
+}
+.radio-play-button {
+  min-width: 104px;
+}
+.radio-volume-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 24px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.radio-volume-heading .modal-label {
+  margin: 0;
+}
+.radio-volume-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.radio-volume-slider {
+  position: relative;
+  height: 22px;
+  flex: 1 1 auto;
+}
+.radio-volume-track {
+  position: absolute;
+  inset: 2px 0;
+  overflow: hidden;
+  border: 1px solid #313131;
+  border-radius: var(--radius-pill);
+  background: radial-gradient(circle, #1b2735, #090a0f);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+.radio-volume-fill {
+  height: 100%;
+  min-width: 1px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #00f260, #0575e6);
+  box-shadow:
+    0 0 5px #00f260,
+    0 0 9px #0575e6;
+}
+.radio-volume-input {
+  appearance: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.radio-volume-input::-webkit-slider-runnable-track {
+  height: 18px;
+  background: transparent;
+}
+.radio-volume-input::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  border-radius: 50%;
+  background: #111820;
+  box-shadow:
+    0 0 0 2px rgba(5, 117, 230, 0.4),
+    0 2px 7px rgba(0, 0, 0, 0.65);
+  transition:
+    transform 90ms ease,
+    box-shadow 90ms ease;
+}
+
+.radio-volume-input:active::-webkit-slider-thumb {
+  transform: scale(1.08);
+  box-shadow:
+    0 0 0 3px rgba(5, 117, 230, 0.5),
+    0 2px 9px rgba(0, 0, 0, 0.72);
+}
 /* Modal actions are glossy pills: neutral by default, .primary = violet. */
 .modal-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   background: var(--gloss-neutral);
   color: var(--text-secondary);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: var(--radius-button);
+  border-radius: var(--radius-pill);
   box-shadow: var(--gloss-shadow-neutral);
   font-family: var(--sans);
   font-size: 13px;
@@ -1039,6 +1285,140 @@ body {
 /* The notes modal is a workspace, not a small dialog — give it room. */
 .notes-modal {
   width: min(900px, 94vw);
+}
+
+/* ── What's-new window (post-update release notes) ──
+   Lives in its OWN borderless, screen-centered, TRANSPARENT Tauri window (see
+   Rust `open_whatsnew_window`). The native window is see-through so the rounded
+   card below shows real corners + a drop shadow, matching the in-app modals
+   instead of a hard rectangular window edge. */
+.whatsnew-root,
+.whatsnew-root body {
+  background: transparent;
+}
+.whatsnew-window {
+  display: flex;
+  flex-direction: column;
+  /* Fill the transparent window edge-to-edge: only the corners are clipped by
+     the radius (showing the desktop through them), so there's no inset gap or
+     shadow halo around the card. */
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  padding: 22px 24px;
+  border-radius: var(--radius-card);
+  /* Clip the confetti canvas to the rounded corners. */
+  overflow: hidden;
+  /* The window root sets the base font so the heading + body inherit our sans
+     stack (the `.modal-title` class only sizes/weights, it never sets family,
+     and this window has no `.modal` ancestor to inherit from). */
+  font-family: var(--sans);
+  /* Match the in-app modal's scrollbar treatment (those rules are scoped to
+     `.modal`, which this window doesn't use). */
+}
+/* One-shot confetti overlay — covers the whole modal, never intercepts clicks,
+   sits above the content while the burst plays then clears itself. */
+.confetti-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 5;
+}
+.whatsnew-window ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.whatsnew-window ::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+/* Scroll container takes the remaining height and engages once the notes outgrow
+   it — short release lists sit at their natural height, long ones scroll. */
+.whatsnew-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* Pad the right edge so the scrollbar never overlaps the text. */
+  padding-right: 8px;
+  margin-right: -4px;
+}
+.whatsnew-section {
+  margin-bottom: 22px;
+}
+.whatsnew-section:last-child {
+  margin-bottom: 0;
+}
+.whatsnew-section.latest {
+  margin-bottom: 20px;
+  padding: 16px 16px 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  background: var(--surface-1);
+}
+.whatsnew-version {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 12px;
+}
+.whatsnew-section.latest .whatsnew-version {
+  color: var(--text-secondary);
+}
+.whatsnew-history-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0 18px;
+  color: var(--text-muted);
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.whatsnew-history-divider::before,
+.whatsnew-history-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: color-mix(in srgb, var(--border) 78%, transparent);
+}
+.whatsnew-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.whatsnew-item {
+  position: relative;
+  padding-left: 18px;
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.whatsnew-item::before {
+  content: "\203a";
+  position: absolute;
+  left: 4px;
+  top: -0.5px;
+  color: var(--primary);
+  font-weight: 700;
+}
+.whatsnew-highlight {
+  color: color-mix(in srgb, var(--secondary) 72%, var(--text));
+  font: inherit;
+  font-weight: 700;
 }
 
 /* ── Tasks modal (project task list → run one / run all) ── */
@@ -1209,13 +1589,14 @@ body {
 /* Scope toggle on its own row (Global / Project). */
 .mcp-scope-toggle {
   display: flex;
-  gap: 4px;
+  gap: 10px;
   margin-top: 10px;
 }
 /* In-transcript task header row (shown at the top of a task's session). */
 .task-row {
   margin: 2px 0 6px;
 }
+
 .picker-list {
   flex: 1 1 auto;
   overflow-y: auto;
@@ -1282,7 +1663,7 @@ body {
 .badge {
   display: inline-flex;
   align-items: center;
-  border: 1px solid;
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-pill);
   padding: 1px 8px;
   font-family: var(--mono);
@@ -1290,6 +1671,9 @@ body {
   font-weight: 600;
   line-height: 1.5;
   white-space: nowrap;
+  color: var(--text-secondary);
+  background: var(--gloss-neutral);
+  box-shadow: var(--gloss-shadow-neutral);
 }
 .picker-preview {
   flex: 1;
@@ -1435,6 +1819,25 @@ body {
   background: var(--border);
 }
 
+/* Non-scrolling wrapper around `.transcript` — owns the flex sizing +
+   `position: relative` so an absolutely positioned overlay child (the Ken
+   power banner) is pinned to the visible chat viewport, not the scrolled
+   CONTENT inside `.transcript` (a `position: absolute` descendant of a
+   scrolling container is positioned relative to the top of that container's
+   scrollable content, not what's currently on screen — a full-height overlay
+   on a scrolled-down existing session would render far above the visible
+   messages). `.transcript` itself just fills this frame and scrolls. */
+.transcript-frame {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* Clips the overlay's 1px bleed below (see `.ken-power-overlay`) so it never
+     spills onto the chat-head border or the tool panel/footer beyond this
+     frame. */
+  overflow: hidden;
+}
 .transcript {
   flex: 1 1 auto;
   /* Required so this scrollable flex child actually shrinks (default min-height
@@ -1493,6 +1896,13 @@ body {
   overflow-y: auto;
   padding: 20px 24px;
   font-size: 15px;
+}
+.plan-review-ken {
+  flex: 0 0 auto;
+  padding: 8px 24px;
+  font-size: 13px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-1);
 }
 .plan-review-actions {
   flex: 0 0 auto;
@@ -1582,6 +1992,18 @@ body {
   font-size: 15px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+/* `@Ken` prompt bubble: tinted in Ken's color (matching his replies + the input
+   highlight) so the transcript shows this message went to the mentor, not GG
+   Coder. A faint Ken-tinted fill keeps it readable on the right edge. */
+.user-msg.user-ken {
+  color: var(--ken);
+  background: color-mix(in srgb, var(--ken) 12%, var(--user-bg));
+}
+/* "Sent to GG Coder" bubble (from a Ken prompt-block button): same faint Ken
+   tint as a @Ken bubble, with the shimmer label carrying Ken's color. */
+.user-msg.user-ken-sent {
+  background: color-mix(in srgb, var(--ken) 12%, var(--user-bg));
 }
 
 /* ── Queued steering message: still waiting to be injected mid-run. Dim it
@@ -1850,6 +2272,85 @@ body {
   color: var(--text);
   border-color: var(--border-strong);
   background: var(--surface-2);
+}
+/* Ken Kai (mentor agent): the whole reply is tinted in Ken's color — that tint
+   IS the only signal it's Ken, not GG Coder. No border line, no badge. Color the
+   markdown text and its inline elements (headings, list markers, bold, links),
+   but leave the runnable-prompt block to its own styling below. */
+.ken-msg .assistant-text,
+.ken-msg .assistant-text .markdown,
+.ken-msg .assistant-text .markdown :is(p, li, h1, h2, h3, h4, strong, em, blockquote, code) {
+  color: var(--ken);
+}
+.ken-msg .assistant-text .markdown a {
+  color: var(--ken);
+  text-decoration-color: color-mix(in srgb, var(--ken) 50%, transparent);
+}
+/* Ken's activity bar reuses the GG Coder ActivityBar's running statusrow as-is
+   (same top border, padding, spinner, layout, meta readout) so it's the same
+   control aligned to what we have, just tinted to Ken. Only the spinner glow is
+   re-tinted from brand-blue to Ken's color. */
+.ken-spinner {
+  text-shadow: 0 0 8px color-mix(in srgb, var(--ken) 55%, transparent);
+}
+
+/* Ken's runnable-prompt block: Ken-tinted, with a Send-to-GG-Coder button. */
+.markdown .ken-prompt-block {
+  margin: 0.6em 0;
+  /* Neutral card (no pink): a subtle raised surface with the standard border,
+     so the prompt reads as an actionable block without the heavy magenta tint. */
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface-1);
+  overflow: hidden;
+}
+.markdown .ken-prompt-body {
+  margin: 0;
+  padding: 12px 14px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 0.92em;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+/* Send button: neutral surface, standard border, with the Ken color reserved
+   for the text + icon only (the accent, not the whole button). No pink fill. */
+.markdown .ken-prompt-send {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 14px 12px;
+  padding: 5px 11px;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--ken);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+  cursor: pointer;
+  transition:
+    color var(--t-fast),
+    border-color var(--t-fast),
+    background var(--t-fast);
+}
+.markdown .ken-prompt-send:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-1);
+}
+/* Sent: settles to a quiet confirmed state in success green, no longer the
+   call-to-action Ken accent. */
+.markdown .ken-prompt-send.sent {
+  color: var(--success);
+  cursor: default;
+  opacity: 0.85;
 }
 .markdown table {
   border-collapse: collapse;
@@ -2194,6 +2695,343 @@ body {
   background: var(--surface-2);
 }
 
+/* Chat-input stack: the textarea plus (transiently) the enhance animation layer.
+   Highlights for enhanced terms are NOT drawn over the input — an overlay can't
+   reliably track a native textarea's text metrics. They live in the sent bubble
+   (a clean div) instead, where they align perfectly + keep their tooltips. */
+.input-stack {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+.input-stack .input {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+/* `@Ken` active: the textarea text goes transparent (caret stays via caret-color)
+   so only the aligned highlight overlay shows, with the leading `@Ken` shimmering
+   in Ken's color. This is the signal the message is addressed to the mentor. */
+.input-stack .input.input-ken {
+  color: transparent;
+  caret-color: var(--ken);
+}
+.input-stack .input.input-ken::placeholder {
+  color: var(--text-dim);
+}
+.ken-input-highlight {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  /* Match .input metrics EXACTLY so the overlay text lands under the textarea's
+     own glyphs and caret 1:1. */
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 0;
+  margin: 0;
+  /* Identical text metrics to .input above (see note there) so glyph advance
+     matches the textarea 1:1 and the caret tracks the visible text exactly. */
+  letter-spacing: 0;
+  word-spacing: 0;
+  font-kerning: none;
+  font-variant-ligatures: none;
+  /* Wrap EXACTLY like the textarea (soft-wrap: break at spaces, don't break
+     words). The textarea uses the CSS default overflow-wrap: normal, so the
+     overlay must too, or it wraps at a different point and the caret drifts from
+     the visible text on wrapped lines. */
+  white-space: pre-wrap;
+  overflow-wrap: normal;
+  word-break: normal;
+  overflow: hidden;
+  max-height: 40vh;
+  color: var(--user-text);
+}
+/* The `@Ken` token is a shimmer span, which otherwise renders at font-weight 600.
+   In the input it MUST match the textarea's exact glyph metrics (normal weight,
+   inherited mono) or its advance width drifts from the real text and the caret
+   lands away from the visible end. Force it to inherit the input's metrics. */
+.ken-input-highlight .shimmer-text {
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  word-spacing: inherit;
+  font-kerning: inherit;
+  font-variant-ligatures: inherit;
+}
+
+/* Dissolve→skeleton→decode animation layer. While it plays it becomes the input
+   row's height driver: the textarea is pulled OUT of flow (.input-anim) so the
+   box collapses to this layer's content height — shrinking as the old text
+   dissolves, holding at one line for the skeleton, then growing as the new text
+   decodes in. Metrics mirror .input exactly so wrapping matches 1:1. */
+.input.input-anim {
+  position: absolute;
+  /* Out of flow + invisible so the .enh-diss layer alone drives the row height. */
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.enh-diss {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  /* At least one text line tall so the collapsed/skeleton state matches an empty
+     input's default height (14px × 1.5 = 21px). */
+  min-height: 1.5em;
+  /* Match the textarea's growth cap so a long decoded prompt scrolls inside the
+     input box instead of overflowing past it (mirrors .input max-height). */
+  max-height: 40vh;
+  overflow-y: auto;
+  /* Explicit: without this, setting only overflow-y makes overflow-x compute to
+     `auto` (CSS spec), turning the box into a horizontal scroll container that
+     sizes to its content — so the text stops wrapping and runs off on one line.
+     Pinning overflow-x hidden (like the textarea) restores normal wrapping. */
+  overflow-x: hidden;
+  z-index: 3;
+  pointer-events: none;
+  /* Match .input exactly so the text wraps identically to the textarea. */
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 0;
+  margin: 0;
+  /* Wrap exactly like the textarea (default overflow-wrap) so the decoded text
+     occupies the same lines the real input will once it's committed. */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  color: var(--user-text);
+}
+.enh-diss::-webkit-scrollbar {
+  width: 8px;
+}
+.enh-diss::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+/* Smooth dissolve: the whole old draft fades + drifts up while its height (set
+   inline by JS) collapses to one line. One CSS tween, no character deletion — it
+   just "vanishes" softly.
+
+   NOTE: deliberately NO animated `filter: blur()` here. An animated blur on a
+   `will-change`-promoted layer crashes WKWebView's compositor on Intel Macs —
+   the GPU process loses the webview's ROOT surface and the WHOLE window paints
+   black (not just this node). Apple Silicon's Metal compositor survives it, so
+   it only reproduced on Intel. The fade now leans on opacity + transform only,
+   which composite safely on every GPU. Do not re-add blur to this animation. */
+.enh-diss-fade {
+  overflow: hidden;
+  /* JS drives an explicit height tween here, so drop the shared one-line floor. */
+  min-height: 0;
+  transition:
+    opacity 460ms ease,
+    transform 460ms ease,
+    height 460ms cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: opacity, transform, height;
+}
+.enh-diss-fade.dissolving {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.985);
+}
+@media (prefers-reduced-motion: reduce) {
+  .enh-diss-fade {
+    transition: none;
+  }
+}
+.enh-diss-skeleton {
+  display: flex;
+  align-items: center;
+}
+/* The enhancer skeleton stands in for a full line of prompt text: full width,
+   clearly visible, with a seamless single-pass sheen. A flat surface-2 base with
+   a translating ::after band (clipped by overflow:hidden) loops without the
+   abrupt re-entry the shared background-position sweep shows at high contrast. */
+.enh-diss-skeleton .skeleton {
+  width: 100%;
+  height: 14px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  /* Override the shared background-position sweep — we sweep via ::after below. */
+  animation: none;
+  overflow: hidden;
+}
+.enh-diss-skeleton .skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 0%,
+    transparent 30%,
+    color-mix(in srgb, var(--secondary) 38%, var(--surface-2)) 50%,
+    transparent 70%,
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: enh-skeleton-sweep 1.5s ease-in-out infinite;
+}
+@keyframes enh-skeleton-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .enh-diss-skeleton .skeleton::after {
+    animation: none;
+  }
+}
+/* The bright resolving "lead" glyph at the active edge (decode front / dissolve
+   tail) — brand periwinkle, mirroring the Matrix decode head. */
+.enh-diss-lead {
+  color: #c4b5fd;
+}
+
+/* "Enhance" pill — pinned to the center of the input box's top border,
+   overlapping it. Absolutely positioned against .inputwrap (position: relative),
+   so it's fully decoupled from the textarea's text flow: it can't overlap text,
+   drift with wrapping, shift the caret, or jump the box height. Nudged up by
+   ~half its height so it straddles the top border like a tab. */
+.enhance-pill {
+  position: absolute;
+  top: -11px;
+  /* Centered on the top border (not top-right) so it stays clear of the status
+     row's "esc to cancel" button, which sits in the right corner just above. */
+  left: 50%;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  /* Hidden resting state. Always mounted so it can animate BOTH ways: the
+     `.visible` class fades + slides it in; removing it fades + slides it out.
+     pointer-events off while hidden so it can't be clicked mid-fade.
+     translateX(-50%) keeps it centered through the transform transition. */
+  opacity: 0;
+  transform: translate(-50%, -4px) scale(0.96);
+  pointer-events: none;
+  transition:
+    opacity var(--t-fast) ease,
+    transform var(--t-fast) ease,
+    filter var(--t-fast) ease;
+  /* Match the "+ New" button: glossy primary pill so it's clearly visible. */
+  background: var(--gloss-primary);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  box-shadow: var(--gloss-shadow-primary);
+  border-radius: var(--radius-pill);
+  color: #f4f8ff;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.enhance-pill.visible {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+  pointer-events: auto;
+}
+.enhance-pill:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.enhance-pill:disabled {
+  cursor: default;
+}
+/* Pulse only while visible — scoped so the animation can't override the hidden
+   state's opacity:0 and flash a hidden pill. */
+.enhance-pill.visible.enhancing {
+  animation: enhance-pulse 1s ease-in-out infinite;
+}
+@keyframes enhance-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* A corrected technical term — highlighted, with a teaching tooltip on hover.
+   Shared by the preview card and the sent user bubble. A custom CSS tooltip is
+   used instead of the native `title=` attribute, which is unreliable / never
+   appears inside the Tauri webview. */
+.enh-term {
+  position: relative;
+  background: color-mix(in srgb, var(--secondary) 20%, transparent);
+  color: var(--text);
+  /* text-decoration hugs the glyphs (and each wrapped fragment) instead of
+     floating at the bottom of the line box the way border-bottom does. */
+  text-decoration: underline dashed color-mix(in srgb, var(--secondary) 70%, transparent);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+  border-radius: 3px;
+  padding: 0 2px;
+  cursor: help;
+  outline: none;
+}
+.enh-tip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: max-content;
+  max-width: 280px;
+  padding: 7px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-button);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: normal;
+  text-align: left;
+  color: var(--text-secondary);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--t-fast),
+    transform var(--t-fast),
+    visibility var(--t-fast);
+}
+/* Little arrow pointing down at the term. */
+.enh-tip::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: var(--surface-2);
+}
+.enh-term:hover .enh-tip,
+.enh-term:focus .enh-tip,
+.enh-term:focus-visible .enh-tip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) translateY(0);
+}
+.enh-tip-said {
+  color: var(--text-dim);
+}
+.enh-tip-orig {
+  color: var(--text);
+}
+.enh-tip-note {
+  color: var(--text-muted);
+}
+
 /* Staged attachment chips above the input. */
 .attach-bar {
   display: flex;
@@ -2483,6 +3321,15 @@ body {
   color: var(--user-text);
   font-family: var(--mono);
   font-size: 14px;
+  /* Pin every text-metric property explicitly so the @Ken highlight overlay (a
+     <div>) and this <textarea> compute IDENTICAL glyph advance. Browsers apply
+     different UA defaults for kerning/ligatures/spacing to form controls vs
+     divs, which otherwise drifts the caret from the visible overlay text by a
+     growing amount as you type. */
+  letter-spacing: 0;
+  word-spacing: 0;
+  font-kerning: none;
+  font-variant-ligatures: none;
   /* Auto-growing multi-line input: JS sets height to fit content; cap growth
      here and scroll past the cap. No manual resize handle, wrap long lines. */
   resize: none;
@@ -2518,8 +3365,12 @@ body {
   padding: 0;
   transition: color var(--t-fast);
 }
-.cancel:hover {
+.cancel:hover:not(:disabled) {
   text-decoration: underline;
+}
+.cancel:disabled {
+  cursor: wait;
+  text-decoration: none;
 }
 
 /* App-update banner — its own row below the footer so it reads as a distinct,
@@ -2629,15 +3480,37 @@ body {
   opacity: 0.7;
   cursor: default;
 }
-/* Shown in the update pill's place when already up to date — just the current
-   version, muted, so the spot never collapses/jumps. */
-.home-version {
+/* Shown in the update pill's place when already up to date — the current
+   version plus a "What's new" button, so the spot never collapses/jumps. */
+.home-version-row {
   align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.home-version {
   font-family: var(--mono);
   font-size: 12px;
   font-weight: 500;
   color: var(--text-dim);
   letter-spacing: 0.02em;
+}
+/* Small text button to the right of the version that re-opens the What's-new
+   window. Borderless + muted so it reads as a quiet secondary link, not a CTA. */
+.home-whatsnew {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  letter-spacing: -0.005em;
+  transition: color var(--t-fast);
+}
+.home-whatsnew:hover {
+  color: var(--text);
 }
 
 .footer {
@@ -2652,6 +3525,20 @@ body {
      transcript above never shift when the footer fills in (8+8 padding +
      ~20px line box). */
   min-height: 37px;
+  /* .inputwrap (an earlier sibling) is `position: relative`, which — despite
+     coming first in DOM order — paints ABOVE any non-positioned sibling per
+     CSS stacking rules (positioned elements always paint after static ones).
+     Without this, the growing textarea overlapped the upward-opening
+     .model-menu anchored in the footer. Make the footer positioned too, with
+     a higher z-index, so it (and its dropdowns) stack above the input. */
+  position: relative;
+  z-index: 2;
+}
+.footer-chat {
+  justify-content: flex-end;
+}
+.footer-chat .footer-right {
+  margin-left: auto;
 }
 
 /* Footer clusters reveal as one faded unit once the session has hydrated,
@@ -2825,8 +3712,8 @@ body {
   }
 }
 
-/* Left cluster shrinks first; the git branch truncates rather than deforming
-   the bar when the window narrows. */
+/* Left cluster holds transient task/plan status and yields space to the controls
+   when the window narrows. Project context now lives in the title bar. */
 .footer-left {
   flex: 1 1 auto;
   min-width: 0;
@@ -2839,13 +3726,6 @@ body {
 /* Dividers sit flush (no flex gap) so ` │ ` reads as one separator unit. */
 .footer-sep {
   flex: 0 0 auto;
-}
-/* cwd is the first thing to truncate when the bar gets tight. */
-.footer-cwd {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* Right cluster holds the controls (context, thinking, model, provider) at
@@ -2874,28 +3754,9 @@ body {
   text-decoration: underline;
 }
 
-/* ── Footer: context meter ── */
-.ctx-meter {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--mono);
-}
-.ctx-meter-track {
-  display: inline-block;
-  width: 56px;
-  height: 5px;
-  background: var(--surface-2);
-  border-radius: var(--radius-pill);
-  overflow: hidden;
-}
-.ctx-meter-fill {
-  display: block;
-  height: 100%;
-  border-radius: var(--radius-pill);
-  transition: width var(--t-fast);
-}
+/* ── Footer: context percentage ── */
 .ctx-meter-pct {
+  font-family: var(--mono);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
@@ -2986,13 +3847,28 @@ body {
 .model-anchor {
   position: relative;
   display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Static "GG" / "Ken" prefix — plain text, never clickable. Only the model
+   name next to it opens the dropdown. `line-height: 1` matches `.model-button`
+   below so both sit on the same baseline — without it the button's default UA
+   line-height differs from the inherited body line-height and the label
+   visibly floats above the model name. */
+.model-label {
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1;
 }
 
 .model-button {
   background: transparent;
   border: none;
+  margin: 0;
   font-family: var(--mono);
   font-size: 13px;
+  line-height: 1;
   cursor: pointer;
   padding: 0;
   transition: color var(--t-fast);
@@ -3029,6 +3905,13 @@ body {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 2px 8px;
+}
+
+/* "Follow GG Coder" row in Ken's model picker — full-width above the grid. */
+.model-menu-follow {
+  display: block;
+  width: 100%;
+  margin-bottom: 6px;
 }
 
 .model-menu-item {
@@ -3124,4 +4007,889 @@ body {
 }
 .gaze-pill svg {
   color: var(--primary);
+}
+
+/* ── Autopilot toggle (Material switch, Uiverse by lenin55) ──
+   Sits left of the "+ New" button in the nav row. The switch markup mirrors the
+   source snippet; colors are re-themed for the dark canvas: the off-track uses a
+   visible neutral (the original rgba(0,0,0,.38) vanished on dark), and the
+   checked track/thumb use the app accent instead of the source teal. */
+.autopilot-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  /* Match the sibling .btn-sm height (25px) and reset the inherited 1.55
+     line-height so the label's tall line box can't push the nav row taller than
+     the buttons — the switch is 24px, the label collapses to its glyph height,
+     so the cluster stays ≤ the buttons and the row height is unchanged. */
+  height: 25px;
+  line-height: 1;
+}
+.autopilot-label {
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.cl-toggle-switch {
+  position: relative;
+  /* Center the inline-block switch as a flex child at its exact height. As a
+     plain inline box the wrapper baseline-aligned the switch, inflating its own
+     line box to 26px (taller than the 25px row) and lifting the switch ~1px above
+     the row center. Flex + fixed height removes the baseline/line-box effect so
+     the switch sits dead center with the label and buttons. */
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+}
+.cl-switch {
+  position: relative;
+  display: inline-block;
+  /* The track (span::before) floats and the thumb (::after) is absolute, so
+     neither adds height — an auto-height box collapses and the switch sits off
+     center in the flex row. Pin the switch to the track's real footprint
+     (36px + 10px left margin wide, 14px + 5px×2 margin tall) so the parent's
+     align-items:center lines it up with the label and buttons. */
+  width: 46px;
+  height: 24px;
+}
+/* Input */
+.cl-switch > input {
+  appearance: none;
+  -moz-appearance: none;
+  -webkit-appearance: none;
+  z-index: -1;
+  position: absolute;
+  right: 6px;
+  top: -8px;
+  display: block;
+  margin: 0;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  background-color: var(--secondary);
+  outline: none;
+  opacity: 0;
+  transform: scale(1);
+  pointer-events: none;
+  transition:
+    opacity 0.3s 0.1s,
+    transform 0.2s 0.1s;
+}
+/* Track */
+.cl-switch > span::before {
+  content: "";
+  float: right;
+  display: inline-block;
+  margin: 5px 0 5px 10px;
+  border-radius: 7px;
+  width: 36px;
+  height: 14px;
+  background-color: var(--border-strong);
+  vertical-align: top;
+  transition:
+    background-color 0.2s,
+    opacity 0.2s;
+}
+/* Thumb */
+.cl-switch > span::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  right: 16px;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  background-color: #cdd2db;
+  box-shadow:
+    0 3px 1px -2px rgba(0, 0, 0, 0.2),
+    0 2px 2px 0 rgba(0, 0, 0, 0.14),
+    0 1px 5px 0 rgba(0, 0, 0, 0.12);
+  transition:
+    background-color 0.2s,
+    transform 0.2s;
+}
+/* Checked */
+.cl-switch > input:checked {
+  right: -10px;
+  background-color: var(--secondary);
+}
+.cl-switch > input:checked + span::before {
+  background-color: rgba(155, 140, 247, 0.5);
+}
+.cl-switch > input:checked + span::after {
+  background-color: var(--secondary);
+  transform: translateX(16px);
+}
+/* Hover, Focus */
+.cl-switch:hover > input {
+  opacity: 0.04;
+}
+.cl-switch > input:focus {
+  opacity: 0.12;
+}
+.cl-switch:hover > input:focus {
+  opacity: 0.16;
+}
+/* Active */
+.cl-switch > input:active {
+  opacity: 1;
+  transform: scale(0);
+  transition:
+    transform 0s,
+    opacity 0s;
+}
+.cl-switch > input:active + span::before {
+  background-color: var(--border-strong);
+}
+.cl-switch > input:checked:active + span::before {
+  background-color: rgba(155, 140, 247, 0.5);
+}
+/* Disabled */
+.cl-switch > input:disabled {
+  opacity: 0;
+}
+.cl-switch > input:disabled + span::before {
+  background-color: var(--border);
+}
+.cl-switch > input:checked:disabled + span::before {
+  background-color: rgba(155, 140, 247, 0.3);
+}
+.cl-switch > input:checked:disabled + span::after {
+  background-color: rgba(155, 140, 247, 0.6);
+}
+
+/* ── Rank / Progress (Ranks system) ───────────────────────────────────── */
+.rank-badge-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.rank-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 160px;
+  height: 26px;
+  padding: 4px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-pill);
+  background: var(--gloss-neutral);
+  color: var(--text-secondary);
+  box-shadow: var(--gloss-shadow-neutral);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  overflow: visible;
+  transition:
+    filter var(--t-fast),
+    box-shadow var(--t-fast),
+    color var(--t-fast);
+}
+.rank-badge:hover {
+  filter: brightness(1.18);
+  color: var(--text);
+}
+.rank-xp-chip-layer {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 4px);
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: center;
+  gap: 3px;
+  pointer-events: none;
+  transform: translateX(-50%);
+  z-index: 20;
+}
+.rank-xp-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--success) 16%, var(--surface-1));
+  color: var(--success);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  animation: rankXpChip 1.7s ease-out both;
+}
+.rank-glyph {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(77, 157, 255, 0.28), rgba(155, 140, 247, 0.18));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+.rank-glyph::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 1.5px;
+  background: var(--primary);
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.rank-level {
+  color: var(--text-muted);
+  font-weight: 700;
+}
+.rank-badge-celebrate::before {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(77, 157, 255, 0.42);
+  opacity: 0;
+  pointer-events: none;
+}
+.rank-sparks {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow:
+    0 -18px 0 var(--primary),
+    14px -12px 0 var(--secondary),
+    18px 2px 0 var(--info),
+    9px 16px 0 var(--primary),
+    -11px 15px 0 var(--secondary),
+    -18px -2px 0 var(--info),
+    -13px -13px 0 var(--primary);
+}
+.rank-name {
+  display: inline-block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.rank-fx-dim {
+  color: var(--text-dim);
+}
+.rank-fx-plain {
+  color: var(--text);
+}
+.rank-fx-blue {
+  color: #8fb7ff;
+}
+.rank-fx-green {
+  color: #8ee6b0;
+}
+.rank-fx-gradient,
+.rank-fx-gradient-glow,
+.rank-fx-animated,
+.rank-fx-gold,
+.rank-fx-gold-shimmer,
+.rank-fx-iridescent {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  -webkit-background-clip: text;
+}
+.rank-fx-gradient {
+  background-image: linear-gradient(90deg, #b88cff, #6ea8ff);
+}
+.rank-fx-gradient-glow {
+  background-image: linear-gradient(90deg, #b88cff, #6ea8ff, #7df9ff);
+  text-shadow: 0 0 14px rgba(126, 170, 255, 0.25);
+}
+.rank-fx-animated {
+  background-image: linear-gradient(
+    90deg,
+    #9b8cf7 0%,
+    #60a5fa 25%,
+    #34d399 50%,
+    #60a5fa 75%,
+    #9b8cf7 100%
+  );
+  background-size: 200% 100%;
+}
+.rank-fx-gold {
+  background-image: linear-gradient(90deg, #b78b2d, #ffe38a, #d9a441);
+}
+.rank-fx-gold-shimmer {
+  background-image: linear-gradient(
+    110deg,
+    #b78b2d 0%,
+    #d9a441 24%,
+    #ffe38a 42%,
+    #fff3bf 50%,
+    #ffe38a 58%,
+    #d9a441 76%,
+    #b78b2d 100%
+  );
+  background-size: 200% 100%;
+}
+.rank-fx-iridescent {
+  background-image: linear-gradient(
+    90deg,
+    #9b8cf7 0%,
+    #7df9ff 20%,
+    #ff8bd2 40%,
+    #fff18a 60%,
+    #7df9ff 80%,
+    #9b8cf7 100%
+  );
+  background-size: 200% 100%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .rank-badge-celebrate::before {
+    animation: rankBadgePulse 2.2s ease-out both;
+  }
+  .rank-badge-celebrate .rank-glyph {
+    animation: rankBadgeGlyph 2.2s ease-out both;
+  }
+  .rank-badge-celebrate .rank-level {
+    animation: rankBadgeLevel 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .rank-badge-celebrate .rank-name {
+    animation: rankBadgeName 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .rank-badge-celebrate .rank-sparks {
+    animation: rankBadgeSparks 1.2s ease-out both;
+  }
+  .rank-fx-animated {
+    animation: rankShift 8s linear infinite;
+  }
+  .rank-fx-gold-shimmer {
+    animation: rankShift 7s linear infinite;
+  }
+  .rank-fx-iridescent {
+    animation: rankShift 12s linear infinite;
+  }
+}
+@keyframes rankXpChip {
+  0% {
+    opacity: 0;
+    transform: translateY(7px) scale(0.96);
+  }
+  16% {
+    opacity: 1;
+  }
+  72% {
+    opacity: 1;
+    transform: translateY(-4px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.98);
+  }
+}
+@keyframes rankBadgePulse {
+  0% {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  18% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.18);
+  }
+}
+@keyframes rankBadgeGlyph {
+  0% {
+    filter: brightness(1);
+  }
+  24% {
+    filter: brightness(1.5);
+  }
+  100% {
+    filter: brightness(1);
+  }
+}
+@keyframes rankBadgeLevel {
+  0% {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes rankBadgeName {
+  0% {
+    opacity: 0;
+    transform: translateX(5px);
+    filter: brightness(1.35);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+    filter: brightness(1);
+  }
+}
+@keyframes rankBadgeSparks {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.35);
+  }
+  18% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.15);
+  }
+}
+@keyframes rankShift {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+/* ── Rank scorecard — RPG character card: rank header, big level number +
+   XP meter, then colored stat bars. Flat, no boxes-in-boxes. ── */
+.scorecard-modal {
+  width: min(380px, 90vw);
+}
+.scorecard {
+  display: flex;
+  flex-direction: column;
+  padding: 0 2px 2px;
+  text-align: left;
+}
+.scorecard-modal .modal-head {
+  margin-bottom: 2px;
+}
+.scorecard-rank {
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1.15;
+}
+.scorecard-tier {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.scorecard-level {
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+  margin-top: 18px;
+}
+.scorecard-level-num {
+  color: var(--text);
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  /* Digits have no descenders — trim the font box's below-baseline space so
+     the stretched meter's bar sits flush with the number's visual bottom. */
+  line-height: 0.76;
+  font-variant-numeric: tabular-nums;
+}
+.scorecard-level-meter {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+.scorecard-level-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+.scorecard-level-row span:last-child {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+}
+.scorecard-bar {
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.38);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+.scorecard-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+}
+.scorecard-divider {
+  height: 1px;
+  margin: 16px 0 14px;
+  background: var(--border);
+}
+.scorecard-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.scorecard-stat {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+.scorecard-stat-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.scorecard-stat-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.38);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+.scorecard-stat-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--text-dim);
+}
+.scorecard-stat b {
+  min-width: 44px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.scorecard-footer {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 16px;
+  font-size: 11px;
+}
+.scorecard-footer span {
+  color: var(--text-dim);
+}
+.scorecard-footer b {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Compact subscription quota in the title strip. The track is the primary
+   signal; labels stay terse so the session title keeps most of the width. */
+.title-usage-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-button);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background var(--t-fast),
+    border-color var(--t-fast),
+    color var(--t-fast);
+}
+.title-usage-meter:hover {
+  border-color: var(--border);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+}
+.title-usage-window {
+  width: 25px;
+  color: var(--text-muted);
+  font-weight: 650;
+  text-align: right;
+}
+.title-usage-track {
+  position: relative;
+  width: 64px;
+  height: 12px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid #313131;
+  border-radius: var(--radius-pill);
+  background: radial-gradient(circle, #1b2735, #090a0f);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+.title-usage-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 1px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #00f260, #0575e6);
+  box-shadow:
+    0 0 4px #00f260,
+    0 0 7px #0575e6;
+  transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.title-usage-fill::before {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 200%;
+  height: 200%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.18), transparent);
+  content: "";
+  opacity: 0.5;
+  transform: translate(-50%, -50%);
+  animation: titleUsageRipple 3s infinite;
+}
+.title-usage-particles {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+.title-usage-particle {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: #fff;
+  opacity: 0.55;
+  animation: titleUsageFloat 5s infinite ease-in-out;
+}
+.title-usage-particle:nth-child(1) {
+  top: 15%;
+  left: 20%;
+}
+.title-usage-particle:nth-child(2) {
+  top: 30%;
+  left: 72%;
+  animation-delay: 1s;
+}
+.title-usage-particle:nth-child(3) {
+  top: 52%;
+  left: 50%;
+  animation-delay: 2s;
+}
+.title-usage-particle:nth-child(4) {
+  top: 72%;
+  left: 38%;
+  animation-delay: 1.5s;
+}
+.title-usage-particle:nth-child(5) {
+  top: 82%;
+  left: 62%;
+  animation-delay: 2.5s;
+}
+.title-usage-reset {
+  max-width: 62px;
+  overflow: hidden;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@keyframes titleUsageRipple {
+  from {
+    opacity: 0.7;
+    transform: translate(-50%, -50%) scale(0.5);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.5);
+  }
+}
+@keyframes titleUsageFloat {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(3px, -3px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .title-usage-fill::before,
+  .title-usage-particle {
+    animation: none;
+  }
+}
+
+/* ── Durable chat memories ── */
+.memory-modal {
+  width: min(780px, 92vw);
+  padding: 20px;
+}
+.memory-modal .modal-head {
+  margin-bottom: 6px;
+}
+.memory-modal-title {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.brain-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-1);
+}
+.brain-tabs button {
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 600;
+  transition:
+    background-color var(--t-fast),
+    color var(--t-fast);
+}
+.brain-tabs button:hover {
+  color: var(--text);
+}
+.brain-tabs button[aria-selected="true"] {
+  background: color-mix(in srgb, var(--primary) 18%, var(--surface-2));
+  color: var(--text);
+}
+.brain-tabs button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+.memory-table-wrap {
+  max-height: min(480px, 64vh);
+  overflow: auto;
+  overscroll-behavior: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.memory-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.memory-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-align: left;
+  text-transform: uppercase;
+}
+.memory-table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.memory-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.memory-table-text {
+  min-width: 250px;
+  color: var(--text);
+  line-height: 1.45;
+}
+.memory-category {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-1);
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: capitalize;
+}
+.memory-importance,
+.memory-updated {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.memory-delete-cell {
+  width: 30px;
+  text-align: right;
+}
+.memory-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-button);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.memory-delete:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--surface-1);
+  color: var(--error);
+}
+.memory-delete:disabled {
+  cursor: wait;
+  opacity: 0.35;
+}
+.memory-modal-state {
+  padding: 44px 20px;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+}
+.memory-modal-error {
+  color: var(--error);
+}
+.memory-table .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }

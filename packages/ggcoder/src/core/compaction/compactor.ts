@@ -27,7 +27,15 @@ export const MAX_SUMMARY_RETRIES = 2;
 /** Max output tokens for the summary response. */
 const MAX_SUMMARY_OUTPUT_TOKENS = 4096;
 
-/** Local deadline for each compaction summary LLM attempt. */
+/**
+ * Local INACTIVITY deadline for each compaction summary LLM attempt: the timer
+ * resets on every stream event, so it only fires after this long with no sign
+ * of life from the provider. A hard total deadline here used to kill every
+ * large summary mid-generation (a multi-hundred-K-token input can stream for
+ * well over 30s) — ~90% of summary attempts were falling back to the
+ * low-quality extractive summary. Hung requests still fail fast: no first
+ * token within the window aborts the attempt.
+ */
 export const SUMMARY_ATTEMPT_TIMEOUT_MS = 30_000;
 
 class SummaryTimeoutError extends Error {
@@ -41,22 +49,50 @@ async function awaitSummaryResponseWithTimeout<T>(
   response: Promise<T>,
   timeoutMs: number,
   signal?: AbortSignal,
+  onTimeout?: () => void,
+  activity?: AsyncIterable<unknown>,
 ): Promise<T> {
   signal?.throwIfAborted();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let abortListener: (() => void) | undefined;
+  let settled = false;
 
   try {
     return await new Promise<T>((resolve, reject) => {
-      timeout = setTimeout(() => reject(new SummaryTimeoutError(timeoutMs)), timeoutMs);
-      if (typeof timeout.unref === "function") timeout.unref();
+      const arm = (): void => {
+        if (settled) return;
+        if (timeout) clearTimeout(timeout);
+        timeout = setTimeout(() => {
+          reject(new SummaryTimeoutError(timeoutMs));
+          onTimeout?.();
+        }, timeoutMs);
+        if (typeof timeout.unref === "function") timeout.unref();
+      };
+      arm();
 
       abortListener = () => reject(new DOMException("Aborted", "AbortError"));
       signal?.addEventListener("abort", abortListener, { once: true });
 
+      // Every stream event proves the provider is alive and generating — reset
+      // the deadline instead of aborting an actively-streaming summary. Errors
+      // here are ignored: the response promise carries the real failure.
+      if (activity) {
+        void (async () => {
+          try {
+            for await (const _event of activity) {
+              if (settled) return;
+              arm();
+            }
+          } catch {
+            /* response promise rejects with the real error */
+          }
+        })();
+      }
+
       response.then(resolve, reject);
     });
   } finally {
+    settled = true;
     if (timeout) clearTimeout(timeout);
     if (abortListener) signal?.removeEventListener("abort", abortListener);
   }
@@ -114,22 +150,17 @@ export interface CompactionResult {
 }
 
 /**
- * Default token reserve for compaction.
- * Leaves headroom for the model's next response + system overhead.
- * Matches the widely-used Pi / Grok-CLI default of 16 384 tokens.
+ * @deprecated Compaction now uses only the configured context-window percentage.
+ * Retained for source compatibility until the next major release.
  */
 export const COMPACTION_RESERVE_TOKENS = 16_384;
 
-/** Extra non-output headroom for prompt/cache/accounting overhead. */
+/** @deprecated Retained for source compatibility until the next major release. */
 export const COMPACTION_OVERHEAD_RESERVE_TOKENS = 5_000;
 
 /**
- * Calculate the context headroom to reserve before auto-compaction.
- *
- * Use the requested output cap, not the model registry's theoretical maximum.
- * GPT-5.5 over OpenAI Codex has a 272K effective input window but advertises a
- * 128K max output capability; reserving that full amount would compact at
- * ~139K tokens even though the CLI currently requests 16K output tokens.
+ * @deprecated Compaction no longer reserves output tokens when choosing its boundary.
+ * Retained for source compatibility until the next major release.
  */
 export function getCompactionReserveTokens(maxTokens: number): number {
   const safeMaxTokens = Number.isFinite(maxTokens) && maxTokens > 0 ? Math.ceil(maxTokens) : 0;
@@ -142,19 +173,17 @@ const COMPACTION_MIN_MESSAGES = 4;
 /**
  * Check if compaction should be triggered.
  *
- * Uses the reserve-based approach (contextWindow − reserveTokens) used by
- * Pi, Grok-CLI, OpenClaw, BrowserOS, and most real-world agent frameworks.
- * A percentage-based threshold is still supported: when both are supplied the
- * more conservative (lower) limit wins.
+ * The boundary is the first whole token at or above the configured percentage
+ * of the active transport's context window. Output-token ceilings do not move it.
  */
 export function shouldCompact(
   messages: Message[],
   contextWindow: number,
-  threshold = 0.8,
+  threshold = 0.85,
   /** Actual API-reported token count — preferred over char-based estimate when available. */
   actualTokens?: number,
-  /** Fixed token reserve subtracted from contextWindow. Defaults to 16 384. */
-  reserveTokens = COMPACTION_RESERVE_TOKENS,
+  /** @deprecated Output-token reserves no longer affect compaction decisions. */
+  _reserveTokens = COMPACTION_RESERVE_TOKENS,
 ): boolean {
   // Don't attempt compaction with too few messages — compact() would bail
   // anyway (middleMessages <= 2), but this avoids the spinner + LLM auth dance.
@@ -165,21 +194,10 @@ export function shouldCompact(
     return false;
   }
   const estimated = actualTokens ?? estimateConversationTokens(messages);
-  const percentageLimit = contextWindow * threshold;
-  // Honor the reserve when it leaves a sensible amount of context. Models
-  // with large output budgets (e.g. Codex Mini at 100K out / 200K ctx) will
-  // hit the API's context_length error if we only compact at the percentage
-  // threshold. When the reserve is pathological (≥ 75% of the window — e.g.
-  // tiny test fixtures or a model whose output budget eats most of the
-  // window), fall back to the percentage threshold alone.
-  const reserveLimit =
-    reserveTokens > 0 && reserveTokens < contextWindow * 0.75
-      ? contextWindow - reserveTokens
-      : percentageLimit;
-  const limit = Math.min(percentageLimit, reserveLimit);
+  const limit = Math.ceil(contextWindow * threshold);
   const source = actualTokens != null ? "actual" : "estimated";
   log("INFO", "compaction", `Context check: ${estimated} ${source} tokens, threshold ${limit}`);
-  return estimated > limit;
+  return estimated >= limit;
 }
 
 /**
@@ -241,6 +259,64 @@ function truncateString(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   const truncatedChars = text.length - maxChars;
   return `${text.slice(0, maxChars)}\n\n[... ${truncatedChars} more characters truncated]`;
+}
+
+/** Maximum retained characters for each string argument in a completed tool call. */
+export const HISTORICAL_TOOL_ARG_MAX_CHARS = 8_000;
+
+function compactHistoricalToolArg(value: unknown): { value: unknown; changed: boolean } {
+  if (typeof value === "string") {
+    const compacted = truncateString(value, HISTORICAL_TOOL_ARG_MAX_CHARS);
+    return { value: compacted, changed: compacted !== value };
+  }
+  if (Array.isArray(value)) {
+    let changed = false;
+    const compacted = value.map((item) => {
+      const result = compactHistoricalToolArg(item);
+      changed ||= result.changed;
+      return result.value;
+    });
+    return { value: changed ? compacted : value, changed };
+  }
+  if (value && typeof value === "object") {
+    let changed = false;
+    const compacted = Object.fromEntries(
+      Object.entries(value).map(([key, item]) => {
+        const result = compactHistoricalToolArg(item);
+        changed ||= result.changed;
+        return [key, result.value];
+      }),
+    );
+    return { value: changed ? compacted : value, changed };
+  }
+  return { value, changed: false };
+}
+
+/**
+ * Clone recent assistant tool-call messages and cap large historical arguments.
+ * IDs, tool names, and short arguments remain byte-for-byte unchanged.
+ */
+export function compactHistoricalToolCallArgs(messages: Message[]): Message[] {
+  return messages.map((message) => {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) return message;
+
+    let messageChanged = false;
+    const content = (message.content as ContentPart[]).map((part): ContentPart => {
+      if (part.type !== "tool_call") return part;
+
+      const toolCall = part as ContentPart & {
+        type: "tool_call";
+        args: Record<string, unknown>;
+      };
+      const result = compactHistoricalToolArg(toolCall.args);
+      if (!result.changed) return part;
+
+      messageChanged = true;
+      return { ...toolCall, args: result.value as Record<string, unknown> };
+    });
+
+    return messageChanged ? { ...message, content } : message;
+  });
 }
 
 /**
@@ -565,8 +641,13 @@ export function extractSummaryText(content: string | ContentPart[]): string {
     .join("");
 }
 
-/** Budget of recent tokens to keep un-summarized (~20K tokens). */
-const KEEP_RECENT_TOKENS = 20_000;
+/**
+ * Budget of recent tokens to keep un-summarized (~8K tokens).
+ * Aligned with opencode's post-compaction preserved tail — the pruner protects
+ * recency between compactions, so rebuilding a fat tail right after paying for
+ * a summary wastes the savings.
+ */
+const KEEP_RECENT_TOKENS = 8_000;
 
 /**
  * Compact a conversation by summarizing older messages via LLM.
@@ -578,7 +659,7 @@ const KEEP_RECENT_TOKENS = 20_000;
  * better summary.
  *
  * - Keeps the system message (index 0) intact.
- * - Keeps the most recent ~20K tokens of conversation intact.
+ * - Keeps the most recent ~8K tokens of conversation intact.
  * - Summarizes everything in between using an appropriate model.
  * - Tool results are truncated and thinking blocks stripped in the summary call.
  * - Messages are token-budgeted to avoid overflowing the summarizer's context.
@@ -608,10 +689,13 @@ export async function compact(
     contextWindow: String(options.contextWindow),
   });
 
-  // Find the cut point — keep ~20K tokens of recent conversation
+  // Find the cut point — keep ~8K tokens of recent conversation. Completed
+  // tool calls may contain an entire generated file in their arguments; cap
+  // those historical payloads so one atomic call/result pair cannot defeat
+  // the recent-token budget and overflow the next provider request.
   const systemMessage = messages[0];
   const recentStart = findRecentCutPoint(messages, KEEP_RECENT_TOKENS);
-  const recentMessages = messages.slice(recentStart);
+  const recentMessages = compactHistoricalToolCallArgs(messages.slice(recentStart));
   const middleMessages = messages.slice(1, recentStart);
 
   log("INFO", "compaction", `Cut point analysis`, {
@@ -707,13 +791,18 @@ export async function compact(
     model: summaryModel.id,
     messageCount: String(summaryMessages.length),
     hasApiKey: String(!!options.apiKey),
-    apiKeyPrefix: options.apiKey ? options.apiKey.slice(0, 15) + "..." : "none",
   });
 
-  // Call LLM with retries on empty responses
+  // Retry empty successful responses only. Transport failures and timeouts use
+  // the deterministic fallback immediately; replaying the same large request
+  // adds long UI stalls and can leave several expensive requests in flight.
   let summaryText = "";
   for (let attempt = 0; attempt <= MAX_SUMMARY_RETRIES; attempt++) {
     options.signal?.throwIfAborted();
+    const attemptController = new AbortController();
+    const forwardAbort = () => attemptController.abort(options.signal?.reason);
+    options.signal?.addEventListener("abort", forwardAbort, { once: true });
+
     try {
       const result = stream({
         provider: options.provider,
@@ -728,13 +817,15 @@ export async function compact(
           options.provider === "moonshot" && isKimiCodingEndpoint(options.baseUrl)
             ? kimiCodingHeaders()
             : undefined,
-        signal: options.signal,
+        signal: attemptController.signal,
       });
 
       const response = await awaitSummaryResponseWithTimeout(
         result.response,
         SUMMARY_ATTEMPT_TIMEOUT_MS,
         options.signal,
+        () => attemptController.abort(),
+        result,
       );
       options.signal?.throwIfAborted();
 
@@ -777,10 +868,14 @@ export async function compact(
         "WARN",
         "compaction",
         err instanceof SummaryTimeoutError
-          ? `Summary LLM call timed out after ${SUMMARY_ATTEMPT_TIMEOUT_MS}ms — using fallback if no later attempt succeeds`
+          ? `Summary LLM call timed out after ${SUMMARY_ATTEMPT_TIMEOUT_MS}ms — using fallback`
           : `Summary LLM call failed: ${err instanceof Error ? err.message : String(err)}`,
         { attempt: String(attempt), timeoutMs: String(SUMMARY_ATTEMPT_TIMEOUT_MS) },
       );
+      break;
+    } finally {
+      options.signal?.removeEventListener("abort", forwardAbort);
+      attemptController.abort();
     }
   }
 

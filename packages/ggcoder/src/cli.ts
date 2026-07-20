@@ -52,6 +52,7 @@ import fs from "node:fs";
 import readline from "node:readline/promises";
 import { renderApp } from "./ui/render.js";
 import { runJsonMode } from "./modes/json-mode.js";
+import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import { runRpcMode } from "./modes/rpc-mode.js";
 import { runServeMode } from "./modes/serve-mode.js";
 import {
@@ -68,7 +69,7 @@ import { formatUserError } from "./utils/error-handler.js";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { ThemeName } from "./ui/theme/theme.js";
 import { AuthStorage } from "./core/auth-storage.js";
-import { SessionManager } from "./core/session-manager.js";
+import { SessionManager, type TurnMetricPayload } from "./core/session-manager.js";
 import { ensureAppDirs, getAppPaths, loadSavedSettings } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
 import { setStreamDiagnostic } from "@abukhaled/gg-agent";
@@ -76,7 +77,9 @@ import { setProviderDiagnostic } from "@abukhaled/gg-ai";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { createTools } from "./tools/index.js";
+import { cleanupToolOutputs } from "./tools/overflow.js";
 import { CheckpointStore } from "./core/checkpoint-store.js";
+import { ReviewCoverageTracker } from "./core/ideal-review.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import {
   createCompactedSessionCheckpoint,
@@ -84,14 +87,16 @@ import {
   getRestoredMessagesForDisplay,
 } from "./core/session-compaction.js";
 import { setEstimatorModel } from "./core/compaction/token-estimator.js";
+import { findUserSessionPrompt } from "./core/session-preview.js";
 import {
+  getAuthStorageKeys,
   getContextWindow,
   getDefaultModel,
   getMaxThinkingLevel,
   getModel,
+  getModelsForProvider,
 } from "./core/model-registry.js";
 import { MCPClientManager, getAllMcpServers } from "./core/mcp/index.js";
-import { runPixel } from "./cli/pixel.js";
 import { runLogin, runLogout, runDoctor } from "./cli/auth.js";
 import { runMcp } from "./cli/mcp.js";
 import {
@@ -102,6 +107,7 @@ import {
   requireInteractiveTTY,
 } from "./cli/shared.js";
 import { discoverAgents } from "./core/agents.js";
+import { applyAsyncSubagentPolicy } from "./core/subagent-policy.js";
 import { discoverSkills } from "./core/skills.js";
 import path from "node:path";
 import chalk from "chalk";
@@ -109,13 +115,13 @@ import { checkAndAutoUpdate } from "./core/auto-update.js";
 
 import { routeCliCommandInput, type CliSubcommandName } from "./cli/command-routing.js";
 
-const THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh", "max"]);
+const THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh", "max", "ultra"]);
 
 export function parseThinkingLevel(value: string | undefined): ThinkingLevel | undefined {
   if (value === undefined) return undefined;
   if (THINKING_LEVELS.has(value as ThinkingLevel)) return value as ThinkingLevel;
   throw new Error(
-    `Invalid --thinking value "${value}". Expected low, medium, high, xhigh, or max.`,
+    `Invalid --thinking value "${value}". Expected low, medium, high, xhigh, max, or ultra.`,
   );
 }
 
@@ -168,9 +174,9 @@ function printHelp(): void {
     ["-v, --version", "Show version number"],
     [
       "--provider <name>",
-      "AI provider (anthropic, xiaomi, openai, gemini, glm, moonshot, minimax, deepseek, openrouter, sakana)",
+      "AI provider (anthropic, xiaomi, openai, gemini, glm, moonshot, minimax, deepseek, openrouter, sakana, xai)",
     ],
-    ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-5.5)"],
+    ["--model <name>", "Model to use (e.g. claude-sonnet-5, gpt-5.5)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Override the system prompt"],
     ["--thinking <level>", "Enable thinking level (low, medium, high, xhigh, max)"],
@@ -227,7 +233,6 @@ function createCliSubcommandHandlers(): Record<CliSubcommandName, () => void> {
   };
 
   return {
-    pixel: () => runWithStandardErrorHandling(() => runPixel({ runInkTUI }), true),
     mcp: () => runWithStandardErrorHandling(runMcp),
     login: () => runWithStandardErrorHandling(runLogin),
     logout: () => runWithStandardErrorHandling(runLogout),
@@ -246,6 +251,14 @@ function createCliSubcommandHandlers(): Record<CliSubcommandName, () => void> {
 }
 
 function main(): void {
+  if (process.argv.includes("--subagent-worker")) {
+    void runSubagentWorkerMode().catch((error: unknown) => {
+      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      process.exitCode = 1;
+    });
+    return;
+  }
+
   // Silent auto-update check (throttled, non-blocking on failure)
   const updateMessage = checkAndAutoUpdate(CLI_VERSION);
   if (updateMessage) {
@@ -275,6 +288,7 @@ function main(): void {
       model: { type: "string" },
       "max-turns": { type: "string" },
       "system-prompt": { type: "string" },
+      tools: { type: "string" },
       "prompt-cache-key": { type: "string" },
       thinking: { type: "string" },
       resume: { type: "string" },
@@ -302,6 +316,17 @@ function main(): void {
     const systemPrompt = values["system-prompt"];
     const promptCacheKey = values["prompt-cache-key"];
     const thinkingLevel = parseThinkingLevel(values.thinking);
+    // Optional tool allow-list forwarded by the subagent spawner from an agent
+    // definition's `tools:` frontmatter. Comma-separated; empty → full toolset.
+    // An all-empty value collapses to undefined (full toolset) rather than an
+    // empty array, which AgentSession would treat as "block every tool".
+    const parsedTools = values.tools
+      ? values.tools
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean)
+      : [];
+    const allowedTools = parsedTools.length > 0 ? parsedTools : undefined;
     const cwd = process.cwd();
     runJsonMode({
       message,
@@ -310,6 +335,7 @@ function main(): void {
       cwd,
       systemPrompt,
       maxTurns,
+      allowedTools,
       promptCacheKey,
       thinkingLevel,
     }).catch((err: unknown) => {
@@ -345,13 +371,14 @@ function main(): void {
 
   function getHardcodedDefault(p: string): string {
     if (p === "openai") return "gpt-5.5";
-    if (p === "gemini") return "gemini-3.1-flash-lite-preview";
+    if (p === "gemini") return "gemini-3.1-flash-lite";
     if (p === "glm") return "glm-5.2";
-    if (p === "moonshot") return "kimi-k2.7-code";
+    if (p === "moonshot") return "kimi-k3";
     if (p === "minimax") return "MiniMax-M3";
     if (p === "deepseek") return "deepseek-v4-pro";
     if (p === "openrouter") return "qwen/qwen3.6-plus";
     if (p === "sakana") return "fugu";
+    if (p === "xai") return "grok-4.5";
     return "claude-opus-4-8";
   }
 
@@ -371,6 +398,8 @@ function main(): void {
     thinkingLevel,
     idealReviewEnabled: saved.idealReviewEnabled,
     lspDiagnostics: saved.lspDiagnostics,
+    allowOutsideWorkspaceWrites: saved.allowOutsideWorkspaceWrites,
+    subagentMaxPerModel: saved.subagentMaxPerModel,
     continueRecent,
     resumeSessionPath: values.resume,
     theme: savedTheme,
@@ -392,9 +421,10 @@ async function runInkTUI(opts: {
   continueRecent?: boolean;
   resumeSessionPath?: string;
   theme?: "auto" | ThemeName;
-  initialOverlay?: "pixel";
   idealReviewEnabled?: boolean;
   lspDiagnostics?: boolean;
+  allowOutsideWorkspaceWrites?: boolean;
+  subagentMaxPerModel?: number;
 }): Promise<void> {
   requireInteractiveTTY();
 
@@ -425,49 +455,88 @@ async function runInkTUI(opts: {
   // Preload every logged-in provider's credentials for the model switcher.
   // Resolve each one BEFORE picking the active provider, so a dead OAuth
   // refresh token (preferredProvider expired) doesn't crash startup — we
-  // fall back to whichever other provider actually resolved.
+  // fall back to whichever other provider actually resolved. Keyed by
+  // auth-storage key (not always the provider id) — e.g. Xiaomi splits into
+  // "xiaomi" (Token Plan) and "xiaomi-credits" (API Credits, required for
+  // mimo-v2.5-pro-ultraspeed) since a user may hold either or both.
   const credentialsByProvider: Record<
     string,
     { accessToken: string; accountId?: string; projectId?: string; baseUrl?: string }
   > = {};
   const expiredProviders: Provider[] = [];
   for (const p of loggedInProviders) {
-    try {
-      const resolved = await authStorage.resolveCredentials(p);
-      credentialsByProvider[p] = {
-        accessToken: resolved.accessToken,
-        accountId: resolved.accountId,
-        projectId: resolved.projectId,
-        baseUrl: resolved.baseUrl,
-      };
-    } catch {
-      // Refresh failed (resolveCredentials wipes the bad creds when the
-      // refresh token is dead). Track so we can warn the user, and fall
-      // back to another working provider below.
-      expiredProviders.push(p);
+    // Every distinct storage key any of this provider's models might need —
+    // almost always just `[p]`; only providers with model-specific
+    // `authStorageKeys` (Xiaomi) contribute extra keys.
+    const storageKeys = new Set<string>([p]);
+    for (const m of getModelsForProvider(p)) {
+      for (const key of m.authStorageKeys ?? []) storageKeys.add(key);
     }
+    let resolvedAny = false;
+    for (const key of storageKeys) {
+      try {
+        const resolved = await authStorage.resolveCredentials(p, { storageKeys: [key] });
+        credentialsByProvider[key] = {
+          accessToken: resolved.accessToken,
+          accountId: resolved.accountId,
+          projectId: resolved.projectId,
+          baseUrl: resolved.baseUrl,
+        };
+        resolvedAny = true;
+      } catch {
+        // This particular storage key isn't configured (or its refresh token
+        // is dead) — other keys for this provider may still resolve.
+      }
+    }
+    // Refresh failed for every key (resolveCredentials wipes bad OAuth creds
+    // when the refresh token is dead). Track so we can warn the user, and
+    // fall back to another working provider below.
+    if (!resolvedAny) expiredProviders.push(p);
   }
 
-  // Fall back if the preferred provider didn't resolve. The settings file
-  // is NOT updated — user might re-login to the preferred one later and
+  // The model a provider should actually boot with, given which storage keys
+  // resolved: prefer the provider's default model, but for a provider like
+  // Xiaomi that splits credentials across models, fall back to whichever
+  // model's specific storage key DID resolve (e.g. a user who configured only
+  // API Credits, no Token Plan, must still land on mimo-v2.5-pro-ultraspeed,
+  // not get treated as logged out of Xiaomi entirely).
+  const resolvedKeyFor = (p: Provider, modelId: string): string | undefined =>
+    getAuthStorageKeys(p, modelId).find((key) => credentialsByProvider[key]);
+  const modelResolves = (p: Provider, modelId: string): boolean =>
+    resolvedKeyFor(p, modelId) !== undefined;
+  const resolvableModelFor = (p: Provider): string | undefined => {
+    const def = getDefaultModel(p).id;
+    if (modelResolves(p, def)) return def;
+    return getModelsForProvider(p).find((m) => modelResolves(p, m.id))?.id;
+  };
+
+  // Fall back if the preferred provider/model didn't resolve. The settings
+  // file is NOT updated — user might re-login to the preferred one later and
   // expect to come back. This is a per-launch override.
   let provider = preferredProvider;
   let model = preferredModel;
-  if (!credentialsByProvider[provider]) {
-    const fallback = loggedInProviders.find((p) => credentialsByProvider[p]);
-    if (!fallback) {
-      throw new Error(
-        'All logged-in providers expired or failed to authenticate. Run "ggcoder login" to re-authenticate.',
+  if (!modelResolves(provider, model)) {
+    // Same provider, different model first — e.g. Xiaomi Credits-only users
+    // land on mimo-v2.5-pro-ultraspeed instead of bouncing to another provider.
+    const sameProviderModel = resolvableModelFor(provider);
+    if (sameProviderModel) {
+      model = sameProviderModel;
+    } else {
+      const fallback = loggedInProviders.find((p) => resolvableModelFor(p));
+      if (!fallback) {
+        throw new Error(
+          'All logged-in providers expired or failed to authenticate. Run "ggcoder login" to re-authenticate.',
+        );
+      }
+      console.warn(
+        chalk.yellow(
+          `⚠ ${displayName(preferredProvider)} session expired — switched to ${displayName(fallback)} for this launch.\n` +
+            `  Run "ggcoder login" to re-authenticate ${displayName(preferredProvider)}.`,
+        ),
       );
+      provider = fallback;
+      model = resolvableModelFor(fallback)!;
     }
-    console.warn(
-      chalk.yellow(
-        `⚠ ${displayName(preferredProvider)} session expired — switched to ${displayName(fallback)} for this launch.\n` +
-          `  Run "ggcoder login" to re-authenticate ${displayName(preferredProvider)}.`,
-      ),
-    );
-    provider = fallback;
-    model = getDefaultModel(fallback).id;
   } else if (expiredProviders.length > 0) {
     console.warn(
       chalk.yellow(
@@ -489,7 +558,7 @@ async function runInkTUI(opts: {
 
   // Use the already-resolved credentials from the preload loop — no need
   // to re-resolve and risk hitting the same dead refresh path again.
-  const cached = credentialsByProvider[provider]!;
+  const cached = credentialsByProvider[resolvedKeyFor(provider, model)!]!;
   const creds = {
     accessToken: cached.accessToken,
     accountId: cached.accountId,
@@ -524,48 +593,38 @@ async function runInkTUI(opts: {
   // Holder so the (cwd-bound) tools can snapshot pre-mutation file state for
   // /rewind. The store is created once the session id is known (below).
   const checkpointRef: { current: CheckpointStore | null } = { current: null };
+  const reviewCoverageTracker = new ReviewCoverageTracker(cwd);
   const onPreFileMutation = (filePath: string): Promise<void> =>
     checkpointRef.current?.recordPreMutation(filePath) ?? Promise.resolve();
+  let activeProvider = provider;
+  let activeModel = model;
+  let activeThinking = opts.thinkingLevel;
 
-  const { tools, processManager, rebuildReadTool, lspManager } = await createTools(cwd, {
-    agents,
-    skills,
-    provider,
-    model,
-    planModeRef,
-    onPreFileMutation,
-    lspDiagnostics: opts.lspDiagnostics,
-    authStorage,
-    onEnterPlan: (reason) => planToolCallbacks.onEnterPlan?.(reason),
-    onExitPlan: (planPath) =>
-      planToolCallbacks.onExitPlan?.(planPath) ?? Promise.resolve("Plan review is unavailable."),
-  });
-
-  // The active LSP pool follows the active tool set — rebuilds (pixel chdir)
-  // shut the old pool down and swap in the new one.
-  let activeLspManager = lspManager;
-
-  // Rebuilds the cwd-bound tools for a different project root. Used by the
-  // pixel-fix flow so the agent operates in the error's project, not in
-  // wherever ggcoder was launched from.
-  const rebuildToolsForCwd = async (newCwd: string) => {
-    activeLspManager?.shutdownAll();
-    const { tools: rebuilt, lspManager: rebuiltLspManager } = await createTools(newCwd, {
+  const { tools, processManager, rebuildReadTool, lspManager, subAgentManager } = await createTools(
+    cwd,
+    {
       agents,
       skills,
       provider,
       model,
       planModeRef,
       onPreFileMutation,
+      onFileRead: (filePath) => reviewCoverageTracker.recordRead(filePath),
+      onFileMutated: (filePath) => reviewCoverageTracker.recordChanged(filePath),
       lspDiagnostics: opts.lspDiagnostics,
+      getWriteGuardSettings: () => ({
+        allowOutsideWorkspaceWrites: opts.allowOutsideWorkspaceWrites ?? false,
+      }),
       authStorage,
       onEnterPlan: (reason) => planToolCallbacks.onEnterPlan?.(reason),
       onExitPlan: (planPath) =>
         planToolCallbacks.onExitPlan?.(planPath) ?? Promise.resolve("Plan review is unavailable."),
-    });
-    activeLspManager = rebuiltLspManager;
-    return rebuilt;
-  };
+      getProvider: () => activeProvider,
+      getModel: () => activeModel,
+      getThinkingLevel: () => activeThinking,
+      getMaxPerModel: () => opts.subagentMaxPerModel,
+    },
+  );
 
   // MCP startup can involve `npx` installing/booting servers. Do it after the
   // TUI paints so a slow network or npm cache never looks like "nothing happens".
@@ -581,20 +640,28 @@ async function runInkTUI(opts: {
     return initialMcpConnectPromise;
   };
 
-  const systemPrompt = await buildSystemPrompt(
-    cwd,
-    skills,
-    planModeRef.current,
-    undefined,
-    tools.map((tool) => tool.name),
-    undefined,
+  const toolNames = tools.map((tool) => tool.name);
+  const systemPrompt = applyAsyncSubagentPolicy(
+    await buildSystemPrompt(
+      cwd,
+      skills,
+      planModeRef.current,
+      undefined,
+      toolNames,
+      undefined,
+      provider,
+    ),
     provider,
+    model,
+    opts.thinkingLevel,
+    toolNames,
   );
 
   // Kill all background processes on exit (synchronous — catches all exit paths)
   process.on("exit", () => {
+    subAgentManager?.shutdownAllNow();
     processManager.shutdownAll();
-    activeLspManager?.shutdownAll();
+    lspManager?.shutdownAll();
     mcpManager.dispose().catch(() => {});
   });
 
@@ -606,6 +673,7 @@ async function runInkTUI(opts: {
   let sessionPath: string | undefined;
   let sessionId: string | undefined;
   let initialHistory: CompletedItem[] | undefined;
+  let turnMetrics: TurnMetricPayload[] = [];
 
   // Determine which session to resume (explicit path or most recent)
   const explicitResumePath = opts.resumeSessionPath
@@ -620,6 +688,7 @@ async function runInkTUI(opts: {
     try {
       const loaded = await sessionManager.load(resumePath);
       const loadedMessages = sessionManager.getMessages(loaded.entries);
+      turnMetrics = sessionManager.getTurnMetrics(loaded.entries);
 
       if (loadedMessages.length > 0) {
         messages.push(...loadedMessages);
@@ -634,6 +703,7 @@ async function runInkTUI(opts: {
         // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
         const contextWindow = getContextWindow(model, { provider, accountId: creds.accountId });
         if (shouldCompact(messages, contextWindow, 0.8)) {
+          await subAgentManager?.hydrate(loaded.header.id);
           log("INFO", "session", `Restored session exceeds context — auto-compacting`);
           const compactionAbort = new AbortController();
           const onSigint = () => compactionAbort.abort();
@@ -657,9 +727,19 @@ async function runInkTUI(opts: {
               provider,
               model,
               messages: compacted.messages,
+              conversationId: loaded.header.conversationId ?? loaded.header.id,
+              preview: loaded.header.preview ?? findUserSessionPrompt(messages),
+              title: [...loaded.entries]
+                .reverse()
+                .find((entry) => entry.type === "label")
+                ?.label.trim(),
             });
             sessionPath = compactedSession.path;
             sessionId = compactedSession.id;
+            for (const metric of turnMetrics) {
+              await sessionManager.appendTurnMetric(sessionPath, metric);
+            }
+            await subAgentManager?.rebindParentSession(sessionId);
             messages.length = 0;
             messages.push(...compacted.messages);
             log("INFO", "session", `Auto-compaction complete`, {
@@ -703,6 +783,7 @@ async function runInkTUI(opts: {
   // Now that the session id is finalized, back /rewind with a checkpoint store.
   if (sessionId) {
     checkpointRef.current = new CheckpointStore({ sessionId, cwd });
+    await subAgentManager?.hydrate(sessionId);
   }
 
   // Prune old session transcripts in the background — they're append-only
@@ -726,6 +807,8 @@ async function runInkTUI(opts: {
         })
         .catch(() => {});
     }
+    // Sweep recoverable full tool outputs (~/.gg/tool-output/) older than 48h.
+    void cleanupToolOutputs().catch(() => {});
   }
 
   await renderApp({
@@ -745,24 +828,32 @@ async function runInkTUI(opts: {
     loggedInProviders,
     credentialsByProvider,
     initialHistory,
+    initialTurnMetrics: turnMetrics,
     sessionsDir: paths.sessionsDir,
     sessionPath,
     sessionId,
     processManager,
+    subAgentManager,
+    lspManager,
+    reviewCoverageTracker,
     settingsFile: paths.settingsFile,
     mcpManager,
     authStorage,
     planModeRef,
     skills,
     checkpointStore: checkpointRef.current ?? undefined,
-    initialOverlay: opts.initialOverlay,
     idealReviewEnabled: opts.idealReviewEnabled,
-    rebuildToolsForCwd,
     rebuildReadTool,
     connectInitialMcpTools,
     planCallbacks: planToolCallbacks,
+    onRuntimeStateChange: (updates) => {
+      if (updates.provider) activeProvider = updates.provider;
+      if (updates.model) activeModel = updates.model;
+      if ("thinking" in updates) activeThinking = updates.thinking;
+    },
   });
 
+  await subAgentManager?.shutdownAll();
   closeLogger();
 }
 
@@ -790,12 +881,13 @@ async function runSessions(): Promise<void> {
 
   function getDefault(p: string): string {
     if (p === "openai") return "gpt-5.5";
-    if (p === "gemini") return "gemini-3.1-flash-lite-preview";
+    if (p === "gemini") return "gemini-3.1-flash-lite";
     if (p === "glm") return "glm-5.2";
-    if (p === "moonshot") return "kimi-k2.7-code";
+    if (p === "moonshot") return "kimi-k3";
     if (p === "minimax") return "MiniMax-M3";
     if (p === "deepseek") return "deepseek-v4-pro";
     if (p === "sakana") return "fugu";
+    if (p === "xai") return "grok-4.5";
     return "claude-opus-4-8";
   }
 
@@ -813,6 +905,8 @@ async function runSessions(): Promise<void> {
     thinkingLevel,
     idealReviewEnabled: saved2.idealReviewEnabled,
     lspDiagnostics: saved2.lspDiagnostics,
+    allowOutsideWorkspaceWrites: saved2.allowOutsideWorkspaceWrites,
+    subagentMaxPerModel: saved2.subagentMaxPerModel,
     resumeSessionPath: selectedPath,
     theme: saved2.theme,
   });
@@ -1176,8 +1270,6 @@ async function runAgentHome(): Promise<void> {
   });
 }
 
-// ── Pixel ──────────────────────────────────────────────────
-
 // ── Helpers ────────────────────────────────────────────────
 
 /**
@@ -1204,6 +1296,7 @@ async function resolveActiveProvider(
     "deepseek",
     "openrouter",
     "sakana",
+    "xai",
   ];
   const loggedInProviders: Provider[] = [];
   for (const p of allProviders) {
@@ -1348,15 +1441,38 @@ export function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
           case "tool_call": {
             flushText();
             const result = toolResults.get(block.id);
-            items.push({
-              kind: "tool_done",
-              name: block.name,
-              args: block.args,
-              result: result?.content ?? "",
-              isError: result?.isError ?? false,
-              durationMs: 0,
-              id: `restore-${id++}`,
-            });
+            if (block.name === "subagent" || block.name === "spawn_agent") {
+              items.push({
+                kind: "subagent_group",
+                agents: [
+                  {
+                    toolCallId: block.id,
+                    task: String(
+                      block.name === "spawn_agent"
+                        ? (block.args.task_name ?? block.args.task ?? "Async agent")
+                        : (block.args.task ?? "Sub-agent"),
+                    ),
+                    agentName: String(block.args.agent ?? "default"),
+                    status: result?.isError ? "error" : "done",
+                    toolUseCount: 0,
+                    tokenUsage: { input: 0, output: 0 },
+                    result: result?.content ?? "",
+                    durationMs: 0,
+                  },
+                ],
+                id: `restore-${id++}`,
+              });
+            } else {
+              items.push({
+                kind: "tool_done",
+                name: block.name,
+                args: block.args,
+                result: result?.content ?? "",
+                isError: result?.isError ?? false,
+                durationMs: 0,
+                id: `restore-${id++}`,
+              });
+            }
             break;
           }
           case "server_tool_call": {

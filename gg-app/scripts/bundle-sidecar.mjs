@@ -4,28 +4,26 @@
 //
 // Why external + copy (not a single SEA binary): ggcoder's runtime pulls in
 // native `sharp` and lazily imports optional natives (playwright, transformers,
-// unpdf, linkedom, ...). Those cannot be inlined by a bundler, so we mark them
-// `external` and copy the real packages (with their dependency trees) next to
-// the bundle. Each OS/arch bundle is built on its own CI runner, so the copied
-// `sharp` platform binary is always correct for the target.
+// unpdf, ...). Those cannot be inlined by a bundler, so we mark them `external`
+// and copy the real packages (with their dependency trees) next to the bundle.
+// Pure-JS linkedom is bundled to avoid flattening incompatible htmlparser2/entities
+// versions into that external node_modules tree. Each OS/arch bundle is built on
+// its own runner, so copied native binaries match the target.
 import { build } from "esbuild";
 import { createRequire } from "node:module";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
-const sidecarEntry = join(
-  repoRoot,
-  "packages",
-  "ggcoder",
-  "dist",
-  "app-sidecar.js",
-);
+const sidecarEntry = join(here, "error-mom-sidecar.mjs");
+const ggcoderSidecarEntry = join(repoRoot, "packages", "ggcoder", "dist", "app-sidecar.js");
 const outDir = join(here, "..", "src-tauri", "sidecar");
 const outFile = join(outDir, "app-sidecar.mjs");
 const nodeModulesOut = join(outDir, "node_modules");
+const bundledSkillsSource = join(repoRoot, "packages", "ggcoder", "assets", "skills");
+const bundledSkillsOut = join(outDir, "skills");
 
 // Packages that must NOT be inlined: native addons + lazily-loaded optional
 // heavy deps. They are copied verbatim with their dependency trees instead.
@@ -34,22 +32,29 @@ const EXTERNAL = [
   "playwright",
   "@huggingface/transformers",
   "unpdf",
-  "linkedom",
   "ogg-opus-decoder",
   "turndown",
   "turndown-plugin-gfm",
   "@mozilla/readability",
+  // The Codex transport loads this package's zstd.wasm by path at runtime.
+  // Keep the package external so the WASM asset survives the sidecar bundle.
+  "@bokuweb/zstd-wasm",
+  // Default MCP server: spawned as a stdio child, never imported, so esbuild
+  // won't bundle it. Copy it next to the sidecar so resolveStdioCommand can
+  // resolve its bin and rewrite `npx -y @kenkaiiii/kencode-search` to a direct
+  // `node dist/index.js` spawn. Without this the shipped app silently falls
+  // back to raw npx, paying a ~90 MB `npm exec` wrapper per MCP connection.
+  "@kenkaiiii/kencode-search",
 ];
 
 // require resolver anchored at the ggcoder package, where these deps live.
-const ggcoderRequire = createRequire(
-  join(repoRoot, "packages", "ggcoder", "package.json"),
-);
+const ggcoderRequire = createRequire(join(repoRoot, "packages", "ggcoder", "package.json"));
 
 // Candidate node_modules roots to scan directly when `require.resolve` is
 // blocked by a package's `exports` map (which often hides ./package.json).
 const NM_ROOTS = [
   join(repoRoot, "packages", "ggcoder", "node_modules"),
+  join(repoRoot, "packages", "gg-ai", "node_modules"),
   join(repoRoot, "node_modules"),
 ];
 
@@ -73,17 +78,38 @@ function nearestPackageDir(start) {
  */
 function packageRoot(name, fromRequire, fromDir) {
   const segs = name.split("/");
+  // A resolved dir only counts as the package root when its package.json is the
+  // REAL manifest (name matches). Some packages' `exports` maps remap
+  // `<pkg>/package.json` to a nested stub — e.g. @modelcontextprotocol/sdk
+  // resolves it to `dist/cjs/package.json` ({"type":"commonjs"}). Copying that
+  // dir shipped a package with no dependencies field, so its dep tree
+  // (zod-to-json-schema, …) was never copied and the bundled kencode-search
+  // crashed at require time in the installed app.
+  const isRealRoot = (dir) => {
+    try {
+      return JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).name === name;
+    } catch {
+      return false;
+    }
+  };
   // 1) Direct package.json resolution (works when exports allows it).
   try {
-    return dirname(fromRequire.resolve(`${name}/package.json`));
+    const dir = dirname(fromRequire.resolve(`${name}/package.json`));
+    if (isRealRoot(dir)) return dir;
   } catch {
     // ignore and fall through
   }
-  // 2) Resolve the package entry, then walk up to its package.json.
+  // 2) Resolve the package entry, then walk up to the real package root (the
+  //    nearest package.json can be a nested build stub — keep walking).
   try {
     const entry = fromRequire.resolve(name);
-    const root = nearestPackageDir(dirname(entry));
-    if (root) return root;
+    let dir = nearestPackageDir(dirname(entry));
+    while (dir) {
+      if (isRealRoot(dir)) return dir;
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = nearestPackageDir(parent);
+    }
   } catch {
     // ignore and fall through
   }
@@ -110,11 +136,17 @@ function packageRoot(name, fromRequire, fromDir) {
  */
 function copyPackage(name, fromRequire, fromDir, copied) {
   if (copied.has(name)) return;
-  const root = packageRoot(name, fromRequire, fromDir);
-  if (!root) {
+  const linkedRoot = packageRoot(name, fromRequire, fromDir);
+  if (!linkedRoot) {
     console.warn(`skip (not found): ${name}`);
     return;
   }
+  // Resolve pnpm symlinks to the real .pnpm dir. Anchoring the child resolver
+  // at the SYMLINK path can't see the package's own deps (pnpm places them as
+  // siblings of the REAL location), which silently skipped every transitive
+  // dep of a package found via the symlink — the bundled kencode-search
+  // shipped without the MCP SDK's dependency tree and crashed on spawn.
+  const root = realpathSync(linkedRoot);
   copied.add(name);
   const dest = join(nodeModulesOut, ...name.split("/"));
   mkdirSync(dirname(dest), { recursive: true });
@@ -131,14 +163,44 @@ function copyPackage(name, fromRequire, fromDir, copied) {
   }
 }
 
-async function main() {
-  if (!existsSync(sidecarEntry)) {
+/**
+ * Native packages can publish binaries for every supported OS/architecture in
+ * one npm tarball. Keep only this build runner's payload: shipping dormant Intel
+ * Mach-O files makes an arm64 app look Intel-based to macOS inventory scanners
+ * and adds roughly 180 MB of unused files before compression.
+ */
+function pruneForeignNativePayloads() {
+  const runtimes = join(nodeModulesOut, "onnxruntime-node", "bin", "napi-v3");
+  if (!existsSync(runtimes)) return;
+
+  const selected = join(runtimes, process.platform, process.arch);
+  if (!existsSync(selected)) {
     throw new Error(
-      `sidecar entry missing: ${sidecarEntry} (build @kenkaiiii/ggcoder first)`,
+      `onnxruntime-node has no native payload for ${process.platform}/${process.arch}`,
     );
+  }
+
+  const keep = join(outDir, `.gg-onnxruntime-${process.pid}`);
+  cpSync(selected, keep, { recursive: true });
+  rmSync(runtimes, { recursive: true, force: true });
+  mkdirSync(join(runtimes, process.platform), { recursive: true });
+  cpSync(keep, selected, { recursive: true });
+  rmSync(keep, { recursive: true, force: true });
+  console.log(`pruned onnxruntime-node payloads to ${process.platform}/${process.arch}`);
+}
+
+async function main() {
+  if (!existsSync(ggcoderSidecarEntry)) {
+    throw new Error(
+      `sidecar entry missing: ${ggcoderSidecarEntry} (build @kenkaiiii/ggcoder first)`,
+    );
+  }
+  if (!existsSync(bundledSkillsSource)) {
+    throw new Error(`bundled skills missing: ${bundledSkillsSource}`);
   }
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
+  cpSync(bundledSkillsSource, bundledSkillsOut, { recursive: true });
 
   await build({
     entryPoints: [sidecarEntry],
@@ -168,6 +230,7 @@ async function main() {
   for (const name of EXTERNAL) {
     copyPackage(name, ggcoderRequire, ggcoderRoot, copied);
   }
+  pruneForeignNativePayloads();
   console.log(
     `bundled sidecar → ${outFile}\ncopied ${copied.size} external packages → ${nodeModulesOut}`,
   );

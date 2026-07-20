@@ -89,17 +89,60 @@ export interface AgentToolCallEndEvent {
   durationMs: number;
 }
 
+export interface AgentTurnTiming {
+  /** Logical turn start, before context transforms or provider retries. Unix epoch milliseconds. */
+  startedAt: number;
+  /** First provider event, or full-response arrival for non-streaming fallback. */
+  firstProviderEventAt?: number;
+  /** Successful provider response completion. Unix epoch milliseconds. */
+  completedAt: number;
+  /** Time spent awaiting provider attempts, including failed attempts but excluding retry backoff. */
+  providerDurationMs: number;
+  /** Time from logical turn start to the first provider event. */
+  ttftMs?: number;
+  /** Output tokens divided by total provider duration. Omitted when no rate is measurable. */
+  outputTokensPerSecond?: number;
+}
+
 export interface AgentTurnEndEvent {
   type: "turn_end";
   turn: number;
   stopReason: StopReason;
   usage: Usage;
+  timing: AgentTurnTiming;
 }
 
 export interface AgentDoneEvent {
   type: "agent_done";
   totalTurns: number;
   totalUsage: Usage;
+}
+
+/**
+ * Terminal signal emitted when the loop stops because it exhausted its turn
+ * budget (`maxTurns`) mid-task — i.e. the model still wanted to run tools but
+ * ran out of turns. Distinguishes a hard cut-off from a clean completion so
+ * callers (e.g. the subagent spawner) can tell the parent the output may be
+ * incomplete. Yielded immediately before the final `agent_done`.
+ */
+export interface AgentMaxTurnsEvent {
+  type: "max_turns";
+  totalTurns: number;
+  maxTurns: number;
+}
+
+/**
+ * Warning signal emitted when a turn ended on a non-clean stop reason —
+ * `max_tokens` (output clipped at the model's output-token limit), `refusal`,
+ * or a provider-reported `error` stop. Distinguishes a truncated/degraded
+ * completion from a clean one so hosts can warn the user instead of silently
+ * presenting incomplete output as done.
+ */
+export interface AgentTruncatedEvent {
+  type: "truncated";
+  reason: "max_tokens" | "refusal" | "provider_error";
+  /** True when the loop injected a continuation and will keep going. */
+  continued: boolean;
 }
 
 export interface AgentRetryEvent {
@@ -110,7 +153,8 @@ export interface AgentRetryEvent {
     | "provider_error"
     | "empty_response"
     | "stream_stall"
-    | "overflow_compact";
+    | "overflow_compact"
+    | "tool_argument_glitch";
   attempt: number;
   maxAttempts: number;
   delayMs: number;
@@ -120,6 +164,13 @@ export interface AgentRetryEvent {
   observedLimit?: number;
   /** When true, the retry should not be shown to the user (hidden retry). */
   silent?: boolean;
+  /**
+   * Chars of streamed text preserved in message history across this retry
+   * (transport failures only). When > 0 the retry CONTINUES from the partial
+   * instead of replaying — UIs must keep the streamed text on screen rather
+   * than rolling it back.
+   */
+  preservedChars?: number;
 }
 
 export interface AgentToolCallDeltaEvent {
@@ -180,9 +231,20 @@ export type AgentEvent =
   | AgentRetryEvent
   | AgentTurnEndEvent
   | AgentDoneEvent
+  | AgentMaxTurnsEvent
+  | AgentTruncatedEvent
   | AgentErrorEvent;
 
 // ── Agent Options ───────────────────────────────────────────
+
+export interface TransformContextOptions {
+  /** Force a transform after the provider reports context overflow. */
+  force?: boolean;
+  /** Latest successful provider usage, anchored at its assistant message. */
+  usage?: Usage;
+  /** Messages appended after that usage sample and not yet seen by the provider. */
+  pendingMessages: Message[];
+}
 
 export interface AgentOptions {
   provider: StreamOptions["provider"];
@@ -192,6 +254,8 @@ export interface AgentOptions {
   priorMessages?: Message[];
   tools?: AgentTool[];
   serverTools?: ServerToolDefinition[];
+  /** Control whether tools may/must be called, or select a named tool when supported. */
+  toolChoice?: StreamOptions["toolChoice"];
   maxTurns?: number;
   maxTokens?: number;
   temperature?: number;
@@ -200,6 +264,7 @@ export interface AgentOptions {
   baseUrl?: string;
   signal?: AbortSignal;
   accountId?: string;
+  transportSessionId?: StreamOptions["transportSessionId"];
   projectId?: StreamOptions["projectId"];
   cacheRetention?: StreamOptions["cacheRetention"];
   /** Stable per-session cache routing key for providers that support it. */
@@ -225,6 +290,10 @@ export interface AgentOptions {
   clearToolUses?: boolean;
   /** Max characters for a single tool result. Results exceeding this are truncated with a notice. */
   maxToolResultChars?: number;
+  /** Aggregate budget for ALL tool results in one assistant turn. Protects
+   *  against parallel fan-outs injecting huge uncached context in one turn;
+   *  the largest results are trimmed (water-filling) with a re-run notice. */
+  maxTurnToolResultChars?: number;
   /** Max consecutive pause_turn continuations before stopping (default: 5).
    *  Prevents infinite loops when server-side tools keep pausing. */
   maxContinuations?: number;
@@ -233,12 +302,14 @@ export interface AgentOptions {
    * the messages array (e.g. compaction, truncation). Return the same array
    * for no-op, or a new array to replace the conversation context.
    *
+   * The latest provider usage is authoritative for the history through its
+   * assistant response. `pendingMessages` contains context appended afterward.
    * When `options.force` is true, the caller should compact unconditionally
    * (e.g. after a context overflow error from the API).
    */
   transformContext?: (
     messages: Message[],
-    options?: { force?: boolean },
+    options: TransformContextOptions,
   ) => Message[] | Promise<Message[]>;
   /**
    * Polled after tool execution completes each turn. Returns user messages

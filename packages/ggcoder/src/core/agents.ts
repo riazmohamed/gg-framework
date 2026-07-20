@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { stripBom } from "../utils/text.js";
 
 export interface AgentDefinition {
   name: string;
@@ -18,7 +19,7 @@ export interface AgentDefinition {
  * so user agents override bundled when names collide.
  */
 export async function discoverAgents(options: {
-  globalAgentsDir: string;
+  globalAgentsDir?: string;
   projectDir?: string;
 }): Promise<AgentDefinition[]> {
   const agents: AgentDefinition[] = [];
@@ -31,8 +32,10 @@ export async function discoverAgents(options: {
   }
 
   // Global agents: ~/.gg/agents/*.md
-  const globalAgents = await loadAgentsFromDir(options.globalAgentsDir, "global");
-  agents.push(...globalAgents);
+  if (options.globalAgentsDir) {
+    const globalAgents = await loadAgentsFromDir(options.globalAgentsDir, "global");
+    agents.push(...globalAgents);
+  }
 
   // Bundled defaults — shipped with ggcoder, user-defined agents with the same
   // name take precedence because they come first in the array.
@@ -89,7 +92,9 @@ async function loadAgentsFromDir(
  * You are a scout. Quickly investigate a codebase...
  * ```
  */
-export function parseAgentFile(raw: string, source: "global" | "project"): AgentDefinition {
+export function parseAgentFile(rawInput: string, source: "global" | "project"): AgentDefinition {
+  // A BOM before `---` would otherwise silently kill frontmatter parsing.
+  const raw = stripBom(rawInput);
   let name = "";
   let description = "";
   let tools: string[] = [];

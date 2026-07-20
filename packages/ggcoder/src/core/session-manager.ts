@@ -3,7 +3,14 @@ import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import path from "node:path";
 import crypto from "node:crypto";
-import type { Message, Provider } from "@abukhaled/gg-ai";
+import {
+  environmentSecrets,
+  redactValue,
+  type Message,
+  type Provider,
+  type Usage,
+} from "@abukhaled/gg-ai";
+import type { AgentTurnTiming } from "@abukhaled/gg-agent";
 import { log } from "./logger.js";
 import { encodeCwd } from "./encode-cwd.js";
 import type { CompletedItem } from "../ui/app-items.js";
@@ -51,10 +58,120 @@ export interface CustomEntry extends BaseEntry {
 }
 
 export const DISPLAY_ITEM_CUSTOM_KIND = "display_item";
+export const TURN_METRIC_CUSTOM_KIND = "turn_metric";
+
+export type TurnMetricCost =
+  | { status: "known"; usd: number; source: string; effectiveAt: string }
+  | { status: "unavailable"; reason: string };
+
+export interface TurnMetricPayload {
+  version: 1;
+  turn: number;
+  provider: Provider;
+  model: string;
+  stopReason: string;
+  usage: Usage;
+  timing: AgentTurnTiming;
+  cost: TurnMetricCost;
+}
+
+function finiteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function parseTurnMetric(value: unknown): TurnMetricPayload | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const payload = value as Partial<TurnMetricPayload>;
+  const usage = payload.usage as Partial<Usage> | undefined;
+  const timing = payload.timing as Partial<AgentTurnTiming> | undefined;
+  const cost = payload.cost as Partial<TurnMetricCost> | undefined;
+  if (
+    payload.version !== 1 ||
+    !finiteNumber(payload.turn) ||
+    typeof payload.provider !== "string" ||
+    typeof payload.model !== "string" ||
+    typeof payload.stopReason !== "string" ||
+    !usage ||
+    !finiteNumber(usage.inputTokens) ||
+    !finiteNumber(usage.outputTokens) ||
+    !timing ||
+    !finiteNumber(timing.startedAt) ||
+    !finiteNumber(timing.completedAt) ||
+    !finiteNumber(timing.providerDurationMs) ||
+    !cost ||
+    (cost.status !== "known" && cost.status !== "unavailable")
+  ) {
+    return undefined;
+  }
+  if (
+    (usage.cacheRead !== undefined && !finiteNumber(usage.cacheRead)) ||
+    (usage.cacheWrite !== undefined && !finiteNumber(usage.cacheWrite)) ||
+    (timing.firstProviderEventAt !== undefined && !finiteNumber(timing.firstProviderEventAt)) ||
+    (timing.ttftMs !== undefined && !finiteNumber(timing.ttftMs)) ||
+    (timing.outputTokensPerSecond !== undefined && !finiteNumber(timing.outputTokensPerSecond)) ||
+    (cost.status === "known" &&
+      (!finiteNumber(cost.usd) ||
+        typeof cost.source !== "string" ||
+        typeof cost.effectiveAt !== "string")) ||
+    (cost.status === "unavailable" && typeof cost.reason !== "string")
+  ) {
+    return undefined;
+  }
+  return payload as TurnMetricPayload;
+}
 
 interface DisplayItemPayload {
   version: 1;
   item: CompletedItem;
+}
+
+/** Custom-entry kind for a Ken Kai (mentor agent) turn. Ken's advisory
+ *  conversation is NOT part of the LLM message history (GG Coder never sees it),
+ *  but it's persisted alongside the build session so it survives resume. Stored
+ *  as a `custom` entry with `parentId: null` so it is NEVER on the message DAG
+ *  branch — this keeps it out of `getMessages()` AND avoids racing the build
+ *  session's leaf pointer (Ken runs concurrently). `afterMessageCount` is the
+ *  number of non-system messages that existed when the turn was recorded, used
+ *  to interleave Ken turns back into the transcript chronologically. */
+export const KEN_TURN_CUSTOM_KIND = "ken_turn";
+
+export interface KenTurnPayload {
+  version: 1;
+  question: string;
+  reply: string;
+  afterMessageCount: number;
+}
+
+/** Custom-entry kind for an autopilot verdict marker. Mirrors `ken_turn`:
+ *  persisted as a `custom` entry with `parentId: null` so it's never on the
+ *  message DAG (GG Coder never sees it) but survives resume/compaction and
+ *  interleaves back into the transcript via `afterMessageCount`. Covers all
+ *  four terminal/near-terminal autopilot markers so a resumed session renders
+ *  the exact same Ken bubble the live run showed — never the raw verdict
+ *  keyword (e.g. `ALL_CLEAR`) the model actually replied with. */
+export const AUTOPILOT_MARKER_CUSTOM_KIND = "autopilot_marker";
+
+export interface AutopilotMarkerPayload {
+  version: 1;
+  phase: "prompted" | "done" | "human" | "capped" | "plan_approved";
+  reason?: string;
+  body?: string;
+  afterMessageCount: number;
+}
+
+/** Custom-entry kind for a generic app transcript marker (plan-mode banner,
+ *  task header, error row, user-bubble display hint). Same not-on-the-DAG
+ *  treatment as Ken turns / autopilot markers: persisted with `parentId: null`
+ *  so the LLM never sees it, anchored by `afterMessageCount` so the host can
+ *  interleave it back into the transcript on resume. */
+export const APP_MARKER_CUSTOM_KIND = "app_transcript_marker";
+
+export interface AppMarkerPayload {
+  version: 1;
+  kind: "plan" | "task" | "error" | "user_hint" | "compaction" | "agent_handoff";
+  afterMessageCount: number;
+  /** Kind-specific display fields (reason/title/headline/kenSent/counts/…). */
+  data: Record<string, unknown>;
 }
 
 export type SessionEntry =
@@ -80,6 +197,10 @@ export interface SessionHeader {
   type: "session";
   version: 2;
   id: string;
+  /** Stable identity shared by checkpoint files created during compaction. */
+  conversationId?: string;
+  /** Stable display fallback retained when checkpoint messages contain only internal summaries. */
+  preview?: string;
   timestamp: string;
   cwd: string;
   provider: Provider;
@@ -162,6 +283,7 @@ export class SessionManager {
     cwd: string,
     provider: Provider,
     model: string,
+    options?: { conversationId?: string; preview?: string },
   ): Promise<{
     id: string;
     path: string;
@@ -175,10 +297,16 @@ export class SessionManager {
     const fileName = `${timestamp.replace(/[:.]/g, "-")}_${id.slice(0, 8)}.jsonl`;
     const filePath = path.join(dir, fileName);
 
+    const normalizedPreview = options?.preview?.replace(/\s+/g, " ").trim().slice(0, 80);
+    const safePreview = normalizedPreview
+      ? String(redactValue(normalizedPreview, { secrets: environmentSecrets(process.env) }))
+      : undefined;
     const header: SessionHeader = {
       type: "session",
       version: 2,
       id,
+      conversationId: options?.conversationId ?? id,
+      ...(safePreview ? { preview: safePreview } : {}),
       timestamp,
       cwd,
       provider,
@@ -384,10 +512,25 @@ export class SessionManager {
 
   async appendEntry(sessionPath: string, entry: SessionEntry): Promise<void> {
     try {
-      await fs.appendFile(sessionPath, JSON.stringify(entry) + "\n", "utf-8");
+      // Persist a sanitized clone. The live conversation remains untouched so
+      // credentials can still be used by the current in-memory run.
+      const safeEntry = redactValue(entry, { secrets: environmentSecrets(process.env) });
+      await fs.appendFile(sessionPath, JSON.stringify(safeEntry) + "\n", "utf-8");
     } catch (error) {
       this.handlePersistError(error, "appendEntry");
     }
+  }
+
+  async appendTurnMetric(sessionPath: string, payload: TurnMetricPayload): Promise<void> {
+    const entry: CustomEntry = {
+      type: "custom",
+      kind: TURN_METRIC_CUSTOM_KIND,
+      id: crypto.randomUUID(),
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      data: payload,
+    };
+    await this.appendEntry(sessionPath, entry);
   }
 
   async updateLeaf(sessionPath: string, leafId: string): Promise<void> {
@@ -457,6 +600,93 @@ export class SessionManager {
       const payload = entry.data as Partial<DisplayItemPayload> | undefined;
       const item = payload?.version === 1 ? payload.item : undefined;
       return isCompletedItemLike(item) ? [item] : [];
+    });
+  }
+
+  /** Read all persisted Ken turns in file order. Returns them regardless of
+   *  branch (Ken turns are not chained into the DAG), validated + normalized. */
+  getKenTurns(entries: SessionEntry[]): KenTurnPayload[] {
+    return entries.flatMap((entry): KenTurnPayload[] => {
+      if (entry.type !== "custom" || entry.kind !== KEN_TURN_CUSTOM_KIND) return [];
+      const p = entry.data as Partial<KenTurnPayload> | undefined;
+      if (p?.version === 1 && typeof p.question === "string" && typeof p.reply === "string") {
+        return [
+          {
+            version: 1,
+            question: p.question,
+            reply: p.reply,
+            afterMessageCount: typeof p.afterMessageCount === "number" ? p.afterMessageCount : 0,
+          },
+        ];
+      }
+      return [];
+    });
+  }
+
+  /** Read all persisted app transcript markers in file order, validated +
+   *  normalized (same not-on-the-DAG treatment as Ken turns). */
+  getAppMarkers(entries: SessionEntry[]): AppMarkerPayload[] {
+    return entries.flatMap((entry): AppMarkerPayload[] => {
+      if (entry.type !== "custom" || entry.kind !== APP_MARKER_CUSTOM_KIND) return [];
+      const p = entry.data as Partial<AppMarkerPayload> | undefined;
+      const kind = p?.kind;
+      if (
+        p?.version === 1 &&
+        (kind === "plan" ||
+          kind === "task" ||
+          kind === "error" ||
+          kind === "user_hint" ||
+          kind === "compaction" ||
+          kind === "agent_handoff")
+      ) {
+        return [
+          {
+            version: 1,
+            kind,
+            afterMessageCount: typeof p.afterMessageCount === "number" ? p.afterMessageCount : 0,
+            data: typeof p.data === "object" && p.data !== null ? p.data : {},
+          },
+        ];
+      }
+      return [];
+    });
+  }
+
+  /** Read validated per-turn usage and timing records in file order. */
+  getTurnMetrics(entries: SessionEntry[]): TurnMetricPayload[] {
+    return entries.flatMap((entry): TurnMetricPayload[] => {
+      if (entry.type !== "custom" || entry.kind !== TURN_METRIC_CUSTOM_KIND) return [];
+      const metric = parseTurnMetric(entry.data);
+      return metric ? [metric] : [];
+    });
+  }
+
+  /** Read all persisted autopilot markers in file order, validated + normalized
+   *  (same not-on-the-DAG treatment as Ken turns). */
+  getAutopilotMarkers(entries: SessionEntry[]): AutopilotMarkerPayload[] {
+    return entries.flatMap((entry): AutopilotMarkerPayload[] => {
+      if (entry.type !== "custom" || entry.kind !== AUTOPILOT_MARKER_CUSTOM_KIND) return [];
+      const p = entry.data as Partial<AutopilotMarkerPayload> | undefined;
+      const phase = p?.phase;
+      if (
+        p?.version === 1 &&
+        (phase === "prompted" ||
+          phase === "done" ||
+          phase === "human" ||
+          phase === "capped" ||
+          phase === "plan_approved")
+      ) {
+        return [
+          {
+            version: 1,
+            phase,
+            ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
+            ...(typeof p.body === "string" ? { body: p.body } : {}),
+            afterMessageCount: typeof p.afterMessageCount === "number" ? p.afterMessageCount : 0,
+          },
+        ];
+      }
+      return [];
     });
   }
 

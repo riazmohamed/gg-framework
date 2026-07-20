@@ -11,6 +11,10 @@
  * Cross-tool preferences for those tools live in TOOL_STEERING instead.
  */
 export const TOOL_PROMPT_HINTS: Record<string, string> = {
+  code_search:
+    "Find the most relevant functions/classes/types for a query via AST chunking + BM25 " +
+    "ranking. Returns whole ranked symbol chunks with `file:line → symbol` headers — far fewer " +
+    "tokens than reading whole files. TS/JS only.",
   source_path:
     "Resolve installed package/repo source via opensrc. Use before assuming dependency APIs; inspect returned absolute path with read/grep/find/ls.",
   web_search:
@@ -26,6 +30,10 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
   exit_plan: "Submit a .gg/plans/ markdown plan for user approval and leave plan mode.",
   subagent: "Delegate focused, isolated subtasks (research, parallel exploration).",
   skill: "Invoke a named skill for specialized instructions.",
+  tool_search:
+    "Search the extended tool catalog (MCP servers/integrations) by capability — e.g. " +
+    "'search public GitHub code', 'UI design screenshots'. Matches become callable on your " +
+    "next step. Check the catalog BEFORE concluding you lack a capability.",
   generate_image:
     "Generate or edit images using OpenAI's gpt-image-2 model. Only use when the user explicitly asks to create or edit an image — never generate images proactively. Requires OpenAI to be connected. Pass `image` with a file path to edit an existing image. Save with `out_path`.",
   "mcp__kencode-search__referenceSources":
@@ -43,7 +51,10 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
  * equivalent to the full per-tool hint list in the prompt-bench ablation
  * while costing ~95% fewer words.
  */
-export const TOOL_STEERING_CLAUSES: ReadonlyArray<{ needs: readonly string[]; text: string }> = [
+export const TOOL_STEERING_CLAUSES: ReadonlyArray<{
+  needs: readonly string[];
+  text: string;
+}> = [
   {
     needs: ["edit", "write"],
     text: "Prefer `edit` over `write` for changes to existing files.",
@@ -51,6 +62,14 @@ export const TOOL_STEERING_CLAUSES: ReadonlyArray<{ needs: readonly string[]; te
   {
     needs: ["bash", "find", "grep"],
     text: "Use `find`/`grep` rather than `bash` to locate files and search content.",
+  },
+  {
+    needs: ["code_search", "grep", "read"],
+    text: "Prefer `code_search` for “where/how is X implemented” in TS/JS; use `grep` for exact strings or non-TS files.",
+  },
+  {
+    needs: ["read", "grep", "ls", "find"],
+    text: "Batch independent read-only calls (read, grep, ls, find) into one turn — they run in parallel, so it's faster than one per turn; only serialize a call that depends on a previous result.",
   },
 ];
 
@@ -70,6 +89,7 @@ export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "bash",
   "find",
   "grep",
+  "code_search",
   "ls",
   "source_path",
   "web_fetch",

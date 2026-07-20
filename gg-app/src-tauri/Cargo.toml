@@ -1,6 +1,6 @@
 [package]
 name = "gg-app"
-version = "0.3.1"
+version = "0.24.1"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
@@ -28,6 +28,7 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["time"] }
+base64 = "0.22"
 
 # Updater + process (relaunch) are desktop-only — the updater plugin doesn't
 # build for mobile targets.

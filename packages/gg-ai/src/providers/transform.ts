@@ -6,6 +6,7 @@ import type {
   DocumentContent,
   ImageContent,
   Message,
+  Provider,
   StopReason,
   TextContent,
   ThinkingContent,
@@ -180,6 +181,86 @@ function toAnthropicAssistantContent(
     })
     .map((part) => toAnthropicAssistantPart(part, idMap))
     .filter((b): b is Anthropic.ContentBlockParam => b !== null);
+}
+
+const PROVIDER_IMAGE_LIMIT_PLACEHOLDER = "[image omitted: provider image limit]";
+
+const PROVIDER_IMAGE_BUDGETS: Partial<Record<Provider, number>> = {
+  anthropic: 90,
+  minimax: 90,
+  openai: 200,
+  gemini: 200,
+  openrouter: 90,
+};
+
+function countContextImages(messages: Message[]): number {
+  let count = 0;
+  for (const message of messages) {
+    if (message.role === "user" && Array.isArray(message.content)) {
+      count += message.content.filter((part) => part.type === "image").length;
+    } else if (message.role === "tool") {
+      for (const result of message.content) {
+        if (Array.isArray(result.content)) {
+          count += result.content.filter((part) => part.type === "image").length;
+        }
+      }
+    }
+  }
+  return count;
+}
+
+/**
+ * Cap historical images before provider dispatch, removing the oldest first.
+ * The persisted/live conversation is never mutated; only modified messages and
+ * tool results are cloned for the outgoing request.
+ */
+export function clampProviderContextImages(
+  messages: Message[],
+  provider: Provider,
+  supportsImages: boolean | undefined,
+): Message[] {
+  if (supportsImages === false) return messages;
+  const budget = PROVIDER_IMAGE_BUDGETS[provider] ?? 5;
+  let remainingToRemove = countContextImages(messages) - budget;
+  if (remainingToRemove <= 0) return messages;
+
+  return messages.map((message): Message => {
+    if (message.role === "user" && Array.isArray(message.content)) {
+      const content = message.content.filter((part) => {
+        if (part.type !== "image" || remainingToRemove <= 0) return true;
+        remainingToRemove--;
+        return false;
+      });
+      return {
+        ...message,
+        content:
+          content.length > 0
+            ? content
+            : [{ type: "text" as const, text: PROVIDER_IMAGE_LIMIT_PLACEHOLDER }],
+      };
+    }
+    if (message.role === "tool") {
+      return {
+        ...message,
+        content: message.content.map((result) => {
+          if (!Array.isArray(result.content)) return result;
+          const content = result.content.filter((part) => {
+            if (part.type !== "image" || remainingToRemove <= 0) return true;
+            remainingToRemove--;
+            return false;
+          });
+          return {
+            ...result,
+            content:
+              content.length > 0
+                ? content
+                : [{ type: "text" as const, text: PROVIDER_IMAGE_LIMIT_PLACEHOLDER }],
+          };
+        }),
+      };
+    }
+    return message;
+  });
 }
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
@@ -562,12 +643,12 @@ export function toAnthropicToolChoice(choice: ToolChoice): Anthropic.ToolChoice 
 
 /**
  * Anthropic models with built-in adaptive thinking (Fable 5, Mythos 5,
- * Opus 4.8/4.7/4.6, Sonnet 4.6). Matches both dashed (`opus-4-8`) and dotted
+ * Opus 4.8/4.7/4.6, Sonnet 5). Matches both dashed (`opus-4-8`) and dotted
  * (`opus-4.8`) forms so callers don't have to enumerate variants. These models
  * don't need the `interleaved-thinking` beta header — it's built in.
  */
 export function isAdaptiveThinkingModel(model: string): boolean {
-  return /opus-4[-.]8|opus-4[-.]7|opus-4[-.]6|sonnet-4[-.]6|fable-5|mythos-5/.test(model);
+  return /opus-4[-.]8|opus-4[-.]7|opus-4[-.]6|sonnet-5|fable-5|mythos-5/.test(model);
 }
 
 export function toAnthropicThinking(
@@ -581,10 +662,10 @@ export function toAnthropicThinking(
 } {
   if (isAdaptiveThinkingModel(model)) {
     // Adaptive thinking — model decides when/how much to think.
-    // budget_tokens is deprecated on Opus 4.8 / Opus 4.7 / Opus 4.6 / Sonnet 4.6.
+    // budget_tokens is deprecated on Opus 4.8 / Opus 4.7 / Opus 4.6 / Sonnet 5.
     // Anthropic's output_config.effort accepts low, medium, high, xhigh, and max.
     // xhigh is Fable 5 / Opus 4.8 / 4.7-only; max is supported by Fable 5,
-    // Opus 4.8/4.7/4.6 and Sonnet 4.6.
+    // Opus 4.8/4.7/4.6 and Sonnet 5.
     let effort: string = level;
     if (effort === "xhigh" && !/fable-5|opus-4-8|opus-4-7/.test(model)) {
       effort = "high";
@@ -605,7 +686,7 @@ export function toAnthropicThinking(
   // provider's `max_tokens > maximum allowed` rejection. Now the ceiling is the
   // envelope and the budget is a fraction of it with a reserved visible floor.
   const VISIBLE_FLOOR = 1024;
-  const effectiveLevel = level === "xhigh" || level === "max" ? "high" : level;
+  const effectiveLevel = level === "xhigh" || level === "max" || level === "ultra" ? "high" : level;
   const budgetMap: Record<"low" | "medium" | "high", number> = {
     low: Math.max(1024, Math.floor(maxTokens * 0.2)),
     medium: Math.max(2048, Math.floor(maxTokens * 0.45)),
@@ -935,7 +1016,7 @@ export function toOpenAIReasoningEffort(
   level: ThinkingLevel,
   model: string,
 ): "low" | "medium" | "high" | "xhigh" {
-  const effort = level === "max" ? "xhigh" : level;
+  const effort = level === "max" || level === "ultra" ? "xhigh" : level;
   // Sakana Fugu models reject any effort other than "high"/"xhigh", so floor a
   // lower manual selection up to "high" rather than letting the API 400.
   if (model.startsWith("fugu") && (effort === "low" || effort === "medium")) {

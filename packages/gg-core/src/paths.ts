@@ -4,6 +4,8 @@ import os from "node:os";
 export interface AppPaths {
   agentDir: string;
   sessionsDir: string;
+  subagentSessionsDir: string;
+  subagentsDir: string;
   settingsFile: string;
   authFile: string;
   telegramFile: string;
@@ -15,6 +17,8 @@ export interface AppPaths {
   extensionsDir: string;
   agentsDir: string;
   commandsDir: string;
+  progressFile: string;
+  progressBackupFile: string;
 }
 
 export function getAppPaths(): AppPaths {
@@ -22,6 +26,8 @@ export function getAppPaths(): AppPaths {
   return {
     agentDir,
     sessionsDir: path.join(agentDir, "sessions"),
+    subagentSessionsDir: path.join(agentDir, "subagent-sessions"),
+    subagentsDir: path.join(agentDir, "subagents"),
     settingsFile: path.join(agentDir, "settings.json"),
     authFile: path.join(agentDir, "auth.json"),
     telegramFile: path.join(agentDir, "telegram.json"),
@@ -33,5 +39,7 @@ export function getAppPaths(): AppPaths {
     extensionsDir: path.join(agentDir, "extensions"),
     agentsDir: path.join(agentDir, "agents"),
     commandsDir: path.join(agentDir, "commands"),
+    progressFile: path.join(agentDir, "progress.json"),
+    progressBackupFile: path.join(agentDir, "progress.backup.json"),
   };
 }

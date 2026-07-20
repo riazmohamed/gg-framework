@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { getAppPaths } from "../config.js";
 import { encodeCwd } from "./encode-cwd.js";
+import { getUserSessionPrompt } from "./session-preview.js";
 
 export type ProjectSource = "ggcoder" | "claude-code" | "codex";
 
@@ -67,8 +68,12 @@ function mergeSources(a: ProjectSource[], b: ProjectSource[]): ProjectSource[] {
 
 /**
  * Scan ~/.gg/sessions/. Each session directory's name is the encoded cwd
- * (slashes → underscores); we decode it back and verify the directory still
- * exists on disk.
+ * (slashes → underscores), but that encoding is lossy: any real path segment
+ * containing a literal underscore round-trips wrong (e.g. `my_app` decodes to
+ * `.../my/app`, which doesn't exist, so the project silently vanished from the
+ * picker). So — like Claude Code discovery — we read the real cwd out of the
+ * session header (`{"type":"session",...,"cwd":"/abs"}`) and only fall back to
+ * decoding the directory name when no header carries a cwd.
  */
 async function discoverGgcoderProjects(): Promise<DiscoveredProject[]> {
   const sessionsDir = getAppPaths().sessionsDir;
@@ -85,21 +90,33 @@ async function discoverGgcoderProjects(): Promise<DiscoveredProject[]> {
     const mtime = await maxJsonlMtime(dir);
     if (mtime === null) continue;
 
-    // Normalize so paths containing traversal segments (e.g. an agent launched
-    // with cwd `.../src-tauri/../..`) collapse to their real directory and the
-    // basename isn't a stray "..". Deduped against other entries downstream.
-    const decoded = path.resolve("/" + entry.replace(/_/g, "/"));
-    if (!(await isDirectory(decoded))) continue;
+    const rawCwd =
+      (await readFirstFromJsonlDir(dir, ggcoderCwdExtractor)) ?? fallbackUnderscoreDecode(entry);
+    if (!rawCwd) continue;
+    // Normalize traversal segments (e.g. an agent launched with cwd
+    // `.../src-tauri/../..`) so the basename isn't a stray "..".
+    const cwd = path.resolve(rawCwd);
+    if (!(await isDirectory(cwd))) continue;
 
     results.push({
-      name: path.basename(decoded),
-      path: decoded,
+      name: path.basename(cwd),
+      path: cwd,
       lastActiveMs: mtime,
       lastActiveDisplay: formatRelativeTime(mtime),
       sources: ["ggcoder"],
     });
   }
   return results;
+}
+
+/**
+ * Best-effort decode of a ggcoder session directory name back to a cwd, used
+ * only when the session files carry no `cwd` header. Lossy by design (literal
+ * underscores are indistinguishable from separators); the caller still verifies
+ * the result is an existing directory.
+ */
+function fallbackUnderscoreDecode(entry: string): string {
+  return "/" + entry.replace(/_/g, "/");
 }
 
 /**
@@ -246,6 +263,22 @@ const claudeCwdExtractor: LineExtractor = (line) => {
   return null;
 };
 
+// ggcoder session files open with a `{"type":"session",...,"cwd":"/abs"}` header
+// that stores the real cwd verbatim. Prefer it over decoding the directory name,
+// whose slash→underscore encoding is lossy for paths containing literal
+// underscores (e.g. `my_app` would wrongly decode to `.../my/app`).
+const ggcoderCwdExtractor: LineExtractor = (line) => {
+  try {
+    const parsed = JSON.parse(line) as { type?: unknown; cwd?: unknown };
+    if (parsed.type === "session" && typeof parsed.cwd === "string" && parsed.cwd.startsWith("/")) {
+      return parsed.cwd;
+    }
+  } catch {
+    // skip malformed
+  }
+  return null;
+};
+
 const CODEX_CWD_RE = /<cwd>([^<]+)<\/cwd>/;
 const codexCwdExtractor: LineExtractor = (line) => {
   // Current format (openai/codex protocol.rs, late-2025+): RolloutLine wraps
@@ -351,7 +384,7 @@ export interface RecentSession {
   id: string;
   /** Absolute path to the session .jsonl (passed back to reopen it). */
   path: string;
-  /** First user message, trimmed to a short preview (may be empty). */
+  /** Legacy saved label, falling back to the first real user prompt. */
   preview: string;
   /** Relative "3h ago" string from last activity. */
   lastActiveDisplay: string;
@@ -359,42 +392,50 @@ export interface RecentSession {
 }
 
 /**
- * List the most recent ggcoder sessions for a project cwd, newest first, each
- * with a short preview built from its first user message. Used by the new-window
- * project picker to offer "resume a session" alongside "new session".
- *
- * Fast path: instead of fully reading every session file in the project (what
- * SessionManager.list does to count messages), sort files by mtime and read
- * only the newest `limit`. Each chosen file is parsed in ONE pass for its
- * header id, message count, last activity, and first user preview. For projects
- * with many/large sessions this is the difference between scanning everything
- * and scanning ~5 files.
+ * List the most recent ggcoder conversations for a project cwd. Compaction
+ * checkpoints share a conversation id, so only the newest resumable checkpoint
+ * is shown. Legacy labels win; otherwise the first real user prompt is used.
  */
-export async function listRecentSessions(cwd: string, limit = 5): Promise<RecentSession[]> {
-  const sessionsDir = getAppPaths().sessionsDir;
+export async function listRecentSessions(
+  cwd: string,
+  limit = 5,
+  sessionsDir = getAppPaths().sessionsDir,
+): Promise<RecentSession[]> {
   const dir = path.join(sessionsDir, encodeCwd(cwd));
   const files = await collectJsonlFiles(dir, 1);
   if (files.length === 0) return [];
   files.sort((a, b) => b.mtime - a.mtime);
 
   const out: RecentSession[] = [];
+  const seenConversationIds = new Set<string>();
   for (const f of files) {
     if (out.length >= limit) break;
     const parsed = await readSessionSummary(f.path);
-    if (parsed && parsed.messageCount > 0) out.push(parsed);
+    if (!parsed || parsed.messageCount === 0) continue;
+    if (seenConversationIds.has(parsed.conversationId)) continue;
+    seenConversationIds.add(parsed.conversationId);
+    const { conversationId: _conversationId, ...session } = parsed;
+    out.push(session);
   }
   return out;
 }
 
-/** Single-pass parse of one session file: header id + count + activity + preview. */
-async function readSessionSummary(file: string): Promise<RecentSession | null> {
+interface ParsedRecentSession extends RecentSession {
+  conversationId: string;
+}
+
+/** Single-pass parse of one session file: identity + count + activity + preview. */
+async function readSessionSummary(file: string): Promise<ParsedRecentSession | null> {
   return new Promise((resolve) => {
     const stream = createReadStream(file, { encoding: "utf-8" });
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
     let id = "";
+    let conversationId = "";
     let messageCount = 0;
     let lastActivity = "";
+    let headerPreview = "";
     let preview = "";
+    let label = "";
     let valid = false;
     let done = false;
     const finish = (): void => {
@@ -402,7 +443,14 @@ async function readSessionSummary(file: string): Promise<RecentSession | null> {
       done = true;
       resolve(
         valid
-          ? { id, path: file, preview, lastActiveDisplay: rel(lastActivity), messageCount }
+          ? {
+              id,
+              conversationId: conversationId || id,
+              path: file,
+              preview: label || headerPreview || preview,
+              lastActiveDisplay: rel(lastActivity),
+              messageCount,
+            }
           : null,
       );
       rl.close();
@@ -414,21 +462,30 @@ async function readSessionSummary(file: string): Promise<RecentSession | null> {
         const p = JSON.parse(line) as {
           type?: string;
           id?: string;
+          conversationId?: string;
+          preview?: unknown;
           timestamp?: string;
+          label?: unknown;
           message?: { role?: string; content?: unknown };
         };
         if (!valid) {
           if (p.type !== "session") return finish(); // not a session file
           valid = true;
           id = p.id ?? "";
+          conversationId = p.conversationId ?? id;
+          if (typeof p.preview === "string") {
+            headerPreview = p.preview.replace(/\s+/g, " ").trim().slice(0, 80);
+          }
           if (p.timestamp) lastActivity = p.timestamp;
           return;
         }
-        if (p.type === "message") {
+        if (p.type === "label" && typeof p.label === "string" && p.label.trim()) {
+          label = p.label.replace(/\s+/g, " ").trim().slice(0, 80);
+        } else if (p.type === "message") {
           messageCount++;
           if (p.timestamp) lastActivity = p.timestamp;
           if (!preview && p.message?.role === "user") {
-            const text = extractText(p.message.content);
+            const text = getUserSessionPrompt(p.message.content);
             if (text) preview = text.replace(/\s+/g, " ").trim().slice(0, 80);
           }
         }
@@ -444,17 +501,4 @@ async function readSessionSummary(file: string): Promise<RecentSession | null> {
 
 function rel(timestamp: string): string {
   return formatRelativeTime(Date.parse(timestamp) || 0);
-}
-
-function extractText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (block && typeof block === "object" && "text" in block) {
-        const t = (block as { text?: unknown }).text;
-        if (typeof t === "string") return t;
-      }
-    }
-  }
-  return "";
 }

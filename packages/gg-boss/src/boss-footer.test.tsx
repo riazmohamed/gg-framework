@@ -18,8 +18,9 @@ describe("BossFooter helpers", () => {
   });
 
   it("computes context percentage from the boss model window", () => {
-    expect(getBossFooterContextPercent("claude-sonnet-4-6", 0)).toBe(0);
-    expect(getBossFooterContextPercent("claude-sonnet-4-6", 20_000)).toBeGreaterThan(0);
-    expect(getBossFooterContextPercent("claude-sonnet-4-6", 20_000)).toBeLessThan(100);
+    expect(getBossFooterContextPercent("claude-sonnet-5", 0)).toBe(0);
+    expect(getBossFooterContextPercent("claude-sonnet-5", 20_000)).toBeGreaterThan(0);
+    expect(getBossFooterContextPercent("claude-sonnet-5", 20_000)).toBeLessThan(100);
+    expect(getBossFooterContextPercent("gpt-5.5", 136_000, 272_000)).toBe(50);
   });
 });

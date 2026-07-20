@@ -3,8 +3,9 @@ import { theme } from "./theme";
 
 // Braille rotation spinner — the native language of CLI coding tools (ora,
 // npm, cargo). Smooth, monospace, and unmistakably "ours" rather than the
-// Matrix-flavored sparkle it replaces.
-const FRAMES = [
+// Matrix-flavored sparkle it replaces. Exported so Ken's activity row spins
+// with the exact same frames (aligned, not a separate visual language).
+export const SPINNER_FRAMES = [
   "\u280b",
   "\u2819",
   "\u2839",
@@ -16,7 +17,9 @@ const FRAMES = [
   "\u2807",
   "\u280f",
 ];
-const FRAME_MS = 80;
+export const SPINNER_FRAME_MS = 80;
+const FRAMES = SPINNER_FRAMES;
+const FRAME_MS = SPINNER_FRAME_MS;
 
 function formatElapsed(ms: number): string {
   const s = Math.round(ms / 1000);
@@ -36,6 +39,8 @@ export function formatTokenCount(n: number): string {
 
 interface Props {
   running: boolean;
+  /** Cancellation was requested and is awaiting provider settlement. */
+  cancelling?: boolean;
   /** Accumulated output tokens for the current/just-finished run. */
   tokens: number;
   /** Done-status phrase shown when a run just finished (e.g. "Brewed up a response in 12s"). */
@@ -100,6 +105,7 @@ function ToolsToggle({
  */
 export function ActivityBar({
   running,
+  cancelling = false,
   tokens,
   doneStatus,
   isThinking,
@@ -142,10 +148,11 @@ export function ActivityBar({
     };
   }, [running]);
 
-  // Plan-step progress (amber "Plan Steps n/total"), shown whenever an approved
-  // plan is being implemented — mirrors the ggcoder CLI activity bar.
+  // Plan-step progress is live run feedback, not durable idle status. Keeping
+  // it mounted after run_end made a blocked/malformed marker sequence look like
+  // active work forever, including the misleading "x/x" stale state.
   const planBadge =
-    planTotal > 0 ? (
+    running && planTotal > 0 && planDone < planTotal ? (
       <span className="plan-steps-badge">
         <span style={{ color: theme.warning }}>{"Plan Steps"}</span>{" "}
         <span style={{ color: theme.textDim }}>
@@ -178,9 +185,8 @@ export function ActivityBar({
             <span>Ready for work</span>
           </span>
         )}
-        {planBadge && <span style={{ marginLeft: "auto" }}>{planBadge}</span>}
         {showToolsToggle && onToggleTools && (
-          <span className="statusrow-tools-toggle" style={{ marginLeft: planBadge ? 8 : "auto" }}>
+          <span className="statusrow-tools-toggle" style={{ marginLeft: "auto" }}>
             <ToolsToggle hidden={toolsHidden} onToggle={onToggleTools} />
           </span>
         )}
@@ -208,9 +214,18 @@ export function ActivityBar({
   if (thinkingLabel) meta.push({ text: thinkingLabel, thinking: true });
 
   return (
-    <div className="statusrow running" style={{ color: theme.textMuted }}>
+    <div
+      className="statusrow running"
+      style={{ color: theme.textMuted }}
+      role="status"
+      aria-live="polite"
+    >
       <span className="statusrow-left">
-        <span className="statusrow-icon spinner" style={{ color: theme.primary }}>
+        <span
+          className="statusrow-icon spinner"
+          style={{ color: theme.primary }}
+          aria-hidden="true"
+        >
           {FRAMES[frame]}
         </span>
         <span className="working" style={{ color: theme.text }}>
@@ -242,8 +257,14 @@ export function ActivityBar({
         {showToolsToggle && onToggleTools && (
           <ToolsToggle hidden={toolsHidden} onToggle={onToggleTools} />
         )}
-        <button className="cancel" style={{ color: theme.error }} onClick={onCancel}>
-          esc to cancel
+        <button
+          className="cancel"
+          style={{ color: cancelling ? theme.textMuted : theme.error }}
+          onClick={onCancel}
+          disabled={cancelling}
+          aria-label={cancelling ? "Cancellation in progress" : "Cancel agent run"}
+        >
+          {cancelling ? "Cancelling..." : "esc to cancel"}
         </button>
       </span>
     </div>

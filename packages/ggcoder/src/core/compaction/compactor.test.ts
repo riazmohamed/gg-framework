@@ -8,11 +8,12 @@ import {
   buildFallbackSummary,
   extractSummaryText,
   compact,
+  compactHistoricalToolCallArgs,
+  HISTORICAL_TOOL_ARG_MAX_CHARS,
   SUMMARY_ATTEMPT_TIMEOUT_MS,
-  MAX_SUMMARY_RETRIES,
 } from "./compactor.js";
 import { estimateConversationTokens } from "./token-estimator.js";
-import { getContextWindow } from "../model-registry.js";
+import { MODELS, getContextWindow } from "@abukhaled/gg-core";
 import type { Message, ContentPart, ToolResult } from "@abukhaled/gg-ai";
 
 // ── Helpers ────────────────────────────────────────────────
@@ -71,7 +72,7 @@ describe("shouldCompact", () => {
     expect(shouldCompact(messages, 500, 0.8)).toBe(true);
   });
 
-  it("uses default threshold of 0.8", () => {
+  it("uses default threshold of 0.85", () => {
     const content = "x".repeat(400);
     const messages = [
       makeMessage("system", content),
@@ -80,7 +81,9 @@ describe("shouldCompact", () => {
       makeMessage("user", content),
     ];
     const estimated = estimateConversationTokens(messages);
+    // estimated ≈ 0.7 × window → under the 0.85 default boundary
     expect(shouldCompact(messages, Math.ceil(estimated / 0.7))).toBe(false);
+    // estimated ≈ 0.9 × window → over the 0.85 default boundary
     expect(shouldCompact(messages, Math.ceil(estimated / 0.9))).toBe(true);
   });
 
@@ -157,87 +160,84 @@ describe("shouldCompact", () => {
     expect(shouldCompact(messages, contextWindow, 0.8, 200)).toBe(true);
   });
 
-  it("uses requested output cap for reserve instead of theoretical model max", () => {
-    const messages = [makeMessage("system", "sys"), makeMessage("user", "hello")];
-    const contextWindow = 272_000;
-    const reserveTokens = getCompactionReserveTokens(16_384);
-
-    expect(reserveTokens).toBe(21_384);
-    expect(shouldCompact(messages, contextWindow, 0.8, 133_000, reserveTokens)).toBe(false);
-    expect(shouldCompact(messages, contextWindow, 0.8, 218_000, reserveTokens)).toBe(true);
+  it("keeps the deprecated reserve helper source-compatible", () => {
+    expect(getCompactionReserveTokens(4_096)).toBe(16_384);
+    expect(getCompactionReserveTokens(16_384)).toBe(21_384);
   });
 
-  it("keeps the fixed 16k minimum reserve for tiny output caps", () => {
-    expect(getCompactionReserveTokens(4_096)).toBe(16_384);
+  it("does not let an output-token reserve move the percentage boundary", () => {
+    const messages = [makeMessage("user", "x")];
+    const contextWindow = 272_000;
+    const boundary = Math.ceil(contextWindow * 0.8);
+
+    expect(shouldCompact(messages, contextWindow, 0.8, boundary - 1, 128_000)).toBe(false);
+    expect(shouldCompact(messages, contextWindow, 0.8, boundary, 128_000)).toBe(true);
   });
 });
 
 // ── Cross-model compaction thresholds ─────────────────────
 
 describe("compaction thresholds across all models", () => {
-  // Helper: build a conversation of approximately `targetTokens` tokens
-  function buildConversationOfSize(targetTokens: number): Message[] {
-    const messages: Message[] = [makeMessage("system", "System prompt.")];
-    const charsPerMsg = 1000;
-    // ~1000 chars / 3.5 ≈ 290 tokens per message pair (user + assistant overhead)
-    const tokensPerPair = estimateConversationTokens([
-      makeMessage("user", "x".repeat(charsPerMsg)),
-      makeMessage("assistant", "ok"),
-    ]);
-    const pairs = Math.ceil(targetTokens / tokensPerPair);
-    for (let i = 0; i < pairs; i++) {
-      messages.push(makeMessage("user", `msg ${i} ${"x".repeat(charsPerMsg)}`));
-      messages.push(makeMessage("assistant", `response ${i}`));
-    }
-    return messages;
-  }
+  const messages = [makeMessage("user", "x")];
 
-  const modelThresholds: { model: string; contextWindow: number }[] = [
-    { model: "claude-opus-4-8", contextWindow: 1_000_000 },
-    { model: "claude-sonnet-4-6", contextWindow: 1_000_000 },
-    { model: "claude-haiku-4-5-20251001", contextWindow: 200_000 },
-    { model: "gpt-5.3-codex", contextWindow: 400_000 },
-    { model: "gpt-5.1-codex-mini", contextWindow: 200_000 },
-    { model: "glm-5.1", contextWindow: 204_800 },
-    { model: "glm-4.7", contextWindow: 200_000 },
-    { model: "glm-4.7-flash", contextWindow: 200_000 },
-    { model: "kimi-k2.7-code", contextWindow: 262_144 },
-  ];
+  it.each(MODELS)("$id crosses the default boundary at exactly 85%", (model) => {
+    const contextWindow = getContextWindow(model.id, { provider: model.provider });
+    const boundary = Math.ceil(contextWindow * 0.85);
 
-  it("model registry returns correct context windows for all models", () => {
-    for (const { model, contextWindow } of modelThresholds) {
-      expect(getContextWindow(model), `${model} context window`).toBe(contextWindow);
-    }
+    expect(contextWindow).toBe(model.contextWindow);
+    expect(shouldCompact(messages, contextWindow, undefined, boundary - 1)).toBe(false);
+    expect(shouldCompact(messages, contextWindow, undefined, boundary)).toBe(true);
   });
 
-  it("unknown models fall back to 200k context window", () => {
+  it.each(MODELS)("$id honors a custom threshold", (model) => {
+    const contextWindow = getContextWindow(model.id, { provider: model.provider });
+    const customBoundary = Math.ceil(contextWindow * 0.65);
+
+    expect(shouldCompact(messages, contextWindow, 0.65, customBoundary - 1)).toBe(false);
+    expect(shouldCompact(messages, contextWindow, 0.65, customBoundary)).toBe(true);
+  });
+
+  it.each(MODELS)("$id ignores theoretical output size at the boundary", (model) => {
+    const contextWindow = getContextWindow(model.id, { provider: model.provider });
+    const boundary = Math.ceil(contextWindow * 0.8);
+
+    expect(shouldCompact(messages, contextWindow, 0.8, boundary - 1, model.maxOutputTokens)).toBe(
+      false,
+    );
+    expect(shouldCompact(messages, contextWindow, 0.8, boundary, model.maxOutputTokens)).toBe(true);
+  });
+
+  it("unknown models fall back to a 200k context window", () => {
     expect(getContextWindow("some-unknown-model")).toBe(200_000);
   });
 
-  for (const { model, contextWindow } of modelThresholds) {
-    const threshold80 = contextWindow * 0.8;
+  const openAITransportCases = [
+    { id: "gpt-5.6-sol", publicWindow: 1_050_000, codexWindow: 272_000 },
+    { id: "gpt-5.6-terra", publicWindow: 1_050_000, codexWindow: 272_000 },
+    { id: "gpt-5.6-luna", publicWindow: 1_050_000, codexWindow: 272_000 },
+    { id: "gpt-5.5", publicWindow: 1_050_000, codexWindow: 272_000 },
+  ] as const;
 
-    it(`${model} (${contextWindow / 1000}k): does NOT compact at 70% context`, () => {
-      const tokens70 = Math.floor(contextWindow * 0.7);
-      const messages = buildConversationOfSize(tokens70);
-      // Use actualTokens to precisely control the value
-      expect(shouldCompact(messages, contextWindow, 0.8, tokens70)).toBe(false);
-    });
+  it.each(openAITransportCases)("$id uses its public API window without accountId", (testCase) => {
+    const contextWindow = getContextWindow(testCase.id, { provider: "openai" });
+    const boundary = Math.ceil(testCase.publicWindow * 0.8);
 
-    it(`${model} (${contextWindow / 1000}k): DOES compact at 85% context`, () => {
-      const tokens85 = Math.floor(contextWindow * 0.85);
-      const messages = buildConversationOfSize(tokens85);
-      expect(shouldCompact(messages, contextWindow, 0.8, tokens85)).toBe(true);
-    });
+    expect(contextWindow).toBe(testCase.publicWindow);
+    expect(shouldCompact(messages, contextWindow, 0.8, boundary - 1)).toBe(false);
+    expect(shouldCompact(messages, contextWindow, 0.8, boundary)).toBe(true);
+  });
 
-    it(`${model} (${contextWindow / 1000}k): compaction threshold is exactly ${threshold80 / 1000}k tokens`, () => {
-      const messages = [makeMessage("user", "x")];
-      // 1 token under threshold — no compact
-      expect(shouldCompact(messages, contextWindow, 0.8, threshold80 - 1)).toBe(false);
-      // 1 token over threshold — compact
-      expect(shouldCompact(messages, contextWindow, 0.8, threshold80 + 1)).toBe(true);
+  it.each(openAITransportCases)("$id uses its Codex OAuth window with accountId", (testCase) => {
+    const contextWindow = getContextWindow(testCase.id, {
+      provider: "openai",
+      accountId: "chatgpt-account",
     });
-  }
+    const boundary = Math.ceil(testCase.codexWindow * 0.8);
+
+    expect(contextWindow).toBe(testCase.codexWindow);
+    expect(shouldCompact(messages, contextWindow, 0.8, boundary - 1)).toBe(false);
+    expect(shouldCompact(messages, contextWindow, 0.8, boundary)).toBe(true);
+  });
 });
 
 // ── findRecentCutPoint ─────────────────────────────────────
@@ -527,6 +527,48 @@ describe("extractSummaryText", () => {
   });
 });
 
+// ── historical tool-call compaction ───────────────────────
+
+describe("compactHistoricalToolCallArgs", () => {
+  it("caps large string arguments without mutating the session history", () => {
+    const largeContent = "x".repeat(HISTORICAL_TOOL_ARG_MAX_CHARS * 4);
+    const original = makeToolCallMessage("write", { file_path: "large.ts", content: largeContent });
+
+    const [compacted] = compactHistoricalToolCallArgs([original]);
+    const compactedCall = (compacted.content as ContentPart[])[0] as ContentPart & {
+      type: "tool_call";
+      args: { file_path: string; content: string };
+    };
+    const originalCall = (original.content as ContentPart[])[0] as ContentPart & {
+      type: "tool_call";
+      args: { content: string };
+    };
+
+    expect(compactedCall.args.file_path).toBe("large.ts");
+    expect(compactedCall.args.content.length).toBeLessThan(largeContent.length);
+    expect(compactedCall.args.content).toContain("more characters truncated");
+    expect(originalCall.args.content).toBe(largeContent);
+  });
+
+  it("caps large strings nested inside edit arrays", () => {
+    const largeEdit = "x".repeat(HISTORICAL_TOOL_ARG_MAX_CHARS * 4);
+    const original = makeToolCallMessage("edit", {
+      file_path: "large.ts",
+      edits: [{ old_text: "before", new_text: largeEdit }],
+    });
+
+    const [compacted] = compactHistoricalToolCallArgs([original]);
+    const compactedCall = (compacted.content as ContentPart[])[0] as ContentPart & {
+      type: "tool_call";
+      args: { edits: Array<{ old_text: string; new_text: string }> };
+    };
+
+    expect(compactedCall.args.edits[0].old_text).toBe("before");
+    expect(compactedCall.args.edits[0].new_text.length).toBeLessThan(largeEdit.length);
+    expect(compactedCall.args.edits[0].new_text).toContain("more characters truncated");
+  });
+});
+
 // ── compact (integration) ──────────────────────────────────
 
 vi.mock("@abukhaled/gg-ai", async (importOriginal) => {
@@ -543,14 +585,14 @@ import { stream } from "@abukhaled/gg-ai";
 describe("compact", () => {
   const baseOptions = {
     provider: "anthropic" as const,
-    model: "claude-sonnet-4-6-20250514",
+    model: "claude-sonnet-5",
     apiKey: "test-key",
     contextWindow: 200_000,
   };
 
   // Each user message: ~20 + 10000 chars ≈ 2504 tokens + 4 overhead ≈ 2508 tokens
   // Each assistant: ~12 chars ≈ 7 tokens
-  // 30 pairs ≈ 30 × 2515 ≈ 75K tokens total (well over 20K recent budget)
+  // 30 pairs ≈ 30 × 2515 ≈ 75K tokens total (well over the 8K recent budget)
   function buildConversation(middleCount: number): Message[] {
     const msgs: Message[] = [makeMessage("system", "You are a helpful assistant.")];
     for (let i = 0; i < middleCount; i++) {
@@ -628,6 +670,30 @@ describe("compact", () => {
     expect(summaryMsg.role).toBe("user");
     expect(summaryMsg.content as string).toContain("[Previous conversation summary]");
     expect(summaryMsg.content as string).toContain("great summary");
+  });
+
+  it("caps the preserved recent tail at ~8K tokens", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockReturnValue(
+      mockStreamResult(
+        Promise.resolve({
+          message: { role: "assistant", content: "Summary." },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1000, outputTokens: 50 },
+        }),
+      ) as never,
+    );
+
+    const messages = buildConversation(30);
+    const result = await compact(messages, baseOptions);
+    expect(result.result.compacted).toBe(true);
+
+    // Recent tail = everything after system + summary + assistant ack.
+    const tail = result.messages.slice(3);
+    const tailTokens = estimateConversationTokens(tail);
+    // Budget is 8K; one ≈2.5K-token conversation pair of slack covers the
+    // never-split-a-pair / always-keep-last-user-exchange guards.
+    expect(tailTokens).toBeLessThanOrEqual(8_000 + 3_000);
   });
 
   it("uses fallback summary when LLM returns empty", async () => {
@@ -710,13 +776,69 @@ describe("compact", () => {
 
       const messages = buildConversation(30);
       const promise = compact(messages, baseOptions);
-      await vi.advanceTimersByTimeAsync((SUMMARY_ATTEMPT_TIMEOUT_MS + 1) * 3);
+      await vi.advanceTimersByTimeAsync(SUMMARY_ATTEMPT_TIMEOUT_MS + 1);
       const result = await promise;
 
-      expect(mockStream).toHaveBeenCalledTimes(MAX_SUMMARY_RETRIES + 1);
+      expect(mockStream).toHaveBeenCalledTimes(1);
       const summaryMsg = result.messages[1];
       expect(summaryMsg.role).toBe("user");
       expect(summaryMsg.content as string).toContain("## Goal");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps waiting past the deadline while the stream is actively emitting events", async () => {
+    // Regression: the 30s deadline used to be a HARD total cap, killing every
+    // large summary mid-generation (they stream for well over 30s) and forcing
+    // the extractive fallback. It is now an INACTIVITY deadline — each stream
+    // event re-arms it — so a response that takes 2.5× the timeout but never
+    // goes silent longer than the window must produce the REAL summary.
+    vi.useFakeTimers();
+    try {
+      const mockStream = vi.mocked(stream);
+      mockStream.mockClear();
+
+      const eventGap = SUMMARY_ATTEMPT_TIMEOUT_MS * 0.66; // each gap < timeout
+      const totalDuration = SUMMARY_ATTEMPT_TIMEOUT_MS * 2.5; // total ≫ timeout
+      const response = new Promise((resolve) => {
+        setTimeout(
+          () =>
+            resolve({
+              message: { role: "assistant", content: "Real streamed summary." },
+              stopReason: "end_turn",
+              usage: { inputTokens: 1000, outputTokens: 200 },
+            }),
+          totalDuration,
+        );
+      });
+      let emitted = 0;
+      const iterator = () => ({
+        next: () =>
+          new Promise<IteratorResult<unknown>>((resolve) => {
+            if (emitted >= 3) {
+              resolve({ done: true, value: undefined });
+              return;
+            }
+            emitted++;
+            setTimeout(() => resolve({ done: false, value: { type: "text_delta" } }), eventGap);
+          }),
+      });
+      mockStream.mockReturnValue({
+        response,
+        events: { [Symbol.asyncIterator]: iterator },
+        [Symbol.asyncIterator]: iterator,
+      } as never);
+
+      const messages = buildConversation(30);
+      const promise = compact(messages, baseOptions);
+      await vi.advanceTimersByTimeAsync(totalDuration + 1);
+      const result = await promise;
+
+      const summaryMsg = result.messages[1];
+      expect(summaryMsg.role).toBe("user");
+      expect(summaryMsg.content as string).toContain("Real streamed summary.");
+      expect(summaryMsg.content as string).not.toContain("## Goal");
     } finally {
       vi.useRealTimers();
     }
@@ -726,7 +848,8 @@ describe("compact", () => {
     const mockStream = vi.mocked(stream);
     const ac = new AbortController();
     mockStream.mockImplementation(({ signal }: { signal?: AbortSignal }) => {
-      expect(signal).toBe(ac.signal);
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(signal).not.toBe(ac.signal);
       return mockStreamResult(
         new Promise((_, reject) => {
           signal?.addEventListener(

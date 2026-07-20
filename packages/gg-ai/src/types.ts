@@ -14,11 +14,12 @@ export type Provider =
   | "deepseek"
   | "openrouter"
   | "sakana"
+  | "xai"
   | "palsu";
 
 // ── Thinking ───────────────────────────────────────────────
 
-export type ThinkingLevel = "low" | "medium" | "high" | "xhigh" | "max";
+export type ThinkingLevel = "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 // ── Cache ─────────────────────────────────────────────────
 
@@ -271,6 +272,10 @@ export interface StreamOptions {
   accountId?: string;
   /** GLM coding plan API key (separate from regular apiKey). Used only for GLM coding endpoint. */
   glmCodingApiKey?: string;
+  /** Stable conversation identity for Codex transport headers. This is distinct from
+   *  promptCacheKey: sessions with matching prefixes may share a cache key, but must
+   *  retain independent session/thread identities. */
+  transportSessionId?: string;
   /** Google Cloud/Code Assist project ID used by Gemini OAuth transport. */
   projectId?: string;
   /** Enable provider-native web search. Each provider uses its own format:

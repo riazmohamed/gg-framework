@@ -6,7 +6,15 @@ import type {
   StreamResponse,
   ToolCall,
 } from "../types.js";
-import { ProviderError, readHeader, isHardBillingMessage } from "../errors.js";
+import {
+  ProviderError,
+  readHeader,
+  isHardBillingMessage,
+  isRawJsonErrorEcho,
+  isRawHtmlErrorEcho,
+  emptyProviderErrorMessage,
+  providerHtmlErrorMessage,
+} from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import {
   downgradeUnsupportedImages,
@@ -33,13 +41,19 @@ function extractOpenAIUsage(usage: OpenAI.CompletionUsage): {
   inputTokens: number;
   outputTokens: number;
   cacheRead: number;
+  cacheWrite: number;
 } {
   let cacheRead = 0;
+  let cacheWrite = 0;
   const details = usage.prompt_tokens_details;
   if (details?.cached_tokens) {
     cacheRead = details.cached_tokens;
   }
   const usageAny = usage as unknown as Record<string, unknown>;
+  const detailsAny = details as unknown as Record<string, unknown> | undefined;
+  if (typeof detailsAny?.cache_write_tokens === "number") {
+    cacheWrite = detailsAny.cache_write_tokens;
+  }
   if (!cacheRead && typeof usageAny.cached_tokens === "number" && usageAny.cached_tokens > 0) {
     cacheRead = usageAny.cached_tokens as number;
   }
@@ -53,9 +67,10 @@ function extractOpenAIUsage(usage: OpenAI.CompletionUsage): {
   // OpenAI's prompt_tokens includes cached tokens; subtract to match
   // Anthropic's convention where inputTokens excludes cache hits.
   return {
-    inputTokens: usage.prompt_tokens - cacheRead,
+    inputTokens: usage.prompt_tokens - cacheRead - cacheWrite,
     outputTokens: usage.completion_tokens,
     cacheRead,
+    cacheWrite,
   };
 }
 
@@ -99,9 +114,18 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
 
   const client = createClient(options);
 
-  // GLM and Moonshot use a custom `thinking` body param instead of `reasoning_effort`
+  // Public Kimi K3 moved from K2.x's custom `thinking` body parameter to
+  // top-level `reasoning_effort`; Kimi Code's OAuth endpoint keeps its managed
+  // nested shape. Both are always-on at the sole current `max` effort.
+  const isKimiK3 = options.provider === "moonshot" && options.model === "kimi-k3";
+  const isManagedKimiK3 =
+    isKimiK3 && options.baseUrl?.replace(/\/+$/, "").endsWith("/coding/v1") === true;
+  const isKimiK27 = options.provider === "moonshot" && options.model.startsWith("kimi-k2.7-code");
+  const hasFixedKimiSampling = isKimiK3 || isKimiK27;
   const usesThinkingParam =
-    options.provider === "glm" || options.provider === "moonshot" || options.provider === "xiaomi";
+    options.provider === "glm" ||
+    (options.provider === "moonshot" && !isKimiK3 && !isKimiK27) ||
+    options.provider === "xiaomi";
 
   const downgradedImages = downgradeUnsupportedImages(options.messages, options.supportsImages);
   const downgradedMessages = downgradeUnsupportedVideos(downgradedImages, options.supportsVideo);
@@ -122,7 +146,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   }
   const messages = toOpenAIMessages(downgradedMessages, {
     provider: options.provider,
-    thinking: !!options.thinking,
+    // K3 and K2.7 preserve reasoning even when the user hides thinking in the
+    // UI; keep assistant tool-call history wire-valid in that display mode.
+    thinking: isKimiK3 || isKimiK27 || !!options.thinking,
     supportsImages: options.supportsImages,
   });
 
@@ -135,10 +161,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     messages,
     stream: useStreaming,
     ...(options.maxTokens ? { max_completion_tokens: options.maxTokens } : {}),
-    ...(effectiveTemp != null && !options.thinking ? { temperature: effectiveTemp } : {}),
-    ...(options.topP != null ? { top_p: options.topP } : {}),
+    ...(effectiveTemp != null && !options.thinking && !hasFixedKimiSampling
+      ? { temperature: effectiveTemp }
+      : {}),
+    ...(options.topP != null && !hasFixedKimiSampling ? { top_p: options.topP } : {}),
     ...(options.stop ? { stop: options.stop } : {}),
-    ...(options.thinking && !usesThinkingParam
+    ...(options.thinking && !usesThinkingParam && !isKimiK3 && !isKimiK27
       ? { reasoning_effort: toOpenAIReasoningEffort(options.thinking, options.model) }
       : {}),
     ...(options.tools?.length ? { tools: toOpenAITools(options.tools) } : {}),
@@ -160,10 +188,13 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     const paramsAny = params as unknown as Record<string, unknown>;
     paramsAny.prompt_cache_key = normalizePromptCacheKey(options.promptCacheKey ?? "ggcoder");
 
-    // Map cacheRetention to OpenAI's prompt_cache_retention param.
-    // "long" → "24h" keeps cached prefixes active up to 24 hours (OpenAI feature).
-    const retention = options.cacheRetention ?? "short";
-    if (retention === "long") {
+    // GPT-5.6 replaced prompt_cache_retention with prompt_cache_options.
+    // Its only supported TTL is 30m; implicit mode preserves automatic latest-
+    // message breakpoints while enabling the newer reliable key+prefix matching.
+    if (options.provider === "openai" && options.model.startsWith("gpt-5.6")) {
+      paramsAny.prompt_cache_options = { mode: "implicit", ttl: "30m" };
+    } else if (!isKimiK3 && (options.cacheRetention ?? "short") === "long") {
+      // K3 caching is automatic and its request schema does not expose a TTL.
       paramsAny.prompt_cache_retention = "24h";
     }
   }
@@ -172,12 +203,27 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     (params as unknown as Record<string, unknown>).service_tier = options.serviceTier;
   }
 
-  // Inject custom thinking param for GLM/Moonshot/Xiaomi (not part of OpenAI spec)
+  if (isKimiK3) {
+    const paramsAny = params as unknown as Record<string, unknown>;
+    if (isManagedKimiK3) {
+      // Kimi Code's managed OAuth endpoint keeps the official CLI's Kimi wire
+      // shape: nested effort plus preserved thinking.
+      paramsAny.thinking = { type: "enabled", effort: "max", keep: "all" };
+    } else {
+      // The public K3 API uses top-level reasoning_effort. The OpenAI SDK's
+      // effort union does not know Kimi's `max` value yet.
+      paramsAny.reasoning_effort = "max";
+    }
+  }
+
+  // Inject the custom toggle for K2.6-era Kimi, GLM, and Xiaomi. Public K3 uses
+  // reasoning_effort, managed K3 has its endpoint-specific block above, and
+  // K2.7 is always-thinking and rejects an explicit disabled toggle.
   if (usesThinkingParam) {
     if (options.thinking) {
       (params as unknown as Record<string, unknown>).thinking = { type: "enabled" };
     } else {
-      // All providers (GLM, Moonshot, Xiaomi MiMo) support explicit disabled.
+      // The providers/models routed through this block support explicit disabled.
       // MiMo is an always-on reasoning model — without { type: "disabled" } it
       // returns reasoning_content and may produce thinking-only responses with
       // no actionable output, causing the agent loop to silently end.
@@ -229,6 +275,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheRead = 0;
+  let cacheWrite = 0;
   let finishReason: string | null = null;
   let receivedAnyChunk = false;
 
@@ -238,7 +285,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       const choice = chunk.choices?.[0];
 
       if (chunk.usage) {
-        ({ inputTokens, outputTokens, cacheRead } = extractOpenAIUsage(chunk.usage));
+        ({ inputTokens, outputTokens, cacheRead, cacheWrite } = extractOpenAIUsage(chunk.usage));
       }
 
       if (!choice) continue;
@@ -343,7 +390,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       content: contentParts.length > 0 ? contentParts : textAccum || "",
     },
     stopReason,
-    usage: { inputTokens, outputTokens, ...(cacheRead > 0 && { cacheRead }) },
+    usage: {
+      inputTokens,
+      outputTokens,
+      ...(cacheRead > 0 && { cacheRead }),
+      ...(cacheWrite > 0 && { cacheWrite }),
+    },
   };
 
   yield { type: "done", stopReason };
@@ -447,8 +499,9 @@ function completionToResponse(completion: OpenAI.ChatCompletion): StreamResponse
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheRead = 0;
+  let cacheWrite = 0;
   if (completion.usage) {
-    ({ inputTokens, outputTokens, cacheRead } = extractOpenAIUsage(completion.usage));
+    ({ inputTokens, outputTokens, cacheRead, cacheWrite } = extractOpenAIUsage(completion.usage));
   }
 
   const stopReason = normalizeOpenAIStopReason(choice?.finish_reason ?? null);
@@ -459,7 +512,12 @@ function completionToResponse(completion: OpenAI.ChatCompletion): StreamResponse
       content: contentParts.length > 0 ? contentParts : textAccum,
     },
     stopReason,
-    usage: { inputTokens, outputTokens, ...(cacheRead > 0 && { cacheRead }) },
+    usage: {
+      inputTokens,
+      outputTokens,
+      ...(cacheRead > 0 && { cacheRead }),
+      ...(cacheWrite > 0 && { cacheWrite }),
+    },
   };
 }
 
@@ -495,7 +553,17 @@ function toError(err: unknown, provider: string = "openai"): ProviderError {
     const bodyMessage =
       typeof body?.message === "string" && body.message.trim() ? body.message.trim() : undefined;
     const modelName = typeof body?.model === "string" ? body.model : "";
-    const cleanMessage = bodyMessage ?? err.message;
+    // The SDK may expose a whole HTML edge/proxy page either as the parsed body
+    // message or as err.message. Preserve the original on `cause`, but never send
+    // transport markup to the user.
+    const messageCandidate = bodyMessage ?? err.message;
+    const cleanMessage = isRawHtmlErrorEcho(messageCandidate)
+      ? providerHtmlErrorMessage(err.status)
+      : bodyMessage
+        ? bodyMessage
+        : isRawJsonErrorEcho(err.message)
+          ? emptyProviderErrorMessage(err.status)
+          : err.message;
 
     let hint: string | undefined;
     if (modelName === "codex-mini-latest" || cleanMessage.includes("codex-mini-latest")) {

@@ -1,4 +1,5 @@
 import type { AgentEvent } from "@abukhaled/gg-agent";
+import type { SubAgentSnapshot } from "./subagent-manager.js";
 
 // ── Event Map ──────────────────────────────────────────────
 
@@ -30,6 +31,8 @@ export interface BusEventMap {
       cacheWrite?: number;
     };
   };
+  max_turns: { totalTurns: number; maxTurns: number };
+  truncated: { reason: "max_tokens" | "refusal" | "provider_error"; continued: boolean };
   error: { error: Error };
 
   // Server tool events
@@ -47,7 +50,14 @@ export interface BusEventMap {
 
   // Agent self-correction hooks (ideal review / loop-break / re-grounding).
   // Carries only the semantic kind; the presentation layer owns text + color.
-  hook: { kind: "ideal" | "loop_break" | "regrounding" };
+  hook: {
+    kind: "ideal" | "loop_break" | "regrounding";
+    coverageExpected?: string[];
+    coverageMissing?: string[];
+  };
+
+  // Persistent async child lifecycle (bounded metadata/output snapshot).
+  subagent_state: SubAgentSnapshot;
 
   // Session lifecycle
   session_start: { sessionId: string };
@@ -149,6 +159,18 @@ export class EventBus {
         this.emit("agent_done", {
           totalTurns: event.totalTurns,
           totalUsage: event.totalUsage,
+        });
+        break;
+      case "max_turns":
+        this.emit("max_turns", {
+          totalTurns: event.totalTurns,
+          maxTurns: event.maxTurns,
+        });
+        break;
+      case "truncated":
+        this.emit("truncated", {
+          reason: event.reason,
+          continued: event.continued,
         });
         break;
       case "server_tool_call":

@@ -8,7 +8,6 @@ import { MemeLayer } from "./MemeLayer";
 import { SettingsModal } from "./SettingsModal";
 import { TelegramSettingsModal } from "./TelegramSettingsModal";
 import { McpModal } from "./McpModal";
-import { SoundButton } from "./SoundButton";
 import {
   waitForReady,
   getSettings,
@@ -16,22 +15,26 @@ import {
   getServeStatus,
   startServe,
   stopServe,
+  openWhatsNewWindow,
+  getProgress,
+  type ProgressSnapshot,
 } from "./agent";
+import { RankBadge } from "./RankBadge";
+import { ScorecardModal } from "./ScorecardModal";
 import { useAppUpdate } from "./update";
 import { toast } from "./toast";
 
 interface Props {
   onProjects: () => void;
+  onChat: () => void;
   onLogin: () => void;
 }
 
 /**
  * App entry screen: the shimmering GG Coder banner over the primary actions.
- * "Your Projects" requires two prerequisites — a configured project folder AND
- * at least one connected AI provider — and is dimmed until both are met, with
- * toasts guiding the user. Settings (project folder) lives here, beside Projects.
+ * Code and Chat require a configured workspace folder and connected AI provider.
  */
-export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
+export function HomeScreen({ onProjects, onChat, onLogin }: Props): React.ReactElement {
   const [folderSet, setFolderSet] = useState(false);
   const [providerCount, setProviderCount] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
@@ -41,18 +44,24 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
   const [telegramConfigured, setTelegramConfigured] = useState(false);
   const [serveBusy, setServeBusy] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
+  const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
+  const [showScorecard, setShowScorecard] = useState(false);
   const appUpdate = useAppUpdate();
 
   useEffect(() => {
     void getVersion()
       .then(setVersion)
       .catch(() => {});
+    void waitForReady()
+      .then(() => getProgress())
+      .then(setProgress)
+      .catch(() => {});
   }, []);
 
   async function refresh(): Promise<void> {
     // Settings + auth are read NATIVELY (Rust) — do them first, WITHOUT waiting on
-    // the sidecar, so the "Your Projects" gate never stays dimmed just because
-    // the agent is slow/crashed (the original bug, now also covering providers).
+    // the sidecar, so the workspace gate never stays dimmed just because the
+    // agent is slow/crashed.
     const [settings, providers] = await Promise.all([getSettings(), authStatus()]);
     // Prefer the explicit `configured` flag; fall back to a non-empty root so an
     // older sidecar (one that predates the flag) degrades to "set" instead of
@@ -110,14 +119,14 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
     }
   }
 
-  function handleProjects(): void {
+  function handleWorkspace(open: () => void): void {
     if (ready) {
-      onProjects();
+      open();
       return;
     }
     // Guide the user to the missing prerequisite(s).
     if (!folderSet) {
-      toast("Set a project folder first. Open Settings.", "warning");
+      toast("Set a workspace folder first. Open Settings.", "warning");
     }
     if (providerCount === 0) {
       toast("Connect an AI provider first.", "warning");
@@ -139,7 +148,24 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
           {appUpdate.phase === "installing" ? "Installing\u2026" : `Update to ${appUpdate.version}`}
         </button>
       ) : (
-        version && <span className="home-version">{`v${version}`}</span>
+        version && (
+          <div className="home-version-row">
+            <span className="home-version">{`v${version}`}</span>
+            <RankBadge
+              snapshot={progress}
+              onClick={() => setShowScorecard(true)}
+              className="home-rank-badge"
+            />
+            <button
+              className="home-whatsnew"
+              type="button"
+              title="See the latest updates"
+              onClick={() => void openWhatsNewWindow().catch(() => {})}
+            >
+              What&apos;s new
+            </button>
+          </div>
+        )
       )}
       <AsciiLogo />
       <div className="home-tagline">Cause the other coding agents piss me off</div>
@@ -169,17 +195,23 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
         </a>
       </div>
       <div className="home-actions">
-        <div className="home-projects-row">
+        <div className="home-projects-row home-primary-row">
           <button
             className={`btn btn-primary btn-lg home-btn${ready ? "" : " is-dimmed"}`}
             aria-disabled={!ready}
-            onClick={handleProjects}
+            onClick={() => handleWorkspace(onProjects)}
           >
-            Your Projects
+            Code
           </button>
-          <SoundButton />
           <button
-            className="btn btn-ghost btn-icon home-settings"
+            className={`btn btn-primary btn-lg home-btn${ready ? "" : " is-dimmed"}`}
+            aria-disabled={!ready}
+            onClick={() => handleWorkspace(onChat)}
+          >
+            Chat
+          </button>
+          <button
+            className="btn btn-ghost btn-icon btn-nav-icon home-settings"
             title="Settings"
             onClick={() => setShowSettings(true)}
           >
@@ -207,7 +239,7 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
             {serveBusy ? "Working\u2026" : serving ? "\u25CF Remote · Stop" : "Remote"}
           </button>
           <button
-            className="btn btn-ghost btn-icon home-settings"
+            className="btn btn-ghost btn-icon btn-nav-icon home-settings"
             title="Telegram setup"
             onClick={() => setShowTelegram(true)}
           >
@@ -232,6 +264,9 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
         />
       )}
       {showMcp && <McpModal onClose={() => setShowMcp(false)} />}
+      {showScorecard && progress && (
+        <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
+      )}
     </div>
   );
 }

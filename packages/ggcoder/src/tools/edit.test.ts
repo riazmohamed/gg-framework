@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createEditTool } from "./edit.js";
+import { lineHash } from "../core/hashline.js";
 import { recordRead, type ReadTracker } from "./read-tracker.js";
 
 function resultToString(result: unknown): string {
@@ -1142,3 +1143,306 @@ describe("createEditTool", () => {
     });
   });
 });
+
+describe("edit anchor guard", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "edit-anchor-test-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  function diffOf(result: unknown): string {
+    if (typeof result === "string") return result;
+    if (result && typeof result === "object" && "details" in result) {
+      return (result as { details?: { diff?: string } }).details?.diff ?? "";
+    }
+    return "";
+  }
+
+  /** Anchor for a 1-based line in `content`. */
+  function anchorFor(content: string, line1: number) {
+    const idx = line1 - 1;
+    const text = content.split("\n")[idx]!;
+    return { line: line1, hash: lineHash(text, idx) };
+  }
+
+  it("applies normally when the anchor matches", async () => {
+    const filePath = path.join(tmpDir, "a.ts");
+    const content = "const a = 1;\nconst b = 2;\nconst c = 3;\n";
+    await fs.writeFile(filePath, content);
+    const tracker: ReadTracker = new Map();
+    await markRead(tracker, filePath);
+
+    const a = anchorFor(content, 2);
+    const tool = createEditTool(tmpDir, tracker);
+    const result = await tool.execute(
+      {
+        file_path: "a.ts",
+        edits: [
+          {
+            old_text: "const b = 2;",
+            new_text: "const b = 20;",
+            anchor: { start_line: a.line, start_hash: a.hash, end_line: a.line, end_hash: a.hash },
+          },
+        ],
+      },
+      { signal: new AbortController().signal, toolCallId: "anc-1" },
+    );
+
+    expect(diffOf(result)).toContain("+const b = 20;");
+    expect(await fs.readFile(filePath, "utf-8")).toBe(
+      "const a = 1;\nconst b = 20;\nconst c = 3;\n",
+    );
+  });
+
+  it("rejects a wrong start_hash with stale_anchor and writes nothing", async () => {
+    const filePath = path.join(tmpDir, "b.ts");
+    const content = "const a = 1;\nconst b = 2;\n";
+    await fs.writeFile(filePath, content);
+    const tracker: ReadTracker = new Map();
+    await markRead(tracker, filePath);
+
+    const tool = createEditTool(tmpDir, tracker);
+    await expect(
+      tool.execute(
+        {
+          file_path: "b.ts",
+          edits: [
+            {
+              old_text: "const b = 2;",
+              new_text: "const b = 20;",
+              anchor: { start_line: 2, start_hash: "dead", end_line: 2, end_hash: "dead" },
+            },
+          ],
+        },
+        { signal: new AbortController().signal, toolCallId: "anc-2" },
+      ),
+    ).rejects.toThrow(/changed since you read it/);
+
+    // File untouched.
+    expect(await fs.readFile(filePath, "utf-8")).toBe(content);
+  });
+
+  it("partial-applies a multi-edit batch where one anchor is stale", async () => {
+    const filePath = path.join(tmpDir, "c.ts");
+    const content = "const a = 1;\nconst b = 2;\nconst c = 3;\n";
+    await fs.writeFile(filePath, content);
+    const tracker: ReadTracker = new Map();
+    await markRead(tracker, filePath);
+
+    const a = anchorFor(content, 1);
+    const tool = createEditTool(tmpDir, tracker);
+    const result = await tool.execute(
+      {
+        file_path: "c.ts",
+        edits: [
+          {
+            old_text: "const a = 1;",
+            new_text: "const a = 10;",
+            anchor: { start_line: a.line, start_hash: a.hash, end_line: a.line, end_hash: a.hash },
+          },
+          {
+            old_text: "const c = 3;",
+            new_text: "const c = 30;",
+            anchor: { start_line: 3, start_hash: "dead", end_line: 3, end_hash: "dead" },
+          },
+        ],
+      },
+      { signal: new AbortController().signal, toolCallId: "anc-3" },
+    );
+
+    const content2 = contentOf(result);
+    expect(content2).toContain("Applied 1 of 2 edits");
+    expect(content2).toContain("changed since you read it");
+    // First edit persisted; the stale one did not.
+    expect(await fs.readFile(filePath, "utf-8")).toBe(
+      "const a = 10;\nconst b = 2;\nconst c = 3;\n",
+    );
+  });
+
+  it("absent anchor behaves exactly like today (fuzzy path)", async () => {
+    const filePath = path.join(tmpDir, "d.ts");
+    await fs.writeFile(filePath, "const a = 1;\n");
+    const tracker: ReadTracker = new Map();
+    await markRead(tracker, filePath);
+
+    const tool = createEditTool(tmpDir, tracker);
+    const result = await tool.execute(
+      { file_path: "d.ts", edits: [{ old_text: "const a = 1;", new_text: "const a = 2;" }] },
+      { signal: new AbortController().signal, toolCallId: "anc-4" },
+    );
+
+    expect(diffOf(result)).toContain("+const a = 2;");
+    expect(await fs.readFile(filePath, "utf-8")).toBe("const a = 2;\n");
+  });
+
+  // ── Span form { span, lines } ──
+
+  function spanFor(content: string, startLine: number, endLine: number) {
+    const lines = content.split("\n");
+    return {
+      start_line: startLine,
+      start_hash: lineHash(lines[startLine - 1]!, startLine - 1),
+      end_line: endLine,
+      end_hash: lineHash(lines[endLine - 1]!, endLine - 1),
+    };
+  }
+
+  it("span form replaces the pinned line range without old_text", async () => {
+    const content = "const a = 1;\nconst b = 2;\nconst c = 3;\n";
+    const filePath = path.join(tmpDir, "span1.ts");
+    await fs.writeFile(filePath, content);
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        file_path: "span1.ts",
+        edits: [{ span: spanFor(content, 2, 2), lines: ["const b = 20;"] }],
+      },
+      { signal: new AbortController().signal, toolCallId: "span-1" },
+    );
+
+    expect(diffOf(result)).toContain("+const b = 20;");
+    expect(await fs.readFile(filePath, "utf-8")).toBe(
+      "const a = 1;\nconst b = 20;\nconst c = 3;\n",
+    );
+  });
+
+  it("span form: multi-line replace, insert-by-expansion, and delete via empty lines", async () => {
+    const content = "one\ntwo\nthree\nfour\nfive\n";
+    const filePath = path.join(tmpDir, "span2.txt");
+    await fs.writeFile(filePath, content);
+
+    const tool = createEditTool(tmpDir);
+    await tool.execute(
+      {
+        file_path: "span2.txt",
+        edits: [
+          // Replace lines 2-3 with three lines (expansion = insertion).
+          { span: spanFor(content, 2, 3), lines: ["TWO", "TWO.5", "THREE"] },
+          // Delete line 5 ("five"). Anchors verify against the file AS READ,
+          // and spans apply bottom-up, so the earlier expansion doesn't shift this.
+          { span: spanFor(content, 5, 5), lines: [] },
+        ],
+      },
+      { signal: new AbortController().signal, toolCallId: "span-2" },
+    );
+
+    // Deleting line 5 ("five") leaves the trailing newline's empty segment as EOF.
+    expect(await fs.readFile(filePath, "utf-8")).toBe("one\nTWO\nTWO.5\nTHREE\nfour\n");
+  });
+
+  it("span form rejects stale hashes without touching the file", async () => {
+    const content = "alpha\nbeta\n";
+    const filePath = path.join(tmpDir, "span3.txt");
+    await fs.writeFile(filePath, content);
+
+    const tool = createEditTool(tmpDir);
+    await expect(
+      tool.execute(
+        {
+          file_path: "span3.txt",
+          edits: [
+            {
+              span: { start_line: 1, start_hash: "dead", end_line: 1, end_hash: "dead" },
+              lines: ["hijacked"],
+            },
+          ],
+        },
+        { signal: new AbortController().signal, toolCallId: "span-3" },
+      ),
+    ).rejects.toThrow(/changed since you read it/);
+    expect(await fs.readFile(filePath, "utf-8")).toBe(content);
+  });
+
+  it("span form rejects overlapping spans (first wins, overlap reported)", async () => {
+    const content = "l1\nl2\nl3\nl4\n";
+    const filePath = path.join(tmpDir, "span4.txt");
+    await fs.writeFile(filePath, content);
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        file_path: "span4.txt",
+        edits: [
+          { span: spanFor(content, 1, 2), lines: ["A"] },
+          { span: spanFor(content, 2, 3), lines: ["B"] },
+        ],
+      },
+      { signal: new AbortController().signal, toolCallId: "span-4" },
+    );
+
+    expect(contentOf(result)).toContain("overlaps");
+    expect(await fs.readFile(filePath, "utf-8")).toBe("A\nl3\nl4\n");
+  });
+
+  it("span and text forms mix in one batch: spans first, then text on the result", async () => {
+    const content = "const x = 1;\nconst y = 2;\n";
+    const filePath = path.join(tmpDir, "span5.ts");
+    await fs.writeFile(filePath, content);
+
+    const tool = createEditTool(tmpDir);
+    await tool.execute(
+      {
+        file_path: "span5.ts",
+        edits: [
+          { span: spanFor(content, 1, 1), lines: ["const x = 10;"] },
+          { old_text: "const y = 2;", new_text: "const y = 20;" },
+        ],
+      },
+      { signal: new AbortController().signal, toolCallId: "span-5" },
+    );
+
+    expect(await fs.readFile(filePath, "utf-8")).toBe("const x = 10;\nconst y = 20;\n");
+  });
+
+  it("rejects an edit that mixes span with old_text, and one with neither form", async () => {
+    const content = "a\nb\n";
+    const filePath = path.join(tmpDir, "span6.txt");
+    await fs.writeFile(filePath, content);
+
+    const tool = createEditTool(tmpDir);
+    await expect(
+      tool.execute(
+        {
+          file_path: "span6.txt",
+          edits: [{ span: spanFor(content, 1, 1), lines: ["z"], old_text: "a", new_text: "z" }],
+        },
+        { signal: new AbortController().signal, toolCallId: "span-6" },
+      ),
+    ).rejects.toThrow(/must not mix/);
+
+    await expect(
+      tool.execute(
+        { file_path: "span6.txt", edits: [{}] },
+        { signal: new AbortController().signal, toolCallId: "span-7" },
+      ),
+    ).rejects.toThrow(/has neither/);
+    expect(await fs.readFile(filePath, "utf-8")).toBe(content);
+  });
+
+  it("blocks edits outside the workspace with the guard error", async () => {
+    const tool = createEditTool(tmpDir);
+    const outside = path.join(os.homedir(), "Documents", "gg-guard-test-outside.txt");
+
+    const raw = await tool.execute(
+      { file_path: outside, edits: [{ old_text: "a", new_text: "b" }] },
+      { signal: new AbortController().signal, toolCallId: "guard-1" },
+    );
+
+    expect(contentOf(raw)).toContain("outside the workspace");
+    expect(contentOf(raw)).toContain("allowOutsideWorkspaceWrites");
+  });
+});
+
+function contentOf(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (result && typeof result === "object" && "content" in result) {
+    return (result as { content?: string }).content ?? "";
+  }
+  return "";
+}

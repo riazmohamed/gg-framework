@@ -1,5 +1,141 @@
 # @kenkaiiii/gg-ai
 
+## 5.20.1
+
+## 5.20.0
+
+## 5.19.6
+
+## 5.19.5
+
+## 5.19.4
+
+## 5.19.3
+
+### Patch Changes
+
+- b6e7562: Compress large OpenAI Codex request bodies with zstd and automatically retry HTTP 507 upstream retry-buffer failures.
+
+## 5.19.2
+
+## 5.19.1
+
+## 5.19.0
+
+## 5.18.0
+
+### Minor Changes
+
+- e00de5b: Add Kimi K3 as Moonshot's default model with its 1M-token multimodal registry metadata and endpoint-specific max-effort request handling for both the public API and Kimi Code OAuth. Keep Kimi K2.7 Code available as the dedicated coding alternative.
+
+## 5.17.0
+
+### Minor Changes
+
+- a3916ff: Harden provider error handling, cancellation settlement, review evidence, LSP confidence, route-aware context limits, turn metrics, and durable child-agent recovery.
+
+## 5.16.0
+
+## 5.15.1
+
+## 5.15.0
+
+## 5.14.0
+
+## 5.13.3
+
+## 5.13.2
+
+## 5.13.1
+
+## 5.13.0
+
+## 5.12.0
+
+## 5.11.0
+
+## 5.10.1
+
+## 5.10.0
+
+## 5.9.7
+
+## 5.9.6
+
+## 5.9.5
+
+## 5.9.4
+
+## 5.9.3
+
+## 5.9.2
+
+## 5.9.1
+
+### Patch Changes
+
+- Fix error guidance to use desktop-app UI actions instead of CLI commands in the gg-app
+
+## 5.9.0
+
+## 5.8.8
+
+## 5.8.7
+
+## 5.8.6
+
+## 5.8.5
+
+## 5.8.4
+
+## 5.8.3
+
+## 5.8.2
+
+## 5.8.1
+
+## 5.8.0
+
+## 5.7.0
+
+## 5.6.3
+
+## 5.6.2
+
+## 5.6.1
+
+## 5.6.0
+
+## 5.5.1
+
+## 5.5.0
+
+## 5.4.3
+
+## 5.4.2
+
+## 5.4.1
+
+## 5.4.0
+
+## 5.3.0
+
+## 5.2.0
+
+## 5.1.2
+
+## 5.1.1
+
+## 5.1.0
+
+## 5.0.0
+
+## 4.15.0
+
+## 4.14.3
+
+## 4.14.2
+
 ## 4.14.1
 
 ## 4.14.0

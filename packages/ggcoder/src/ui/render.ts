@@ -5,10 +5,14 @@ import { render, type Instance as InkInstance } from "ink";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
+import type { SubAgentManager } from "../core/subagent-manager.js";
 import type { MCPClientManager } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
 import type { Skill } from "../core/skills.js";
 import type { CheckpointStore } from "../core/checkpoint-store.js";
+import type { LspManager } from "../core/lsp/manager.js";
+import type { ReviewCoverageTracker } from "../core/ideal-review.js";
+import type { TurnMetricPayload } from "../core/session-manager.js";
 import { App, type CompletedItem, type DoneStatus } from "./App.js";
 import { itemHasImagePreviews } from "./app-items.js";
 import { createTerminalHistoryPrinter } from "./terminal-history.js";
@@ -59,20 +63,23 @@ export interface RenderAppConfig {
     { accessToken: string; accountId?: string; projectId?: string; baseUrl?: string }
   >;
   initialHistory?: CompletedItem[];
+  initialTurnMetrics?: TurnMetricPayload[];
   sessionsDir?: string;
   sessionPath?: string;
   sessionId?: string;
   processManager?: ProcessManager;
+  subAgentManager?: SubAgentManager;
+  lspManager?: LspManager;
+  reviewCoverageTracker?: ReviewCoverageTracker;
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
   planModeRef?: { current: boolean };
   skills?: Skill[];
   checkpointStore?: CheckpointStore;
-  initialOverlay?: "pixel";
-  rebuildToolsForCwd?: (cwd: string) => Promise<AgentTool[]>;
   rebuildReadTool?: (model: string) => AgentTool;
   connectInitialMcpTools?: () => Promise<AgentTool[]>;
+  onRuntimeStateChange?: (updates: Partial<RuntimeState>) => void;
   planCallbacks?: {
     onEnterPlan?: (reason?: string) => void | Promise<void>;
     onExitPlan?: (planPath: string) => Promise<string>;
@@ -85,7 +92,7 @@ export interface RenderAppConfig {
  * picks aren't lost when an overlay close, plan accept, etc. tears down
  * the React tree.
  */
-interface RuntimeState {
+export interface RuntimeState {
   model: string;
   provider: Provider;
   thinking?: ThinkingLevel;
@@ -95,7 +102,7 @@ interface RuntimeState {
  * Session state that needs to survive unmount/remount for paths that
  * KEEP the conversation (overlay close, plan reject) — and which we
  * deliberately wipe for paths that start a fresh session (`/clear`,
- * plan accept, pixel fix).
+ * plan accept).
  *
  * App.tsx mirrors its in-React state into this object via useEffects,
  * so when `resetUI` rebuilds the Ink instance, the new App can re-seed
@@ -103,11 +110,12 @@ interface RuntimeState {
  * as our reset mechanism (the only thing that actually escapes Ink's
  * cumulative live-area drift).
  */
-type OverlayKind = "model" | "skills" | "plan" | "theme" | "pixel" | null;
+type OverlayKind = "model" | "skills" | "plan" | "theme" | null;
 
 export interface SessionStore {
   messages: Message[];
   history: CompletedItem[];
+  turnMetrics?: TurnMetricPayload[];
   /** Live, not-yet-flushed rows that must survive overlay/resize remounts. */
   liveItems?: CompletedItem[];
   /** Transient completion footer (e.g. "✻ Mulled it over for 3s") that is still visible. */
@@ -116,16 +124,14 @@ export interface SessionStore {
   planSteps: PlanStep[];
   sessionPath?: string;
   sessionId?: string;
-  sessionTitle?: string;
-  sessionTitleGenerated: boolean;
-  /** Which overlay (Skills, Plan, Pixel, Theme, Model) is open. */
+  /** Which overlay (Skills, Plan, Theme, Model) is open. */
   overlay?: OverlayKind;
   /** Plan overlay auto-expand-newest flag (only meaningful when overlay==='plan'). */
   planAutoExpand?: boolean;
   /**
    * Action to run on the next mount (consumed once). Used by paths that
    * remount AND immediately drive the agent — plan accept / reject,
-   * pixel fix, etc. The new App reads this on mount, fires the agent,
+   * etc. The new App reads this on mount, fires the agent,
    * and clears the field.
    */
   pendingAction?: {
@@ -150,12 +156,6 @@ export interface SessionStore {
    * sessionStore.history before the unmount, so the chat isn't lost.
    */
   pendingResetUI?: boolean;
-  /**
-   * Pixel fix auto-chaining flag. Survives the deferred resetUI() that may
-   * fire when the agent goes idle (e.g. after a pane was toggled mid-fix).
-   * Without this, the second fix onward loses the chaining intent.
-   */
-  runAllPixel?: boolean;
   /** Plan mode display/restriction state. */
   planMode?: boolean;
   /** Whether pre-final ideal review is enabled for this UI session. */
@@ -395,6 +395,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
 
   const onRuntimeStateChange = (updates: Partial<RuntimeState>): void => {
     Object.assign(runtimeState, updates);
+    config.onRuntimeStateChange?.(updates);
   };
 
   // Session state — App mirrors its React state here via useEffects, so
@@ -403,15 +404,14 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
   const sessionStore: SessionStore = {
     messages: config.messages,
     history: config.initialHistory ?? [{ kind: "banner", id: "banner" }],
+    turnMetrics: config.initialTurnMetrics ?? [],
     liveItems: [],
     doneStatus: null,
     approvedPlanPath: undefined,
     planSteps: [],
     sessionPath: config.sessionPath,
     sessionId: config.sessionId,
-    sessionTitle: undefined,
-    sessionTitleGenerated: false,
-    overlay: config.initialOverlay ?? null,
+    overlay: null,
     planAutoExpand: false,
     pendingAction: undefined,
     planMode: config.planModeRef?.current ?? false,
@@ -589,14 +589,15 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             sessionPath: sessionStore.sessionPath,
             sessionId: sessionStore.sessionId,
             processManager: config.processManager,
+            subAgentManager: config.subAgentManager,
+            lspManager: config.lspManager,
+            reviewCoverageTracker: config.reviewCoverageTracker,
             settingsFile: config.settingsFile,
             mcpManager: config.mcpManager,
             authStorage: config.authStorage,
             planModeRef: config.planModeRef,
             skills: config.skills,
             checkpointStore: config.checkpointStore,
-            initialOverlay: config.initialOverlay,
-            rebuildToolsForCwd: config.rebuildToolsForCwd,
             rebuildReadTool: config.rebuildReadTool,
             connectInitialMcpTools: config.connectInitialMcpTools,
             planCallbacks: config.planCallbacks,
@@ -635,12 +636,11 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       // approvedPlanPath + planSteps for the implementation phase).
       terminalHistoryPrinter.clear();
       sessionStore.history = [{ kind: "banner", id: "banner" }];
+      sessionStore.turnMetrics = [];
       sessionStore.liveItems = [];
       sessionStore.doneStatus = null;
       sessionStore.approvedPlanPath = undefined;
       sessionStore.planSteps = [];
-      sessionStore.sessionTitle = undefined;
-      sessionStore.sessionTitleGenerated = false;
     }
     if (options?.messages) sessionStore.messages = options.messages;
     if (options?.history) {

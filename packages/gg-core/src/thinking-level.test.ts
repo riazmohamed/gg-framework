@@ -14,6 +14,15 @@ describe("thinking-level helpers", () => {
     expect(getNextThinkingLevel("openai", "gpt-5.5", "xhigh")).toBeUndefined();
   });
 
+  it("exposes Ultra only for GPT-5.6 models that support proactive delegation", () => {
+    const baseLevels = ["low", "medium", "high", "xhigh", "max"];
+    expect(getSupportedThinkingLevels("openai", "gpt-5.6-sol")).toEqual([...baseLevels, "ultra"]);
+    expect(getSupportedThinkingLevels("openai", "gpt-5.6-terra")).toEqual([...baseLevels, "ultra"]);
+    expect(getSupportedThinkingLevels("openai", "gpt-5.6-luna")).toEqual(baseLevels);
+    expect(getNextThinkingLevel("openai", "gpt-5.6-sol", "max")).toBe("ultra");
+    expect(getNextThinkingLevel("openai", "gpt-5.6-sol", "ultra")).toBeUndefined();
+  });
+
   it("cycles Anthropic adaptive Opus models through max, including xhigh", () => {
     expect(getSupportedThinkingLevels("anthropic", "claude-opus-4-8")).toEqual([
       "low",
@@ -27,14 +36,23 @@ describe("thinking-level helpers", () => {
   });
 
   it("cycles Anthropic adaptive Sonnet models without xhigh", () => {
-    expect(getSupportedThinkingLevels("anthropic", "claude-sonnet-4-6")).toEqual([
+    expect(getSupportedThinkingLevels("anthropic", "claude-sonnet-5")).toEqual([
       "low",
       "medium",
       "high",
       "max",
     ]);
-    expect(getNextThinkingLevel("anthropic", "claude-sonnet-4-6", "high")).toBe("max");
-    expect(isThinkingLevelSupported("anthropic", "claude-sonnet-4-6", "xhigh")).toBe(false);
+    expect(getNextThinkingLevel("anthropic", "claude-sonnet-5", "high")).toBe("max");
+    expect(isThinkingLevelSupported("anthropic", "claude-sonnet-5", "xhigh")).toBe(false);
+  });
+
+  it("cycles xAI Grok 4.5 through low, medium, and high", () => {
+    expect(getSupportedThinkingLevels("xai", "grok-4.5")).toEqual(["low", "medium", "high"]);
+    expect(getNextThinkingLevel("xai", "grok-4.5", undefined)).toBe("low");
+    expect(getNextThinkingLevel("xai", "grok-4.5", "low")).toBe("medium");
+    expect(getNextThinkingLevel("xai", "grok-4.5", "medium")).toBe("high");
+    expect(getNextThinkingLevel("xai", "grok-4.5", "high")).toBeUndefined();
+    expect(isThinkingLevelSupported("xai", "grok-4.5", "xhigh")).toBe(false);
   });
 
   it("cycles Sakana Fugu through high and xhigh", () => {
@@ -46,7 +64,10 @@ describe("thinking-level helpers", () => {
     expect(isThinkingLevelSupported("sakana", "fugu", "medium")).toBe(false);
   });
 
-  it("keeps non-cycling providers binary at their model max", () => {
+  it("keeps non-cycling providers at their model's sole supported effort", () => {
+    expect(getSupportedThinkingLevels("moonshot", "kimi-k3")).toEqual(["max"]);
+    expect(getNextThinkingLevel("moonshot", "kimi-k3", undefined)).toBe("max");
+    expect(getNextThinkingLevel("moonshot", "kimi-k3", "max")).toBeUndefined();
     expect(getSupportedThinkingLevels("moonshot", "kimi-k2.7-code")).toEqual(["high"]);
     expect(getNextThinkingLevel("moonshot", "kimi-k2.7-code", undefined)).toBe("high");
     expect(getNextThinkingLevel("moonshot", "kimi-k2.7-code", "high")).toBeUndefined();

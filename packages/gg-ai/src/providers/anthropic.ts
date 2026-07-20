@@ -8,7 +8,15 @@ import type {
   StreamResponse,
   ToolCall,
 } from "../types.js";
-import { ProviderError, readHeader, isHardBillingMessage } from "../errors.js";
+import {
+  ProviderError,
+  readHeader,
+  isHardBillingMessage,
+  isRawJsonErrorEcho,
+  isRawHtmlErrorEcho,
+  emptyProviderErrorMessage,
+  providerHtmlErrorMessage,
+} from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import {
   downgradeUnsupportedImages,
@@ -33,6 +41,45 @@ import { isJsonObject } from "../utils/json.js";
  * fresh client.
  */
 const anthropicClientCache = new Map<string, Anthropic>();
+
+/**
+ * Upper HTTP timeout for the non-streaming fallback request.
+ *
+ * The Anthropic SDK refuses any non-streaming `messages.create` whose
+ * `max_tokens` implies a >10-minute worst case — it throws "Streaming is
+ * required for operations that may take longer than 10 minutes" *client-side*,
+ * before any network call (see `calculateNonstreamingTimeout`: the throw fires
+ * when `(60*60*max_tokens)/128000 > 600s`, i.e. any `max_tokens > ~21333`).
+ * Adaptive-thinking Opus/Sonnet models set `max_tokens` to their full output
+ * ceiling (~32K), so the fallback tripped this every time. The SDK only runs
+ * that pre-flight check when the *client* carries no explicit `timeout`, so we
+ * set one here to bypass it. The agent loop already bounds this call with its
+ * own abort signal (NON_STREAMING_HARD_TIMEOUT_MS), so this is just a ceiling.
+ */
+const NON_STREAMING_REQUEST_TIMEOUT_MS = 600_000;
+
+/**
+ * Fine-grained (eager) tool-input streaming is OFF by default.
+ *
+ * With `eager_input_streaming` + the `fine-grained-tool-streaming-2025-05-14`
+ * beta, Anthropic streams tool arguments token-by-token WITHOUT server-side
+ * buffering/validation. If the SSE stream is truncated (large `edit` payloads
+ * are the usual victim), the accumulated `argsJson` is incomplete and
+ * `JSON.parse` throws — historically we swallowed that and emitted a phantom
+ * `args:{}` call, which the tool layer rejected with "Invalid arguments".
+ * Claude Code itself gates this behind a default-false flag
+ * (`CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` / the `tengu_fgts`
+ * experiment); we mirror that. Opt in with `GG_FINE_GRAINED_TOOL_STREAMING=1`
+ * (or the Claude Code env var, for parity).
+ */
+export function fineGrainedToolStreamingEnabled(): boolean {
+  const raw =
+    process.env.GG_FINE_GRAINED_TOOL_STREAMING ??
+    process.env.CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING;
+  if (!raw) return false;
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
 
 function createClient(options: StreamOptions): Anthropic {
   const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
@@ -122,7 +169,9 @@ export async function prewarmAnthropicCache(options: {
     const tools = options.tools?.length
       ? toAnthropicTools(options.tools, {
           cacheControl,
-          enableFineGrainedToolStreaming: true,
+          // Keep the serialized tool bytes identical to runStream so the
+          // prewarmed prompt cache actually hits — both are gated by the flag.
+          enableFineGrainedToolStreaming: fineGrainedToolStreamingEnabled(),
         })
       : undefined;
     await client.messages.create(
@@ -230,7 +279,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
                 options.tools.filter((t) => !reservedServerNames.has(t.name)),
                 {
                   ...(supportsFirstPartyToolExtras && cacheControl ? { cacheControl } : {}),
-                  ...(supportsFirstPartyToolExtras ? { enableFineGrainedToolStreaming: true } : {}),
+                  ...(supportsFirstPartyToolExtras && fineGrainedToolStreamingEnabled()
+                    ? { enableFineGrainedToolStreaming: true }
+                    : {}),
                 },
               )
             : [];
@@ -256,7 +307,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     stream: useStreaming,
   } as Anthropic.MessageCreateParams;
 
-  // Adaptive thinking models (Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6) don't need the
+  // Adaptive thinking models (Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5) don't need the
   // interleaved-thinking beta — they have it built in.
   const hasAdaptiveThinking = isAdaptiveThinkingModel(options.model);
 
@@ -264,7 +315,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     ...(isOAuth ? ["claude-code-20250219", "oauth-2025-04-20"] : []),
     ...(options.compaction ? ["compact-2026-01-12"] : []),
     ...(options.clearToolUses ? ["context-management-2025-06-27"] : []),
-    "fine-grained-tool-streaming-2025-05-14",
+    // Eager tool-input streaming beta — opt-in only (see
+    // fineGrainedToolStreamingEnabled). Off by default: the un-buffered stream
+    // truncates large tool payloads into malformed JSON → phantom empty calls.
+    ...(fineGrainedToolStreamingEnabled() ? ["fine-grained-tool-streaming-2025-05-14"] : []),
     ...(!hasAdaptiveThinking ? ["interleaved-thinking-2025-05-14"] : []),
     // The 1-h cache TTL (cacheRetention "long") is gated behind this beta. Without
     // it Anthropic silently ignores ttl:"1h" and falls back to the 5-min default,
@@ -284,7 +338,13 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   // recover when the request is replayed over a plain HTTP response.
   if (!useStreaming) {
     try {
-      const message = (await client.messages.create(
+      // withOptions() clones the client (sharing auth state) with an explicit
+      // timeout set, which suppresses the SDK's bogus "Streaming is required…"
+      // pre-flight throw for large max_tokens. See NON_STREAMING_REQUEST_TIMEOUT_MS.
+      const nonStreamingClient = client.withOptions({
+        timeout: NON_STREAMING_REQUEST_TIMEOUT_MS,
+      });
+      const message = (await nonStreamingClient.messages.create(
         { ...params, stream: false } as Anthropic.MessageCreateParamsNonStreaming,
         requestOptions,
       )) as Anthropic.Message;
@@ -442,8 +502,32 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
               try {
                 const parsed = JSON.parse(accum.argsJson) as unknown;
                 args = isJsonObject(parsed) ? parsed : {};
-              } catch {
-                // malformed JSON — keep start-block input fallback when available
+              } catch (parseErr) {
+                // The streamed tool-input JSON arrived truncated/malformed. Do
+                // NOT silently fall back to {} — that emits a phantom empty
+                // tool call (e.g. `edit` with no file_path/edits) which the
+                // tool layer rejects with "Invalid arguments" and the model
+                // then has to guess how to recover from. Instead surface it as
+                // a malformed-stream failure.
+                //
+                // Deliberately NO statusCode: a 5xx would make classifyOverload()
+                // treat this as a transient provider error and replay in the
+                // SAME streaming mode (which just re-truncates). Leaving it
+                // status-less keeps classifyOverload() null, so agent-loop falls
+                // through to isMalformedStream() — which walks the SyntaxError
+                // `cause` and routes the retry into the non-streaming fallback
+                // that returns the complete tool input.
+                // Keep the raw partial JSON on the error (bounded so a large
+                // truncated `edit` payload can't bloat logs) for debugging.
+                const rawPartial = accum.argsJson;
+                const snippet =
+                  rawPartial.length > 200 ? `${rawPartial.slice(0, 200)}\u2026` : rawPartial;
+                throw new ProviderError(
+                  "anthropic",
+                  `Tool "${accum.toolName}" input JSON was truncated in the stream ` +
+                    `(${rawPartial.length} bytes): ${snippet}; ${(parseErr as Error).message}`,
+                  { cause: parseErr },
+                );
               }
             }
             const tc: ToolCall = {
@@ -711,6 +795,11 @@ function readUnifiedRateLimit(headers: unknown): { rejected: boolean; resetsAt?:
 }
 
 function toError(err: unknown): ProviderError {
+  // Already normalized (e.g. the truncated-tool-JSON guard in runStream throws a
+  // ProviderError whose cause is the SyntaxError). Pass it through untouched so
+  // its statusCode and cause chain survive for agent-loop's retry classifiers
+  // (isMalformedStream walks one level of `.cause`).
+  if (err instanceof ProviderError) return err;
   if (err instanceof Anthropic.APIError) {
     // Anthropic exposes request IDs as `requestID` in current SDKs, `request_id`
     // in older/compat shapes, and sometimes inside the streamed error body.
@@ -722,11 +811,14 @@ function toError(err: unknown): ProviderError {
       (typeof errorBody?.request_id === "string" ? errorBody.request_id : undefined) ??
       (typeof nestedError?.request_id === "string" ? nestedError.request_id : undefined) ??
       undefined;
+    // Guard against an empty-string message (e.g. MiniMax's Anthropic-transport
+    // path returning `{ message: "" }`) counting as "usable" — that would win
+    // over the raw-JSON-echo fallback below and surface a blank error instead.
     const bodyMessage =
-      typeof nestedError?.message === "string"
-        ? nestedError.message
-        : typeof errorBody?.message === "string"
-          ? errorBody.message
+      typeof nestedError?.message === "string" && nestedError.message.trim()
+        ? nestedError.message.trim()
+        : typeof errorBody?.message === "string" && errorBody.message.trim()
+          ? errorBody.message.trim()
           : undefined;
     const bodyType =
       typeof nestedError?.type === "string"
@@ -736,8 +828,18 @@ function toError(err: unknown): ProviderError {
           : typeof (err as unknown as { type?: unknown }).type === "string"
             ? ((err as unknown as { type: string }).type as string)
             : undefined;
-    const message =
-      bodyType && bodyMessage ? `${bodyType}: ${bodyMessage}` : (bodyMessage ?? err.message);
+    // The SDK may expose raw JSON or a whole HTML edge/proxy page through either
+    // the parsed body or err.message. Preserve the original on `cause`, but never
+    // send transport markup to the user.
+    const fallbackMessage = isRawJsonErrorEcho(err.message)
+      ? emptyProviderErrorMessage(err.status)
+      : err.message;
+    const messageCandidate = bodyMessage ?? err.message;
+    const message = isRawHtmlErrorEcho(messageCandidate)
+      ? providerHtmlErrorMessage(err.status)
+      : bodyType && bodyMessage
+        ? `${bodyType}: ${bodyMessage}`
+        : (bodyMessage ?? fallbackMessage);
 
     // Subscription (OAuth) usage-window exhaustion. Anthropic returns 429 with
     // the unified rate-limit headers; a "rejected" status — or a reset stamp
