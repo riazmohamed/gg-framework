@@ -2,7 +2,7 @@ import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { environmentSecrets, redactValue } from "@kenkaiiii/gg-ai";
+import { environmentSecrets, redactValue } from "@abukhaled/gg-ai";
 import { log } from "./logger.js";
 import type { SubAgentSnapshot } from "./subagent-manager.js";
 

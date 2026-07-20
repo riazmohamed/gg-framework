@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Message } from "@kenkaiiii/gg-ai";
+import type { Message } from "@abukhaled/gg-ai";
 import { normalizeMessageImages } from "./message-images.js";
 
 async function oversizedPng(): Promise<Buffer> {

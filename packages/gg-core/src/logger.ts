@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { environmentSecrets, redactText, redactValue } from "@kenkaiiii/gg-ai";
+import { environmentSecrets, redactText, redactValue } from "@abukhaled/gg-ai";
 
 export type LogLevel = "INFO" | "ERROR" | "WARN" | "DEBUG";
 

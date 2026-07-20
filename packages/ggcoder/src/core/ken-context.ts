@@ -16,7 +16,7 @@
  * they hit the provider prompt cache instead of being re-sent uncached on
  * every `@Ken` question and every autopilot review round.
  */
-import type { Message, ContentPart, ToolResult } from "@kenkaiiii/gg-ai";
+import type { Message, ContentPart, ToolResult } from "@abukhaled/gg-ai";
 import { matchExpandedCommand, type WorkflowCommandSpec } from "./autopilot-gate.js";
 
 /** How many of the most recent build-session messages to inline verbatim. */

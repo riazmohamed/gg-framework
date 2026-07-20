@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool } from "@abukhaled/gg-agent";
 import type { DeferredToolCatalog } from "../core/mcp/deferred-catalog.js";
 
 const ToolSearchParams = z.object({

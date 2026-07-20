@@ -26,7 +26,7 @@ import { PROMPT_COMMANDS, getPromptCommand } from "./prompt-commands.js";
 import { loadCustomCommands } from "./custom-commands.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage } from "./auth-storage.js";
-import { MOONSHOT_OAUTH_KEY } from "@kenkaiiii/gg-core";
+import { MOONSHOT_OAUTH_KEY } from "@abukhaled/gg-core";
 import { getClaudeCliUserAgent } from "./claude-code-version.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "./oauth/kimi.js";
 import {

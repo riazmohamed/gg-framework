@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Message } from "@kenkaiiii/gg-ai";
+import type { Message } from "@abukhaled/gg-ai";
 import { AgentSession } from "./agent-session.js";
 import type { IdealReviewStats, ReviewCoverageTracker } from "./ideal-review.js";
 

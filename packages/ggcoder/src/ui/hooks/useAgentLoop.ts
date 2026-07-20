@@ -15,7 +15,6 @@ import type {
   ImageContent,
   VideoContent,
 } from "@abukhaled/gg-ai";
-import type { IdealReviewStats } from "../../core/ideal-review.js";
 import {
   buildReviewCoverageMessage,
   withReviewCoverageRequirements,

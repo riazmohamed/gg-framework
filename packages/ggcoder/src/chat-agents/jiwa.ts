@@ -4,8 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
-import { withFileLock } from "@kenkaiiii/gg-core";
+import type { AgentTool } from "@abukhaled/gg-agent";
+import { withFileLock } from "@abukhaled/gg-core";
 
 export const JIWA_SOFT_LIMIT = 60;
 export const JIWA_HARD_LIMIT = 90;

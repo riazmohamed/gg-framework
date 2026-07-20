@@ -6,7 +6,7 @@ import fs from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import path from "node:path";
-import { getAppPaths } from "@kenkaiiii/gg-core";
+import { getAppPaths } from "@abukhaled/gg-core";
 import { xpForLevel } from "./ranks.js";
 import { createEmptyProgress, dayKey } from "./store.js";
 import type { ProgressFile } from "./types.js";

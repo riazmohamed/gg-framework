@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { render } from "ink";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Message, Provider, Usage } from "@kenkaiiii/gg-ai";
+import type { Message, Provider, Usage } from "@abukhaled/gg-ai";
 import type * as CompactorModule from "../../core/compaction/compactor.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
 import type { CompletedItem } from "../app-items.js";

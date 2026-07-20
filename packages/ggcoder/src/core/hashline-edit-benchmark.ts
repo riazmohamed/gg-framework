@@ -34,7 +34,7 @@
  *   GG_HL_REPEAT                   (runs per task, default 1 — raise to average noise)
  */
 
-import { stream, type Message, type StreamEvent, type Usage } from "@kenkaiiii/gg-ai";
+import { stream, type Message, type StreamEvent, type Usage } from "@abukhaled/gg-ai";
 import { AuthStorage } from "./auth-storage.js";
 import { anchorFile, type AnchoredFile } from "./hashline.js";
 import {

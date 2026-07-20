@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Message, Usage } from "@kenkaiiii/gg-ai";
+import type { Message, Usage } from "@abukhaled/gg-ai";
 import { calculateActiveContextTokens } from "./active-context.js";
 import { estimateConversationTokens } from "./token-estimator.js";
 

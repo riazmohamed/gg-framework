@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { AgentDefinition } from "../core/agents.js";
 import { getFastModel } from "../core/model-registry.js";
 import { truncateTail } from "./truncate.js";

@@ -3,7 +3,7 @@
 // so the desktop app and the terminal stay in lockstep. The app fetches this
 // (plus live connection status) from the sidecar's /auth/status endpoint.
 
-import { XIAOMI_CREDITS_KEY } from "@kenkaiiii/gg-core";
+import { XIAOMI_CREDITS_KEY } from "@abukhaled/gg-core";
 
 export type AuthMethod = "oauth" | "apikey";
 

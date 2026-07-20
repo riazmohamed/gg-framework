@@ -1,4 +1,4 @@
-import { stream, type Message, type Provider, type TextContent } from "@kenkaiiii/gg-ai";
+import { stream, type Message, type Provider, type TextContent } from "@abukhaled/gg-ai";
 
 /**
  * One piece of an enhanced prompt. A `text` segment is verbatim prose; a `term`

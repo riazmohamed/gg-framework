@@ -1,4 +1,4 @@
-import type { Message, Usage } from "@kenkaiiii/gg-ai";
+import type { Message, Usage } from "@abukhaled/gg-ai";
 import { estimateConversationTokens } from "./token-estimator.js";
 
 export interface ActiveContextOptions {

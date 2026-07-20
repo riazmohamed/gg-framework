@@ -12,7 +12,7 @@ import {
 import { USER_INSTRUCTIONS_HEADER } from "./autopilot-gate.js";
 import { PROMPT_COMMANDS } from "./prompt-commands.js";
 import { createTools } from "../tools/index.js";
-import type { Message } from "@kenkaiiii/gg-ai";
+import type { Message } from "@abukhaled/gg-ai";
 
 // Mirror the sidecar's Ken allow-list so the filter test tracks the real set.
 const KEN_ALLOWED_TOOLS = [

@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { AgentSession } from "../core/agent-session.js";
 import { isModelUnavailableError } from "../tools/subagent.js";
 import { boundSubAgentOutput, SUB_AGENT_TIMEOUT_MS } from "../tools/subagent-shared.js";

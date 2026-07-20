@@ -1,4 +1,4 @@
-import type { TextContent, ImageContent, VideoContent } from "@kenkaiiii/gg-ai";
+import type { TextContent, ImageContent, VideoContent } from "@abukhaled/gg-ai";
 
 type ContentPart = TextContent | ImageContent | VideoContent;
 type UserContent = string | ContentPart[];

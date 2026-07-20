@@ -11,7 +11,7 @@
  * wires the live sessions; this module owns validation + resolution so both
  * are unit-testable without booting the sidecar.
  */
-import type { Provider } from "@kenkaiiii/gg-ai";
+import type { Provider } from "@abukhaled/gg-ai";
 
 /** A pinned Ken model choice: provider + model id. */
 export interface KenModelPref {

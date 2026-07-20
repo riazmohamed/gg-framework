@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool } from "@abukhaled/gg-agent";
 import type { AgentSessionOptions } from "../core/agent-session.js";
 import { createChatAgent, parseChatAgentId } from "./index.js";
 import { RESEARCH_CHAT_SYSTEM_PROMPT } from "./research.js";

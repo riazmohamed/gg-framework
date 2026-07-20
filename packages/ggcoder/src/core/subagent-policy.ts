@@ -1,4 +1,4 @@
-import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 
 export const ASYNC_ORCHESTRATION_MARKER = "\n\n## Async subagent orchestration\n";
 

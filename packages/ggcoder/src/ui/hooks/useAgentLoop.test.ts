@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { evaluateLoopBreak, ToolCallProgressTracker } from "../../core/loop-breaker.js";
 import { shouldRetainThinkingDelta, type AgentLoopOptions } from "./useAgentLoop.js";
-import type { Message } from "@kenkaiiii/gg-ai";
-import type { TransformContextOptions } from "@kenkaiiii/gg-agent";
+import type { Message } from "@abukhaled/gg-ai";
+import type { TransformContextOptions } from "@abukhaled/gg-agent";
 
 describe("useAgentLoop context transforms", () => {
   it("adds missing read coverage to the initial Ideal review turn", () => {

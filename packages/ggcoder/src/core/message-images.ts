@@ -1,4 +1,4 @@
-import type { ImageContent, Message } from "@kenkaiiii/gg-ai";
+import type { ImageContent, Message } from "@abukhaled/gg-ai";
 import { shrinkToFit } from "../utils/image.js";
 
 function imageBlocks(message: Message): ImageContent[] {

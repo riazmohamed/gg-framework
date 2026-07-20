@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool } from "@abukhaled/gg-agent";
 import type { AgentSession } from "../core/agent-session.js";
 import { createGeneralChatAgent, GENERAL_CHAT_SYSTEM_PROMPT } from "./general.js";
 import { createResearchChatAgent, RESEARCH_CHAT_SYSTEM_PROMPT } from "./research.js";

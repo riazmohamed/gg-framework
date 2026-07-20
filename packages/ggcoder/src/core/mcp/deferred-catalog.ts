@@ -1,4 +1,4 @@
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool } from "@abukhaled/gg-agent";
 
 /**
  * Holds MCP tools OUT of the per-turn request payload until the model asks

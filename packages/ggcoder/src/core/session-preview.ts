@@ -1,4 +1,4 @@
-import type { Message } from "@kenkaiiii/gg-ai";
+import type { Message } from "@abukhaled/gg-ai";
 
 const COMPACTION_SUMMARY_PREFIX = "[Previous conversation summary]";
 const AUTOPILOT_PROMPT_PREFIX =
