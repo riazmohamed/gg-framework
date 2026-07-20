@@ -664,10 +664,10 @@ export function toAnthropicThinking(
     // Adaptive thinking — model decides when/how much to think.
     // budget_tokens is deprecated on Opus 4.8 / Opus 4.7 / Opus 4.6 / Sonnet 5.
     // Anthropic's output_config.effort accepts low, medium, high, xhigh, and max.
-    // xhigh is Fable 5 / Opus 4.8 / 4.7-only; max is supported by Fable 5,
-    // Opus 4.8/4.7/4.6 and Sonnet 5.
+    // xhigh is Opus 4.8/4.7-only; max is supported by Opus 4.8/4.7/4.6, Sonnet 5,
+    // Fable 5, and Mythos 5 (Fable 5 / Mythos 5 clamp xhigh → high).
     let effort: string = level;
-    if (effort === "xhigh" && !/fable-5|opus-4-8|opus-4-7/.test(model)) {
+    if (effort === "xhigh" && !/opus-4-8|opus-4-7/.test(model)) {
       effort = "high";
     }
     return {

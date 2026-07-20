@@ -99,18 +99,6 @@ export const MODELS: ModelInfo[] = [
   //   maxThinkingLevel: "max",
   // },
   {
-    id: "claude-fable-5",
-    name: "Claude Fable 5",
-    provider: "anthropic",
-    contextWindow: 1_000_000,
-    maxOutputTokens: 128_000,
-    supportsThinking: true,
-    supportsImages: true,
-    supportsVideo: false,
-    costTier: "high",
-    maxThinkingLevel: "max",
-  },
-  {
     id: "claude-opus-4-8",
     name: "Claude Opus 4.8",
     provider: "anthropic",
