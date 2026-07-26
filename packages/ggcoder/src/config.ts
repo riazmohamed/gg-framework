@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
+import { createHash } from "node:crypto";
 import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { getAppPaths, type AppPaths } from "@abukhaled/gg-core";
 import type { ThemeName } from "./ui/theme/theme.js";
@@ -138,8 +139,24 @@ function isValidThemeSetting(value: string): value is "auto" | ThemeName {
   return VALID_THEME_SETTINGS.has(value);
 }
 
-/** Seed built-in agent definitions on first run (won't overwrite user edits). */
-async function seedDefaultAgents(agentsDir: string): Promise<void> {
+/**
+ * SHA-256 of the exact `auditor.md` / `skeptic.md` bodies seeded by v5.22.6.
+ * Used to delete only our own mistakenly-seeded copies — never a user's file.
+ */
+export const SHADOWING_SEEDED_AGENT_HASHES: Record<string, string> = {
+  "auditor.md": "7c8c6c1ff892a7ebf45164b0367e340f099cf2cd611bfec23eb39ecc24592502",
+  "skeptic.md": "7def72d81da78919efb4934f396d8da47912786a49176badf996eac4d57a285d",
+};
+
+/**
+ * Seed built-in agent definitions on first run (won't overwrite user edits).
+ *
+ * Exported for tests: `getAppPaths()` resolves `os.homedir()` inside gg-core's
+ * prebuilt dist, which vitest does not transform, so a homedir spy would not
+ * apply and the test would operate on the developer's real `~/.gg`. Tests must
+ * call this with an explicit temp directory instead of going via ensureAppDirs.
+ */
+export async function seedDefaultAgents(agentsDir: string): Promise<void> {
   const defaults: Record<string, string> = {
     "owl.md": `---
 name: owl
@@ -200,6 +217,29 @@ Do the work, don't just describe it. Don't over-engineer.
       // File exists — don't overwrite user edits
     } catch {
       await fs.writeFile(filePath, content, "utf-8");
+    }
+  }
+
+  await removeShadowingSeededAgents(agentsDir);
+}
+
+/**
+ * v5.22.6 briefly seeded `auditor.md` / `skeptic.md` into the user agents dir.
+ * Those names are already shipped as BUNDLED_AGENTS with richer prompts, and
+ * user-dir agents take precedence — so the seeded copies silently shadowed the
+ * bundled ones (a weaker /bullet-proof). Delete them, but ONLY when the file is
+ * byte-identical to what 5.22.6 wrote, so a user who edited or authored their
+ * own agent of that name keeps it.
+ */
+async function removeShadowingSeededAgents(agentsDir: string): Promise<void> {
+  for (const [filename, seededHash] of Object.entries(SHADOWING_SEEDED_AGENT_HASHES)) {
+    const filePath = path.join(agentsDir, filename);
+    try {
+      const content = await fs.readFile(filePath, "utf-8");
+      const hash = createHash("sha256").update(content, "utf-8").digest("hex");
+      if (hash === seededHash) await fs.rm(filePath, { force: true });
+    } catch {
+      // Missing or unreadable — nothing to clean up.
     }
   }
 }

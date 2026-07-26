@@ -1,4 +1,5 @@
 import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
+import { isKimiCodingEndpoint } from "./oauth/kimi.js";
 import { XIAOMI_CREDITS_KEY } from "./auth-storage.js";
 
 export interface ModelInfo {
@@ -37,8 +38,8 @@ export interface ModelInfo {
    *     and `ultra`; gg-ai caps at `max` — `ultra` needs a ThinkingLevel bump)
    *   - OpenAI GPT-5.5-era: `xhigh`
    *   - OpenAI Pro/Codex/old: clamped to what the model accepts
-   *   - Claude Fable 5 / Mythos 5, Opus 4.8 / 4.7 / 4.6 and Sonnet 5: `max`
-   *     (Fable 5 / Mythos 5 use always-on adaptive thinking, low→max ladder)
+   *   - Claude Fable 5 / Mythos 5, Opus 5 and Sonnet 5: `max` (Fable 5 /
+   *     Mythos 5 use always-on adaptive thinking, low→max ladder)
    *   - Claude Haiku 4.5: `high` (no adaptive `max` tier)
    *   - Kimi K3: `max` (always-on reasoning; currently the only API effort)
    *   - GLM / Kimi K2.x / Xiaomi / MiniMax / Qwen: `high` — binary-thinking
@@ -99,8 +100,12 @@ export const MODELS: ModelInfo[] = [
   //   maxThinkingLevel: "max",
   // },
   {
-    id: "claude-opus-4-8",
-    name: "Claude Opus 4.8",
+    // Released 2026-07-24 — "For complex agentic coding and enterprise work".
+    // Near-Fable capability at half the price ($5/$25 vs $10/$50). Adaptive
+    // thinking with the full effort ladder (low→max, xhigh included); dateless
+    // ID is the canonical pinned snapshot (post-4.6 naming scheme).
+    id: "claude-opus-5",
+    name: "Claude Opus 5",
     provider: "anthropic",
     contextWindow: 1_000_000,
     maxOutputTokens: 128_000,
@@ -299,8 +304,9 @@ export const MODELS: ModelInfo[] = [
   },
   // ── Moonshot (Kimi) ────────────────────────────────────
   // K3 is Kimi's 2.8T-parameter flagship for long-horizon coding, knowledge
-  // work, and deep reasoning. It always reasons at the `max` effort; the public
-  // API uses `reasoning_effort`, while Kimi Code OAuth keeps its managed wire shape.
+  // work, and deep reasoning. Its effort ladder is server-declared as
+  // low/high/max on both the public API (default max) and the Kimi For Coding
+  // OAuth endpoint (default high); thinking can also be fully disabled.
   {
     id: "kimi-k3",
     name: "Kimi K3",
@@ -540,12 +546,44 @@ export const MODELS: ModelInfo[] = [
   },
 ];
 
+/**
+ * Models discovered at runtime rather than shipped in `MODELS` — today only
+ * locally hosted ones (Ollama/LM Studio/llama.cpp/vLLM), whose ids and context
+ * windows depend on what the user has installed. Kept in a separate map so
+ * `MODELS` stays a static, reviewable table.
+ */
+const runtimeModels = new Map<string, ModelInfo>();
+
+/** Add (or replace) runtime-discovered models. Later registrations win by id. */
+export function registerRuntimeModels(models: readonly ModelInfo[]): void {
+  for (const model of models) runtimeModels.set(model.id, model);
+}
+
+/**
+ * Remove runtime models matching `predicate` (all of them when omitted) — e.g.
+ * every model from an endpoint the user just deleted.
+ */
+export function clearRuntimeModels(predicate?: (model: ModelInfo) => boolean): void {
+  if (!predicate) {
+    runtimeModels.clear();
+    return;
+  }
+  for (const [id, model] of runtimeModels) {
+    if (predicate(model)) runtimeModels.delete(id);
+  }
+}
+
+/** Static table plus everything discovered at runtime. */
+export function getAllModels(): ModelInfo[] {
+  return [...MODELS, ...runtimeModels.values()];
+}
+
 export function getModel(id: string): ModelInfo | undefined {
-  return MODELS.find((m) => m.id === id);
+  return MODELS.find((m) => m.id === id) ?? runtimeModels.get(id);
 }
 
 export function getModelsForProvider(provider: Provider): ModelInfo[] {
-  return MODELS.filter((m) => m.provider === provider);
+  return getAllModels().filter((m) => m.provider === provider);
 }
 
 /**
@@ -557,7 +595,7 @@ export function getModelsForProvider(provider: Provider): ModelInfo[] {
  * Credits, while the API-only `mimo-v2.5-pro-ultraspeed` has no fallback.
  */
 export function getAuthStorageKeys(provider: Provider, modelId: string): string[] {
-  const model = MODELS.find((m) => m.id === modelId && m.provider === provider);
+  const model = getAllModels().find((m) => m.id === modelId && m.provider === provider);
   return model?.authStorageKeys ?? [provider];
 }
 
@@ -591,8 +629,33 @@ export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "openrouter") return MODELS.find((m) => m.id === "qwen/qwen3.6-plus")!;
   if (provider === "sakana") return MODELS.find((m) => m.id === "fugu")!;
   if (provider === "xai") return MODELS.find((m) => m.id === "grok-4.5")!;
+  // Local models only exist once discovery has run, and there's no "the" local
+  // model. Never throw here (callers rely on a ModelInfo): fall back to a
+  // placeholder that carries the conservative defaults, so a caller asking
+  // before a scan gets a coherent object instead of a crash.
+  if (provider === "local") {
+    return getModelsForProvider("local")[0] ?? PLACEHOLDER_LOCAL_MODEL;
+  }
   return MODELS.find((m) => m.id === "claude-sonnet-5")!;
 }
+
+/**
+ * Stand-in returned by `getDefaultModel("local")` before any local model has
+ * been discovered. Not registered, never selectable in the UI — it exists only
+ * so the non-null contract of `getDefaultModel` holds.
+ */
+const PLACEHOLDER_LOCAL_MODEL: ModelInfo = {
+  id: "local/none/none",
+  name: "No local model discovered",
+  provider: "local",
+  contextWindow: 8192,
+  maxOutputTokens: 2048,
+  supportsThinking: false,
+  supportsImages: false,
+  supportsVideo: false,
+  costTier: "low",
+  maxThinkingLevel: "high",
+};
 
 export interface ContextWindowOptions {
   provider?: Provider;
@@ -690,6 +753,25 @@ export function getExecutorModel(provider: Provider, currentModelId: string): Mo
  */
 export function getMaxThinkingLevel(modelId: string): ThinkingLevel {
   return getModel(modelId)?.maxThinkingLevel ?? "high";
+}
+
+/**
+ * The thinking level a fresh session starts at. Identical to
+ * {@link getMaxThinkingLevel} except where the provider declares a lower
+ * default effort server-side — Kimi K3's Kimi For Coding OAuth endpoint
+ * declares `default_effort: "high"` in its /models think_efforts (the public
+ * Moonshot API declares "max"), and the official kimi-code CLI starts there.
+ * Pass the active credential's baseUrl so the endpoint-aware default resolves;
+ * matching it keeps plan-usage burn identical to the official CLI (users can
+ * still toggle up to max).
+ */
+export function getDefaultThinkingLevel(
+  modelId: string,
+  options?: { baseUrl?: string },
+): ThinkingLevel {
+  const model = getModel(modelId);
+  if (model?.id === "kimi-k3" && isKimiCodingEndpoint(options?.baseUrl)) return "high";
+  return model?.maxThinkingLevel ?? "high";
 }
 
 /**

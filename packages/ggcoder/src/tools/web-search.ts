@@ -2,6 +2,7 @@ import { parseHTML } from "linkedom";
 import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { log } from "../core/logger.js";
+import { checkUrlPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 
 const USER_AGENTS = [
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -861,11 +862,22 @@ async function performSearch(
   maxResults: number,
   filters: SearchFilters,
   signal: AbortSignal,
+  getNetworkPolicy?: GetNetworkPolicy,
 ): Promise<SearchResponse> {
+  const unavailableEngines: SearchEngine[] = [];
+
   for (const engine of ENGINES) {
     const startedAt = Date.now();
     try {
       const { url, headers, method, body } = buildRequest(engine, query, filters);
+      // Enforce the egress allowlist per engine — a blocked engine is simply
+      // skipped, exactly like an unavailable one.
+      const blocked = checkUrlPolicy(url, getNetworkPolicy);
+      if (blocked) {
+        unavailableEngines.push(engine);
+        log("DEBUG", "web-search", "Search engine blocked by network allowlist", { engine });
+        continue;
+      }
       const attemptSignal = AbortSignal.any([
         signal,
         AbortSignal.timeout(ENGINE_ATTEMPT_TIMEOUT_MS),
@@ -879,7 +891,11 @@ async function performSearch(
       );
 
       if (isRateLimited(statusCode, html)) {
-        log("WARN", "web-search", "Search engine unavailable", {
+        unavailableEngines.push(engine);
+        // A blocked fallback is expected on public search pages. Keep each
+        // attempt in DEBUG and emit one actionable WARN only when every engine
+        // is unavailable; otherwise successful searches flood the app log.
+        log("DEBUG", "web-search", "Search engine unavailable", {
           engine,
           status: String(statusCode),
           reason: "rate-limited",
@@ -901,7 +917,8 @@ async function performSearch(
         return { results: filteredResults.results, engine, stats: filteredResults.stats };
       }
     } catch (error) {
-      log("WARN", "web-search", "Search engine attempt failed", {
+      unavailableEngines.push(engine);
+      log("DEBUG", "web-search", "Search engine attempt failed", {
         engine,
         error: error instanceof Error ? error.message : String(error),
         duration: `${Date.now() - startedAt}ms`,
@@ -910,6 +927,11 @@ async function performSearch(
     }
   }
 
+  if (unavailableEngines.length === ENGINES.length) {
+    log("WARN", "web-search", "All search engines unavailable", {
+      engines: unavailableEngines.join(","),
+    });
+  }
   return { results: [], engine: "DuckDuckGo", stats: emptyFilterStats() };
 }
 
@@ -918,6 +940,7 @@ async function cachedSearch(
   maxResults: number,
   filters: SearchFilters,
   callerSignal: AbortSignal,
+  getNetworkPolicy?: GetNetworkPolicy,
 ): Promise<SearchResponse> {
   const key = searchCacheKey(query, maxResults, filters);
   const now = Date.now();
@@ -933,7 +956,7 @@ async function cachedSearch(
   let pending = searchesInFlight.get(key);
   if (!pending) {
     const sharedSignal = AbortSignal.timeout(ENGINES.length * ENGINE_ATTEMPT_TIMEOUT_MS);
-    pending = performSearch(query, maxResults, filters, sharedSignal)
+    pending = performSearch(query, maxResults, filters, sharedSignal, getNetworkPolicy)
       .then((value) => {
         if (value.results.length > 0) {
           pruneSearchCache(Date.now());
@@ -994,7 +1017,9 @@ function statsFooter(stats: FilterStats): string {
   return parts.length > 0 ? ` · ${parts.join(" · ")}` : "";
 }
 
-export function createWebSearchTool(): AgentTool<typeof parameters> {
+export function createWebSearchTool(
+  getNetworkPolicy?: GetNetworkPolicy,
+): AgentTool<typeof parameters> {
   return {
     name: "web_search",
     description:
@@ -1016,9 +1041,19 @@ export function createWebSearchTool(): AgentTool<typeof parameters> {
         maxResults,
         filters,
         context.signal,
+        getNetworkPolicy,
       );
 
       if (results.length === 0) {
+        const policy = getNetworkPolicy?.();
+        if (policy?.mode === "allowlist") {
+          const allowed = policy.allow.length > 0 ? policy.allow.join(", ") : "(none)";
+          return (
+            `No search results: every search engine host is blocked by the network allowlist ` +
+            `(allowed: ${allowed}), or the engines returned nothing. Ask the user to add a ` +
+            `search engine host to the networkAllow setting.`
+          );
+        }
         return `No search results found for: "${args.query}". All search engines were unavailable or returned no results.`;
       }
 

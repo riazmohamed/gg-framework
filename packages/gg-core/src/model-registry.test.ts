@@ -1,11 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { XIAOMI_CREDITS_KEY } from "./auth-storage.js";
 import {
   MODELS,
+  type ModelInfo,
+  clearRuntimeModels,
+  getAllModels,
+  getModel,
+  registerRuntimeModels,
   getAuthStorageKey,
   getAuthStorageKeys,
   getContextWindow,
   getDefaultModel,
+  getDefaultThinkingLevel,
   getFastModel,
   getModelsForProvider,
   getToolResultCharLimit,
@@ -109,7 +115,7 @@ describe("getFastModel", () => {
   });
 
   it("picks Haiku for Anthropic and Luna for OpenAI", () => {
-    expect(getFastModel("anthropic", "claude-opus-4-8").costTier).toBe("low");
+    expect(getFastModel("anthropic", "claude-opus-5").costTier).toBe("low");
     expect(getFastModel("openai", "gpt-5.6-sol").id).toBe("gpt-5.6-luna");
   });
 });
@@ -181,6 +187,25 @@ describe("model registry context windows", () => {
     expect(getContextWindow("kimi-k3", { provider: "moonshot" })).toBe(1_048_576);
   });
 
+  it("starts Kimi K3 at the endpoint's declared default effort, kimi-code-style", () => {
+    // Kimi For Coding OAuth endpoint declares default_effort "high" …
+    expect(getDefaultThinkingLevel("kimi-k3", { baseUrl: "https://api.kimi.com/coding/v1" })).toBe(
+      "high",
+    );
+    // … the public Moonshot API declares "max" …
+    expect(getDefaultThinkingLevel("kimi-k3", { baseUrl: "https://api.moonshot.ai/v1" })).toBe(
+      "max",
+    );
+    // … and no stored endpoint (e.g. API-key-only auth) means the public API.
+    expect(getDefaultThinkingLevel("kimi-k3")).toBe("max");
+    // Every other model starts at its registry max regardless of endpoint.
+    expect(
+      getDefaultThinkingLevel("kimi-k2.7-code", { baseUrl: "https://api.kimi.com/coding/v1" }),
+    ).toBe("high");
+    expect(getDefaultThinkingLevel("claude-opus-5")).toBe("max");
+    expect(getDefaultThinkingLevel("claude-opus-5")).toBe("max");
+  });
+
   it("defaults MiniMax to the multimodal M3 with a 1M context window", () => {
     expect(getDefaultModel("minimax")).toMatchObject({
       id: "MiniMax-M3",
@@ -224,5 +249,67 @@ describe("model registry context windows", () => {
     ]);
     expect(getContextWindow("gemini-3.1-flash-lite", { provider: "gemini" })).toBe(1_048_576);
     expect(getContextWindow("gemini-3-flash", { provider: "gemini" })).toBe(1_048_576);
+  });
+});
+
+describe("runtime model registry", () => {
+  const local: ModelInfo = {
+    id: "local/ollama/qwen3-coder:30b",
+    name: "qwen3-coder:30b (Ollama)",
+    provider: "local",
+    contextWindow: 262_144,
+    maxOutputTokens: 4096,
+    supportsThinking: true,
+    supportsImages: false,
+    supportsVideo: false,
+    costTier: "low",
+    maxThinkingLevel: "high",
+    authStorageKeys: ["local:ollama"],
+  };
+
+  afterEach(() => clearRuntimeModels());
+
+  it("makes registered models resolvable exactly like static ones", () => {
+    expect(getModel(local.id)).toBeUndefined();
+
+    registerRuntimeModels([local]);
+
+    expect(getModel(local.id)).toBe(local);
+    expect(getModelsForProvider("local").map((m) => m.id)).toEqual([local.id]);
+    expect(getContextWindow(local.id)).toBe(262_144);
+    expect(getAuthStorageKeys("local", local.id)).toEqual(["local:ollama"]);
+    expect(getAllModels()).toHaveLength(MODELS.length + 1);
+  });
+
+  it("replaces an entry re-registered under the same id", () => {
+    registerRuntimeModels([local]);
+    registerRuntimeModels([{ ...local, contextWindow: 8192 }]);
+
+    expect(getAllModels().filter((m) => m.id === local.id)).toHaveLength(1);
+    expect(getContextWindow(local.id)).toBe(8192);
+  });
+
+  it("clears selectively by predicate and leaves static models alone", () => {
+    registerRuntimeModels([
+      local,
+      { ...local, id: "local/vllm/x", authStorageKeys: ["local:vllm"] },
+    ]);
+
+    clearRuntimeModels((m) => m.authStorageKeys?.[0] === "local:vllm");
+
+    expect(getModelsForProvider("local").map((m) => m.id)).toEqual([local.id]);
+
+    clearRuntimeModels();
+
+    expect(getModelsForProvider("local")).toEqual([]);
+    expect(getAllModels()).toHaveLength(MODELS.length);
+  });
+
+  it("never throws for getDefaultModel('local'), before or after discovery", () => {
+    expect(getDefaultModel("local")).toMatchObject({ provider: "local" });
+
+    registerRuntimeModels([local]);
+
+    expect(getDefaultModel("local")).toBe(local);
   });
 });

@@ -1,5 +1,116 @@
 # @kenkaiiii/gg-agent
 
+## 5.24.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.24.0
+
+## 5.23.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.23.3
+
+## 5.23.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.23.2
+
+## 5.23.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.23.1
+
+## 5.23.0
+
+### Patch Changes
+
+- Updated dependencies [a6a78c2]
+  - @kenkaiiii/gg-ai@5.23.0
+
+## 5.22.6
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.6
+
+## 5.22.5
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.5
+
+## 5.22.4
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.4
+
+## 5.22.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.3
+
+## 5.22.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.2
+
+## 5.22.1
+
+### Patch Changes
+
+- Reliability fixes from the baseline harness (bench/baseline):
+  - **Truncated-stream guard (gg-ai):** a clean stream close with no terminal event (no `message_stop` / `finish_reason`) now throws a retryable `ProviderError(504)` instead of silently returning partial text as a phantom-complete `end_turn`. Applies to both the Anthropic and OpenAI-compatible providers.
+  - **Sidecar bounds (ggcoder):** inbound HTTP bodies capped at 10 MB (413) via `readCappedBody`; the `~/.gg` progress `fs.watch` handle is now closed on shutdown; the project-file glob search streams and bails after 50k entries. Closes three unbounded-memory/leak paths.
+  - **Cap-divergence marker (gg-agent):** `capToolResults`/`capTurnToolResults` now stamp `ToolResult.capped = { originalChars, keptChars, scope }` when they trim, so the event-transcript vs model-input divergence is programmatically visible. Internal metadata only — never serialized to the provider.
+  - **Empty-part serializer fix (gg-ai):** `toAnthropicMessages` no longer emits empty text parts (user `""`, user `{text:""}`, settled assistant `""`), eliminating live Anthropic 400 "text content blocks must be non-empty" failures.
+  - **Tool-id remap fix (gg-ai):** `remapToolCallId` now strips the full `toolu_` prefix (`slice(6)`), mapping `toolu_01ABC` → clean `call_01ABC` instead of the lossy double-underscore `call__01ABC`.
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@5.22.1
+
+## 5.22.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.0
+
+## 5.21.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.21.0
+
+## 5.20.5
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.20.5
+
+## 5.20.4
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.20.4
+
+## 5.20.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.20.3
+
+## 5.20.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.20.2
+
 ## 5.20.1
 
 ### Patch Changes

@@ -17,6 +17,7 @@ import type {
   ToolResultContent,
 } from "../types.js";
 import { resolveToolSchema, zodToJsonSchema } from "../utils/zod-to-json-schema.js";
+import { DEFAULT_REASONING_FIELD } from "./reasoning-field.js";
 
 // ── Shared helpers ─────────────────────────────────────────
 
@@ -473,60 +474,76 @@ export function toAnthropicMessages(
       continue;
     }
     if (msg.role === "user") {
+      // Drop empty-string text parts: Anthropic rejects empty text blocks with a
+      // 400 ("text content blocks must be non-empty"). A string content of ""
+      // and an all-empty content array are both degenerate — skip the whole
+      // message rather than send a guaranteed-400 body. Whitespace-only text is
+      // left intact (it is non-empty and the API accepts it). Baseline #20 A/B.
+      if (typeof msg.content === "string") {
+        if (msg.content === "") continue;
+      } else if (!msg.content.some((p) => !(p.type === "text" && p.text === ""))) {
+        continue;
+      }
       out.push({
         role: "user",
         content:
           typeof msg.content === "string"
             ? msg.content
-            : msg.content.map((part): Anthropic.ContentBlockParam => {
-                if (part.type === "text") return { type: "text" as const, text: part.text };
-                if (part.type === "image") {
+            : msg.content
+                .filter((part) => !(part.type === "text" && part.text === ""))
+                .map((part): Anthropic.ContentBlockParam => {
+                  if (part.type === "text") return { type: "text" as const, text: part.text };
+                  if (part.type === "image") {
+                    return {
+                      type: "image" as const,
+                      source: {
+                        type: "base64" as const,
+                        media_type: part.mediaType as
+                          | "image/jpeg"
+                          | "image/png"
+                          | "image/gif"
+                          | "image/webp",
+                        data: part.data,
+                      },
+                    };
+                  }
+                  if (part.type === "document") {
+                    return {
+                      type: "document" as const,
+                      source: {
+                        type: "base64" as const,
+                        media_type: "application/pdf" as const,
+                        data: part.data,
+                      },
+                      ...(part.name ? { title: part.name } : {}),
+                    } as Anthropic.DocumentBlockParam;
+                  }
+                  if (part.type === "video") {
+                    // MiniMax-M3 rides the Anthropic transport and accepts native
+                    // video blocks. Non-video models never reach here — video is
+                    // downgraded to text by downgradeUnsupportedVideos first.
+                    return {
+                      type: "video" as const,
+                      source: {
+                        type: "base64" as const,
+                        media_type: part.mediaType,
+                        data: part.data,
+                      },
+                    } as unknown as Anthropic.ContentBlockParam;
+                  }
                   return {
-                    type: "image" as const,
-                    source: {
-                      type: "base64" as const,
-                      media_type: part.mediaType as
-                        | "image/jpeg"
-                        | "image/png"
-                        | "image/gif"
-                        | "image/webp",
-                      data: part.data,
-                    },
+                    type: "text" as const,
+                    text: "[Video content not supported by this provider]",
                   };
-                }
-                if (part.type === "document") {
-                  return {
-                    type: "document" as const,
-                    source: {
-                      type: "base64" as const,
-                      media_type: "application/pdf" as const,
-                      data: part.data,
-                    },
-                    ...(part.name ? { title: part.name } : {}),
-                  } as Anthropic.DocumentBlockParam;
-                }
-                if (part.type === "video") {
-                  // MiniMax-M3 rides the Anthropic transport and accepts native
-                  // video blocks. Non-video models never reach here — video is
-                  // downgraded to text by downgradeUnsupportedVideos first.
-                  return {
-                    type: "video" as const,
-                    source: {
-                      type: "base64" as const,
-                      media_type: part.mediaType,
-                      data: part.data,
-                    },
-                  } as unknown as Anthropic.ContentBlockParam;
-                }
-                return {
-                  type: "text" as const,
-                  text: "[Video content not supported by this provider]",
-                };
-              }),
+                }),
       });
       continue;
     }
     if (msg.role === "assistant") {
+      // A settled assistant turn with string content "" bypasses the array
+      // filter below and would reach the wire as an empty string — Anthropic
+      // 400s on it just like an empty text block. Drop it (baseline #20 D).
+      if (typeof msg.content === "string" && msg.content === "") continue;
       const content =
         typeof msg.content === "string"
           ? msg.content
@@ -643,12 +660,13 @@ export function toAnthropicToolChoice(choice: ToolChoice): Anthropic.ToolChoice 
 
 /**
  * Anthropic models with built-in adaptive thinking (Fable 5, Mythos 5,
- * Opus 4.8/4.7/4.6, Sonnet 5). Matches both dashed (`opus-4-8`) and dotted
- * (`opus-4.8`) forms so callers don't have to enumerate variants. These models
- * don't need the `interleaved-thinking` beta header — it's built in.
+ * Opus 5, Opus 4.8/4.7/4.6, Sonnet 5). Matches both dashed (`opus-4-8`) and
+ * dotted (`opus-4.8`) forms so callers don't have to enumerate variants. These
+ * models don't need the `interleaved-thinking` beta header — it's built in.
+ * (`opus-5` can't false-match `claude-opus-4-5-…` — the `4-` breaks the literal.)
  */
 export function isAdaptiveThinkingModel(model: string): boolean {
-  return /opus-4[-.]8|opus-4[-.]7|opus-4[-.]6|sonnet-5|fable-5|mythos-5/.test(model);
+  return /opus-5|opus-4[-.]8|opus-4[-.]7|opus-4[-.]6|sonnet-5|fable-5|mythos-5/.test(model);
 }
 
 export function toAnthropicThinking(
@@ -662,12 +680,11 @@ export function toAnthropicThinking(
 } {
   if (isAdaptiveThinkingModel(model)) {
     // Adaptive thinking — model decides when/how much to think.
-    // budget_tokens is deprecated on Opus 4.8 / Opus 4.7 / Opus 4.6 / Sonnet 5.
+    // budget_tokens is deprecated on Opus 5 / 4.8 / 4.7 / 4.6 and Sonnet 5.
     // Anthropic's output_config.effort accepts low, medium, high, xhigh, and max.
-    // xhigh is Opus 4.8/4.7-only; max is supported by Opus 4.8/4.7/4.6, Sonnet 5,
-    // Fable 5, and Mythos 5 (Fable 5 / Mythos 5 clamp xhigh → high).
+    // xhigh is Opus 5 / 4.8 / 4.7-only; max is supported by every adaptive model.
     let effort: string = level;
-    if (effort === "xhigh" && !/opus-4-8|opus-4-7/.test(model)) {
+    if (effort === "xhigh" && !/opus-5|opus-4-8|opus-4-7/.test(model)) {
       effort = "high";
     }
     return {
@@ -713,15 +730,26 @@ function remapToolCallId(id: string, idMap: Map<string, string>): string {
   if (!id.startsWith("toolu_")) return id;
   const existing = idMap.get(id);
   if (existing) return existing;
-  const mapped = `call_${id.slice(5)}`;
+  // Strip the full `toolu_` prefix (6 chars). `slice(5)` left the trailing
+  // underscore, producing `call__<id>` (double underscore) — lossy and not
+  // identity-reversible. `slice(6)` yields a clean `call_<id>`. Pairing still
+  // holds because both the tool_call and its result resolve through idMap.
+  const mapped = `call_${id.slice(6)}`;
   idMap.set(id, mapped);
   return mapped;
 }
 
 export function toOpenAIMessages(
   messages: Message[],
-  options?: { provider?: string; thinking?: boolean; supportsImages?: boolean },
+  options?: {
+    provider?: string;
+    thinking?: boolean;
+    supportsImages?: boolean;
+    /** Wire name for reasoning on assistant messages. Defaults to `reasoning_content`. */
+    reasoningField?: string;
+  },
 ): OpenAI.ChatCompletionMessageParam[] {
+  const reasoningField = options?.reasoningField || DEFAULT_REASONING_FIELD;
   const out: OpenAI.ChatCompletionMessageParam[] = [];
   const idMap = new Map<string, string>();
   // GLM drops reasoning_content when a user message follows tool results.
@@ -903,9 +931,9 @@ export function toOpenAIMessages(
       // Moonshot/Kimi requires reasoning_content on assistant tool_call messages —
       // default to empty string.  GLM silently hangs on empty values, so skip it there.
       if (thinkingParts) {
-        (assistantMsg as unknown as Record<string, unknown>).reasoning_content = thinkingParts;
+        (assistantMsg as unknown as Record<string, unknown>)[reasoningField] = thinkingParts;
       } else if (options?.thinking && hasToolCalls && options.provider !== "glm") {
-        (assistantMsg as unknown as Record<string, unknown>).reasoning_content = " ";
+        (assistantMsg as unknown as Record<string, unknown>)[reasoningField] = " ";
       }
       out.push(assistantMsg);
       continue;
@@ -1010,6 +1038,19 @@ export function toOpenAIToolChoice(choice: ToolChoice): OpenAI.ChatCompletionToo
   if (choice === "none") return "none";
   if (choice === "required") return "required";
   return { type: "function", function: { name: choice.name } };
+}
+
+/**
+ * Reasoning effort for a locally hosted server (Ollama, LM Studio, llama.cpp,
+ * vLLM). These spell the top rung **"max"**, not "xhigh" — Ollama 0.32 answers
+ * `invalid reasoning value: 'xhigh' (must be "high", "medium", "low", "max", or
+ * "none")`, so sending the OpenAI spelling is a hard 400. Like Kimi's `max`,
+ * the value sits outside the OpenAI SDK's effort union, so the caller assigns
+ * it through the usual escape hatch.
+ */
+export function toLocalReasoningEffort(level: ThinkingLevel): "low" | "medium" | "high" | "max" {
+  if (level === "max" || level === "ultra" || level === "xhigh") return "max";
+  return level;
 }
 
 export function toOpenAIReasoningEffort(

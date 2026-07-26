@@ -7,6 +7,7 @@ import { parseAgentFile } from "./agents.js";
 import { loadCustomCommands } from "./custom-commands.js";
 import { stripBom } from "../utils/text.js";
 import { createSkillTool } from "../tools/skill.js";
+import { useFakeHome } from "../test-support/fake-home.js";
 
 const BOM = "\uFEFF";
 
@@ -43,6 +44,10 @@ describe("BOM-tolerant instruction parsing", () => {
 
   it("parses a BOM'd .gg/commands/*.md custom command", async () => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "bom-commands-"));
+    // loadCustomCommands merges ~/.gg/commands with the project's, so the real
+    // home dir would leak the developer's global commands into this count.
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "bom-commands-home-"));
+    const restoreHome = useFakeHome(home);
     try {
       const dir = path.join(cwd, ".gg", "commands");
       await fs.mkdir(dir, { recursive: true });
@@ -58,7 +63,9 @@ describe("BOM-tolerant instruction parsing", () => {
       expect(commands[0].description).toBe("Ship it");
       expect(commands[0].prompt).toBe("Deploy the app.");
     } finally {
+      restoreHome();
       await fs.rm(cwd, { recursive: true, force: true });
+      await fs.rm(home, { recursive: true, force: true });
     }
   });
 });

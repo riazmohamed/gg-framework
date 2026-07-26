@@ -44,6 +44,14 @@ const SettingsSchema = z.object({
   /** Allow write/edit outside the workspace (cwd, tmpdir, ~/.gg). Off by
    *  default — outside writes return a guard error asking for user approval. */
   allowOutsideWorkspaceWrites: z.boolean().default(false),
+  /** Network egress policy. "allowlist" enforces `networkAllow` on the agent's
+   *  own web-fetch/web-search calls and blocks recognised network commands in
+   *  bash. NOT an OS sandbox — a determined process can still reach the network
+   *  (see core/network-guard.ts). Default "off" changes nothing. */
+  networkMode: z.enum(["off", "allowlist"]).default("off"),
+  /** Hosts allowed when networkMode is "allowlist". A leading `*.` wildcard
+   *  matches subdomains (`*.github.com`). */
+  networkAllow: z.array(z.string()).default([]),
   /** Defer MCP tool schemas out of the prompt until discovered via tool_search.
    *  Cuts ~8k tokens/cache-miss turn with two MCP servers (bench/RESULTS.md). */
   deferredMcpTools: z.boolean().default(true),
@@ -72,6 +80,8 @@ export const DEFAULT_SETTINGS: Settings = {
   idealReviewEnabled: true,
   lspDiagnostics: true,
   allowOutsideWorkspaceWrites: false,
+  networkMode: "off",
+  networkAllow: [],
   deferredMcpTools: true,
   sessionRetentionDays: 30,
   speedProfile: "optimized",

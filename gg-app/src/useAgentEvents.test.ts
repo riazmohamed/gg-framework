@@ -10,8 +10,12 @@ import type { MutableRefObject } from "react";
 // erased), so the mock just provides that, resolving empty so run_end's command
 // refresh is a no-op.
 vi.mock("./sounds", () => ({ playSound: vi.fn() }));
-vi.mock("./agent", () => ({ listCommands: vi.fn().mockResolvedValue([]) }));
+vi.mock("./agent", () => ({
+  listCommands: vi.fn().mockResolvedValue([]),
+  listModels: vi.fn().mockResolvedValue([]),
+}));
 
+import { listModels } from "./agent";
 import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
 import type { Item } from "./App";
 import type { AgentState, SidecarEvent } from "./agent";
@@ -19,6 +23,14 @@ import type { LiveToolEntry } from "./LiveToolPanel";
 
 const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
   ({ type, data }) as SidecarEvent;
+
+// subagent_state snapshots are buffered and flushed on a 150ms timer (burst
+// coalescing). Tests that assert on subagent groups let the flush fire first.
+const flushSubagents = async (): Promise<void> => {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+};
 
 function setup(
   handleKenEvent: (e: SidecarEvent) => boolean = () => false,
@@ -57,6 +69,12 @@ function setup(
     stateRef.current = agentState;
   }) as AgentEventsDeps["setState"];
 
+  let models: unknown[] = [];
+  const setModels = ((u: unknown) => {
+    models =
+      typeof u === "function" ? (u as (p: unknown[]) => unknown[])(models) : (u as unknown[]);
+  }) as unknown as AgentEventsDeps["setModels"];
+
   const noop = (): void => {};
   stateRef.current = agentState;
   const deps: AgentEventsDeps = {
@@ -84,6 +102,7 @@ function setup(
     setQueuedCount: noop as unknown as AgentEventsDeps["setQueuedCount"],
     setAttachments: noop as unknown as AgentEventsDeps["setAttachments"],
     setCommands: noop as unknown as AgentEventsDeps["setCommands"],
+    setModels,
     stateRef,
     planDoneRef: { current: new Set<number>() },
     planTotalRef: { current: 0 },
@@ -100,6 +119,7 @@ function setup(
     getLiveToolFeed: () => liveToolFeed,
     getPlanReview: () => planReview,
     getState: () => agentState,
+    getModels: () => models,
     setRunning,
     setTokens,
   };
@@ -107,6 +127,39 @@ function setup(
 
 describe("useAgentEvents", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("removes the notice when compaction is skipped", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("compaction_start", { messageCount: 466 }));
+      hook.result.current.handleEvent(
+        ev("compaction_end", { compacted: false, originalCount: 466, newCount: 466 }),
+      );
+    });
+
+    expect(getItems()).toEqual([]);
+  });
+
+  it("completes the notice when messages were compacted", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("compaction_start", { messageCount: 466 }));
+      hook.result.current.handleEvent(
+        ev("compaction_end", { compacted: true, originalCount: 466, newCount: 42 }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "compaction",
+        status: "done",
+        originalCount: 466,
+        newCount: 42,
+      }),
+    ]);
+  });
 
   it("keeps the run owned while cancellation is pending", () => {
     const { hook, getState, setRunning } = setup(() => false, {
@@ -412,7 +465,7 @@ describe("useAgentEvents", () => {
     expect(deps.planDoneRef.current.size).toBe(0);
   });
 
-  it("upserts persistent async agents by agent_id through idle and interrupted states", () => {
+  it("upserts persistent async agents by agent_id through idle and interrupted states", async () => {
     const { hook, getItems } = setup();
     const base = {
       agent_id: "abcd1234",
@@ -438,6 +491,7 @@ describe("useAgentEvents", () => {
         }),
       ),
     );
+    await flushSubagents();
     const groups = getItems().filter((item) => item.kind === "subagent_group");
     expect(groups).toHaveLength(1);
     const group = groups[0];
@@ -452,7 +506,42 @@ describe("useAgentEvents", () => {
     ]);
   });
 
-  it("keeps late async snapshots attached to their original run group", () => {
+  it("preserves distinct subagent activities coalesced within one flush", async () => {
+    const { hook, getItems } = setup();
+    const base = {
+      agent_id: "abcd1234",
+      task_name: "scan auth",
+      state: "running",
+      started_at: 1,
+      updated_at: 2,
+      elapsed_ms: 10,
+      turn_count: 0,
+      tool_use_count: 1,
+      token_usage: { input: 0, output: 0 },
+    };
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("subagent_state", { ...base, current_activity: "Reading auth.ts" }),
+      );
+      hook.result.current.handleEvent(
+        ev("subagent_state", {
+          ...base,
+          tool_use_count: 2,
+          current_activity: "Searching token refresh",
+        }),
+      );
+    });
+    await flushSubagents();
+
+    const group = getItems().find((item) => item.kind === "subagent_group");
+    expect(group?.kind === "subagent_group" ? group.agents[0]?.activities : []).toEqual([
+      "Reading auth.ts",
+      "Searching token refresh",
+    ]);
+  });
+
+  it("keeps late async snapshots attached to their original run group", async () => {
     const { hook, getItems } = setup();
     const snapshot = (agentId: string, state: "starting" | "completed") => ({
       agent_id: agentId,
@@ -474,6 +563,7 @@ describe("useAgentEvents", () => {
       hook.result.current.handleEvent(ev("subagent_state", snapshot("new-agent", "starting")));
       hook.result.current.handleEvent(ev("subagent_state", snapshot("old-agent", "completed")));
     });
+    await flushSubagents();
 
     const groups = getItems().filter((item) => item.kind === "subagent_group");
     expect(groups).toHaveLength(2);
@@ -483,5 +573,37 @@ describe("useAgentEvents", () => {
     expect(groups[1]?.kind === "subagent_group" ? groups[1].agents : []).toMatchObject([
       { toolCallId: "new-agent", status: "starting" },
     ]);
+  });
+});
+
+describe("models_change", () => {
+  it("refreshes the picker when local-model discovery lands", async () => {
+    const discovered = [
+      { id: "local/ollama/gemma4:e2b", name: "gemma4:e2b (Ollama)", provider: "local" },
+    ];
+    vi.mocked(listModels).mockResolvedValue(discovered as never);
+    const { hook, getModels } = setup();
+
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+
+    // Without this the boot scan finds the user's models and nothing ever
+    // shows them until the app restarts.
+    expect(listModels).toHaveBeenCalled();
+    expect(getModels()).toEqual(discovered);
+  });
+
+  it("keeps the existing list when a refresh comes back empty", async () => {
+    vi.mocked(listModels).mockResolvedValue([] as never);
+    const { hook, getModels } = setup();
+
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+
+    expect(getModels()).toEqual([]);
   });
 });

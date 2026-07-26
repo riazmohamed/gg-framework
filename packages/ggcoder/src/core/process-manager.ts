@@ -1,4 +1,5 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import type { spawnSync } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -41,13 +42,12 @@ export interface ProcessManagerOps {
 }
 
 function stopProcessTree(pid: number, ops: ProcessManagerOps = {}): void {
-  if ((ops.platform ?? process.platform) === "win32") {
-    (ops.spawnSync ?? spawnSync)("taskkill", ["/pid", String(pid), "/T", "/F"], {
-      stdio: "ignore",
-    });
+  if (ops.killProcessTree) {
+    ops.killProcessTree(pid);
     return;
   }
-  (ops.killProcessTree ?? killProcessTree)(pid);
+  // killProcessTree is itself platform-aware (taskkill /T /F on Windows).
+  killProcessTree(pid, { platform: ops.platform, kill: ops.kill, spawnSync: ops.spawnSync });
 }
 
 export class ProcessManager {
@@ -192,18 +192,25 @@ export class ProcessManager {
       return `Process ${id} already exited (code ${proc.exitCode})`;
     }
 
-    // SIGTERM first
-    try {
-      (this.ops.kill ?? process.kill)(-proc.pid, "SIGTERM");
-    } catch {
+    const isWindows = (this.ops.platform ?? process.platform) === "win32";
+    if (isWindows) {
+      // Windows has no process groups and no real SIGTERM: signalling the
+      // wrapper only orphans its descendants. Force-kill the PID tree up front.
+      stopProcessTree(proc.pid, this.ops);
+    } else {
+      // SIGTERM the group first so POSIX children get a chance to clean up.
       try {
-        (this.ops.kill ?? process.kill)(proc.pid, "SIGTERM");
+        (this.ops.kill ?? process.kill)(-proc.pid, "SIGTERM");
       } catch {
-        return `Process ${id} already exited`;
+        try {
+          (this.ops.kill ?? process.kill)(proc.pid, "SIGTERM");
+        } catch {
+          return `Process ${id} already exited`;
+        }
       }
     }
 
-    // Wait up to 5s, then SIGKILL
+    // Wait up to 5s, then hard-kill a surviving tree.
     const exited = await new Promise<boolean>((resolve) => {
       const timeout = setTimeout(() => resolve(false), 5000);
       child.on("close", () => {
@@ -213,6 +220,9 @@ export class ProcessManager {
     });
 
     if (!exited) {
+      if (isWindows) {
+        return `Failed to stop process ${id}: it did not exit within 5 seconds and may still be running.`;
+      }
       stopProcessTree(proc.pid, this.ops);
     }
 

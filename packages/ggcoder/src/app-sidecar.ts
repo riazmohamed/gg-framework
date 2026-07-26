@@ -28,6 +28,7 @@ import type { AddressInfo } from "node:net";
 import { runJsonMode } from "./modes/json-mode.js";
 import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
+import { setStreamDiagnostic } from "@abukhaled/gg-agent";
 import { AgentSession } from "./core/agent-session.js";
 import { RunLifecycle } from "./core/run-lifecycle.js";
 import {
@@ -66,16 +67,37 @@ import {
   restoreAssistantTexts,
   autopilotMarkerCopySeed,
 } from "./core/session-history.js";
+import {
+  sessionToMarkdown,
+  defaultExportFilename,
+  type ToolDetail,
+} from "./core/session-export.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
+import { readCappedBody } from "./utils/http-body.js";
 import {
   fetchSubscriptionUsage,
   MOONSHOT_OAUTH_KEY,
   SubscriptionUsageError,
   XIAOMI_CREDITS_KEY,
+  discoverLocalModels,
+  findProbedModel,
+  formatLocalModelId,
+  parseLocalModelId,
+  probeEndpoint,
+  toModelInfo as localModelInfo,
+  type LocalEndpoint,
+  type LocalEndpointProbe,
   type SubscriptionUsageProvider,
   type SubscriptionUsageSnapshot,
 } from "@abukhaled/gg-core";
+import {
+  LocalEndpointError,
+  addCustomEndpoint,
+  listAllEndpoints,
+  removeCustomEndpoint,
+  syncEndpointCredentials,
+} from "./core/local-endpoint-store.js";
 import { loginAnthropic } from "./core/oauth/anthropic.js";
 import { loginOpenAI } from "./core/oauth/openai.js";
 import { loginGemini } from "./core/oauth/gemini.js";
@@ -84,9 +106,17 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "./core/oauth/types.j
 import { AUTH_PROVIDERS, type AuthProviderMeta } from "./core/auth-providers.js";
 import { ensureAppDirs, loadSavedSettings } from "./config.js";
 import { SettingsManager, type Settings } from "./core/settings-manager.js";
-import { getModel, getMaxThinkingLevel, getContextWindow, MODELS } from "./core/model-registry.js";
+import {
+  getModel,
+  getDefaultThinkingLevel,
+  getContextWindow,
+  getAllModels,
+  clearRuntimeModels,
+  registerRuntimeModels,
+} from "./core/model-registry.js";
 import { resolveStartOrFallback } from "./core/resolve-start.js";
 import { getGitBranch, getGitDirtyFileCount, isGitRepo } from "./utils/git.js";
+import { getGitHubOpenCounts, getGitHubRepoSlug } from "./utils/github.js";
 import { extractPlanSteps } from "./utils/plan-steps.js";
 import {
   getNextThinkingLevel,
@@ -442,6 +472,9 @@ interface FileHit {
 }
 
 const FILE_SEARCH_LIMIT = 20;
+// Upper bound on files walked per search (baseline #8 memory cap). Far above the
+// 20-result output limit, so relevance/recency ranking is unaffected in practice.
+const FILE_SEARCH_SCAN_CAP = 50_000;
 
 /** Score a candidate path against a lowercased query. Higher is better; a
  *  negative score means "no match". Basename hits beat path hits; prefix beats
@@ -489,8 +522,13 @@ async function searchProjectFiles(cwd: string, rawQuery: string): Promise<FileHi
   const ig = ignore.default().add(gitignore);
 
   // `stats: true` gives mtime without a second stat pass, so the empty-query
-  // "recent files" path is a single walk.
-  const entries = await fg.default("**/*", {
+  // "recent files" path is a single walk. Stream + hard scan cap (baseline #8):
+  // collecting the full result array retained ~0.9 MB per 1k files (18.5 MB at
+  // 20k), unbounded. Bail after FILE_SEARCH_SCAN_CAP entries so a giant repo
+  // can't balloon RSS; the newest/most-relevant matches still surface because
+  // the cap is far above the 20-result output limit.
+  const entries: { path: string; stats?: { mtimeMs: number } }[] = [];
+  const scanStream = fg.default.stream("**/*", {
     cwd,
     dot: false,
     onlyFiles: true,
@@ -499,6 +537,17 @@ async function searchProjectFiles(cwd: string, rawQuery: string): Promise<FileHi
     followSymbolicLinks: false,
     stats: true,
   });
+  for await (const entry of scanStream) {
+    entries.push(entry as unknown as { path: string; stats?: { mtimeMs: number } });
+    if (entries.length >= FILE_SEARCH_SCAN_CAP) {
+      (scanStream as unknown as { destroy: () => void }).destroy();
+      log("DEBUG", "app-sidecar", "file search scan cap hit", {
+        cap: String(FILE_SEARCH_SCAN_CAP),
+        cwd,
+      });
+      break;
+    }
+  }
   const files = entries.filter((e) => !ig.ignores(e.path));
 
   if (!query) {
@@ -523,6 +572,12 @@ async function searchProjectFiles(cwd: string, rawQuery: string): Promise<FileHi
  * hook prompt, by its distinctive opening phrase. Returns the hook kind so the
  * webview can render the short notice line instead of the full prompt body.
  */
+/** `?tools=` on /export. Anything unrecognised (including absent) falls back to
+ *  the human-facing `summary` default rather than dumping every payload. */
+function parseToolDetail(value: string | null): ToolDetail {
+  return value === "none" || value === "full" ? value : "summary";
+}
+
 function detectHookKind(text: string): "ideal" | "loop_break" | "regrounding" | null {
   const t = text.trimStart();
   if (t.startsWith("Ideal? Review the actual work")) return "ideal";
@@ -656,6 +711,7 @@ async function runJsonModeIfRequested(): Promise<boolean> {
       "max-turns": { type: "string" },
       "system-prompt": { type: "string" },
       tools: { type: "string" },
+      "mcp-servers": { type: "string" },
       "prompt-cache-key": { type: "string" },
     },
     allowPositionals: true,
@@ -672,14 +728,24 @@ async function runJsonModeIfRequested(): Promise<boolean> {
         .filter(Boolean)
     : [];
   const allowedTools = parsedTools.length > 0 ? parsedTools : undefined;
+  // MCP servers the agent definition asked for. Without forwarding these, an
+  // allow-listed child connects no MCP at all and loses live code search.
+  const parsedMcpServers = values["mcp-servers"]
+    ? values["mcp-servers"]
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+  const allowedMcpServers = parsedMcpServers.length > 0 ? parsedMcpServers : undefined;
   await runJsonMode({
     message: positionals[0] ?? "",
     provider: (values.provider ?? "anthropic") as Provider,
-    model: values.model ?? "claude-opus-4-8",
+    model: values.model ?? "claude-opus-5",
     cwd: process.cwd(),
     systemPrompt: values["system-prompt"],
     maxTurns: maxTurnsRaw ? parseInt(maxTurnsRaw, 10) : undefined,
     allowedTools,
+    allowedMcpServers,
     promptCacheKey: values["prompt-cache-key"],
   }).catch(async (err: unknown) => {
     captureSidecarError(err, "app-sidecar.json-mode", {
@@ -695,13 +761,11 @@ async function runJsonModeIfRequested(): Promise<boolean> {
 // ── Daemon-level HTTP helpers (shared by the session-management routes) ─────
 // The per-session route table has its own local copies; these serve the
 // daemon's own POST /session / DELETE /session routes.
-function daemonReadBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (c) => chunks.push(c as Buffer));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
-    req.on("error", reject);
-  });
+function daemonReadBody(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<string | null> {
+  return readCappedBody(req, res);
 }
 
 function daemonJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -732,6 +796,33 @@ async function main(): Promise<void> {
   // ~/.gg/debug.log (initLogger truncates on each start).
   const sidecarLog = path.join(paths.agentDir, "gg-app-sidecar.log");
   initLogger(sidecarLog);
+
+  // The desktop sidecar previously omitted the stream diagnostic hook used by
+  // the CLI, leaving device-specific provider stalls impossible to distinguish from
+  // event-loop starvation or a broken streaming network path. Keep routine
+  // phases lightweight; timeout phases include non-sensitive runtime context.
+  setStreamDiagnostic((phase, data) => {
+    const includeRuntime =
+      phase === "idle_timeout_fired" ||
+      phase === "hard_timeout_fired" ||
+      phase === "stall_exhausted";
+    log("INFO", "stream", phase, {
+      ...(data ?? {}),
+      ...(includeRuntime
+        ? {
+            platform: process.platform,
+            arch: process.arch,
+            osRelease: os.release(),
+            node: process.version,
+            logicalCpus: os.cpus().length,
+            totalMemoryMb: Math.round(os.totalmem() / 1024 / 1024),
+            freeMemoryMb: Math.round(os.freemem() / 1024 / 1024),
+            rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+            processUptimeSec: Math.round(process.uptime()),
+          }
+        : {}),
+    });
+  });
 
   // Global last-resort guards, installed as early as the logger allows so they
   // cover the WHOLE lifecycle — including startup/initialize, the phase the
@@ -810,19 +901,26 @@ async function main(): Promise<void> {
     { expiresAt: number; result: UsageResult }
   >();
   const usageRequests = new Map<SubscriptionUsageProvider, Promise<UsageResult>>();
-  // 429 backoff: when the provider rate-limits the usage endpoint, hold the
-  // error result until this timestamp instead of re-polling (and re-logging a
-  // WARN) every 60s — the old cadence hammered a limited endpoint for hours.
+  // 429 backoff: quota endpoints are auxiliary UI data. Honor Retry-After when
+  // provided; otherwise retain the unavailable snapshot for 30 minutes. Clamp
+  // the provider value so a malformed header can neither hammer the endpoint
+  // nor suppress usage data forever.
   const usageRateLimitedUntil = new Map<SubscriptionUsageProvider, number>();
-  const USAGE_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
+  const USAGE_RATE_LIMIT_FALLBACK_BACKOFF_MS = 30 * 60_000;
+  const USAGE_RATE_LIMIT_MIN_BACKOFF_MS = 60_000;
+  const USAGE_RATE_LIMIT_MAX_BACKOFF_MS = 24 * 60 * 60_000;
 
   async function fetchUsageProvider(provider: SubscriptionUsageProvider): Promise<UsageResult> {
-    const displayName = provider === "anthropic" ? "Anthropic" : "Codex";
-    if (!(await auth.hasProviderAuth(provider))) {
+    const displayName =
+      provider === "anthropic" ? "Anthropic" : provider === "openai" ? "Codex" : "Kimi";
+    // Kimi plan usage is tracked on the OAuth credential specifically — the
+    // Moonshot platform API key is metered per-token, not per plan window.
+    const authKey = provider === "moonshot" ? MOONSHOT_OAUTH_KEY : provider;
+    if (!(await auth.hasProviderAuth(authKey))) {
       return { provider, displayName, connected: false, windows: [], fetchedAt: Date.now() };
     }
     try {
-      let credentials = await auth.resolveCredentials(provider);
+      let credentials = await auth.resolveCredentials(authKey);
       try {
         const snapshot = {
           ...(await fetchSubscriptionUsage(provider, credentials)),
@@ -834,7 +932,7 @@ async function main(): Promise<void> {
         // A provider can revoke an access token before its stored expiry. Refresh
         // once on 401, matching inference auth recovery, then retry the usage call.
         if (error instanceof SubscriptionUsageError && error.status === 401) {
-          credentials = await auth.resolveCredentials(provider, { forceRefresh: true });
+          credentials = await auth.resolveCredentials(authKey, { forceRefresh: true });
           const snapshot = {
             ...(await fetchSubscriptionUsage(provider, credentials)),
             connected: true as const,
@@ -849,11 +947,24 @@ async function main(): Promise<void> {
       if (shouldCaptureUsagePollingError(error)) {
         captureSidecarError(error, "app-sidecar.usage.fetch", { provider });
       }
-      log("WARN", "app-sidecar", "subscription usage fetch failed", { provider, message });
+      let backoffMs: number | undefined;
       if (error instanceof SubscriptionUsageError && error.status === 429) {
-        usageRateLimitedUntil.set(provider, Date.now() + USAGE_RATE_LIMIT_BACKOFF_MS);
+        backoffMs = Math.min(
+          USAGE_RATE_LIMIT_MAX_BACKOFF_MS,
+          Math.max(
+            USAGE_RATE_LIMIT_MIN_BACKOFF_MS,
+            error.retryAfterMs ?? USAGE_RATE_LIMIT_FALLBACK_BACKOFF_MS,
+          ),
+        );
+        usageRateLimitedUntil.set(provider, Date.now() + backoffMs);
       }
-      const connected = await auth.hasProviderAuth(provider);
+      log("WARN", "app-sidecar", "subscription usage fetch failed", {
+        provider,
+        message,
+        ...(backoffMs !== undefined && { backoffMs: String(backoffMs) }),
+      });
+
+      const connected = await auth.hasProviderAuth(authKey);
       return {
         provider,
         displayName,
@@ -926,7 +1037,8 @@ async function main(): Promise<void> {
       // ── Daemon-level routes (session lifecycle) ──────────────────────────
       // Create a session for a window: { mode?, cwd, sessionPath? } → { sessionId }.
       if (method === "POST" && url === "/session") {
-        void daemonReadBody(req).then(async (raw) => {
+        void daemonReadBody(req, res).then(async (raw) => {
+          if (raw === null) return;
           let body: { mode?: unknown; chatAgent?: unknown; cwd?: unknown; sessionPath?: unknown } =
             {};
           try {
@@ -992,7 +1104,7 @@ async function main(): Promise<void> {
       if (method === "GET" && (url === "/usage" || url.startsWith("/usage?"))) {
         void (async () => {
           const provider = new URL(url, `http://${host}`).searchParams.get("provider");
-          if (provider !== "anthropic" && provider !== "openai") {
+          if (provider !== "anthropic" && provider !== "openai" && provider !== "moonshot") {
             daemonJson(res, 400, { error: "unsupported usage provider" });
             return;
           }
@@ -1033,6 +1145,8 @@ async function main(): Promise<void> {
     // Radio playback is app-wide (one stream across all windows), so it stops
     // at the daemon level, not per session.
     stopRadio();
+    // Close the ~/.gg progress fs.watch handle (baseline #8 leak fix).
+    progress.dispose();
     await Promise.all([...sessions.values()].map((c) => c.dispose().catch(() => {})));
     server.close();
     process.exit(0);
@@ -1131,6 +1245,8 @@ interface ProgressManager {
   snapshot: () => ProgressSnapshot;
   /** Award XP for one successfully completed run (prompt + any new commits). */
   awardRun: (cwd: string, runStartedAt: number, originId?: string) => Promise<void>;
+  /** Close the ~/.gg fs.watch + clear any pending debounce (leak-free shutdown). */
+  dispose: () => void;
 }
 
 async function createProgressManager(
@@ -1202,6 +1318,7 @@ async function createProgressManager(
   // Watch ~/.gg (dir watch survives the atomic tmp+rename) for progress.json
   // writes from other daemon processes; debounce, reload read-only, dedupe by nonce.
   let watchDebounce: NodeJS.Timeout | null = null;
+  let progressWatcher: ReturnType<typeof fsWatch> | null = null;
   try {
     const watcher = fsWatch(agentDir, (_event, filename) => {
       if (filename !== "progress.json") return;
@@ -1219,6 +1336,7 @@ async function createProgressManager(
       }, 150);
     });
     watcher.unref();
+    progressWatcher = watcher;
   } catch (err) {
     captureSidecarError(err, "app-sidecar.progress.watch");
     log("DEBUG", "app-sidecar", "progress watch unavailable", {
@@ -1226,7 +1344,22 @@ async function createProgressManager(
     });
   }
 
-  return { snapshot, awardRun };
+  // Dispose closes the fs.watch handle (baseline #8: it was previously never
+  // closed — a per-daemon leak) and clears any pending debounce timer.
+  function dispose(): void {
+    if (watchDebounce) {
+      clearTimeout(watchDebounce);
+      watchDebounce = null;
+    }
+    try {
+      progressWatcher?.close();
+    } catch {
+      // Already closed / never opened — nothing to do.
+    }
+    progressWatcher = null;
+  }
+
+  return { snapshot, awardRun, dispose };
 }
 
 type WorkspaceMode = "code" | "chat";
@@ -1283,6 +1416,10 @@ async function createSession(
   const host = "127.0.0.1";
 
   const saved = loadSavedSettings(paths.settingsFile);
+  // Native login/logout and other live sessions share auth.json. Refresh the
+  // daemon-level snapshot before choosing this session's provider so a project
+  // never boots against credentials that were just replaced or disconnected.
+  await auth.load();
   // Per-project model/thinking prefs win over the shared global settings.json:
   // each window (one project cwd) restores its own selection instead of every
   // window reading the same single global slot that the last writer clobbered
@@ -1307,9 +1444,14 @@ async function createSession(
   }
 
   // Per-project thinking prefs win over the global settings.json fallback.
+  // With no saved level, the default follows the active credential's endpoint:
+  // Kimi K3 on the OAuth coding endpoint starts at its declared default (high),
+  // matching the official kimi-code CLI's plan-usage profile.
   const thinkEnabled = projectPrefs?.thinkingEnabled ?? saved.thinkingEnabled;
   const thinkingLevel: ThinkingLevel | undefined = thinkEnabled
-    ? (projectPrefs?.thinkingLevel ?? saved.thinkingLevel ?? getMaxThinkingLevel(model))
+    ? (projectPrefs?.thinkingLevel ??
+      saved.thinkingLevel ??
+      getDefaultThinkingLevel(model, { baseUrl: auth.getStoredBaseUrl(provider) }))
     : undefined;
 
   // ── SSE fan-out (declared before the session so plan callbacks can use it) ─
@@ -1360,6 +1502,25 @@ async function createSession(
     );
   }
 
+  /**
+   * Guidance for a connection failure against the ACTIVE local endpoint, or
+   * undefined when that isn't the situation (so the generic wording stands).
+   * "Disable your VPN / allow us through the firewall" is useless advice for a
+   * server running on this machine — name what the user has to restart.
+   */
+  function localNetworkGuidance(source: string | undefined): string | undefined {
+    if (source !== "network") return undefined;
+    const state = session.getState();
+    if (state.provider !== "local") return undefined;
+    const parsed = parseLocalModelId(state.model);
+    const probe = localProbes.find((p) => p.endpoint.id === parsed?.endpointId);
+    if (!probe) return undefined;
+    return (
+      `${probe.endpoint.label} stopped responding at ${probe.endpoint.baseUrl}. ` +
+      "Start it again and retry, or pick another model."
+    );
+  }
+
   // Turn any thrown value into the same clear headline/message/guidance shape
   // the TUI shows (see gg-ai's formatError) instead of a bare `err.message`, log
   // the full detail, and broadcast it under `type` ("error" or "ken_error").
@@ -1373,7 +1534,7 @@ async function createSession(
   ): void {
     const f = formatError(err);
     const message = f.message ? desktopGuidance(f.message) : undefined;
-    const guidance = desktopGuidance(f.guidance);
+    const guidance = localNetworkGuidance(f.source) ?? desktopGuidance(f.guidance);
     captureSidecarError(err, `app-sidecar.${logLabel.replaceAll(" ", "-")}`, {
       scope: type,
       ...(f.provider ? { provider: f.provider } : {}),
@@ -1483,17 +1644,142 @@ async function createSession(
   }
   log("INFO", "app-sidecar", "session ready", { provider, model, mode, chatAgent, cwd });
 
+  // ── Local models (Ollama / LM Studio / llama.cpp / vLLM) ──
+  // Probing four HTTP endpoints must never delay readiness, so this runs in the
+  // background (same shape as backgroundMcpConnect) and pushes a models_change
+  // frame when it lands.
+  let localProbes: LocalEndpointProbe[] = [];
+
+  async function scanLocalModels(force: boolean): Promise<LocalEndpointProbe[]> {
+    const endpoints = await listAllEndpoints();
+    const { probes, models } = await discoverLocalModels(endpoints, { force });
+    localProbes = probes;
+    // Only endpoints that answered get a credential: writing one for a server
+    // that isn't running would make `hasProviderAuth("local")` true forever.
+    await syncEndpointCredentials(
+      probes.filter((probe) => probe.reachable).map((probe) => probe.endpoint),
+    );
+    clearRuntimeModels((m) => m.provider === "local");
+    registerRuntimeModels(models);
+    log("INFO", "app-sidecar", "local model scan", {
+      reachable: probes.filter((p) => p.reachable).length + "/" + probes.length,
+      models: String(models.length),
+    });
+    return probes;
+  }
+
+  /** Endpoint rows + models, in the shape the Local models UI renders. */
+  function localStatePayload(): {
+    endpoints: {
+      id: string;
+      label: string;
+      baseUrl: string;
+      kind: LocalEndpoint["kind"];
+      custom: boolean;
+      reachable: boolean;
+      reason?: string;
+      models: {
+        id: string;
+        rawId: string;
+        contextWindow: number;
+        contextWindowKnown: boolean;
+        supportsTools: boolean;
+        supportsImages: boolean;
+        supportsThinking: boolean;
+        loaded?: boolean;
+      }[];
+    }[];
+  } {
+    return {
+      endpoints: localProbes.map((probe) => ({
+        id: probe.endpoint.id,
+        label: probe.endpoint.label,
+        baseUrl: probe.endpoint.baseUrl,
+        kind: probe.endpoint.kind,
+        custom: probe.endpoint.custom === true,
+        reachable: probe.reachable,
+        ...(probe.reason ? { reason: probe.reason } : {}),
+        models: probe.models.map((m) => ({
+          id: formatLocalModelId(probe.endpoint.id, m.rawId),
+          rawId: m.rawId,
+          contextWindow: m.contextWindow,
+          contextWindowKnown: m.contextWindowKnown,
+          supportsTools: m.supportsTools,
+          supportsImages: m.supportsImages,
+          supportsThinking: m.supportsThinking,
+          ...(m.loaded === undefined ? {} : { loaded: m.loaded }),
+        })),
+      })),
+    };
+  }
+
+  /**
+   * Why `modelId` can't be selected right now, or `undefined` when it can.
+   * Two real footguns get a clear answer instead of a mid-run provider error:
+   * a model with no tool calling (can't drive the agent at all), and a server
+   * that has since been shut down.
+   */
+  async function localModelBlocker(modelId: string): Promise<string | undefined> {
+    const parsed = parseLocalModelId(modelId);
+    if (!parsed) return undefined;
+    const endpoints = await listAllEndpoints();
+    const endpoint = endpoints.find((e) => e.id === parsed.endpointId);
+    if (!endpoint)
+      return `Unknown local endpoint "${parsed.endpointId}" — re-scan for local models.`;
+
+    const probe = await probeEndpoint(endpoint);
+    // Keep the cached view honest: this probe is fresher than the last scan.
+    localProbes = localProbes.map((p) => (p.endpoint.id === endpoint.id ? probe : p));
+    if (!probe.reachable) {
+      return `${endpoint.label} isn't running at ${endpoint.baseUrl}. Start it and scan again.`;
+    }
+    const model = probe.models.find((m) => m.rawId === parsed.rawId);
+    if (!model) {
+      return `${endpoint.label} no longer serves "${parsed.rawId}".`;
+    }
+    if (!model.supportsTools) {
+      return `${parsed.rawId} has no tool calling, so it can't run the agent. Pick a tool-capable model.`;
+    }
+    registerRuntimeModels(probe.models.map((m) => localModelInfo(m, endpoint)));
+    return undefined;
+  }
+
+  /**
+   * A restored per-project pref can ask for thinking on a local model that
+   * turns out not to reason (capabilities are only known after a probe). Drop
+   * the level once we know, so the first prompt doesn't carry a
+   * `reasoning_effort` the server rejects.
+   */
+  function clampLocalThinking(): void {
+    const st = session.getState();
+    const level = session.getThinkingLevel();
+    if (!level || st.provider !== "local") return;
+    if (isThinkingLevelSupported(st.provider, st.model, level)) return;
+    session.setThinkingLevel(undefined);
+    broadcast("thinking_change", {
+      thinkingLevel: null,
+      supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
+    });
+  }
+
   // Workspace extras (context window, git status, background tasks). Git state
   // is resolved once at startup and refreshed after every run; the context
   // window follows the active model.
-  const [initialGitBranch, initialGitIsRepo, initialDirtyFileCount] = await Promise.all([
-    getGitBranch(cwd).catch(() => null),
-    isGitRepo(cwd).catch(() => false),
-    getGitDirtyFileCount(cwd).catch(() => 0),
-  ]);
+  const [initialGitBranch, initialGitIsRepo, initialDirtyFileCount, initialGitHubSlug] =
+    await Promise.all([
+      getGitBranch(cwd).catch(() => null),
+      isGitRepo(cwd).catch(() => false),
+      getGitDirtyFileCount(cwd).catch(() => 0),
+      getGitHubRepoSlug(cwd).catch(() => null),
+    ]);
   let gitBranch: string | null = initialGitBranch;
   let gitIsRepo: boolean = initialGitIsRepo;
   let gitDirtyFileCount = initialDirtyFileCount;
+  // Open issue/PR counts for the origin repo's GitHub slug, via the `gh` CLI's
+  // auth. null = unknown (gh missing/unauthed, non-GitHub origin) → chips hidden.
+  const gitHubSlug: string | null = initialGitHubSlug;
+  let gitHubIssues: number | null = null;
+  let gitHubPRs: number | null = null;
   function currentContextWindow(): number {
     const st = session.getState();
     return getContextWindow(st.model, { provider: st.provider, accountId: st.accountId });
@@ -1505,15 +1791,51 @@ async function createSession(
     gitBranch: string | null;
     isGitRepo: boolean;
     gitDirtyFileCount: number;
+    gitHubIssues: number | null;
+    gitHubPRs: number | null;
+    gitHubRepoUrl: string | null;
     tasks: ReturnType<typeof session.listBackgroundProcesses>;
+    additionalRoots: string[];
   } {
     return {
       contextWindow: currentContextWindow(),
       gitBranch,
       isGitRepo: gitIsRepo,
       gitDirtyFileCount,
+      gitHubIssues,
+      gitHubPRs,
+      gitHubRepoUrl: gitHubSlug ? `https://github.com/${gitHubSlug}` : null,
       tasks: session.listBackgroundProcesses(),
+      // Roots added with /add-dir — the header shows a badge when non-empty.
+      additionalRoots: session.getAdditionalRoots(),
     };
+  }
+
+  void scanLocalModels(false)
+    .then(() => {
+      clampLocalThinking();
+      broadcast("extras", footerExtras());
+    })
+    .then(() => broadcast("models_change", { local: localStatePayload() }))
+    .catch((err: unknown) => {
+      // A discovery failure is never fatal — the user simply has no local
+      // models. Log it; don't push an error row into the transcript.
+      log("WARN", "app-sidecar", "local model scan failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+  // Refresh the GitHub counts and broadcast only on change. Transient failures
+  // keep the last-known numbers so the chips don't flicker off on a timeout.
+  async function refreshGitHubCounts(): Promise<void> {
+    if (!gitHubSlug) return;
+    const counts = await getGitHubOpenCounts(gitHubSlug);
+    if (!counts) return;
+    if (counts.issues !== gitHubIssues || counts.prs !== gitHubPRs) {
+      gitHubIssues = counts.issues;
+      gitHubPRs = counts.prs;
+      broadcast("extras", footerExtras());
+    }
   }
 
   // tool_call_end carries no tool name (only the id), so remember each call's
@@ -1962,6 +2284,9 @@ async function createSession(
         isGitRepo(cwd).catch(() => gitIsRepo),
         getGitDirtyFileCount(cwd).catch(() => gitDirtyFileCount),
       ]);
+      // A run may have opened/closed issues or PRs — refresh fire-and-forget so
+      // teardown isn't delayed by the network. Broadcasts itself on change.
+      void refreshGitHubCounts();
       // Serialize behind any marker/tool-triggered refresh so the terminal
       // progress snapshot uses the live plan file. Once every canonical step
       // is complete, remove the approved plan from future system prompts and
@@ -2409,13 +2734,22 @@ async function createSession(
   };
   scheduleGitPoll(5000);
 
-  function readBody(req: http.IncomingMessage): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const chunks: Buffer[] = [];
-      req.on("data", (c) => chunks.push(c as Buffer));
-      req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
-      req.on("error", reject);
-    });
+  // GitHub issue/PR counts change outside the app (web UI, teammates), so poll
+  // on a slow cadence. Network-bound, so keep it well under the search API's
+  // rate budget (2 calls per tick). No-op when the origin isn't a GitHub repo.
+  let gitHubPoll: NodeJS.Timeout | undefined;
+  let gitHubPollStopped = false;
+  const scheduleGitHubPoll = (delay: number): void => {
+    if (gitHubPollStopped) return;
+    gitHubPoll = setTimeout(() => {
+      void refreshGitHubCounts().finally(() => scheduleGitHubPoll(60_000));
+    }, delay);
+    gitHubPoll.unref?.();
+  };
+  scheduleGitHubPoll(2000);
+
+  function readBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<string | null> {
+    return readCappedBody(req, res);
   }
 
   function json(res: http.ServerResponse, status: number, body: unknown): void {
@@ -2573,7 +2907,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/settings") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let projectsRoot: string;
         try {
           projectsRoot = (JSON.parse(raw) as { projectsRoot?: string }).projectsRoot ?? "";
@@ -2596,7 +2931,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/create-project") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let name: string;
         try {
           name = (JSON.parse(raw) as { name?: string }).name ?? "";
@@ -2676,6 +3012,35 @@ async function createSession(
           });
           json(res, 200, { files: [] });
         });
+      return;
+    }
+
+    // Markdown transcript export for the app's download button. Serialized
+    // here rather than in the webview because the webview's transcript model
+    // deliberately keeps tool activity in the LiveToolPanel — exporting from
+    // there would hand the user a coding session with the coding missing.
+    // `?name=1` asks for the suggested filename only (the save dialog needs it
+    // before there is a path), so the markdown never crosses IPC twice.
+    if (method === "GET" && (url === "/export" || url.startsWith("/export?"))) {
+      const query = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+      const st = session.getState();
+      const filename = defaultExportFilename(mode);
+      if (query.get("name") === "1") {
+        json(res, 200, { filename });
+        return;
+      }
+      const markdown = sessionToMarkdown(
+        {
+          mode,
+          cwd,
+          provider: st.provider,
+          model: st.model,
+          ...(st.sessionId ? { sessionId: st.sessionId } : {}),
+        },
+        session.getMessages(),
+        { toolDetail: parseToolDetail(query.get("tools")) },
+      );
+      json(res, 200, { filename, markdown });
       return;
     }
 
@@ -3022,22 +3387,44 @@ async function createSession(
           description: c.description,
           source: "built-in" as const,
         }));
+        // Desktop-safe registry actions belong in the same picker as workflows.
+        // Most registry commands have dedicated app controls or TUI-only flows;
+        // multi-root management has no other affordance, so expose only these.
+        const workspaceActions = [
+          {
+            name: "add-dir",
+            aliases: ["adddir"],
+            description: "Add another project folder to this workspace",
+            source: "built-in" as const,
+          },
+          {
+            name: "remove-dir",
+            aliases: ["removedir"],
+            description: "Remove an added project folder from this workspace",
+            source: "built-in" as const,
+          },
+        ];
         const custom = (await loadCustomCommands(cwd))
-          // A custom command can't shadow a built-in name.
-          .filter((c) => !PROMPT_COMMANDS.some((b) => b.name === c.name))
+          // A custom command can't shadow a built-in name or app action.
+          .filter(
+            (c) =>
+              !PROMPT_COMMANDS.some((b) => b.name === c.name) &&
+              !workspaceActions.some((action) => action.name === c.name),
+          )
           .map((c) => ({
             name: c.name,
             aliases: [] as string[],
             description: c.description,
             source: "custom" as const,
           }));
-        json(res, 200, { commands: [...builtins, ...custom] });
+        json(res, 200, { commands: [...workspaceActions, ...builtins, ...custom] });
       })();
       return;
     }
 
     if (method === "POST" && url === "/prompt") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let text: string;
         let attachments: AppAttachment[];
         let meta: { kenSent?: boolean; enhancements?: unknown[] } | undefined;
@@ -3173,7 +3560,8 @@ async function createSession(
         json(res, 404, { error: "Ken is not available in GG Chat." });
         return;
       }
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let text: string;
         try {
           text = (JSON.parse(raw) as { text?: string }).text ?? "";
@@ -3236,7 +3624,8 @@ async function createSession(
         json(res, 404, { error: "Autopilot is not available in GG Chat." });
         return;
       }
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let enabled: boolean;
         try {
           enabled = Boolean((JSON.parse(raw) as { enabled?: boolean }).enabled);
@@ -3257,7 +3646,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/enhance") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let text: string;
         try {
           text = (JSON.parse(raw) as { text?: string }).text ?? "";
@@ -3307,7 +3697,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/radio/volume") {
-      void readBody(req).then((raw) => {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
         let volume: number;
         try {
           volume = Number((JSON.parse(raw) as { volume?: number }).volume);
@@ -3330,7 +3721,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/radio") {
-      void readBody(req).then((raw) => {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
         let station: string;
         try {
           station = (JSON.parse(raw) as { station?: string }).station ?? "";
@@ -3354,7 +3746,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/tasks/run") {
-      void readBody(req).then((raw) => {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
         let id: string | null;
         let all: boolean;
         try {
@@ -3376,7 +3769,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/tasks/delete") {
-      void readBody(req).then((raw) => {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
         let id: string;
         try {
           id = (JSON.parse(raw) as { id?: string }).id ?? "";
@@ -3402,19 +3796,38 @@ async function createSession(
           if (await auth.hasProviderAuth(p)) loggedIn.push(p);
         }
         // Just the names, grouped by provider in registry order — the UI shows
-        // a clean multi-column list of model ids.
-        const models = MODELS.filter((m) => loggedIn.includes(m.provider)).map((m) => ({
-          id: m.id,
-          name: m.name,
-          provider: m.provider,
-        }));
+        // a clean multi-column list of model ids. Local models come from the
+        // runtime registry (populated by the background scan) and are always
+        // listed: their "login" is the endpoint answering a probe.
+        const models = getAllModels()
+          .filter((m) => m.provider === "local" || loggedIn.includes(m.provider))
+          .map((m) => {
+            if (m.provider !== "local") {
+              return { id: m.id, name: m.name, provider: m.provider };
+            }
+            const probed = findProbedModel(localProbes, m.id);
+            return {
+              id: m.id,
+              name: m.name,
+              provider: m.provider,
+              local: true,
+              endpoint: probed?.endpoint.label ?? parseLocalModelId(m.id)?.endpointId,
+              // A local model that can't call tools can't run the agent — the UI
+              // renders it disabled rather than hiding it, so the user learns why.
+              supportsTools: probed?.model.supportsTools ?? true,
+              contextWindow: m.contextWindow,
+              contextWindowKnown: probed?.model.contextWindowKnown ?? false,
+              supportsThinking: m.supportsThinking,
+            };
+          });
         json(res, 200, { models });
       })();
       return;
     }
 
     if (method === "POST" && url === "/model") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let modelId: string;
         try {
           modelId = (JSON.parse(raw) as { model?: string }).model ?? "";
@@ -3430,6 +3843,13 @@ async function createSession(
         if (running) {
           json(res, 409, { error: "cannot switch model while running" });
           return;
+        }
+        if (target.provider === "local") {
+          const problem = await localModelBlocker(target.id);
+          if (problem) {
+            json(res, 409, { error: problem });
+            return;
+          }
         }
         await session.switchModel(target.provider, target.id);
         // Ken follows GG Coder's model only while un-pinned; a user-set Ken
@@ -3482,7 +3902,8 @@ async function createSession(
     // to BOTH Ken sessions (chat + autopilot reviewer); a switch landing while
     // either is mid-run defers via the pending-model mechanics.
     if (method === "POST" && url === "/ken/model") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let modelId: string | null;
         try {
           const parsed = (JSON.parse(raw) as { model?: string | null }).model;
@@ -3525,7 +3946,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/kill") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let id: string;
         try {
           id = (JSON.parse(raw) as { id?: string }).id ?? "";
@@ -3650,7 +4072,8 @@ async function createSession(
     //   3. session_reset tells the webview to clear its transcript; it then runs
     //      the "implement it now" prompt in the clean session.
     if (method === "POST" && url === "/plan/accept") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let planPath: string | undefined;
         try {
           planPath = (JSON.parse(raw) as { planPath?: string }).planPath || undefined;
@@ -3702,7 +4125,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/auth/apikey") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let provider = "";
         let key: string;
         let variant: string | undefined;
@@ -3746,7 +4170,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/auth/oauth/start") {
-      void readBody(req).then((raw) => {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
         let provider = "";
         try {
           provider = (JSON.parse(raw) as { provider?: string }).provider ?? "";
@@ -3797,7 +4222,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/auth/oauth/code") {
-      void readBody(req).then((raw) => {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
         let code: string;
         try {
           code = (JSON.parse(raw) as { code?: string }).code ?? "";
@@ -3817,7 +4243,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/auth/logout") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let provider: string;
         try {
           provider = (JSON.parse(raw) as { provider?: string }).provider ?? "";
@@ -3839,6 +4266,86 @@ async function createSession(
     }
 
     // ── Telegram config (mirrors `ggcoder telegram`) ─────────
+    // ── Local models ──────────────────────────────────────
+    // GET returns the last scan (cheap, no probing) so opening the modal is
+    // instant; POST /local/scan is the explicit refresh.
+    if (method === "GET" && url === "/local") {
+      json(res, 200, localStatePayload());
+      return;
+    }
+
+    if (method === "POST" && url === "/local/scan") {
+      void scanLocalModels(true)
+        .then(() => {
+          broadcast("models_change", { local: localStatePayload() });
+          json(res, 200, localStatePayload());
+        })
+        .catch((err: unknown) => {
+          broadcastError("error", "local model scan failed", err);
+          json(res, 500, { error: "Local model scan failed — see the sidecar log." });
+        });
+      return;
+    }
+
+    if (method === "POST" && url === "/local/endpoints") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { label?: string; baseUrl?: string; apiKey?: string };
+        try {
+          body = JSON.parse(raw) as typeof body;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        try {
+          const endpoint = await addCustomEndpoint({
+            baseUrl: body.baseUrl ?? "",
+            ...(body.label ? { label: body.label } : {}),
+            ...(body.apiKey ? { apiKey: body.apiKey } : {}),
+          });
+          await scanLocalModels(true);
+          broadcast("models_change", { local: localStatePayload() });
+          json(res, 200, {
+            endpoint: { id: endpoint.id, label: endpoint.label },
+            ...localStatePayload(),
+          });
+        } catch (err) {
+          // Validation errors are the user's typo, not a system fault — 400 with
+          // the exact reason, and nothing in the transcript.
+          if (err instanceof LocalEndpointError) {
+            json(res, 400, { error: err.message });
+            return;
+          }
+          broadcastError("error", "add local endpoint failed", err);
+          json(res, 500, { error: "Could not save the endpoint — see the sidecar log." });
+        }
+      });
+      return;
+    }
+
+    if (method === "DELETE" && url.startsWith("/local/endpoints/")) {
+      const id = decodeURIComponent(url.slice("/local/endpoints/".length));
+      void (async () => {
+        try {
+          await removeCustomEndpoint(id);
+          clearRuntimeModels(
+            (m) => m.provider === "local" && parseLocalModelId(m.id)?.endpointId === id,
+          );
+          await scanLocalModels(true);
+          broadcast("models_change", { local: localStatePayload() });
+          json(res, 200, localStatePayload());
+        } catch (err) {
+          if (err instanceof LocalEndpointError) {
+            json(res, 400, { error: err.message });
+            return;
+          }
+          broadcastError("error", "remove local endpoint failed", err);
+          json(res, 500, { error: "Could not remove the endpoint — see the sidecar log." });
+        }
+      })();
+      return;
+    }
+
     if (method === "GET" && url === "/telegram") {
       void loadTelegramConfig().then((cfg) => {
         if (!cfg) {
@@ -3855,7 +4362,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/telegram") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let botTokenInput: string;
         let userIdInput: string;
         try {
@@ -3964,7 +4472,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/mcp/add") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let line: string;
         let scopeValue: string;
         let bodyCwd: string | undefined;
@@ -4024,7 +4533,8 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/mcp/remove") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let name: string;
         let scopeValue: string;
         let bodyCwd: string | undefined;
@@ -4065,7 +4575,8 @@ async function createSession(
     // `mcp_auth_error`. Responds 202 immediately and runs the flow in the
     // background (the browser round-trip can take a while).
     if (method === "POST" && url === "/mcp/login") {
-      void readBody(req).then(async (raw) => {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
         let name: string;
         let scopeValue: string;
         let bodyCwd: string | undefined;
@@ -4126,6 +4637,8 @@ async function createSession(
     if (tasksPoll) clearTimeout(tasksPoll);
     gitPollStopped = true;
     if (gitPoll) clearTimeout(gitPoll);
+    gitHubPollStopped = true;
+    if (gitHubPoll) clearTimeout(gitHubPoll);
     // Stop the Telegram serve loop + dispose its per-chat sessions.
     if (serveController) await serveController.stop().catch(() => {});
     for (const c of clients) c.res.end();

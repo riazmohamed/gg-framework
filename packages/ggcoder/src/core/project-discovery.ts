@@ -4,8 +4,9 @@ import readline from "node:readline";
 import os from "node:os";
 import path from "node:path";
 import { getAppPaths } from "../config.js";
-import { encodeCwd } from "./encode-cwd.js";
+import { encodeCwd, stripExtendedLengthPrefix } from "./encode-cwd.js";
 import { getUserSessionPrompt } from "./session-preview.js";
+import { isSessionPath, openSessionReadStream, resolveSessionPath } from "./session-storage.js";
 
 export type ProjectSource = "ggcoder" | "claude-code" | "codex";
 
@@ -87,15 +88,18 @@ async function discoverGgcoderProjects(): Promise<DiscoveredProject[]> {
   const results: DiscoveredProject[] = [];
   for (const entry of entries) {
     const dir = path.join(sessionsDir, entry);
-    const mtime = await maxJsonlMtime(dir);
+    const mtime = await maxGgcoderSessionMtime(dir);
     if (mtime === null) continue;
 
     const rawCwd =
-      (await readFirstFromJsonlDir(dir, ggcoderCwdExtractor)) ?? fallbackUnderscoreDecode(entry);
+      (await readFirstFromGgcoderDir(dir, ggcoderCwdExtractor)) ?? fallbackUnderscoreDecode(entry);
     if (!rawCwd) continue;
     // Normalize traversal segments (e.g. an agent launched with cwd
-    // `.../src-tauri/../..`) so the basename isn't a stray "..".
-    const cwd = path.resolve(rawCwd);
+    // `.../src-tauri/../..`) so the basename isn't a stray "..", and drop any
+    // Windows extended-length prefix so a session recorded as `\\?\C:\proj`
+    // (what Rust's canonicalize used to hand the sidecar) resolves to the same
+    // project as a plain `C:\proj` instead of listing a prefixed duplicate.
+    const cwd = path.resolve(stripExtendedLengthPrefix(rawCwd));
     if (!(await isDirectory(cwd))) continue;
 
     results.push({
@@ -110,12 +114,36 @@ async function discoverGgcoderProjects(): Promise<DiscoveredProject[]> {
 }
 
 /**
+ * Is `value` an absolute path on ANY platform?
+ *
+ * `path.isAbsolute` is platform-bound, but a session store is portable: read on
+ * Windows it carries `C:\Users\…` / `\\server\share\…`, on POSIX `/Users/…`.
+ * The old POSIX-only `startsWith("/")` check silently rejected every Windows
+ * cwd header, so discovery fell back to the lossy directory-name decode and
+ * every project/session vanished from the picker on Windows.
+ */
+export function isAbsoluteCwd(value: string): boolean {
+  return path.posix.isAbsolute(value) || path.win32.isAbsolute(value);
+}
+
+/**
  * Best-effort decode of a ggcoder session directory name back to a cwd, used
  * only when the session files carry no `cwd` header. Lossy by design (literal
  * underscores are indistinguishable from separators); the caller still verifies
  * the result is an existing directory.
+ *
+ * `encodeCwd` drops the drive colon (`C:\a\b` → `C_a_b`), so on Windows we
+ * re-attach it for a leading single-letter segment; otherwise a decoded
+ * `/C/a/b` names a directory that never exists and the project disappears.
  */
 function fallbackUnderscoreDecode(entry: string): string {
+  if (process.platform === "win32") {
+    const parts = entry.split("_");
+    if (parts.length > 1 && /^[A-Za-z]$/.test(parts[0]!)) {
+      return `${parts[0]}:\\${parts.slice(1).join("\\")}`;
+    }
+    return entry.replace(/_/g, "\\");
+  }
   return "/" + entry.replace(/_/g, "/");
 }
 
@@ -215,6 +243,13 @@ async function maxJsonlMtime(dir: string): Promise<number | null> {
   return max > 0 ? max : null;
 }
 
+async function maxGgcoderSessionMtime(dir: string): Promise<number | null> {
+  if (!(await isDirectory(dir))) return null;
+  const files = await collectGgcoderSessionFiles(dir, 2);
+  if (files.length === 0) return null;
+  return Math.max(...files.map((file) => file.mtime));
+}
+
 /**
  * Walk `dir` up to `maxDepth` levels deep collecting every .jsonl file. Used
  * for both Claude Code (top-level + `<uuid>/subagents/`) and Codex
@@ -251,12 +286,44 @@ async function collectJsonlFiles(
   }
 }
 
+async function collectGgcoderSessionFiles(
+  dir: string,
+  maxDepth: number,
+): Promise<{ path: string; mtime: number }[]> {
+  const byResolvedPath = new Map<string, { path: string; mtime: number }>();
+  await walk(dir, 0);
+  return [...byResolvedPath.values()];
+
+  async function walk(current: string, depth: number): Promise<void> {
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isFile() && isSessionPath(entry.name)) {
+        try {
+          const resolvedPath = await resolveSessionPath(fullPath);
+          const stat = await fs.stat(resolvedPath);
+          byResolvedPath.set(resolvedPath, { path: resolvedPath, mtime: stat.mtimeMs });
+        } catch {
+          // Ignore malformed redirects, incomplete archives, and raced files.
+        }
+      } else if (entry.isDirectory() && depth < maxDepth && !entry.name.endsWith(".assets")) {
+        await walk(fullPath, depth + 1);
+      }
+    }
+  }
+}
+
 type LineExtractor = (line: string) => string | null;
 
 const claudeCwdExtractor: LineExtractor = (line) => {
   try {
     const parsed = JSON.parse(line) as { cwd?: unknown };
-    if (typeof parsed.cwd === "string" && parsed.cwd.startsWith("/")) return parsed.cwd;
+    if (typeof parsed.cwd === "string" && isAbsoluteCwd(parsed.cwd)) return parsed.cwd;
   } catch {
     // skip malformed
   }
@@ -270,7 +337,7 @@ const claudeCwdExtractor: LineExtractor = (line) => {
 const ggcoderCwdExtractor: LineExtractor = (line) => {
   try {
     const parsed = JSON.parse(line) as { type?: unknown; cwd?: unknown };
-    if (parsed.type === "session" && typeof parsed.cwd === "string" && parsed.cwd.startsWith("/")) {
+    if (parsed.type === "session" && typeof parsed.cwd === "string" && isAbsoluteCwd(parsed.cwd)) {
       return parsed.cwd;
     }
   } catch {
@@ -287,21 +354,20 @@ const codexCwdExtractor: LineExtractor = (line) => {
   try {
     const parsed = JSON.parse(line) as { payload?: { cwd?: unknown } };
     const cwd = parsed.payload?.cwd;
-    if (typeof cwd === "string" && cwd.startsWith("/")) return cwd;
+    if (typeof cwd === "string" && isAbsoluteCwd(cwd)) return cwd;
   } catch {
     // not JSON or unexpected shape; fall through to legacy regex
   }
   // Legacy format (pre-late-2025): cwd embedded as <cwd>...</cwd> inside an
   // <environment_context> user-message string.
   const m = CODEX_CWD_RE.exec(line);
-  if (m && m[1] && m[1].startsWith("/")) return m[1];
+  if (m && m[1] && isAbsoluteCwd(m[1])) return m[1];
   return null;
 };
 
 /**
- * Walk all .jsonl files under `dir` newest-first, returning the first non-null
- * extractor result. Walks two levels deep (matches Claude Code's nested
- * layout).
+ * Walk all plain Claude/Codex JSONL files under `dir` newest-first, returning
+ * the first non-null extractor result.
  */
 async function readFirstFromJsonlDir(
   dir: string,
@@ -313,6 +379,29 @@ async function readFirstFromJsonlDir(
   for (const f of files) {
     const v = await readFirstFromFile(f.path, extractor);
     if (v) return v;
+  }
+  return null;
+}
+
+async function readFirstFromGgcoderDir(
+  dir: string,
+  extractor: LineExtractor,
+): Promise<string | null> {
+  const files = await collectGgcoderSessionFiles(dir, 2);
+  files.sort((a, b) => b.mtime - a.mtime);
+  for (const file of files) {
+    try {
+      const { stream } = await openSessionReadStream(file.path);
+      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+      let lines = 0;
+      for await (const line of rl) {
+        if (++lines > 200) break;
+        const value = extractor(line);
+        if (value) return value;
+      }
+    } catch {
+      // A corrupt archive must not hide otherwise valid projects in this store.
+    }
   }
   return null;
 }
@@ -358,7 +447,14 @@ function fallbackDashDecode(entry: string): string | null {
   // used when the JSONLs have no cwd events; the caller still verifies the
   // result is an existing directory.
   if (!entry.startsWith("-")) return null;
-  return "/" + entry.slice(1).replace(/-/g, "/");
+  const body = entry.slice(1);
+  if (process.platform === "win32") {
+    // Claude Code on Windows encodes `C:\a\b` as `C--a-b` (drive colon → dash).
+    const drive = /^([A-Za-z])--(.*)$/.exec(body);
+    if (drive) return `${drive[1]}:\\${drive[2]!.replace(/-/g, "\\")}`;
+    return body.replace(/-/g, "\\");
+  }
+  return "/" + body.replace(/-/g, "/");
 }
 
 function formatRelativeTime(ms: number): string {
@@ -382,7 +478,7 @@ function formatRelativeTime(ms: number): string {
 export interface RecentSession {
   /** Session id. */
   id: string;
-  /** Absolute path to the session .jsonl (passed back to reopen it). */
+  /** Absolute resumable path to a plain or gzip GG Coder session. */
   path: string;
   /** Legacy saved label, falling back to the first real user prompt. */
   preview: string;
@@ -402,7 +498,7 @@ export async function listRecentSessions(
   sessionsDir = getAppPaths().sessionsDir,
 ): Promise<RecentSession[]> {
   const dir = path.join(sessionsDir, encodeCwd(cwd));
-  const files = await collectJsonlFiles(dir, 1);
+  const files = await collectGgcoderSessionFiles(dir, 1);
   if (files.length === 0) return [];
   files.sort((a, b) => b.mtime - a.mtime);
 
@@ -426,8 +522,8 @@ interface ParsedRecentSession extends RecentSession {
 
 /** Single-pass parse of one session file: identity + count + activity + preview. */
 async function readSessionSummary(file: string): Promise<ParsedRecentSession | null> {
-  return new Promise((resolve) => {
-    const stream = createReadStream(file, { encoding: "utf-8" });
+  try {
+    const { path: resolvedPath, stream } = await openSessionReadStream(file);
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
     let id = "";
     let conversationId = "";
@@ -437,29 +533,11 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
     let preview = "";
     let label = "";
     let valid = false;
-    let done = false;
-    const finish = (): void => {
-      if (done) return;
-      done = true;
-      resolve(
-        valid
-          ? {
-              id,
-              conversationId: conversationId || id,
-              path: file,
-              preview: label || headerPreview || preview,
-              lastActiveDisplay: rel(lastActivity),
-              messageCount,
-            }
-          : null,
-      );
-      rl.close();
-      stream.destroy();
-    };
-    rl.on("line", (line) => {
-      if (done || !line) return;
+
+    for await (const line of rl) {
+      if (!line) continue;
       try {
-        const p = JSON.parse(line) as {
+        const entry = JSON.parse(line) as {
           type?: string;
           id?: string;
           conversationId?: string;
@@ -469,34 +547,43 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
           message?: { role?: string; content?: unknown };
         };
         if (!valid) {
-          if (p.type !== "session") return finish(); // not a session file
+          if (entry.type !== "session") return null;
           valid = true;
-          id = p.id ?? "";
-          conversationId = p.conversationId ?? id;
-          if (typeof p.preview === "string") {
-            headerPreview = p.preview.replace(/\s+/g, " ").trim().slice(0, 80);
+          id = entry.id ?? "";
+          conversationId = entry.conversationId ?? id;
+          if (typeof entry.preview === "string") {
+            headerPreview = entry.preview.replace(/\s+/g, " ").trim().slice(0, 80);
           }
-          if (p.timestamp) lastActivity = p.timestamp;
-          return;
+          if (entry.timestamp) lastActivity = entry.timestamp;
+          continue;
         }
-        if (p.type === "label" && typeof p.label === "string" && p.label.trim()) {
-          label = p.label.replace(/\s+/g, " ").trim().slice(0, 80);
-        } else if (p.type === "message") {
-          messageCount++;
-          if (p.timestamp) lastActivity = p.timestamp;
-          if (!preview && p.message?.role === "user") {
-            const text = getUserSessionPrompt(p.message.content);
+        if (entry.type === "label" && typeof entry.label === "string" && entry.label.trim()) {
+          label = entry.label.replace(/\s+/g, " ").trim().slice(0, 80);
+        } else if (entry.type === "message") {
+          messageCount += 1;
+          if (entry.timestamp) lastActivity = entry.timestamp;
+          if (!preview && entry.message?.role === "user") {
+            const text = getUserSessionPrompt(entry.message.content);
             if (text) preview = text.replace(/\s+/g, " ").trim().slice(0, 80);
           }
         }
       } catch {
-        // skip malformed line
+        // Skip malformed lines; archive migration preserves them byte-for-byte.
       }
-    });
-    rl.on("close", finish);
-    rl.on("error", finish);
-    stream.on("error", finish);
-  });
+    }
+    return valid
+      ? {
+          id,
+          conversationId: conversationId || id,
+          path: resolvedPath,
+          preview: label || headerPreview || preview,
+          lastActiveDisplay: rel(lastActivity),
+          messageCount,
+        }
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function rel(timestamp: string): string {

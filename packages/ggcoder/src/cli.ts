@@ -68,7 +68,7 @@ import { segmentDisplayText, stripDoneMarkers } from "./utils/plan-steps.js";
 import { formatUserError } from "./utils/error-handler.js";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { ThemeName } from "./ui/theme/theme.js";
-import { AuthStorage } from "./core/auth-storage.js";
+import { AuthStorage, readStoredBaseUrlSync } from "./core/auth-storage.js";
 import { SessionManager, type TurnMetricPayload } from "./core/session-manager.js";
 import { ensureAppDirs, getAppPaths, loadSavedSettings } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
@@ -92,7 +92,7 @@ import {
   getAuthStorageKeys,
   getContextWindow,
   getDefaultModel,
-  getMaxThinkingLevel,
+  getDefaultThinkingLevel,
   getModel,
   getModelsForProvider,
 } from "./core/model-registry.js";
@@ -289,6 +289,7 @@ function main(): void {
       "max-turns": { type: "string" },
       "system-prompt": { type: "string" },
       tools: { type: "string" },
+      "mcp-servers": { type: "string" },
       "prompt-cache-key": { type: "string" },
       thinking: { type: "string" },
       resume: { type: "string" },
@@ -311,7 +312,7 @@ function main(): void {
   if (values.json) {
     const message = positionals[0] ?? "";
     const jsonProvider = (values.provider ?? "anthropic") as Provider;
-    const jsonModel = values.model ?? "claude-opus-4-8";
+    const jsonModel = values.model ?? "claude-opus-5";
     const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
     const systemPrompt = values["system-prompt"];
     const promptCacheKey = values["prompt-cache-key"];
@@ -327,6 +328,16 @@ function main(): void {
           .filter(Boolean)
       : [];
     const allowedTools = parsedTools.length > 0 ? parsedTools : undefined;
+    // MCP servers the agent definition asked for (`mcp__<server>__<tool>` in its
+    // `tools:` list). Without this an allow-listed child connects no MCP at all,
+    // so a research agent silently loses live code search.
+    const parsedMcpServers = values["mcp-servers"]
+      ? values["mcp-servers"]
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [];
+    const allowedMcpServers = parsedMcpServers.length > 0 ? parsedMcpServers : undefined;
     const cwd = process.cwd();
     runJsonMode({
       message,
@@ -336,6 +347,7 @@ function main(): void {
       systemPrompt,
       maxTurns,
       allowedTools,
+      allowedMcpServers,
       promptCacheKey,
       thinkingLevel,
     }).catch((err: unknown) => {
@@ -348,7 +360,7 @@ function main(): void {
   // RPC mode — headless JSON-over-stdio for IDE integrations
   if (values.rpc) {
     const rpcProvider = (values.provider ?? "anthropic") as Provider;
-    const rpcModel = values.model ?? "claude-opus-4-8";
+    const rpcModel = values.model ?? "claude-opus-5";
     const systemPrompt = values["system-prompt"];
     const cwd = process.cwd();
     runRpcMode({
@@ -379,12 +391,17 @@ function main(): void {
     if (p === "openrouter") return "qwen/qwen3.6-plus";
     if (p === "sakana") return "fugu";
     if (p === "xai") return "grok-4.5";
-    return "claude-opus-4-8";
+    return "claude-opus-5";
   }
 
   const model: string = saved.model ?? getHardcodedDefault(provider);
+  // No saved level → follow the active credential's endpoint (Kimi K3 OAuth
+  // starts at its declared default, high). Sync read: main() is not async.
   const thinkingLevel: ThinkingLevel | undefined = saved.thinkingEnabled
-    ? (saved.thinkingLevel ?? getMaxThinkingLevel(model))
+    ? (saved.thinkingLevel ??
+      getDefaultThinkingLevel(model, {
+        baseUrl: readStoredBaseUrlSync(getAppPaths().authFile, provider),
+      }))
     : undefined;
 
   // Interactive mode (Ink TUI)
@@ -692,7 +709,7 @@ async function runInkTUI(opts: {
 
       if (loadedMessages.length > 0) {
         messages.push(...loadedMessages);
-        sessionPath = resumePath;
+        sessionPath = loaded.path;
         sessionId = loaded.header.id;
         log("INFO", "session", `Restored session`, {
           path: resumePath,
@@ -786,27 +803,26 @@ async function runInkTUI(opts: {
     await subAgentManager?.hydrate(sessionId);
   }
 
-  // Prune old session transcripts in the background — they're append-only
-  // JSONL and can reach 100MB+ each, so without cleanup ~/.gg/sessions grows
-  // unbounded and eventually fills the disk. Fire-and-forget: pruning must
-  // never delay or break startup. The active session is explicitly protected.
+  // Unified maintenance enforces retention first, then normalizes and archives
+  // cold sessions. Fire-and-forget: startup and TUI readiness never wait for it.
   {
     const { sessionRetentionDays } = loadSavedSettings(paths.settingsFile);
-    if (sessionRetentionDays > 0) {
-      const keepPaths = sessionPath ? [sessionPath] : [];
-      void sessionManager
-        .pruneOldSessions({ maxAgeDays: sessionRetentionDays, keepPaths })
-        .then(({ deletedFiles, freedBytes }) => {
-          if (deletedFiles > 0) {
-            log("INFO", "session", `Pruned old sessions`, {
-              deletedFiles: String(deletedFiles),
-              freedMB: (freedBytes / 1024 / 1024).toFixed(1),
-              retentionDays: String(sessionRetentionDays),
-            });
-          }
-        })
-        .catch(() => {});
-    }
+    const keepPaths = sessionPath ? [sessionPath] : [];
+    void sessionManager
+      .runMaintenance({ retentionDays: sessionRetentionDays, keepPaths })
+      .then((metrics) => {
+        if (metrics.deletedFiles > 0 || metrics.archivedFiles > 0 || metrics.failures > 0) {
+          log("INFO", "session", "Session maintenance complete", {
+            deletedFiles: String(metrics.deletedFiles),
+            freedMB: (metrics.deletedBytes / 1024 / 1024).toFixed(1),
+            archivedFiles: String(metrics.archivedFiles),
+            savedMB: (metrics.bytesSaved / 1024 / 1024).toFixed(1),
+            failures: String(metrics.failures),
+            retentionDays: String(sessionRetentionDays),
+          });
+        }
+      })
+      .catch(() => {});
     // Sweep recoverable full tool outputs (~/.gg/tool-output/) older than 48h.
     void cleanupToolOutputs().catch(() => {});
   }
@@ -888,12 +904,15 @@ async function runSessions(): Promise<void> {
     if (p === "deepseek") return "deepseek-v4-pro";
     if (p === "sakana") return "fugu";
     if (p === "xai") return "grok-4.5";
-    return "claude-opus-4-8";
+    return "claude-opus-5";
   }
 
   const model = saved2.model ?? getDefault(provider);
   const thinkingLevel: ThinkingLevel | undefined = saved2.thinkingEnabled
-    ? (saved2.thinkingLevel ?? getMaxThinkingLevel(model))
+    ? (saved2.thinkingLevel ??
+      getDefaultThinkingLevel(model, {
+        baseUrl: readStoredBaseUrlSync(paths.authFile, provider),
+      }))
     : undefined;
 
   closeLogger();
@@ -1088,7 +1107,8 @@ async function runServe(): Promise<void> {
   );
 
   const thinkingLevel: ThinkingLevel | undefined = saved3.thinkingEnabled
-    ? (saved3.thinkingLevel ?? getMaxThinkingLevel(model))
+    ? (saved3.thinkingLevel ??
+      getDefaultThinkingLevel(model, { baseUrl: authStorage.getStoredBaseUrl(provider) }))
     : undefined;
 
   initLogger(paths.logFile, {
@@ -1249,7 +1269,8 @@ async function runAgentHome(): Promise<void> {
   );
 
   const thinkingLevel: ThinkingLevel | undefined = saved4.thinkingEnabled
-    ? (saved4.thinkingLevel ?? getMaxThinkingLevel(model))
+    ? (saved4.thinkingLevel ??
+      getDefaultThinkingLevel(model, { baseUrl: authStorage.getStoredBaseUrl(provider) }))
     : undefined;
 
   initLogger(paths.logFile, {

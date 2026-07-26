@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type OpenAI from "openai";
-import type { Provider } from "../types.js";
+import type { Provider, ThinkingLevel } from "../types.js";
+import { ProviderError } from "../errors.js";
 import { streamOpenAI } from "./openai.js";
+import { resetReasoningFieldCache } from "./reasoning-field.js";
 
 const createMock = vi.fn();
 
@@ -180,7 +182,7 @@ describe("streamOpenAI request shaping", () => {
     expect(params).not.toHaveProperty("reasoning_effort");
   });
 
-  it("defaults Kimi K3 to max reasoning even when thinking display is off", async () => {
+  it("disables Kimi K3 reasoning via the nested toggle when thinking is off", async () => {
     createMock.mockResolvedValueOnce(createStreamingResult(""));
     const result = streamOpenAI({
       provider: "moonshot",
@@ -205,11 +207,94 @@ describe("streamOpenAI request shaping", () => {
     }
 
     const params = createMock.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(params).toMatchObject({ reasoning_effort: "max" });
-    expect(params).not.toHaveProperty("thinking");
-    expect((params.messages as Array<Record<string, unknown>>)[1]).toMatchObject({
-      reasoning_content: " ",
+    expect(params).toMatchObject({ thinking: { type: "disabled" } });
+    expect(params).not.toHaveProperty("reasoning_effort");
+    // A disabled K3 must not carry placeholder reasoning_content in history.
+    expect((params.messages as Array<Record<string, unknown>>)[1]).not.toHaveProperty(
+      "reasoning_content",
+    );
+  });
+
+  it.each(["low", "high"] as const)(
+    "sends Kimi K3's declared %s effort on both endpoints",
+    async (effort) => {
+      // Public API: top-level reasoning_effort.
+      createMock.mockResolvedValueOnce(createStreamingResult(""));
+      const pub = streamOpenAI({
+        provider: "moonshot",
+        model: "kimi-k3",
+        messages: [{ role: "user", content: "hi" }],
+        apiKey: "t" + "est",
+        thinking: effort,
+      });
+      for await (const _event of pub) {
+        /* consume */
+      }
+      const pubParams = createMock.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(pubParams).toMatchObject({ reasoning_effort: effort });
+      expect(pubParams).not.toHaveProperty("thinking");
+
+      // Kimi Code OAuth: nested managed shape with preserved reasoning.
+      createMock.mockResolvedValueOnce(createStreamingResult(""));
+      const managed = streamOpenAI({
+        provider: "moonshot",
+        model: "kimi-k3",
+        baseUrl: "https://api.kimi.com/coding/v1",
+        messages: [{ role: "user", content: "hi" }],
+        apiKey: "t" + "est",
+        thinking: effort,
+      });
+      for await (const _event of managed) {
+        /* consume */
+      }
+      const managedParams = createMock.mock.calls[1]?.[0] as Record<string, unknown>;
+      expect(managedParams).toMatchObject({
+        thinking: { type: "enabled", effort, keep: "all" },
+      });
+      expect(managedParams).not.toHaveProperty("reasoning_effort");
+    },
+  );
+
+  it("disables Kimi K3 on the managed endpoint with the nested toggle", async () => {
+    createMock.mockResolvedValueOnce(createStreamingResult(""));
+    const result = streamOpenAI({
+      provider: "moonshot",
+      model: "kimi-k3",
+      baseUrl: "https://api.kimi.com/coding/v1",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "t" + "est",
     });
+    for await (const _event of result) {
+      /* consume */
+    }
+
+    const params = createMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(params).toMatchObject({ thinking: { type: "disabled" } });
+    expect(params).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("maps out-of-ladder Kimi K3 efforts per the official alias table", async () => {
+    // Official mapping: ultra/max/xhigh → max, high/medium → high, low → low.
+    const cases: Array<[ThinkingLevel, string]> = [
+      ["medium", "high"],
+      ["xhigh", "max"],
+      ["ultra", "max"],
+    ];
+    for (const [given, sent] of cases) {
+      createMock.mockResolvedValueOnce(createStreamingResult(""));
+      const result = streamOpenAI({
+        provider: "moonshot",
+        model: "kimi-k3",
+        messages: [{ role: "user", content: "hi" }],
+        apiKey: "t" + "est",
+        thinking: given,
+      });
+      for await (const _event of result) {
+        /* consume */
+      }
+      const params = createMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+      expect(params).toMatchObject({ reasoning_effort: sent });
+    }
   });
 
   it("omits invalid reasoning and thinking controls for always-thinking Kimi K2.7", async () => {
@@ -505,6 +590,215 @@ describe("streamOpenAI hard/transient limit classification", () => {
         );
         expect(e.message).not.toContain("<html>");
       },
+    );
+  });
+});
+
+describe("streamOpenAI silent-partial truncation guard", () => {
+  afterEach(() => {
+    createMock.mockReset();
+  });
+
+  // The OpenAI SDK does NOT throw on a clean premature close (the body iterator
+  // just ends), so a stream that produced chunks but never a finish_reason must
+  // be caught by gg-ai and surfaced as a retryable 504 -- otherwise
+  // normalizeOpenAIStopReason(null) silently maps it to "end_turn".
+  function truncatedStream(): AsyncIterable<OpenAI.ChatCompletionChunk> {
+    return (async function* () {
+      yield {
+        id: "chatcmpl_1",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "test",
+        choices: [
+          { index: 0, delta: { role: "assistant", content: "partial-" }, finish_reason: null },
+        ],
+      };
+      yield {
+        id: "chatcmpl_1",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "test",
+        choices: [{ index: 0, delta: { content: "text" }, finish_reason: null }],
+      };
+      // Stream ends here: no chunk ever carries a finish_reason (clean close).
+    })() as AsyncIterable<OpenAI.ChatCompletionChunk>;
+  }
+
+  it("rejects with a 504 when the stream ends before a finish_reason", async () => {
+    createMock.mockResolvedValueOnce(truncatedStream());
+    const result = streamOpenAI({
+      provider: "openai",
+      model: "test-model",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "token",
+    });
+    // Attach the response handler up front so the pump's rejection is never
+    // orphaned when the iterator throws first.
+    const caught = result.response.catch((err: unknown) => err);
+
+    const events: string[] = [];
+    try {
+      for await (const event of result) events.push(event.type);
+    } catch {
+      // Iterator re-throws the same failure; asserted via `caught` below.
+    }
+
+    const thrown = await caught;
+    expect(thrown).toBeInstanceOf(ProviderError);
+    expect((thrown as ProviderError).statusCode).toBe(504);
+    expect((thrown as ProviderError).message).toMatch(/before completion/i);
+    // No phantom "done" event leaked out.
+    expect(events).not.toContain("done");
+  });
+
+  it("resolves normally on a complete stream (guard does not false-positive)", async () => {
+    createMock.mockResolvedValueOnce(
+      (async function* () {
+        yield {
+          id: "chatcmpl_1",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "test",
+          choices: [
+            { index: 0, delta: { role: "assistant", content: "Hello" }, finish_reason: null },
+          ],
+        };
+        yield {
+          id: "chatcmpl_1",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "test",
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        };
+      })() as AsyncIterable<OpenAI.ChatCompletionChunk>,
+    );
+    const result = streamOpenAI({
+      provider: "openai",
+      model: "test-model",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "token",
+    });
+
+    let text = "";
+    for await (const event of result) {
+      if (event.type === "text_delta") text += event.text;
+    }
+    await expect(result.response).resolves.toMatchObject({ stopReason: "stop_sequence" });
+    expect(text).toBe("Hello");
+  });
+});
+
+function reasoningStream(field: string): AsyncIterable<OpenAI.ChatCompletionChunk> {
+  return (async function* () {
+    yield {
+      id: "chatcmpl_r",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "test",
+      choices: [{ index: 0, delta: { [field]: "pondering" }, finish_reason: null }],
+    };
+    yield {
+      id: "chatcmpl_r",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "test",
+      choices: [{ index: 0, delta: { content: "done" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    };
+  })() as AsyncIterable<OpenAI.ChatCompletionChunk>;
+}
+
+describe("streamOpenAI reasoning-field detection", () => {
+  afterEach(() => {
+    createMock.mockReset();
+    resetReasoningFieldCache();
+  });
+
+  it.each(["reasoning_content", "reasoning", "reasoning_text"])(
+    "yields thinking for a `%s` delta and echoes the same field back",
+    async (field) => {
+      const baseUrl = `https://vllm.test/${field}/v1`;
+      createMock.mockResolvedValueOnce(reasoningStream(field));
+      const first = streamOpenAI({
+        provider: "openai",
+        model: "local-model",
+        baseUrl,
+        messages: [{ role: "user", content: "hi" }],
+        apiKey: "test-key",
+        thinking: "high",
+      });
+
+      const thinking: string[] = [];
+      for await (const event of first) {
+        if (event.type === "thinking_delta") thinking.push(event.text);
+      }
+      const response = await first.response;
+      expect(thinking).toEqual(["pondering"]);
+      expect(response.message.content).toContainEqual({ type: "thinking", text: "pondering" });
+
+      // Follow-up turn echoes history back using the detected field name.
+      createMock.mockResolvedValueOnce(reasoningStream(field));
+      const second = streamOpenAI({
+        provider: "openai",
+        model: "local-model",
+        baseUrl,
+        messages: [
+          { role: "user", content: "hi" },
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", text: "pondering" },
+              { type: "text", text: "done" },
+            ],
+          },
+          { role: "user", content: "again" },
+        ],
+        apiKey: "test-key",
+        thinking: "high",
+      });
+      for await (const _event of second) {
+        /* consume */
+      }
+
+      const params = createMock.mock.calls[1]?.[0] as Record<string, unknown>;
+      const assistant = (params.messages as Array<Record<string, unknown>>)[1]!;
+      expect(assistant[field]).toBe("pondering");
+      for (const other of ["reasoning_content", "reasoning", "reasoning_text"]) {
+        if (other !== field) expect(assistant).not.toHaveProperty(other);
+      }
+    },
+  );
+
+  it("defaults to reasoning_content for an endpoint that never emitted reasoning", async () => {
+    createMock.mockResolvedValueOnce(createStreamingResult(""));
+    const result = streamOpenAI({
+      provider: "openai",
+      model: "unknown-model",
+      baseUrl: "https://unknown.test/v1",
+      messages: [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", text: "hmm" },
+            { type: "text", text: "ok" },
+          ],
+        },
+        { role: "user", content: "again" },
+      ],
+      apiKey: "test-key",
+      thinking: "high",
+    });
+    for await (const _event of result) {
+      /* consume */
+    }
+
+    const params = createMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect((params.messages as Array<Record<string, unknown>>)[1]).toHaveProperty(
+      "reasoning_content",
+      "hmm",
     );
   });
 });

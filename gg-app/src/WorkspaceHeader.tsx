@@ -1,15 +1,26 @@
 import type { ReactNode } from "react";
-import type { WorkspaceMode } from "./agent";
+import { openProjectPath, openUrl, type WorkspaceMode } from "./agent";
 
 interface WorkspaceHeaderProps {
   workspaceMode: WorkspaceMode;
   cwd?: string;
   gitBranch?: string | null;
   gitDirtyFileCount?: number;
+  /** Open issue/PR counts for the project's GitHub origin (null = unknown/hidden). */
+  gitHubIssues?: number | null;
+  gitHubPRs?: number | null;
+  /** Origin repo's web URL — makes the issue/PR chips clickable. */
+  gitHubRepoUrl?: string | null;
+  /** Extra workspace roots added with /add-dir. */
+  additionalRoots?: string[];
   navHidden: boolean;
   onToggleNav: () => void;
   stripExtras?: ReactNode;
   children: ReactNode;
+}
+
+function pluralize(count: number, singular: string, plural: string): string {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 export function formatWorkspaceTitle(
@@ -17,12 +28,20 @@ export function formatWorkspaceTitle(
   gitBranch: string | null | undefined,
   fallback: string,
   gitDirtyFileCount = 0,
+  gitHubIssues: number | null = null,
+  gitHubPRs: number | null = null,
+  additionalRoots: string[] = [],
 ): string {
   const directory = cwd?.split(/[\\/]/).filter(Boolean).pop();
   if (!directory) return fallback;
   const segments = [directory];
+  if (additionalRoots.length > 0)
+    segments.push(`+${pluralize(additionalRoots.length, "root", "roots")}`);
   if (gitBranch) segments.push(`⎇ ${gitBranch}`);
   if (gitDirtyFileCount > 0) segments.push(`${gitDirtyFileCount} uncommitted`);
+  if (gitHubIssues !== null && gitHubIssues > 0)
+    segments.push(pluralize(gitHubIssues, "issue", "issues"));
+  if (gitHubPRs !== null && gitHubPRs > 0) segments.push(pluralize(gitHubPRs, "PR", "PRs"));
   return segments.join(" │ ");
 }
 
@@ -32,6 +51,10 @@ export function WorkspaceHeader({
   cwd,
   gitBranch,
   gitDirtyFileCount = 0,
+  gitHubIssues = null,
+  gitHubPRs = null,
+  gitHubRepoUrl = null,
+  additionalRoots = [],
   navHidden,
   onToggleNav,
   stripExtras,
@@ -46,20 +69,59 @@ export function WorkspaceHeader({
         <span
           className="chat-head-title"
           data-tauri-drag-region
-          title={formatWorkspaceTitle(cwd, gitBranch, fallbackTitle, gitDirtyFileCount)}
+          title={formatWorkspaceTitle(
+            cwd,
+            gitBranch,
+            fallbackTitle,
+            gitDirtyFileCount,
+            gitHubIssues,
+            gitHubPRs,
+            additionalRoots,
+          )}
         >
           {directory ? (
             <>
-              <span className="chat-head-cwd" data-tauri-drag-region>
+              <button
+                type="button"
+                className="chat-head-cwd chat-head-link"
+                disabled={!cwd}
+                title={cwd ? `${cwd} — open folder` : undefined}
+                onClick={() => cwd && void openProjectPath(cwd)}
+              >
                 {directory}
-              </span>
+              </button>
               {gitBranch && (
                 <>
                   <span className="chat-head-sep" data-tauri-drag-region>
                     {"│"}
                   </span>
-                  <span className="chat-head-branch" data-tauri-drag-region>
-                    {`⎇ ${gitBranch}`}
+                  {gitHubRepoUrl ? (
+                    <button
+                      type="button"
+                      className="chat-head-branch chat-head-link"
+                      title={`${gitBranch} — open ${gitHubRepoUrl} on GitHub`}
+                      onClick={() => void openUrl(gitHubRepoUrl)}
+                    >
+                      {`⎇ ${gitBranch}`}
+                    </button>
+                  ) : (
+                    <span className="chat-head-branch" data-tauri-drag-region>
+                      {`⎇ ${gitBranch}`}
+                    </span>
+                  )}
+                </>
+              )}
+              {additionalRoots.length > 0 && (
+                <>
+                  <span className="chat-head-sep" data-tauri-drag-region>
+                    {"│"}
+                  </span>
+                  <span
+                    className="chat-head-dirty"
+                    data-tauri-drag-region
+                    title={`Additional workspace roots:\n${additionalRoots.join("\n")}`}
+                  >
+                    {`+${pluralize(additionalRoots.length, "root", "roots")}`}
                   </span>
                 </>
               )}
@@ -75,6 +137,38 @@ export function WorkspaceHeader({
                   >
                     {`${gitDirtyFileCount} uncommitted`}
                   </span>
+                </>
+              )}
+              {gitHubIssues !== null && gitHubIssues > 0 && (
+                <>
+                  <span className="chat-head-sep" data-tauri-drag-region>
+                    {"│"}
+                  </span>
+                  <button
+                    type="button"
+                    className="chat-head-github"
+                    disabled={!gitHubRepoUrl}
+                    title={`${pluralize(gitHubIssues, "open issue", "open issues")} on GitHub${gitHubRepoUrl ? " — click to view" : ""}`}
+                    onClick={() => gitHubRepoUrl && void openUrl(`${gitHubRepoUrl}/issues`)}
+                  >
+                    {pluralize(gitHubIssues, "issue", "issues")}
+                  </button>
+                </>
+              )}
+              {gitHubPRs !== null && gitHubPRs > 0 && (
+                <>
+                  <span className="chat-head-sep" data-tauri-drag-region>
+                    {"│"}
+                  </span>
+                  <button
+                    type="button"
+                    className="chat-head-github"
+                    disabled={!gitHubRepoUrl}
+                    title={`${pluralize(gitHubPRs, "open PR", "open PRs")} on GitHub${gitHubRepoUrl ? " — click to view" : ""}`}
+                    onClick={() => gitHubRepoUrl && void openUrl(`${gitHubRepoUrl}/pulls`)}
+                  >
+                    {pluralize(gitHubPRs, "PR", "PRs")}
+                  </button>
                 </>
               )}
             </>

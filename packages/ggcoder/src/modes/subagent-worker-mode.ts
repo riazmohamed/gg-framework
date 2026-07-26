@@ -14,6 +14,8 @@ export interface SubagentWorkerInitialize {
   systemPrompt?: string;
   thinkingLevel?: ThinkingLevel;
   allowedTools?: string[];
+  /** MCP servers this agent may connect, derived from its `tools:` frontmatter. */
+  allowedMcpServers?: string[];
   promptCacheKey?: string;
   sessionRootDir: string;
   childSessionPath?: string;

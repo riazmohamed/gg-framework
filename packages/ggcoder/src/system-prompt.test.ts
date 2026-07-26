@@ -51,6 +51,10 @@ function promptAudit(prompt: string): { size: ReturnType<typeof promptSize>; fla
     "generic tests, scripts, screenshots, benchmarks, or simulations; use them by default",
     "After meaningful edits, run the relevant verification commands below",
     "Run relevant checks after edits",
+    "Run only targeted verification needed for the change",
+    "Run targeted verification that is appropriate to the change before calling work complete",
+    "plan multi-file work first",
+    "otherwise follow through and verify",
   ];
 
   for (const phrase of obsoleteOrContradictory) {
@@ -102,6 +106,11 @@ describe("buildSystemPrompt", () => {
     );
     expect(sectionIndex(prompt, "## Research & Verification")).toBeLessThan(
       sectionIndex(prompt, "## Code Quality"),
+    );
+    // The one-approach rule must carve out command flows that ship their own
+    // A/B/C option list, or the model second-guesses those prompts.
+    expect(prompt).toContain(
+      "Recommend ONE approach, not a menu — unless a command's flow defines its own options.",
     );
     expect(prompt).not.toContain(
       "Do not default to generic tests, scripts, screenshots, benchmarks, or simulations",
@@ -206,6 +215,10 @@ describe("buildSystemPrompt", () => {
       "works directly in the user's codebase",
       "completing tasks end-to-end",
       "Final replies: 1–2 sentences, hard cap 5",
+      "Do all safe, reversible steps implied by the goal",
+      "never ask permission, merely suggest them, or leave them for the user",
+      "ONE action that unblocks you",
+      "State what works now and the blocker or next step",
       "Read before `edit`/`write`",
       "re-read after formatters",
       "Compute in bash; write with `edit`/`write`",
@@ -213,8 +226,9 @@ describe("buildSystemPrompt", () => {
       "When none exist, infer from the task and project",
       "ask only when a missing product or taste decision would materially change the result",
       "Keep edits small",
-      "Do routine follow-up yourself",
-      "Ask first for destructive actions",
+      "plan only complex/risky multi-file work",
+      "Stop only for user decisions, secrets/access, cost",
+      "otherwise continue through completion",
       "Preserve user work",
       "Rule precedence: project context files",
       "file/module patterns → applicable skill instructions",
@@ -223,13 +237,22 @@ describe("buildSystemPrompt", () => {
       "Do not rely on memory for APIs",
       "Use `source_path`",
       "web_search` then `web_fetch",
-      "ReferenceSources",
-      "DiscoverRepos",
-      "SearchCode literal text/RE2 (not semantic)",
-      "Choose targeted verification appropriate to the change",
+      "use the kencode-search tools (usage in Tools below)",
+      "curated, categorized reference repos",
+      "Search GitHub repos live",
+      "literal text or RE2 regex; NOT semantic",
+      "Skip checks after simple edits",
+      "At coherent checkpoints or after risky/non-obvious changes",
+      "run one targeted check",
     ]) {
       expect(prompt).toContain(required);
     }
+
+    expect(prompt).not.toContain("doable in under 2 minutes");
+    expect(prompt).not.toContain("Estimate time only when");
+    expect(prompt).not.toContain("plan multi-file work first");
+    expect(prompt).not.toContain("otherwise follow through and verify");
+    expect(prompt).not.toContain("Run only targeted verification needed for the change");
   });
 
   it("keeps kencode guidance concise while separating repo discovery from exact search", async () => {
@@ -260,7 +283,7 @@ describe("buildSystemPrompt", () => {
       "tool_search",
     ]);
     // Research section must not name tools the model can't call yet…
-    expect(deferred).not.toContain("SearchCode literal text/RE2");
+    expect(deferred).not.toContain("kencode-search tools");
     expect(deferred).not.toContain("ReferenceSources");
     // …and must point discovery at tool_search instead (research + tools hint).
     expect(deferred).toContain("call `tool_search` first");
@@ -268,7 +291,7 @@ describe("buildSystemPrompt", () => {
 
     // Neither kencode nor tool_search active: the public-code sentence is omitted.
     const bare = await buildSystemPrompt(cwd, undefined, false, undefined, ["read", "bash"]);
-    expect(bare).not.toContain("SearchCode literal text/RE2");
+    expect(bare).not.toContain("kencode-search tools");
     expect(bare).not.toContain("tool_search");
   });
 
@@ -401,16 +424,36 @@ describe("buildSystemPrompt", () => {
   it("only references web_search in Research when it is an active tool", async () => {
     const cwd = await makeProject();
 
-    // Anthropic-shaped tool set: no client-side web_search tool.
-    const withoutSearch = await buildSystemPrompt(cwd, undefined, false, undefined, [
-      "read",
-      "bash",
-      "web_fetch",
-    ]);
-    expect(withoutSearch).not.toContain("web_search");
-    expect(withoutSearch).toContain(
+    // Anthropic-shaped tool set: no client-side web_search tool, but native
+    // server-side search really exists — the prompt may claim it.
+    const anthropicNoSearch = await buildSystemPrompt(
+      cwd,
+      undefined,
+      false,
+      undefined,
+      ["read", "bash", "web_fetch"],
+      undefined,
+      "anthropic",
+    );
+    expect(anthropicNoSearch).not.toContain("web_search");
+    expect(anthropicNoSearch).toContain(
       "use `web_fetch` for authoritative docs (native web search is available)",
     );
+
+    // Non-Anthropic provider without the web_search tool: no native-search
+    // capability exists, so the prompt must not claim one.
+    const otherNoSearch = await buildSystemPrompt(
+      cwd,
+      undefined,
+      false,
+      undefined,
+      ["read", "bash", "web_fetch"],
+      undefined,
+      "openai",
+    );
+    expect(otherNoSearch).not.toContain("web_search");
+    expect(otherNoSearch).not.toContain("native web search is available");
+    expect(otherNoSearch).toContain("use `web_fetch` for authoritative docs");
 
     const withSearch = await buildSystemPrompt(cwd, undefined, false, undefined, [
       "read",
@@ -427,6 +470,26 @@ describe("buildSystemPrompt", () => {
 
     // Non-Windows hosts (and Windows with Git Bash) run POSIX bash.
     expect(prompt).toContain("- Shell: bash (POSIX)");
+  });
+
+  it("lists additional roots and the network allowlist in the Environment section", async () => {
+    const cwd = await makeProject();
+    const plain = await buildSystemPrompt(cwd, undefined, false, undefined, ["read"]);
+    expect(plain).not.toContain("Additional roots:");
+    expect(plain).not.toContain("Network allowlist:");
+
+    const scoped = await buildSystemPrompt(
+      cwd,
+      undefined,
+      false,
+      undefined,
+      ["read"],
+      undefined,
+      undefined,
+      { additionalRoots: ["/work/sdk"], networkAllow: ["*.github.com"] },
+    );
+    expect(scoped).toContain("- Additional roots: /work/sdk");
+    expect(scoped).toContain("- Network allowlist: *.github.com");
   });
 
   it("states the nearest-wins precedence rule in the project context section", async () => {

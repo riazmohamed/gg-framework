@@ -46,13 +46,12 @@ function renderIdentitySection(provider: Provider | undefined): string {
 function renderTalkSection(): string {
   return (
     `## How to Talk\n\n` +
-    `Assume the reader has severe ADHD. Write for fast scanning and low working memory.\n\n` +
-    `**First word = the outcome.** Lead with "Fixed it." / "Done." / "Broken." / "Failed." / "Blocked." — never warm up with "So," "Let me," or "I've."\n\n` +
-    `**Bottom line first.** Line 1 = the answer. Final replies: 1–2 sentences, hard cap 5.\n\n` +
-    `**One idea per line.** **Bold** the key word for scanning.\n\n` +
-    `**Pick, don't present menus.** Recommend ONE approach with one-line reasoning.\n\n` +
-    `**Concrete over abstract.** "Cuts load from 4s to 1s" beats "improves performance."\n\n` +
-    `**No unresolved "it depends."** Always resolve: "Default to X; switch to Y if [condition]." Say what TO do, never what NOT to do. End with one next action or nothing.\n\n` +
+    `Write for severe ADHD: fast scanning, low working memory, easy action.\n\n` +
+    `**First line = actionable state.** Done: lead with the outcome. Blocked or handing off: lead with the ONE next action. Final replies: 1–2 sentences, hard cap 5.\n\n` +
+    `**Default to action.** Do all safe, reversible steps implied by the goal—never ask permission, merely suggest them, or leave them for the user. If blocked, ask for the ONE action that unblocks you.\n\n` +
+    `**Keep progress visible.** State what works now and the blocker or next step; never bury completed work.\n\n` +
+    `**Easy to scan.** One idea per line; **bold** key words. Number steps; cap lists at 5. Recommend ONE approach, not a menu — unless a command's flow defines its own options.\n\n` +
+    `**Be concrete and decisive.** Give measured outcomes. Default to X; switch to Y only when [condition]. Say what TO do.\n\n` +
     `Stay silent between tool calls unless you hit a decision, tradeoff, finding, or question. No preamble, no recap, no hedging, no output dumps. ` +
     `Surface tradeoffs and unverified claims plainly.`
   );
@@ -63,11 +62,11 @@ function renderWorkSection(): string {
     `## How to Work\n\n` +
     `- Read before \`edit\`/\`write\`; re-read after formatters, \`lint --fix\`, codemods, codegen, checkout, or any disk mutator.\n` +
     `- Compute in bash; write with \`edit\`/\`write\` so read-tracking, partial apply, and diagnostics stay intact.\n` +
-    `- Match neighbors (components/tokens/tone). When none exist, infer from the task and project; ask only when a missing product or taste decision would materially change the result. Keep edits small; plan multi-file work first.\n` +
-    `- Do routine follow-up yourself (build, migrate, re-run). Ask first for destructive actions: deletes, force-push, data loss, killing processes, \`rm -rf\`, \`--hard\`, \`--force\`.\n` +
+    `- Match neighbors (components/tokens/tone). When none exist, infer from the task and project; ask only when a missing product or taste decision would materially change the result. Keep edits small; plan only complex/risky multi-file work—edit routine changes directly.\n` +
+    `- Stop only for user decisions, secrets/access, cost, destructive risk, data loss, or unrelated disruption; otherwise continue through completion.\n` +
     `- Preserve user work: investigate unexpected files, branches, or locks before touching them. \`.gitignore\` generated artifacts, secrets, logs, scratch, and \`.env\`.\n` +
     `- Rule precedence: project context files → file/module patterns → applicable skill instructions → Language Style Packs → this prompt.\n` +
-    `- Choose targeted verification appropriate to the change; read/fix failures. Never claim unrun or failing checks passed.`
+    `- Skip checks after simple edits. At coherent checkpoints or after risky/non-obvious changes, run one targeted check; fix failures. Never claim unrun checks passed.`
   );
 }
 
@@ -110,29 +109,35 @@ async function renderApprovedPlanSection(
   );
 }
 
-function renderResearchSection(toolNames: readonly string[] | undefined): string {
+function renderResearchSection(
+  toolNames: readonly string[] | undefined,
+  provider: Provider | undefined,
+): string {
   const active = new Set(toolNames ?? DEFAULT_TOOL_NAMES);
-  // The public-code guidance references the kencode-search MCP tools by name.
-  // With deferred MCP loading those live in the tool_search catalog until
-  // promoted — so point at discovery instead of naming tools the model can't
-  // call yet. Never reference an unavailable tool.
+  // Kencode usage details (literal/RE2, broad→narrow, path semantics) live in
+  // the Tools section hints — one home, no duplication. Research only says WHEN
+  // to reach for public code. With deferred MCP loading the kencode tools sit
+  // in the tool_search catalog until promoted, so point at discovery instead of
+  // naming tools the model can't call yet. Never reference an unavailable tool.
   const publicCode = active.has("mcp__kencode-search__searchCode")
-    ? `For public code, use ReferenceSources for curated repos or DiscoverRepos for current/top repos, then verify exact snippets with SearchCode literal text/RE2 (not semantic); \`path\` is a literal path substring and \`repo\` only after broad/peek proof. `
+    ? ` For real public GitHub code, use the kencode-search tools (usage in Tools below).`
     : active.has("tool_search")
-      ? `For public GitHub code and design references, call \`tool_search\` first (e.g. "search public code" or "UI design screens") — it unlocks the matching tools for your next step. `
+      ? ` For public GitHub code and design references, call \`tool_search\` first (e.g. "search public code" or "UI design screens") — it unlocks the matching tools for your next step.`
       : "";
-  // Only reference `web_search` when it's actually in the active tool set —
-  // Anthropic sessions use server-side native search instead, and naming an
-  // unavailable tool trains the model to call something that doesn't exist.
+  // Only reference `web_search` when it's actually in the active tool set, and
+  // only claim native server-side search on providers that really have it
+  // (Anthropic). Naming an unavailable tool or capability trains the model to
+  // rely on something that doesn't exist.
   const docs = active.has("web_search")
     ? `use \`web_search\` then \`web_fetch\` for authoritative docs`
-    : `use \`web_fetch\` for authoritative docs (native web search is available)`;
+    : provider === "anthropic"
+      ? `use \`web_fetch\` for authoritative docs (native web search is available)`
+      : `use \`web_fetch\` for authoritative docs`;
   return (
     `## Research & Verification\n\n` +
     `Your training data has a cutoff; the real current date is the final line of this prompt. Assume your knowledge of library versions, APIs, CLI flags, config schema, defaults, and best practices has changed since then — treat it as a stale hint to verify, never as ground truth. ` +
-    `Do not rely on memory for APIs, CLI flags, config schema, internals, or error wording — verify first. Use \`source_path\` for installed deps and inspect with read/grep/find/ls; ${docs}. ` +
-    publicCode +
-    `Run targeted checks when they are relevant to the change; read/fix failures; never report unrun or failing checks as passing.`
+    `Do not rely on memory for APIs, CLI flags, config schema, internals, or error wording — verify first. Use \`source_path\` for installed deps; ${docs}.` +
+    publicCode
   );
 }
 
@@ -236,13 +241,33 @@ function renderProjectContextSection(contextParts: readonly string[]): string | 
   );
 }
 
-function renderEnvironmentSection(cwd: string): string {
+/** Extra Environment-section facts that vary per session rather than per host. */
+export interface SystemPromptEnvironment {
+  /** Extra workspace roots added with `/add-dir`. */
+  additionalRoots?: readonly string[];
+  /** Hosts the network allowlist permits, when `networkMode` is `allowlist`. */
+  networkAllow?: readonly string[];
+}
+
+function renderEnvironmentSection(cwd: string, environment?: SystemPromptEnvironment): string {
   // Static per host, so it lives in the cached prompt body: which shell bash
   // commands actually execute under (cmd.exe fallback on bash-less Windows).
   const shellLine = resolveShell("").isCmdFallback
     ? "- Shell: cmd.exe (no bash found)"
     : "- Shell: bash (POSIX)";
-  return `## Environment\n\n- Working directory: ${cwd}\n- Platform: ${process.platform}\n${shellLine}`;
+  const lines = [`- Working directory: ${cwd}`];
+  const roots = environment?.additionalRoots ?? [];
+  if (roots.length > 0) {
+    // Added with /add-dir: tools take absolute paths into these roots and
+    // writes there are allowed.
+    lines.push(`- Additional roots: ${roots.join(", ")}`);
+  }
+  lines.push(`- Platform: ${process.platform}`, shellLine);
+  const allow = environment?.networkAllow ?? [];
+  if (allow.length > 0) {
+    lines.push(`- Network allowlist: ${allow.join(", ")} (other hosts are blocked)`);
+  }
+  return `## Environment\n\n${lines.join("\n")}`;
 }
 
 function renderUncachedDateSuffix(): string {
@@ -261,6 +286,9 @@ function renderUncachedDateSuffix(): string {
  *   exactly what the model can call. Defaults to the full built-in set.
  * @param provider — the active LLM provider. Drives the product identity
  *   (`anthropic` → "Claude Code", everything else → "OG Coder").
+ * @param environment — extra Environment-section facts (additional workspace
+ *   roots, network allowlist). This sits in the cached prefix, so changing it
+ *   costs exactly one cache-miss turn.
  */
 export async function buildSystemPrompt(
   cwd: string,
@@ -270,6 +298,7 @@ export async function buildSystemPrompt(
   toolNames?: readonly string[],
   activeLanguages?: Set<LanguageId>,
   provider?: Provider,
+  environment?: SystemPromptEnvironment,
 ): Promise<string> {
   const sections: string[] = [
     renderIdentitySection(provider),
@@ -282,7 +311,7 @@ export async function buildSystemPrompt(
   const approvedPlanSection = await renderApprovedPlanSection(approvedPlanPath);
   if (approvedPlanSection) sections.push(approvedPlanSection);
 
-  sections.push(renderResearchSection(toolNames), renderCodeQualitySection());
+  sections.push(renderResearchSection(toolNames, provider), renderCodeQualitySection());
 
   const toolsSection = renderToolsSection(toolNames);
   if (toolsSection) sections.push(toolsSection);
@@ -304,7 +333,7 @@ export async function buildSystemPrompt(
     if (skillsSection) sections.push(skillsSection);
   }
 
-  sections.push(renderEnvironmentSection(cwd), renderUncachedDateSuffix());
+  sections.push(renderEnvironmentSection(cwd, environment), renderUncachedDateSuffix());
 
   return sections.join("\n\n");
 }

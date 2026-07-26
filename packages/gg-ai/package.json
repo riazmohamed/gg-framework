@@ -1,6 +1,6 @@
 {
   "name": "@abukhaled/gg-ai",
-  "version": "5.20.1",
+  "version": "5.24.0",
   "type": "module",
   "description": "Unified LLM streaming API for Anthropic, OpenAI, and Gemini",
   "license": "MIT",

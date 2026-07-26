@@ -1,6 +1,7 @@
 // @abukhaled/gg-core — provider-agnostic, UI-free shared foundation.
 export * from "./model-registry.js";
 export * from "./thinking-level.js";
+export * from "./local-models.js";
 export * from "./paths.js";
 export * from "./logger.js";
 export * from "./file-lock.js";

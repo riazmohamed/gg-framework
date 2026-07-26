@@ -22,6 +22,173 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.29.0",
+    date: "2026-07-26",
+    items: [
+      "Every model you already run on your machine now shows up in the picker. I look for Ollama, LM Studio, llama.cpp and vLLM on their usual ports, read each model's real context size, and refuse the ones that can't call tools instead of letting them waste your turn. No key, no cost, and you can add your own endpoint if you moved a port.",
+      "You can save any chat now. Hover over the conversation and an `Export chat` button glides into the corner, one click drops a clean Markdown file wherever you want it, and I remember your folder for next time. It reads like a real document, not a machine dump.",
+      "You can point me at a second folder without leaving your project. Run `/add-dir` and I work across both repos at once, with a `+1 root` badge up top so you always know what I can reach.",
+      "You can lock down exactly which sites I am allowed to touch. Flip on the network allowlist in your settings and everything I fetch, search, clone, or install gets checked against your list first.",
+      "Local and self-hosted models were silently losing their thinking. I now catch the reasoning no matter what the endpoint calls it, so you finally see the whole train of thought — and a model that doesn't reason never gets asked to.",
+      "Local models get room to breathe. A big prompt on your own machine can take minutes to warm up, and I used to give up and retry forever. Now I wait it out, and a runaway search can no longer freeze me solid.",
+    ],
+  },
+  {
+    version: "0.28.3",
+    date: "2026-07-25",
+    items: [
+      "Windows finally feels like home. Your projects and recent sessions show up the moment you open the app, and you stay signed in instead of landing on an empty picker. I was hunting for your files in a folder Windows never actually uses.",
+      "Your work on Windows now genuinely saves. Every session write, resume, and archive was quietly failing behind the scenes, so your history could vanish when you closed the app. Nothing slips away anymore.",
+      "Inline error checking is live on Windows. I spot type errors the instant I create them and fix them in the same turn, exactly like on Mac. Before this I was getting nothing back and never knew it.",
+      "Your `MCP` servers connect on Windows. Anything set up through `npx`, which is very nearly all of them, died with a dead end error before it ever started. They boot properly now.",
+      "No more black console windows flashing when you launch or quit. I also make sure a cancelled command takes its entire process tree down with it, so runaway dev servers stop quietly piling up in the background.",
+    ],
+  },
+  {
+    version: "0.28.2",
+    date: "2026-07-25",
+    items: [
+      "Your specialist agents now research with real, live code instead of guessing from memory. Anything you point at `kencode-search` can finally reach it, so answers come back grounded in code that actually exists today. They were quietly cut off from it before.",
+      "`/bullet-proof` got its sharpest reviewers back. The deep `auditor` and `skeptic` agents were being shadowed by weaker stand-ins, so your security reports now come from the real thing again. Anything you wrote yourself stays exactly as you left it.",
+    ],
+  },
+  {
+    version: "0.28.1",
+    date: "2026-07-24",
+    items: [
+      "`Claude Opus 5` is now fully dialed in. You can cycle its thinking all the way from `low` up through `xhigh` and `max`, so you decide exactly how hard it pushes on any task. It was locked to one setting before. I also cleared the retired `Opus 4.8` out of the model menu, so you only ever see models worth picking.",
+    ],
+  },
+  {
+    version: "0.28.0",
+    date: "2026-07-24",
+    items: [
+      "`Claude Opus 5` just landed, and you can pick it right now. It is Anthropic's newest flagship: near-frontier smarts at half the price of the model it replaces, a full `1M token` context so it holds way more of your project in mind, and image understanding baked in. Open the model menu and give it a spin.",
+    ],
+  },
+  {
+    version: "0.27.7",
+    date: "2026-07-24",
+    items: [
+      "`/bullet-proof` now actually finishes the job. Some models used to chicken out halfway through the security review, so I reworked the whole flow and gave it two new specialist agents, `auditor` and `skeptic`, that hunt down real weaknesses and then try to disprove every single finding. You get a clean, verified report every time, and it runs leaner too.",
+      "I put the agent's instructions on a diet. Less repeated fluff in every request means snappier replies and cheaper sessions, with zero smarts lost. I also retired the old `/setup` command so the menu only shows tools that earn their spot.",
+    ],
+  },
+  {
+    version: "0.27.6",
+    date: "2026-07-24",
+    items: [
+      "Your title bar is now a launchpad. Click the `project name` to pop its folder straight open in Finder or Explorer, and click the `branch` to jump right to the repo on GitHub. It works the same on Mac and Windows.",
+      "No more staring at a lonely `0`. Your `issues` and `PRs` chips now show up only when you actually have some, so the title bar stays clean and only tells you what matters.",
+    ],
+  },
+  {
+    version: "0.27.5",
+    date: "2026-07-24",
+    items: [
+      "`Kimi` and `Moonshot` just got rock solid. They used to drop out mid-task with a bogus `API Key appears invalid` roughly every 15 minutes, especially with a few windows open at once. I now refresh your login well before it can ever expire, so your sessions just keep running.",
+    ],
+  },
+  {
+    version: "0.27.4",
+    date: "2026-07-24",
+    items: [
+      "Your project's GitHub pulse now lives in the title bar. Open `issues` and `PRs` sit right next to your branch, and one click jumps you straight to them on GitHub.",
+      "Your chat agents finally remember on their own. They now save the durable facts you share the moment you share them, no nagging required. I also fixed a nasty bug where a long memory update could abruptly kill your whole conversation.",
+      "No more phantom stalls. Quiet `OpenAI` reasoning models used to look frozen while they were silently thinking. Now the app knows the difference between thinking and stuck.",
+      "Resumed sessions tell the truth. Errors now land exactly where they happened instead of jumping to the bottom of the transcript.",
+    ],
+  },
+  {
+    version: "0.27.3",
+    date: "2026-07-23",
+    items: [
+      "Your workspace windows now know exactly where they belong. I made every window recover its active project instead of dumping you on `Home`, and slow wake-ups now show `Restoring workspace` instead of an empty black screen.",
+      "Your `rank badge` keeps the flex without the flicker. I rebuilt its color-shifting shine so your tier stays visible and smooth, even while other video-heavy apps are fighting for the screen.",
+    ],
+  },
+  {
+    version: "0.27.2",
+    date: "2026-07-23",
+    items: [
+      "Windows and Linux menus are back in fighting shape. I fixed the `model picker` and `Arrange` controls so every click lands, every choice sticks, and keyboard navigation feels crisp, while keeping the exact clean controls you already know.",
+    ],
+  },
+  {
+    version: "0.27.1",
+    date: "2026-07-23",
+    items: [
+      "Long builds no longer stall out waiting for you to type `Continue`. I taught GG Coder to catch runaway tool calls, retry them `2 times`, and keep your conversation moving without losing its place.",
+      "GG's built-in coding senses are fully loaded again. I restored `TypeScript diagnostics` and `source inspection` inside the desktop app, then made search more forgiving, so it catches mistakes sooner and digs through dependencies without missing a beat.",
+    ],
+  },
+  {
+    version: "0.27.0",
+    date: "2026-07-22",
+    items: [
+      "The `model picker` and `Arrange` button now open real native menus while keeping the exact clean controls you already know. They feel faster, behave properly with your keyboard, and look right at home on your machine.",
+      "Reading while several `subagents` work in parallel just got silky smooth. I cut the pointless background chatter and keep every real activity update, so you can scroll through the conversation without fighting the app.",
+      "Updates now show their work. Tap the new `Install` badge and both the footer and home screen turn into live percentage progress, with zero jumping around while GG Coder downloads the good stuff.",
+      "The idle footer finally developed a personality. I added `10` dry little status lines, from professional napping to token polishing, so waiting around is at least mildly entertaining.",
+    ],
+  },
+  {
+    version: "0.26.1",
+    date: "2026-07-22",
+    items: [
+      "Every answer now arrives whole. If your provider's connection drops mid-reply, I catch the cut-off and `retry` cleanly instead of quietly handing you half an answer dressed up as a finished one. No more silent half-answers.",
+      "Random error popups, evicted. I hunted down a sneaky class of `400` rejections that could crash a chat out of nowhere, so your conversations just keep flowing.",
+      "GG now runs lighter for longer. I capped runaway memory at `10 MB` per request and `50k` files per search, and plugged a background leak, so marathon sessions stay snappy instead of slowly bloating.",
+    ],
+  },
+  {
+    version: "0.26.0",
+    date: "2026-07-22",
+    items: [
+      "The login screen just got a glow-up. Every AI provider now shows up as a glossy tile with its real logo, from `Claude` clay to the `DeepSeek` whale, so connecting a new brain feels like picking a fighter. Connected ones get a little green dot so you always know who is ready to roll.",
+      "Kimi users, your quota is no longer a mystery. The title-bar usage meter now tracks your `Kimi For Coding` plan right alongside Claude and ChatGPT, so you can see exactly how much runway you have before you hit a wall.",
+    ],
+  },
+  {
+    version: "0.25.0",
+    date: "2026-07-21",
+    items: [
+      "Kimi `K3` now lets you dial its brainpower with a full `low / high / max` thinking ladder, and you can switch thinking off entirely for quick asks. On the Kimi Code plan it starts at the friendlier `high` default, so your usage stretches further without you lifting a finger.",
+      "GG now just gets on with it. I retuned its marching orders so it stops asking permission for safe, reversible steps and powers through to a verified finish. Fewer pauses, more done.",
+      "Giant sessions stay on the rails. I fixed a compaction bug that could overshoot the context window on monster turns, so long hauls now compress cleanly instead of derailing mid-task.",
+      "Resuming a project tells the truth now. If a session cannot resume, the `project picker` shows the real reason right there instead of leaving you staring at a loading screen that never arrives.",
+    ],
+  },
+  {
+    version: "0.24.5",
+    date: "2026-07-21",
+    items: [
+      "Every interface GG Coder builds now starts with accessibility as a hard requirement. I made `WCAG 2.2 AA` and `ADA-aligned` design non-negotiable across keyboard navigation, screen readers, contrast, motion, forms, media, zoom, and complete user flows. Better UI now means more people can actually use it.",
+    ],
+  },
+  {
+    version: "0.24.4",
+    date: "2026-07-21",
+    items: [
+      "GG Coder's `UI skill` just got pickier about color. I taught it to reject the muddy red-on-red and green-on-green `status pills` AI loves to repeat, then choose styling that actually fits your product instead of forcing another template. Your interfaces get cleaner without all looking the same.",
+    ],
+  },
+  {
+    version: "0.24.3",
+    date: "2026-07-21",
+    items: [
+      "Interfaces GG Coder builds just got a serious taste upgrade. I taught the `UI skill` to lock navigation and content to one clean rail, give `dropdowns` proper breathing room, and kill sticky click outlines without sacrificing `keyboard focus`. The tiny details finally behave like they belong together.",
+    ],
+  },
+  {
+    version: "0.24.2",
+    date: "2026-07-20",
+    items: [
+      "Your conversations now clean up after themselves without disappearing. I keep the last `30 days`, squeeze quiet sessions after `7 days`, and cap runaway saved tool output at `40,000 characters`. You get your disk space back and every archived chat still resumes right where you left it.",
+      "GG Coder refuses to melt down in the background now. I give the engine `5 retries`, then stop it cleanly, and cap each run's logs at `10 MB` so a bad crash can never spiral into a process or disk-space storm.",
+    ],
+  },
+  {
     version: "0.24.1",
     date: "2026-07-20",
     items: [
