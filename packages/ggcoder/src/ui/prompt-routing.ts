@@ -19,11 +19,16 @@ export function routePromptCommandInput(
   const customCmd = !builtinCmd ? customCommands.find((c) => c.name === cmdName) : undefined;
   const promptText = builtinCmd?.prompt ?? customCmd?.prompt;
   if (!promptText) return null;
+  const fullPrompt = promptText.includes("$ARGUMENTS")
+    ? promptText.replaceAll("$ARGUMENTS", cmdArgs)
+    : cmdArgs
+      ? `${promptText}\n\n## User Instructions\n\n${cmdArgs}`
+      : promptText;
   return {
     cmdName,
     cmdArgs,
     promptText,
-    fullPrompt: cmdArgs ? `${promptText}\n\n## User Instructions\n\n${cmdArgs}` : promptText,
+    fullPrompt,
   };
 }
 

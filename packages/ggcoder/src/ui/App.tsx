@@ -709,14 +709,44 @@ export function App(props: AppProps) {
     return () => stopPeriodicUpdateCheck();
   }, [props.version]);
 
-  // Load custom commands from .gg/commands/
+  // Load custom commands from .gg/commands/ and ~/.gg/commands/. Keep polling so
+  // commands copied in while the TUI is already open appear in slash completion
+  // without requiring a restart.
   const [customCommands, setCustomCommands] = useState<CustomCommand[]>([]);
-  const reloadCustomCommands = useCallback(() => {
-    loadCustomCommands(props.cwd).then(setCustomCommands);
+  const reloadCustomCommands = useCallback(async (): Promise<CustomCommand[]> => {
+    const commands = await loadCustomCommands(props.cwd).catch((err: unknown) => {
+      log(
+        "WARN",
+        "command",
+        `Failed to load custom commands: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [] as CustomCommand[];
+    });
+    setCustomCommands(commands);
+    return commands;
   }, [props.cwd]);
   useEffect(() => {
-    reloadCustomCommands();
-  }, [reloadCustomCommands]);
+    let cancelled = false;
+    const refresh = async () => {
+      const commands = await loadCustomCommands(props.cwd).catch((err: unknown) => {
+        log(
+          "WARN",
+          "command",
+          `Failed to load custom commands: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return [] as CustomCommand[];
+      });
+      if (!cancelled) setCustomCommands(commands);
+    };
+    void refresh();
+    const interval = setInterval(() => {
+      void refresh();
+    }, 2_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [props.cwd]);
 
   useEffect(() => {
     currentToolsRef.current = currentTools;
@@ -2028,12 +2058,13 @@ export function App(props: AppProps) {
         return;
       }
 
+      const latestCustomCommands = await reloadCustomCommands();
       if (
         await submitPromptCommand({
           trimmed,
           inputImages,
           currentModel,
-          customCommands,
+          customCommands: latestCustomCommands,
           setLastUserMessage,
           setDoneStatus,
           finalizeSubmittedUserItem,
