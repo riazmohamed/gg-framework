@@ -11,7 +11,10 @@ import { resolveShell, type ResolveShellOpts } from "../core/shell.js";
 import { PersistentShell } from "../core/persistent-shell.js";
 import { isReadOnlyCommand } from "./read-only-bash.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
-import { isCatastrophicCommand } from "../core/workspace-guard.js";
+import {
+  isCatastrophicCommand,
+  type WriteGuardSettings,
+} from "../core/workspace-guard.js";
 import { checkCommandPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import {
   prepareSandboxLaunch,
@@ -85,6 +88,13 @@ export function createBashTool(
   shellOpts?: ResolveShellOpts,
   getNetworkPolicy?: GetNetworkPolicy,
   getSandboxPolicy?: () => SandboxPolicy,
+  /**
+   * Workspace settings, read lazily so `allowOutsideWorkspaceWrites` can be
+   * toggled mid-session. The same getter the write and edit tools use: a
+   * removal outside the workspace is governed by the same opt-in as a write
+   * there, since it is the more destructive of the two.
+   */
+  getWriteGuardSettings?: () => WriteGuardSettings | undefined,
 ): AgentTool<typeof BashParams> {
   // Lazily created on the first persist:true call; one session per tool
   // instance (i.e. per agent session), killed when the process exits.
@@ -131,7 +141,7 @@ export function createBashTool(
       }
       // Catastrophic-command guard — enforced in code, before every execution
       // path (persistent shell, background, and normal spawn).
-      const catastrophic = isCatastrophicCommand(command, cwd);
+      const catastrophic = isCatastrophicCommand(command, cwd, getWriteGuardSettings?.());
       if (catastrophic) {
         return `Error: ${catastrophic}`;
       }

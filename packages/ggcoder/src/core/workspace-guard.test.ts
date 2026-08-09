@@ -122,3 +122,63 @@ describe("isCatastrophicCommand", () => {
     expect(isCatastrophicCommand(command, cwd)).toBeNull();
   });
 });
+
+describe("recursive removal outside the workspace", () => {
+  const cwd = path.join(os.tmpdir(), "ws-guard-project");
+
+  it("refuses a target outside every workspace root", () => {
+    // The gap this closes: `write ~/Documents/x` was already blocked while
+    // `rm -rf ~/Documents` ran unattended — the destructive one was permitted.
+    const reason = isCatastrophicCommand(`rm -rf ${path.join(os.homedir(), "Documents")}`, cwd);
+    expect(reason).toContain("outside the workspace");
+    expect(reason).toContain("allowOutsideWorkspaceWrites");
+  });
+
+  it("allows ordinary destructive work inside the workspace", () => {
+    // `rm -rf node_modules` is normal, and a guard that blocks it gets disabled.
+    expect(isCatastrophicCommand("rm -rf node_modules", cwd)).toBeNull();
+    expect(isCatastrophicCommand(`rm -rf ${path.join(cwd, "dist")}`, cwd)).toBeNull();
+  });
+
+  it("still allows the temp dir and the agent's own state dir", () => {
+    expect(isCatastrophicCommand(`rm -rf ${path.join(os.tmpdir(), "scratch")}`, cwd)).toBeNull();
+  });
+
+  it("allows /tmp, which os.tmpdir() does not report on macOS", () => {
+    // Caught by an existing test: os.tmpdir() is the per-user /var/folders path
+    // here, so /tmp looked like an ordinary outside path and routine cleanup
+    // tripped the guard. A guard that fires on normal work gets turned off.
+    expect(isCatastrophicCommand("rm -rf /tmp/scratch-dir", cwd)).toBeNull();
+    expect(isCatastrophicCommand("rm -rf /var/tmp/build", cwd)).toBeNull();
+  });
+
+  it("honours the same opt-in as the write guard", () => {
+    expect(
+      isCatastrophicCommand(`rm -rf ${path.join(os.homedir(), "Documents")}`, cwd, {
+        allowOutsideWorkspaceWrites: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("respects extra roots added with /add-dir", () => {
+    const extra = path.join(os.tmpdir(), "another-project");
+    expect(
+      isCatastrophicCommand(`rm -rf ${path.join(extra, "build")}`, cwd, {
+        additionalRoots: [extra],
+      }),
+    ).toBeNull();
+  });
+
+  it("does not block an unexpanded variable or a glob", () => {
+    // These resolve at run time, not here. Blocking them would make the guard
+    // fire on ordinary work, and a guard that cries wolf gets turned off.
+    expect(isCatastrophicCommand("rm -rf $BUILD_DIR", cwd)).toBeNull();
+    expect(isCatastrophicCommand("rm -rf ./packages/*/dist", cwd)).toBeNull();
+  });
+
+  it("still refuses the catastrophic targets with their original message", () => {
+    // The narrow, always-on cases must keep their stronger wording.
+    expect(isCatastrophicCommand("rm -rf /", cwd)).toContain("irreversible");
+    expect(isCatastrophicCommand("rm -rf ~", cwd)).toContain("irreversible");
+  });
+});

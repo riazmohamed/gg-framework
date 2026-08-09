@@ -188,6 +188,7 @@ export async function createTools(
       undefined,
       opts?.getNetworkPolicy,
       ops === localOperations ? opts?.getSandboxPolicy : undefined,
+      opts?.getWriteGuardSettings,
     ),
     createFindTool(cwd),
     createGrepTool(cwd, ops),
