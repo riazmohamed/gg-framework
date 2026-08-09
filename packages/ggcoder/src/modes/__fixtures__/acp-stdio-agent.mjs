@@ -33,6 +33,8 @@ if (!cwd) throw new Error("usage: acp-stdio-agent.mjs <cwd> [otherCwd]");
 
 const manager = new SessionManager(path.join(os.homedir(), ".gg", "sessions"));
 let entrySequence = 0;
+/** The cwd most recently handed to createSession, echoed back for assertions. */
+let lastSessionCwd = null;
 
 async function appendMessage(sessionPath, message) {
   entrySequence += 1;
@@ -239,6 +241,14 @@ class ScriptedSession {
   }
 
   async prompt(content) {
+    // Reports the directory this session was actually built for. The client
+    // sends `cwd` on session/new; proving it arrives needs the session to say
+    // so out loud, since nothing else in the protocol echoes it back.
+    if (content === "which cwd") {
+      this.eventBus.emit("text_delta", { text: `cwd=${this.sessionCwd ?? "unset"}` });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return;
+    }
     // A real `edit` run: the file on disk genuinely changes between the tool's
     // start and end events, which is the only way to prove the mode snapshots
     // the BEFORE contents rather than reading the finished file twice.
@@ -424,8 +434,13 @@ await runAcpMode({
   model: "claude-opus-5",
   cwd,
   version: "0.0.0-test",
-  createSession: (signal, hooks) => {
+  // The third argument is the cwd the *client* asked for, which is not always
+  // the one this process was started in. Recorded so a test can prove the
+  // session honours it rather than silently using the process directory.
+  createSession: (signal, hooks, sessionCwd) => {
     current = new ScriptedSession(signal, hooks);
+    current.sessionCwd = sessionCwd;
+    lastSessionCwd = sessionCwd;
     return current;
   },
 });

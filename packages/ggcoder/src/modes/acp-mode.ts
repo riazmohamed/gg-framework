@@ -157,7 +157,7 @@ export interface AcpModeOptions {
    * Builds the session for `session/new`. Overridden by tests; production
    * always gets a real {@link AgentSession}.
    */
-  createSession?: (signal: AbortSignal, hooks: AcpPlanHooks) => AcpAgentSession;
+  createSession?: (signal: AbortSignal, hooks: AcpPlanHooks, cwd: string) => AcpAgentSession;
 }
 
 // ── Tool mapping ───────────────────────────────────────────
@@ -674,6 +674,17 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
    */
   let session: AcpAgentSession | null = null;
   let sessionId = "";
+  /**
+   * The directory the live session works in.
+   *
+   * A client sends `cwd` on `session/new`, and that is the project the user
+   * picked — not the directory this process happens to have been started in.
+   * The two differ whenever the agent is spawned by something long-lived: a
+   * daemon under launchd has cwd `/`, so using only `options.cwd` failed
+   * outright (`mkdir '/.gg'`) and, where it did not fail, silently ran the
+   * session against the wrong project.
+   */
+  let sessionCwd = options.cwd;
   let abort = new AbortController();
   /** Set while a `session/prompt` is in flight, so a second one is rejected. */
   let running = false;
@@ -866,7 +877,7 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
       // A second session/new (or a dispose) beat us here; that session will
       // announce its own commands.
       if (session !== target || sessionId !== forSession) return;
-      void availableCommands(target, options.cwd)
+      void availableCommands(target, sessionCwd)
         .then((commands) => {
           if (session !== target || sessionId !== forSession) return;
           notifyUpdate({
@@ -952,7 +963,7 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
         // afterwards is a new one.
         endMessage();
 
-        const locations = toolLocations(args, options.cwd);
+        const locations = toolLocations(args, sessionCwd);
         // Snapshot BEFORE the tool runs. This handler is synchronous and the
         // tool starts writing immediately after it, which is the only window
         // where the file still holds its pre-edit contents.
@@ -1087,11 +1098,11 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
 
   const createSession =
     options.createSession ??
-    ((signal: AbortSignal, hooks: AcpPlanHooks): AcpAgentSession =>
+    ((signal: AbortSignal, hooks: AcpPlanHooks, cwd: string): AcpAgentSession =>
       new AgentSession({
         provider: options.provider,
         model: options.model,
-        cwd: options.cwd,
+        cwd,
         baseUrl: options.baseUrl,
         systemPrompt: options.systemPrompt,
         thinkingLevel: options.thinkingLevel,
@@ -1132,12 +1143,13 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
    * `session/new` and `session/load` differ only in whether history is
    * restored first, so they share this path rather than drifting apart.
    */
-  async function startSession(restorePath?: string): Promise<AcpAgentSession> {
+  async function startSession(restorePath?: string, cwd?: string): Promise<AcpAgentSession> {
     // Replacing an in-flight session would strand the prompt that is running
     // on it, so the old one is stopped first, deliberately and visibly.
     await disposeSession();
     abort = new AbortController();
-    const created = createSession(abort.signal, planHooks);
+    sessionCwd = cwd ?? options.cwd;
+    const created = createSession(abort.signal, planHooks, sessionCwd);
     await created.initialize();
     if (restorePath) await created.loadSession(restorePath);
     session = created;
@@ -1146,8 +1158,8 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
     return created;
   }
 
-  async function handleNewSession(): Promise<unknown> {
-    const created = await startSession();
+  async function handleNewSession(params: unknown): Promise<unknown> {
+    const created = await startSession(undefined, requestCwd(params));
     notifyAvailableCommands(created);
     announceSessionSoon(created);
     return { sessionId, configOptions: configOptionsFor(created), modes: sessionModes(created) };
@@ -1213,7 +1225,7 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
     const sessionPath = await findSessionById(requested, requestCwd(params));
     if (!sessionPath) throw new InvalidParams(`Unknown session '${requested}'.`);
 
-    const restored = await startSession(sessionPath);
+    const restored = await startSession(sessionPath, requestCwd(params));
     // Display history is reconstructed separately. The live AgentSession above
     // deliberately keeps only the canonical newest checkpoint as model context.
     const checkpoints = await loadSessionCheckpointChain(sessionPath);
@@ -1266,7 +1278,7 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
     const sessionPath = await findSessionById(requested, requestCwd(params));
     if (!sessionPath) throw new InvalidParams(`Unknown session '${requested}'.`);
 
-    const restored = await startSession(sessionPath);
+    const restored = await startSession(sessionPath, requestCwd(params));
     // As in session/load: the client keeps addressing the id it asked for.
     sessionId = requested;
     notifyAvailableCommands(restored);
@@ -1451,7 +1463,7 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
       case "initialize":
         return handleInitialize();
       case "session/new":
-        return handleNewSession();
+        return handleNewSession(params);
       case "session/prompt":
         return handlePrompt(params);
       case "session/list":

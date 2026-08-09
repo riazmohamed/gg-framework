@@ -271,6 +271,42 @@ describe("ACP mode over stdio", () => {
     expect(created.result!.sessionId).toBe("acp-fixture-session");
   });
 
+  it("builds the session in the cwd the client asked for, not the process's own", async () => {
+    // The bug this pins: `session/new` ignored `params.cwd` and always used the
+    // directory the agent process was started in. Spawned by anything
+    // long-lived those differ — a daemon under launchd has cwd `/`, which both
+    // failed outright (`mkdir '/.gg'`) and, where it did not fail, ran the
+    // session against a project the user never chose.
+    client = new AcpClient();
+    client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
+    await client.until(1);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/new",
+      params: { cwd: tmpOtherProject },
+    });
+    const created = (await client.until(2)).at(-1)!;
+    const sessionId = created.result!.sessionId as string;
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "which cwd" }] },
+    });
+    const said = updates(await client.until(3))
+      .filter((update) => update.sessionUpdate === "agent_message_chunk")
+      .map((update) => (update.content as { text?: string }).text ?? "")
+      .join("");
+
+    expect(said).toContain(`cwd=${tmpOtherProject}`);
+    // The harness starts the fixture in the repo root, so a pass here cannot
+    // be the process directory coinciding with the requested one.
+    expect(said).not.toContain(`cwd=${process.cwd()}`);
+  });
+
   it("lists sessions from every project, newest first, titled by their first user prompt", async () => {
     client = new AcpClient();
     await client.handshake();
