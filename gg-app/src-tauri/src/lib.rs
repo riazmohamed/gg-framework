@@ -1163,6 +1163,36 @@ async fn agent_auth_oauth_code(
         .map_err(|e| e.to_string())
 }
 
+/// Proxy: answer an MCP server's mid-tool-call request for user input.
+///
+/// `action` is `accept` | `decline` | `cancel`; `content` carries the filled
+/// form and is only meaningful for `accept`.
+#[tauri::command]
+async fn agent_mcp_elicit(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    id: String,
+    action: String,
+    content: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!(
+            "{}/mcp/elicit/{}",
+            sidecar_base(port),
+            urlencoding(&id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "action": action, "content": content }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Proxy: disconnect a provider (clear its stored credentials).
 #[tauri::command]
 async fn agent_auth_logout(
@@ -1184,6 +1214,29 @@ async fn agent_auth_logout(
         .map_err(|e| e.to_string())
 }
 
+/// Proxy: cancel one pending queued message by id. Returns
+/// `{ cancelled, queued }`. `cancelled: false` means it already drained into
+/// the run between render and click, which is a normal race, not an error.
+#[tauri::command]
+async fn agent_cancel_queued(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/queued/cancel", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Proxy: stop a background task by id. Returns `{ message }`.
 #[tauri::command]
 async fn agent_kill_task(
@@ -1197,6 +1250,30 @@ async fn agent_kill_task(
         .post(format!("{}/kill", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: import a Claude Code / Codex / Cursor transcript into a resumable
+/// GG Coder session. Returns the importer's typed result (`{ ok, ... }`),
+/// including the failure case, so the webview can show the reason verbatim.
+#[tauri::command]
+async fn agent_import_transcript(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    path: String,
+    cwd: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/import-transcript", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "path": path, "cwd": cwd }))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1631,6 +1708,75 @@ async fn agent_save_settings(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn agent_plugins(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}/plugins", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn agent_install_plugin(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    bundle_path: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/plugins/install", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "bundlePath": bundle_path }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn agent_remove_plugin(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    plugin_id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let mut endpoint = reqwest::Url::parse(&format!("{}/plugins/", sidecar_base(port)))
+        .map_err(|e| e.to_string())?;
+    endpoint
+        .path_segments_mut()
+        .map_err(|_| "invalid sidecar URL".to_string())?
+        .push(&plugin_id);
+    let res = client
+        .delete(endpoint)
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── Native app settings (~/.gg/gg-app.json) ───────────────────────────────
 // The project folder is a plain home-dir file with NOTHING to do with the
 // agent, so Rust reads/writes it directly. This makes the home-screen Settings
@@ -1951,6 +2097,22 @@ struct ApiKeyVariant {
     base_url: Option<&'static str>,
 }
 
+/// Guidance for one auth method — what it bills against and when to pick it.
+/// Only providers offering a real choice (the dual-auth ones) carry these.
+/// Mirrors `AuthMethodMeta` in packages/ggcoder/src/core/auth-providers.ts.
+struct MethodDetail {
+    /// "oauth" or "apikey".
+    method: &'static str,
+    /// Button/row label, e.g. "Sign in with Grok".
+    label: &'static str,
+    /// What the user spends on this method.
+    billing: &'static str,
+    /// When to choose it.
+    when: &'static str,
+    /// Prerequisite the user must already have, if any.
+    requires: Option<&'static str>,
+}
+
 /// Static metadata for one AI provider in the login hub. Mirrors
 /// packages/ggcoder/src/core/auth-providers.ts (AUTH_PROVIDERS) — keep in sync.
 struct ProviderMeta {
@@ -1960,6 +2122,16 @@ struct ProviderMeta {
     description: &'static str,
     /// Supported auth methods, e.g. `["oauth"]`, `["apikey"]`, or both.
     methods: &'static [&'static str],
+    /// Distinct auth.json key holding subscription OAuth credentials, for the
+    /// providers that can hold OAuth *and* an API key at once. Mirrors gg-core's
+    /// DUAL_AUTH_PROVIDERS — OAuth-only providers store under `value` itself and
+    /// leave this `None`.
+    oauth_key: Option<&'static str>,
+    /// Display name of the OAuth credential ("Grok OAuth"), for the
+    /// priority note. Only meaningful alongside `oauth_key`.
+    oauth_label: Option<&'static str>,
+    /// Per-method guidance; empty when the provider offers no choice.
+    method_details: &'static [MethodDetail],
     api_key_label: Option<&'static str>,
     /// Custom API base URL stored alongside an API-key credential. Used as the
     /// default when `api_key_variants` is empty.
@@ -1978,6 +2150,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "Anthropic",
         description: "Claude Fable 5, Opus 4.8, Sonnet 5, Haiku 4.5",
         methods: &["oauth"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: None,
         api_key_base_url: None,
         api_key_variants: &[],
@@ -1987,6 +2162,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "OpenAI",
         description: "GPT-5.6 Sol, GPT-5.6 Terra, GPT-5.6 Luna, GPT-5.5",
         methods: &["oauth"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: None,
         api_key_base_url: None,
         api_key_variants: &[],
@@ -1996,6 +2174,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "Gemini",
         description: "Gemini 3.1 Flash Lite, Gemini 3.5 Flash, Gemini 3.1 Pro (Preview)",
         methods: &["oauth"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: None,
         api_key_base_url: None,
         api_key_variants: &[],
@@ -2003,8 +2184,28 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "xai",
         label: "xAI (Grok)",
-        description: "Grok 4.5",
-        methods: &["apikey"],
+        description: "Grok 4.5 · OAuth or API key",
+        methods: &["oauth", "apikey"],
+        oauth_key: Some("xai-oauth"),
+        oauth_label: Some("Grok OAuth"),
+        method_details: &[
+            MethodDetail {
+                method: "oauth",
+                label: "Sign in with Grok",
+                billing: "Uses your SuperGrok or X Premium subscription — no per-token API billing.",
+                when: "Preferred. Pick this if you already pay for Grok.",
+                requires: Some(
+                    "An active SuperGrok or X Premium subscription. xAI gates this endpoint by tier, so a valid login can still be refused — keep an API key as backup.",
+                ),
+            },
+            MethodDetail {
+                method: "apikey",
+                label: "xAI API key",
+                billing: "Metered pay-per-token billing on your console.x.ai credits.",
+                when: "Use without a Grok subscription, or as the fallback when OAuth usage runs out.",
+                requires: Some("An API key from console.x.ai."),
+            },
+        ],
         api_key_label: Some("xAI"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -2014,6 +2215,24 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "Moonshot",
         description: "Kimi K3, K2.7 Code · OAuth or API key",
         methods: &["oauth", "apikey"],
+        oauth_key: Some("moonshot-oauth"),
+        oauth_label: Some("Kimi OAuth"),
+        method_details: &[
+            MethodDetail {
+                method: "oauth",
+                label: "Sign in with Kimi",
+                billing: "Uses your Kimi For Coding plan — no per-token API billing.",
+                when: "Preferred. Pick this if you have a Kimi coding plan.",
+                requires: Some("An active Kimi For Coding subscription."),
+            },
+            MethodDetail {
+                method: "apikey",
+                label: "Moonshot API key",
+                billing: "Metered pay-per-token billing on your Moonshot platform credits.",
+                when: "Use without a Kimi plan, or as the fallback when plan usage runs out.",
+                requires: Some("An API key from platform.moonshot.ai."),
+            },
+        ],
         api_key_label: Some("Moonshot"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -2023,6 +2242,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "Z.AI (GLM)",
         description: "GLM-5.2, GLM-5.1, GLM-4.7, GLM-4.7 Flash",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("Z.AI"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -2032,6 +2254,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "MiniMax",
         description: "MiniMax M3",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("MiniMax"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -2042,6 +2267,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         description:
             "MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 · Token Plan or API Credits",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("Xiaomi MiMo"),
         api_key_base_url: Some("https://token-plan-sgp.xiaomimimo.com/v1"),
         api_key_variants: &[
@@ -2062,6 +2290,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "DeepSeek",
         description: "DeepSeek V4 Pro, V4 Flash",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("DeepSeek"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -2071,6 +2302,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "Sakana (Fugu)",
         description: "Fugu, Fugu Ultra",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("Sakana"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -2080,6 +2314,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "OpenRouter",
         description: "Multi-provider gateway",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("OpenRouter"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -2111,10 +2348,17 @@ fn resolve_apikey_target(
 
 /// Native: provider list + live connection status, read directly from
 /// ~/.gg/auth.json. `connected` is true when a credential key is present
-/// (moonshot is satisfied by either its OAuth key `moonshot-oauth` or the
-/// `moonshot` API key; a multi-variant provider like Xiaomi is satisfied by
-/// ANY of its variant keys — mirrors AuthStorage.hasProviderAuth). Never needs
-/// the sidecar.
+/// (a dual-auth provider like Moonshot/xAI is satisfied by either its OAuth key
+/// or its API key; a multi-variant provider like Xiaomi is satisfied by ANY of
+/// its variant keys — mirrors AuthStorage.hasProviderAuth). Never needs the
+/// sidecar.
+///
+/// Also reports WHICH methods are connected and which one a request would
+/// actually use, mirroring AuthStorage's resolution order: subscription OAuth
+/// wins, and the API key only takes over while OAuth's usage window is
+/// exhausted. A single `connected` bit cannot express "signed in with OAuth,
+/// key on file as backup", and the UI needs that to explain itself and to offer
+/// a per-method disconnect.
 #[tauri::command]
 fn app_auth_status() -> serde_json::Value {
     // Parse the auth file into a JSON object; missing/invalid → empty (no creds).
@@ -2128,26 +2372,115 @@ fn app_auth_status() -> serde_json::Value {
             .map(|v| !v.is_null())
             .unwrap_or(false)
     };
-    let connected = |p: &ProviderMeta| -> bool {
-        if p.value == "moonshot" {
-            return has_key("moonshot-oauth") || has_key("moonshot");
-        }
-        if !p.api_key_variants.is_empty() {
-            return has_key(p.value) || p.api_key_variants.iter().any(|v| has_key(v.key));
-        }
-        has_key(p.value)
+    // `usageExhaustedUntil` on an OAuth credential: set by the agent loop when the
+    // subscription endpoint reported its plan usage was spent (0 when absent).
+    let exhausted_until = |key: &str| -> i64 {
+        creds
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.get("usageExhaustedUntil"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
     };
+    // API-key credential present under any of the provider's key(s).
+    let has_api_key = |p: &ProviderMeta| -> bool {
+        if !p.methods.contains(&"apikey") {
+            return false;
+        }
+        has_key(p.value) || p.api_key_variants.iter().any(|v| has_key(v.key))
+    };
+    // OAuth credential present. Dual-auth providers keep it under a distinct key;
+    // OAuth-only providers store it under the provider id itself.
+    let has_oauth = |p: &ProviderMeta| -> bool {
+        if !p.methods.contains(&"oauth") {
+            return false;
+        }
+        match p.oauth_key {
+            Some(key) => has_key(key),
+            None => has_key(p.value),
+        }
+    };
+    let connected = |p: &ProviderMeta| -> bool { has_oauth(p) || has_api_key(p) };
 
+    let now_ms = current_unix_millis();
     let list: Vec<serde_json::Value> = AUTH_PROVIDERS
         .iter()
         .map(|p| {
+            let oauth = has_oauth(p);
+            let api_key = has_api_key(p);
+            let mut connected_methods: Vec<&str> = Vec::new();
+            if oauth {
+                connected_methods.push("oauth");
+            }
+            if api_key {
+                connected_methods.push("apikey");
+            }
+            // OAuth is sidelined only while its usage window is spent AND a key
+            // exists to cover it — with no key, OAuth stays active so the real
+            // usage-limit error surfaces instead of a silent billing switch.
+            let sidelined_until = match p.oauth_key {
+                Some(key) if oauth && api_key => {
+                    let until = exhausted_until(key);
+                    if until > now_ms {
+                        Some(until)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            let active_method = if oauth {
+                if sidelined_until.is_some() {
+                    Some("apikey")
+                } else {
+                    Some("oauth")
+                }
+            } else if api_key {
+                Some("apikey")
+            } else {
+                None
+            };
+
             let mut obj = serde_json::json!({
                 "value": p.value,
                 "label": p.label,
                 "description": p.description,
                 "methods": p.methods,
                 "connected": connected(p),
+                "connectedMethods": connected_methods,
             });
+            if let Some(m) = active_method {
+                obj["activeMethod"] = serde_json::json!(m);
+            }
+            if let Some(until) = sidelined_until {
+                obj["oauthExhaustedUntil"] = serde_json::json!(until);
+            }
+            if !p.method_details.is_empty() {
+                let guidance: Vec<serde_json::Value> = p
+                    .method_details
+                    .iter()
+                    .map(|d| {
+                        let mut g = serde_json::json!({
+                            "method": d.method,
+                            "label": d.label,
+                            "billing": d.billing,
+                            "when": d.when,
+                        });
+                        if let Some(r) = d.requires {
+                            g["requires"] = serde_json::json!(r);
+                        }
+                        g
+                    })
+                    .collect();
+                obj["methodGuidance"] = serde_json::json!(guidance);
+            }
+            // Only a provider with two methods has a priority to explain. Keep the
+            // wording in sync with gg-core's DUAL_AUTH_PROVIDERS resolution order.
+            if let (Some(oauth_label), Some(key_label)) = (p.oauth_label, p.api_key_label) {
+                obj["priorityNote"] = serde_json::json!(format!(
+                    "With both connected, {oauth_label} is used first. The {key_label} API key takes over automatically while subscription usage is out (or if the OAuth login expires), then {oauth_label} resumes on its own."
+                ));
+            }
             if let Some(l) = p.api_key_label {
                 obj["apiKeyLabel"] = serde_json::json!(l);
             }
@@ -2223,20 +2556,44 @@ fn apply_apikey(
     serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
 }
 
-/// Pure: remove a provider's credential from the existing auth.json text.
-/// Moonshot also drops its distinct OAuth key (`moonshot-oauth`) so a single
-/// "disconnect" fully removes Kimi OAuth + the Moonshot API key. Returns the new
-/// pretty-printed JSON (an empty object `{}` when nothing remains / no file).
-fn apply_logout(existing: Option<&str>, provider: &str) -> Result<String, String> {
+/// Pure: remove a provider's credential(s) from the existing auth.json text.
+///
+/// `method` scopes the removal for dual-auth providers (Moonshot, xAI), which
+/// hold two independent credentials: `Some("oauth")` drops only the subscription
+/// login, `Some("apikey")` drops only the key(s), and `None` disconnects the
+/// provider entirely. Dropping a spent API key must not sign the user out of
+/// their subscription, and vice versa.
+///
+/// Returns the new pretty-printed JSON (an empty object `{}` when nothing
+/// remains / no file).
+fn apply_logout(
+    existing: Option<&str>,
+    provider: &str,
+    method: Option<&str>,
+) -> Result<String, String> {
     let mut root = parse_auth_object(existing)?;
+    let meta = AUTH_PROVIDERS.iter().find(|p| p.value == provider);
     if let Some(map) = root.as_object_mut() {
-        map.remove(provider);
-        if provider == "moonshot" {
-            map.remove("moonshot-oauth");
+        if method != Some("apikey") {
+            // A dual-auth provider's OAuth credential lives under its own key;
+            // every other provider's lives under the provider id.
+            match meta.and_then(|m| m.oauth_key) {
+                Some(key) => {
+                    map.remove(key);
+                }
+                None => {
+                    map.remove(provider);
+                }
+            }
         }
-        if let Some(meta) = AUTH_PROVIDERS.iter().find(|p| p.value == provider) {
-            for v in meta.api_key_variants {
-                map.remove(v.key);
+        if method != Some("oauth") {
+            // Covers single-credential providers and a dual provider's API key,
+            // plus every extra variant key (currently only Xiaomi's).
+            map.remove(provider);
+            if let Some(meta) = meta {
+                for v in meta.api_key_variants {
+                    map.remove(v.key);
+                }
             }
         }
     }
@@ -2308,20 +2665,52 @@ fn app_auth_apikey(
 }
 
 /// Native: disconnect a provider (remove its credential from ~/.gg/auth.json).
-/// Moonshot also clears its OAuth key; any provider with multiple
-/// `api_key_variants` (currently only Xiaomi) clears every variant key, so a
-/// single "disconnect" fully removes all of a provider's credentials. Never
-/// touches the sidecar. Returns `{ ok: true }`.
+/// `method` ("oauth" | "apikey") disconnects just one of a dual-auth provider's
+/// two credentials; omitted, it removes all of them — including the OAuth key
+/// and every API-key variant (currently only Xiaomi's). Never touches the
+/// sidecar. Returns `{ ok: true }`.
 #[tauri::command]
-fn app_auth_logout(provider: String) -> Result<serde_json::Value, String> {
+fn app_auth_logout(
+    app: tauri::AppHandle,
+    provider: String,
+    method: Option<String>,
+) -> Result<serde_json::Value, String> {
+    if let Some(m) = method.as_deref() {
+        if m != "oauth" && m != "apikey" {
+            return Err(format!("unknown auth method: {m}"));
+        }
+    }
     let existing = std::fs::read_to_string(auth_file_path()).ok();
     // Nothing to remove and no file → succeed silently (idempotent).
     if existing.is_none() {
         return Ok(serde_json::json!({ "ok": true }));
     }
-    let next = apply_logout(existing.as_deref(), &provider)?;
+    let next = apply_logout(existing.as_deref(), &provider, method.as_deref())?;
     write_auth_file(&next)?;
+    // Disconnecting removes that provider's models from `/models` and clears
+    // its connection dot. Logout is deliberately native (it must work even with
+    // no daemon), so the sidecar never learns about it — tell every window
+    // directly, or their pickers keep offering models the user can no longer
+    // authenticate against and the login screen still shows them connected.
+    broadcast_agent_event(&app, "models_change", serde_json::json!({}));
+    broadcast_agent_event(
+        &app,
+        "auth_change",
+        serde_json::json!({ "provider": provider }),
+    );
     Ok(serde_json::json!({ "ok": true }))
+}
+
+/// Emit one `agent-event` frame to EVERY window, matching the shape the SSE
+/// bridge produces. For global state changed natively, outside any session.
+fn broadcast_agent_event(app: &tauri::AppHandle, event_type: &str, data: serde_json::Value) {
+    for label in app.webview_windows().keys() {
+        let _ = app.emit_to(
+            EventTarget::webview_window(label.clone()),
+            "agent-event",
+            serde_json::json!({ "type": event_type, "data": data }),
+        );
+    }
 }
 
 /// Current unix time in milliseconds (wall clock; fine for an expiry stamp).
@@ -2683,6 +3072,38 @@ async fn agent_create_project(
             .get("error")
             .and_then(|v| v.as_str())
             .unwrap_or("failed to create project");
+        return Err(msg.to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: hide (or with `hidden: false`, restore) a project in the picker.
+#[tauri::command]
+async fn agent_set_project_hidden(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    path: String,
+    hidden: bool,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/projects/hidden", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "path": path, "hidden": hidden }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("failed to update hidden projects");
         return Err(msg.to_string());
     }
     Ok(body)
@@ -3152,6 +3573,296 @@ fn gaze_focus(
         }
     }
     Ok(target)
+}
+
+// ── System tray (macOS menu bar / Windows notification area) ──────────────
+// One status item giving the app a presence while its windows are hidden behind
+// a fullscreen editor.
+//
+// The icon is platform-split, and the split is NOT cosmetic:
+//   macOS   — a black-on-transparent "G" flagged as a TEMPLATE image, which the
+//             system re-tints for light/dark menu bars. Feeding the rounded app
+//             tile here would render as a solid blob.
+//   Windows — the full-colour app icon. Windows has no template concept, so a
+//             monochrome mark would vanish on either the light or the dark
+//             taskbar; the tile carries its own background and reads on both.
+// (Same split, same reasoning, as openclaw's Tauri tray.)
+//
+// Linux is excluded: it needs libayatana-appindicator and we don't ship Linux
+// (see the release workflow's matrix).
+//
+// The menu has no per-item visibility API in muda, so "Update now" is added and
+// removed by REBUILDING the menu whenever the webview reports a change
+// (`set_update_available` / `set_remote_active`).
+
+/// Tray menu item ids. Kept as one list so the builder and the click handler
+/// can never drift apart.
+#[cfg(any(target_os = "macos", windows))]
+mod tray_id {
+    pub const UPDATE: &str = "tray:update";
+    pub const NEW_CHAT: &str = "tray:new-chat";
+    pub const NEW_CODE: &str = "tray:new-code";
+    pub const REMOTE: &str = "tray:remote";
+    pub const SETTINGS: &str = "tray:settings";
+}
+
+/// Everything the tray menu's labels depend on. Both fields are pushed down by
+/// the webview (Rust owns neither the updater nor the Telegram serve loop), and
+/// any change rebuilds the menu.
+#[derive(Default, Clone, PartialEq, Eq)]
+struct TrayStatus {
+    /// Pending update version, or `None` when up to date. Drives whether the
+    /// "Update now" item exists at all.
+    update_version: Option<String>,
+    /// True while the Telegram serve loop is running. Flips the Remote item
+    /// between "Remote" and "Remote · Turn off".
+    remote_active: bool,
+}
+
+#[derive(Default)]
+struct TrayState(Mutex<TrayStatus>);
+
+/// Tray actions handed to a window that does not exist yet. A freshly built
+/// window's webview isn't listening when the menu is clicked, so the intent is
+/// parked here and the webview claims it on mount via `window_tray_intent`.
+#[derive(Default)]
+struct TrayIntents(Mutex<HashMap<String, String>>);
+
+/// True for the real app windows (`main`, `project-N`) — excludes transient
+/// chrome like the borderless `whatsnew` dialog, which must never be treated as
+/// a place to route a tray action.
+fn is_app_window(label: &str) -> bool {
+    label == "main" || label.starts_with("project-")
+}
+
+/// App-window labels in reading order (left-to-right, top-to-bottom).
+fn app_window_labels(app: &tauri::AppHandle) -> Vec<String> {
+    compute_window_order(app)
+        .into_iter()
+        .filter(|l| is_app_window(l))
+        .collect()
+}
+
+/// The window a tray action should target: the focused app window when there is
+/// one, else the first in reading order. `None` when no app window is open.
+fn tray_target_window(app: &tauri::AppHandle) -> Option<String> {
+    let labels = app_window_labels(app);
+    let focused = app.state::<FocusedWindow>().0.lock().unwrap().clone();
+    focused
+        .filter(|l| labels.iter().any(|x| x == l))
+        .or_else(|| labels.first().cloned())
+}
+
+/// Build the tray menu for a given status. "Update now" is present ONLY while
+/// `update_version` is `Some` — muda has no per-item visibility API, so the menu
+/// is rebuilt instead.
+#[cfg(any(target_os = "macos", windows))]
+fn build_tray_menu(
+    app: &tauri::AppHandle,
+    status: &TrayStatus,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    let menu = Menu::new(app)?;
+    if let Some(version) = status.update_version.as_deref() {
+        menu.append(&MenuItem::with_id(
+            app,
+            tray_id::UPDATE,
+            format!("Update now \u{2192} v{version}"),
+            true,
+            None::<&str>,
+        )?)?;
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+    }
+    menu.append(&MenuItem::with_id(
+        app,
+        tray_id::NEW_CHAT,
+        "New chat session",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        tray_id::NEW_CODE,
+        "New code session",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        tray_id::REMOTE,
+        if status.remote_active {
+            "Remote \u{b7} Turn off"
+        } else {
+            "Remote"
+        },
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        tray_id::SETTINGS,
+        "Settings",
+        true,
+        None::<&str>,
+    )?)?;
+    Ok(menu)
+}
+
+/// Install the status item. Called once from `setup`.
+#[cfg(any(target_os = "macos", windows))]
+fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::image::Image;
+    use tauri::tray::TrayIconBuilder;
+
+    // Black-on-transparent 72x72 PNG, flagged as a template below so macOS
+    // re-tints it per menu-bar appearance instead of us shipping two assets.
+    #[cfg(target_os = "macos")]
+    let icon = Image::from_bytes(include_bytes!("../icons/tray-mac.png"))?;
+    // Windows: the full-colour app tile. `CreateIcon` uses the bitmap at its
+    // native size, so this is the 32x32 asset (16pt at 200% DPI) rather than the
+    // 72px mac one, which the shell would have to scale down.
+    #[cfg(windows)]
+    let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+
+    TrayIconBuilder::with_id("gg")
+        .icon(icon)
+        // Template tinting is a macOS concept; on Windows it must stay off or the
+        // colour tile would be flattened.
+        .icon_as_template(cfg!(target_os = "macos"))
+        .tooltip("GG Coder")
+        .menu(&build_tray_menu(app, &TrayStatus::default())?)
+        // The icon has no action other than its menu, so a click that did nothing
+        // would read as broken. Right-click opens it too (tray-icon defaults
+        // `menu_on_right_click` to true and tracks the two independently), so
+        // Windows still gets its expected right-click behaviour.
+        //
+        // Apps that ALSO open a window on left click must set this to `false` on
+        // Windows or the click does two things at once (rustdesk #15215). That
+        // does not apply here precisely because the menu is the only action — so
+        // don't "fix" this by copying their `cfg(windows)` override.
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| {
+            let action = match event.id().as_ref() {
+                tray_id::UPDATE => "update",
+                tray_id::NEW_CHAT => "new-chat",
+                tray_id::NEW_CODE => "new-code",
+                tray_id::REMOTE => "remote",
+                tray_id::SETTINGS => "settings",
+                _ => return,
+            };
+            dispatch_tray_action(app.clone(), action);
+        })
+        .build(app)?;
+    Ok(())
+}
+
+/// Route a tray action to a window and tell that window's webview what to do.
+///
+/// `new-chat` / `new-code` reuse the single open window when there is exactly
+/// one; with several windows open there is no unambiguous "current" one, so a
+/// NEW window is opened for the session instead of hijacking someone's work.
+/// `remote` / `settings` always act on the existing target window (they're
+/// app-wide, not per-session) and only open a window when none exists.
+fn dispatch_tray_action(app: tauri::AppHandle, action: &'static str) {
+    let labels = app_window_labels(&app);
+    let wants_new_window = match action {
+        "new-chat" | "new-code" => labels.len() != 1,
+        _ => labels.is_empty(),
+    };
+
+    if !wants_new_window {
+        let Some(label) = tray_target_window(&app) else {
+            return;
+        };
+        if let Some(win) = app.get_webview_window(&label) {
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        let _ = app.emit_to(EventTarget::webview_window(&label), "tray-intent", action);
+        return;
+    }
+
+    // Window building must not run on the caller's thread (see `new_window`).
+    tauri::async_runtime::spawn(async move {
+        let label = next_window_label(&app);
+        // Park the intent BEFORE the webview can mount, so the claim on mount
+        // never races the window build.
+        app.state::<TrayIntents>()
+            .0
+            .lock()
+            .unwrap()
+            .insert(label.clone(), action.to_string());
+        let Ok(win) = build_app_window(&app, &label) else {
+            app.state::<TrayIntents>().0.lock().unwrap().remove(&label);
+            return;
+        };
+        start_window_session(
+            app.clone(),
+            label,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            default_cwd(),
+            None,
+        );
+        let _ = win.set_focus();
+        broadcast_window_order(&app);
+    });
+}
+
+/// Claim (once) the tray action this window was opened for. Returns `None` for
+/// windows the user opened themselves.
+#[tauri::command]
+fn window_tray_intent(webview: WebviewWindow) -> Option<String> {
+    let state: State<TrayIntents> = webview.state();
+    let mut map = state.0.lock().unwrap();
+    map.remove(webview.label())
+}
+
+/// Apply `edit` to the tray status and rebuild the menu IF anything changed.
+/// The no-change guard matters: every window pushes status on a timer, so
+/// without it the menu would be rebuilt constantly (and would collapse while
+/// open).
+fn update_tray_status(app: &tauri::AppHandle, edit: impl FnOnce(&mut TrayStatus)) {
+    let next = {
+        let state: State<TrayState> = app.state();
+        let mut current = state.0.lock().unwrap();
+        let mut next = current.clone();
+        edit(&mut next);
+        if next == *current {
+            return;
+        }
+        *current = next.clone();
+        next
+    };
+    let _ = &next;
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        use tauri::tray::TrayIconId;
+        if let Some(tray) = app.tray_by_id(&TrayIconId::new("gg")) {
+            match build_tray_menu(app, &next) {
+                Ok(menu) => {
+                    let _ = tray.set_menu(Some(menu));
+                }
+                Err(e) => log::warn!("tray menu rebuild failed: {e}"),
+            }
+        }
+    }
+}
+
+/// Report update availability from the webview so the tray can show or hide
+/// "Update now". `version` is `None` when up to date.
+#[tauri::command]
+fn set_update_available(app: tauri::AppHandle, version: Option<String>) {
+    update_tray_status(&app, |s| s.update_version = version);
+}
+
+/// Report whether the Telegram serve loop is running, so the tray's Remote item
+/// reads "Remote" or "Remote · Turn off".
+#[tauri::command]
+fn set_remote_active(app: tauri::AppHandle, active: bool) {
+    update_tray_status(&app, |s| s.remote_active = active);
 }
 
 /// Allocate a unique `project-N` window label.
@@ -4155,6 +4866,8 @@ pub fn run() {
         .manage(AppExiting::default())
         .manage(FocusedWindow::default())
         .manage(MoveDebounce::default())
+        .manage(TrayState::default())
+        .manage(TrayIntents::default())
         .manage(reqwest::Client::new())
         .invoke_handler(tauri::generate_handler![
             sidecar_port,
@@ -4183,8 +4896,11 @@ pub fn run() {
             agent_auth_apikey,
             agent_auth_oauth_start,
             agent_auth_oauth_code,
+            agent_mcp_elicit,
             agent_auth_logout,
             agent_kill_task,
+            agent_import_transcript,
+            agent_cancel_queued,
             agent_radio_state,
             agent_radio_set,
             agent_radio_volume,
@@ -4206,7 +4922,11 @@ pub fn run() {
             agent_files,
             agent_settings,
             agent_save_settings,
+            agent_plugins,
+            agent_install_plugin,
+            agent_remove_plugin,
             agent_create_project,
+            agent_set_project_hidden,
             app_settings_get,
             app_settings_save,
             app_create_project,
@@ -4229,7 +4949,10 @@ pub fn run() {
             gaze_focus,
             focus_window_by_offset,
             arrange_all,
-            window_restore_target
+            window_restore_target,
+            window_tray_intent,
+            set_update_available,
+            set_remote_active
         ])
         .setup(|app| {
             // Windows-only: track per-window minimized state so restoring one
@@ -4241,6 +4964,13 @@ pub fn run() {
             // accumulate forever across launches. Best-effort + logged.
             // Cross-platform: uses `ps` on Unix, PowerShell CIM on Windows.
             sweep_orphan_sidecars();
+            // macOS menu-bar / Windows notification-area presence. Built before
+            // the windows so the status item is there even if window restore is
+            // slow. Non-fatal: a tray failure must never stop the app launching.
+            #[cfg(any(target_os = "macos", windows))]
+            if let Err(e) = init_tray(&app.handle().clone()) {
+                log::warn!("tray init failed: {e}");
+            }
             // Spawn the ONE shared Node daemon before any window asks for a
             // session. Window session creation (in restore/setup) awaits its
             // `GG_APP_LISTENING` port via `await_daemon_port`.
@@ -4639,7 +5369,7 @@ mod tests {
     #[test]
     fn apply_logout_xiaomi_drops_both_variant_keys() {
         let existing = r#"{ "xiaomi": { "accessToken": "tp", "refreshToken": "", "expiresAt": 1 }, "xiaomi-credits": { "accessToken": "cr", "refreshToken": "", "expiresAt": 1 } }"#;
-        let out = apply_logout(Some(existing), "xiaomi").unwrap();
+        let out = apply_logout(Some(existing), "xiaomi", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("xiaomi").is_none());
         assert!(v.get("xiaomi-credits").is_none());
@@ -4693,7 +5423,7 @@ mod tests {
     #[test]
     fn apply_logout_removes_provider() {
         let existing = r#"{ "glm": { "accessToken": "k", "refreshToken": "", "expiresAt": 1 }, "openai": { "accessToken": "o", "refreshToken": "", "expiresAt": 1 } }"#;
-        let out = apply_logout(Some(existing), "glm").unwrap();
+        let out = apply_logout(Some(existing), "glm", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("glm").is_none());
         assert_eq!(v["openai"]["accessToken"], "o");
@@ -4702,15 +5432,51 @@ mod tests {
     #[test]
     fn apply_logout_moonshot_drops_both_keys() {
         let existing = r#"{ "moonshot": { "accessToken": "key", "refreshToken": "", "expiresAt": 1 }, "moonshot-oauth": { "accessToken": "oauth", "refreshToken": "r", "expiresAt": 1 } }"#;
-        let out = apply_logout(Some(existing), "moonshot").unwrap();
+        let out = apply_logout(Some(existing), "moonshot", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("moonshot").is_none());
         assert!(v.get("moonshot-oauth").is_none());
     }
 
     #[test]
+    fn apply_logout_xai_drops_both_keys() {
+        let existing = r#"{ "xai": { "accessToken": "key", "refreshToken": "", "expiresAt": 1 }, "xai-oauth": { "accessToken": "oauth", "refreshToken": "r", "expiresAt": 1 } }"#;
+        let out = apply_logout(Some(existing), "xai", None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("xai").is_none());
+        assert!(v.get("xai-oauth").is_none());
+    }
+
+    #[test]
+    fn apply_logout_scoped_to_one_method_keeps_the_other() {
+        // Disconnecting Grok OAuth must leave a configured API key usable, and
+        // dropping a spent API key must not sign the user out of the subscription.
+        let existing = r#"{ "xai": { "accessToken": "key", "refreshToken": "", "expiresAt": 1 }, "xai-oauth": { "accessToken": "oauth", "refreshToken": "r", "expiresAt": 1 } }"#;
+
+        let out = apply_logout(Some(existing), "xai", Some("oauth")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("xai-oauth").is_none());
+        assert_eq!(v["xai"]["accessToken"], "key");
+
+        let out = apply_logout(Some(existing), "xai", Some("apikey")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("xai").is_none());
+        assert_eq!(v["xai-oauth"]["accessToken"], "oauth");
+    }
+
+    #[test]
+    fn apply_logout_oauth_only_provider_uses_provider_id_key() {
+        // Anthropic has no distinct OAuth key — its credential IS `anthropic`.
+        let existing =
+            r#"{ "anthropic": { "accessToken": "t", "refreshToken": "r", "expiresAt": 1 } }"#;
+        let out = apply_logout(Some(existing), "anthropic", Some("oauth")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("anthropic").is_none());
+    }
+
+    #[test]
     fn apply_logout_missing_file_is_empty_object() {
-        let out = apply_logout(None, "glm").unwrap();
+        let out = apply_logout(None, "glm", None).unwrap();
         assert_eq!(out.trim(), "{}");
     }
 

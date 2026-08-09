@@ -11,7 +11,7 @@
  *
  * SCOPE: this is for understanding a file's API, NOT editing it.
  *
- * Run: pnpm --filter @kenkaiiii/ggcoder exec tsx scripts/code-compress-test.ts
+ * Run: pnpm --filter @abukhaled/ogcoder exec tsx scripts/code-compress-test.ts
  */
 import ts from "typescript";
 import { readFileSync } from "node:fs";

@@ -22,6 +22,10 @@ export interface BusEventMap {
     stopReason: string;
     usage: { inputTokens: number; outputTokens: number; cacheRead?: number; cacheWrite?: number };
   };
+  /** Step boundary: every message for this turn is in the array. Hosts persist here. */
+  checkpoint: {
+    turn: number;
+  };
   agent_done: {
     totalTurns: number;
     totalUsage: {
@@ -32,6 +36,8 @@ export interface BusEventMap {
     };
   };
   max_turns: { totalTurns: number; maxTurns: number };
+  /** Turn budget was exhausted but extended because the run showed progress. */
+  turn_budget_extended: { turn: number; grantedTurns: number; extension: number };
   truncated: { reason: "max_tokens" | "refusal" | "provider_error"; continued: boolean };
   error: { error: Error };
 
@@ -59,11 +65,27 @@ export interface BusEventMap {
   // Persistent async child lifecycle (bounded metadata/output snapshot).
   subagent_state: SubAgentSnapshot;
 
+  /** Queued user steering was consumed into the run at a turn boundary.
+   *  `count` is the remaining depth. Lets clients clear the "queued" affordance
+   *  the moment the agent picks a message up, instead of holding it until
+   *  run_end — the message is already in the loop long before the run ends. */
+  queue_drained: { count: number };
+
   // Session lifecycle
   session_start: { sessionId: string };
   model_change: { provider: string; model: string; supportsVideo?: boolean };
   compaction_start: { messageCount: number };
-  compaction_end: { compacted: boolean; originalCount: number; newCount: number };
+  compaction_end: {
+    compacted: boolean;
+    originalCount: number;
+    newCount: number;
+    selectionStrategy?: "query_aware" | "fallback";
+    selectedMessages?: number;
+    selectedTokens?: number;
+    droppedMessages?: number;
+    queryTerms?: number;
+    selectionFallback?: string;
+  };
 
   // Branch events
   branch_created: { leafId: string; messagesKept: number };
@@ -155,6 +177,9 @@ export class EventBus {
           usage: event.usage,
         });
         break;
+      case "checkpoint":
+        this.emit("checkpoint", { turn: event.turn });
+        break;
       case "agent_done":
         this.emit("agent_done", {
           totalTurns: event.totalTurns,
@@ -165,6 +190,13 @@ export class EventBus {
         this.emit("max_turns", {
           totalTurns: event.totalTurns,
           maxTurns: event.maxTurns,
+        });
+        break;
+      case "turn_budget_extended":
+        this.emit("turn_budget_extended", {
+          turn: event.turn,
+          grantedTurns: event.grantedTurns,
+          extension: event.extension,
         });
         break;
       case "truncated":

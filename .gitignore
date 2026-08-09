@@ -26,6 +26,7 @@ test_*.js
 Thumbs.db
 
 # Editor
+CLAUDE.md
 .vscode/
 .idea/
 

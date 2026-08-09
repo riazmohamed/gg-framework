@@ -18,7 +18,7 @@
  * fails the audit — those are exactly the ways compressed context confuses a
  * model. Reduction is only reported for runs that PASS the audit.
  *
- * Run:  pnpm --filter @kenkaiiii/ggcoder exec tsx scripts/compress-bench-real.ts
+ * Run:  pnpm --filter @abukhaled/ogcoder exec tsx scripts/compress-bench-real.ts
  */
 import { execSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";

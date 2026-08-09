@@ -54,7 +54,11 @@ async function writeJson(filePath: string, value: unknown): Promise<void> {
   await fs.writeFile(filePath, JSON.stringify(value, null, 2), "utf-8");
 }
 
-function compactionResult(messages: Message[], compacted = true) {
+function compactionResult(
+  messages: Message[],
+  compacted = true,
+  contextSelection?: CompactorModule.CompactionContextSelection,
+) {
   return {
     messages,
     result: {
@@ -64,6 +68,7 @@ function compactionResult(messages: Message[], compacted = true) {
       newCount: messages.length,
       tokensBeforeEstimate: 180_000,
       tokensAfterEstimate: compacted ? 2_000 : 180_000,
+      ...(contextSelection ? { contextSelection } : {}),
     },
   };
 }
@@ -155,21 +160,28 @@ describe("AgentSession worker auto-compaction", () => {
     });
 
     await session.initialize();
+    await session.setApprovedPlan("/tmp/approved-plan.md");
     await session.prompt("Do worker task");
     await session.dispose();
 
     expect(shouldCompactMock).toHaveBeenCalledWith(
-      expect.arrayContaining([{ role: "user", content: "Do worker task" }]),
+      expect.arrayContaining([
+        expect.objectContaining({ role: "user", content: "Do worker task" }),
+      ]),
       expect.any(Number),
       0.1,
       undefined,
     );
     expect(compactMock).toHaveBeenCalledWith(
-      expect.arrayContaining([{ role: "user", content: "Do worker task" }]),
+      expect.arrayContaining([
+        expect.objectContaining({ role: "user", content: "Do worker task" }),
+      ]),
       expect.objectContaining({
         provider: "anthropic",
         model: "claude-test",
         apiKey: "test-anthropic-token",
+        targetTokens: 20_000,
+        approvedPlanPath: "/tmp/approved-plan.md",
       }),
     );
     expect(agentLoopMock).toHaveBeenCalledWith(
@@ -213,6 +225,14 @@ describe("AgentSession stale tool-output pruning", () => {
         {
           role: "tool",
           content: [{ type: "tool_result", toolCallId: "new-read", content: "fresh" }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "tool_call", id: "latest", name: "grep", args: { pattern: "x" } }],
+        },
+        {
+          role: "tool",
+          content: [{ type: "tool_result", toolCallId: "latest", content: "latest evidence" }],
         },
         { role: "user", content: "turn 3" },
       );
@@ -272,6 +292,14 @@ describe("AgentSession stale tool-output pruning", () => {
         {
           role: "tool",
           content: [{ type: "tool_result", toolCallId: "new-read", content: "fresh" }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "tool_call", id: "latest", name: "grep", args: { pattern: "x" } }],
+        },
+        {
+          role: "tool",
+          content: [{ type: "tool_result", toolCallId: "latest", content: "latest evidence" }],
         },
         { role: "user", content: "turn 3" },
       );
@@ -510,6 +538,70 @@ describe("AgentSession mid-turn compaction", () => {
         (call) => typeof call[3] === "number" && call[3] >= usage.inputTokens + usage.outputTokens,
       ),
     ).toBe(true);
+  });
+
+  it("clears authoritative usage after compaction and does not recompact unchanged context", async () => {
+    await writeJson(path.join(tmpHome, ".gg", "settings.json"), {
+      autoCompact: true,
+      compactThreshold: 0.85,
+    });
+    const trigger = 170_000;
+    let hasCompacted = false;
+    const activeTokensAfterCompaction: number[] = [];
+    shouldCompactMock.mockImplementation(
+      (_messages, _contextWindow, _threshold, actualTokens?: number) => {
+        if (hasCompacted && actualTokens !== undefined)
+          activeTokensAfterCompaction.push(actualTokens);
+        return actualTokens !== undefined && actualTokens >= trigger;
+      },
+    );
+    compactMock.mockImplementation(async () => {
+      hasCompacted = true;
+      return compactionResult([
+        { role: "system", content: "system prompt" },
+        { role: "user", content: "[compacted below target]" },
+      ]);
+    });
+
+    let run = 0;
+    agentLoopMock.mockImplementation(async function* (
+      messages: Message[],
+      options: {
+        transformContext?: (m: Message[], o: TransformContextOptions) => Promise<Message[]>;
+      },
+    ) {
+      run += 1;
+      await options.transformContext!(messages, { pendingMessages: [] });
+      messages.push({ role: "assistant", content: `response ${run}` });
+      if (run === 1) {
+        yield {
+          type: "turn_end",
+          turn: 1,
+          stopReason: "end_turn",
+          usage: { inputTokens: 180_000, outputTokens: 1_000 },
+          timing: { startedAt: 1, completedAt: 2, providerDurationMs: 1 },
+        };
+      }
+      yield { type: "agent_done" };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-fable-5",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      transient: true,
+    });
+    await session.initialize();
+    await session.prompt("first prompt");
+    await session.prompt("second prompt triggers compaction");
+    await session.prompt("third prompt stays below target");
+    await session.dispose();
+
+    expect(compactMock).toHaveBeenCalledTimes(1);
+    expect(activeTokensAfterCompaction.length).toBeGreaterThan(0);
+    expect(activeTokensAfterCompaction.every((tokens) => tokens < trigger)).toBe(true);
   });
 
   it.each(providerModels)(
@@ -890,6 +982,83 @@ describe("AgentSession compaction events", () => {
     expect(events).toEqual([{ compacted: false, originalCount: 1, newCount: 1 }]);
     await session.dispose();
   });
+
+  it("emits query-selection token statistics when the compactor ran retrieval", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      transient: true,
+    });
+    await session.initialize();
+
+    compactMock.mockResolvedValue(
+      compactionResult([...session.getMessages()], false, {
+        strategy: "query_aware",
+        selectedMessages: 8,
+        selectedTokens: 1200,
+        droppedMessages: 4,
+        queryTerms: 3,
+      }),
+    );
+    const events: unknown[] = [];
+    session.eventBus.on("compaction_end", (event) => events.push(event));
+
+    await session.compact({ accessToken: "token" });
+
+    expect(events).toEqual([
+      {
+        compacted: false,
+        originalCount: 1,
+        newCount: 1,
+        selectionStrategy: "query_aware",
+        selectedMessages: 8,
+        selectedTokens: 1200,
+        droppedMessages: 4,
+        queryTerms: 3,
+      },
+    ]);
+    await session.dispose();
+  });
+});
+
+describe("AgentSession.getContextUsage", () => {
+  it("reports the model window and drops after a compaction", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    const model = MODELS[0]!;
+    const session = new AgentSession({
+      provider: model.provider,
+      model: model.id,
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      transient: true,
+    });
+    await session.initialize();
+
+    const messages = session.getMessages();
+    for (let i = 0; i < 40; i += 1) {
+      messages.push({ role: "user", content: "a fairly long user message ".repeat(20) });
+    }
+
+    const before = session.getContextUsage();
+    expect(before.size).toBeGreaterThan(0);
+    expect(before.used).toBeGreaterThan(0);
+    // No authoritative pricing exists yet, so cost is omitted rather than
+    // reported as zero — a client showing $0.00 would be stating a fact we
+    // do not have.
+    expect(before.costUsd).toBeUndefined();
+
+    compactMock.mockResolvedValue(compactionResult([messages[0]!], true));
+    await session.compact({ accessToken: "test-token" });
+
+    const after = session.getContextUsage();
+    // Clients detect compaction from exactly this: used falls, size does not.
+    expect(after.used).toBeLessThan(before.used);
+    expect(after.size).toBe(before.size);
+    await session.dispose();
+  });
 });
 
 describe("load-time auto-compaction deferral (deferLoadCompaction)", () => {
@@ -963,6 +1132,217 @@ describe("load-time auto-compaction deferral (deferLoadCompaction)", () => {
     await resumed.prompt("continue");
     expect(compactMock).toHaveBeenCalledTimes(1);
     await resumed.dispose();
+  });
+
+  it("coordinates simultaneous compactions and adopts the single checkpoint", async () => {
+    const sessionPath = await persistSession();
+    shouldCompactMock.mockReturnValue(true);
+    compactMock.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return compactedResult;
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const first = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      sessionId: sessionPath,
+      deferLoadCompaction: true,
+    });
+    const second = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      sessionId: sessionPath,
+      deferLoadCompaction: true,
+    });
+    await Promise.all([first.initialize(), second.initialize()]);
+
+    const credentials = { accessToken: "test-token" };
+    await Promise.all([
+      first.compact(credentials, "automatic"),
+      second.compact(credentials, "automatic"),
+    ]);
+
+    expect(compactMock).toHaveBeenCalledTimes(1);
+    expect(first.getState().sessionPath).toBe(second.getState().sessionPath);
+    expect(first.getState().sessionPath).not.toBe(sessionPath);
+    await Promise.all([first.dispose(), second.dispose()]);
+  });
+
+  it("rebases stale compaction onto a divergent canonical checkpoint", async () => {
+    const sessionPath = await persistSession();
+    shouldCompactMock.mockReturnValue(false);
+    agentLoopMock.mockImplementation(async function* (messages: Message[]) {
+      messages.push({ role: "assistant", content: "canonical reply" });
+      yield { type: "agent_done" };
+    });
+    compactMock.mockImplementation(async (messages: Message[]) => {
+      const hasCanonicalProgress = messages.some(
+        (message) =>
+          typeof message.content === "string" && message.content.includes("canonical progress"),
+      );
+      return {
+        ...compactedResult,
+        messages: [
+          { role: "system", content: "system prompt" },
+          {
+            role: "user",
+            content: hasCanonicalProgress ? "[compacted canonical progress]" : "[compacted stale]",
+          },
+        ] as Message[],
+      };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const creator = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      sessionId: sessionPath,
+      deferLoadCompaction: true,
+    });
+    const stale = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      sessionId: sessionPath,
+      deferLoadCompaction: true,
+    });
+    await Promise.all([creator.initialize(), stale.initialize()]);
+
+    await creator.prompt("canonical progress");
+    shouldCompactMock.mockReturnValue(true);
+    await creator.compact({ accessToken: "test-anthropic-token" }, "automatic");
+    await stale.compact({ accessToken: "test-anthropic-token" }, "automatic");
+
+    const staleCompactionInput = compactMock.mock.calls[1]?.[0] as Message[];
+    expect(staleCompactionInput).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ content: "[compacted canonical progress]" }),
+      ]),
+    );
+    expect(stale.getMessages()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ content: "[compacted canonical progress]" }),
+      ]),
+    );
+    await Promise.all([creator.dispose(), stale.dispose()]);
+  });
+
+  it("deduplicates unchanged no-op attempts but lets manual compaction retry", async () => {
+    const sessionPath = await persistSession();
+    shouldCompactMock.mockReturnValue(true);
+    compactMock.mockImplementation(async (messages: Message[]) =>
+      compactionResult([...messages], false),
+    );
+
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      sessionId: sessionPath,
+      deferLoadCompaction: true,
+    });
+    await session.initialize();
+    const credentials = { accessToken: "test-token" };
+
+    await session.compact(credentials, "automatic");
+    await session.compact(credentials, "automatic");
+    expect(compactMock).toHaveBeenCalledTimes(1);
+
+    await session.compact(credentials, "manual");
+    expect(compactMock).toHaveBeenCalledTimes(2);
+    expect(session.getState().sessionPath).toBe(sessionPath);
+    await session.dispose();
+  });
+
+  it("resolves a stale below-threshold checkpoint path before loading history", async () => {
+    const sessionPath = await persistSession();
+    shouldCompactMock.mockReturnValue(true);
+    compactMock.mockResolvedValue(compactedResult);
+
+    const { AgentSession } = await import("./agent-session.js");
+    const creator = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      sessionId: sessionPath,
+      deferLoadCompaction: true,
+    });
+    await creator.initialize();
+    await creator.compact({ accessToken: "test-anthropic-token" }, "automatic");
+    const checkpointPath = creator.getState().sessionPath;
+    await creator.dispose();
+
+    shouldCompactMock.mockReturnValue(false);
+    const resumed = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      sessionId: sessionPath,
+      deferLoadCompaction: true,
+    });
+    await resumed.initialize();
+
+    expect(resumed.getState().sessionPath).toBe(checkpointPath);
+    expect(resumed.getMessages()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ content: "[compacted]" })]),
+    );
+    expect(compactMock).toHaveBeenCalledTimes(1);
+    await resumed.dispose();
+  });
+
+  it("adopts a checkpoint created after deferred load before persisting the prompt", async () => {
+    const sessionPath = await persistSession();
+    shouldCompactMock.mockReturnValue(true);
+    compactMock.mockResolvedValue(compactedResult);
+    agentLoopMock.mockImplementation(async function* () {
+      yield { type: "agent_done" };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const creator = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      sessionId: sessionPath,
+      deferLoadCompaction: true,
+    });
+    const follower = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      sessionId: sessionPath,
+      deferLoadCompaction: true,
+    });
+    await Promise.all([creator.initialize(), follower.initialize()]);
+    await creator.compact({ accessToken: "test-token" }, "automatic");
+    const checkpointPath = creator.getState().sessionPath;
+
+    shouldCompactMock.mockReturnValue(false);
+    await follower.prompt("continue from the shared checkpoint");
+
+    expect(compactMock).toHaveBeenCalledTimes(1);
+    expect(follower.getState().sessionPath).toBe(checkpointPath);
+    expect(follower.getMessages()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ content: "[compacted]" }),
+        expect.objectContaining({ content: "continue from the shared checkpoint" }),
+      ]),
+    );
+    await Promise.all([creator.dispose(), follower.dispose()]);
   });
 
   it("still compacts inline during initialize() without the flag (CLI resume)", async () => {

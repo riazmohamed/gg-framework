@@ -12,7 +12,7 @@
 import { build } from "esbuild";
 import { createRequire } from "node:module";
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -47,6 +47,9 @@ const EXTERNAL = [
   "typescript",
   // source_path spawns opensrc's CLI by physical path; it is never imported.
   "opensrc",
+  // Bash launches SRT's physical CLI as a child process for per-session OS
+  // sandboxing; keep its platform binaries and CLI files on disk.
+  "@anthropic-ai/sandbox-runtime",
   // Default MCP server: spawned as a stdio child, never imported, so esbuild
   // won't bundle it. Copy it next to the sidecar so resolveStdioCommand can
   // resolve its bin and rewrite `npx -y @kenkaiiii/kencode-search` to a direct
@@ -65,6 +68,18 @@ const NM_ROOTS = [
   join(repoRoot, "packages", "gg-ai", "node_modules"),
   join(repoRoot, "node_modules"),
 ];
+
+/** Nearest ancestor directory literally named `node_modules`, or null. */
+function enclosingNodeModules(start) {
+  let dir = start;
+  for (let i = 0; i < 8; i++) {
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    if (parent.endsWith(`${sep}node_modules`)) return parent;
+    dir = parent;
+  }
+  return null;
+}
 
 /** Walk up from a file to the nearest dir containing package.json. */
 function nearestPackageDir(start) {
@@ -123,11 +138,17 @@ function packageRoot(name, fromRequire, fromDir) {
   }
   // 3) Direct directory lookup in candidate node_modules. pnpm places a
   //    package's deps as siblings under the same .pnpm/<x>/node_modules dir,
-  //    so the requiring package's parent dir is a key candidate.
+  //    so the requiring package's enclosing node_modules is a key candidate.
   const candidates = [];
   if (fromDir) {
     candidates.push(join(fromDir, "node_modules")); // nested
-    candidates.push(dirname(fromDir)); // pnpm sibling (.../node_modules)
+    // The pnpm sibling root is the ENCLOSING `node_modules` dir, which is two
+    // levels up for a scoped package (.../node_modules/@scope/name) and one for
+    // an unscoped one. Using dirname() alone silently missed every scoped
+    // dependency of a scoped package — e.g. kencode-search's MCP SDK, which
+    // then shipped without its dep tree and crashed the spawned MCP server.
+    const siblingRoot = enclosingNodeModules(fromDir);
+    if (siblingRoot) candidates.push(siblingRoot);
   }
   candidates.push(...NM_ROOTS);
   for (const nm of candidates) {
@@ -200,7 +221,7 @@ function pruneForeignNativePayloads() {
 async function main() {
   if (!existsSync(ggcoderSidecarEntry)) {
     throw new Error(
-      `sidecar entry missing: ${ggcoderSidecarEntry} (build @kenkaiiii/ggcoder first)`,
+      `sidecar entry missing: ${ggcoderSidecarEntry} (build @abukhaled/ogcoder first)`,
     );
   }
   if (!existsSync(bundledSkillsSource)) {

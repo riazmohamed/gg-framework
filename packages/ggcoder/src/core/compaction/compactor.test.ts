@@ -5,13 +5,23 @@ import {
   findRecentCutPoint,
   prepareMessagesForSummary,
   selectMessagesInBudget,
+  classifyMessagesForSummary,
+  findLatestPreviousSummary,
   buildFallbackSummary,
   extractSummaryText,
   compact,
   compactHistoricalToolCallArgs,
+  extractFileOperations,
+  splitTrackedModifiedFiles,
+  buildModifiedFilesSection,
+  resolveSummaryOutputTokens,
   HISTORICAL_TOOL_ARG_MAX_CHARS,
+  MAX_TRACKED_MODIFIED_FILES,
+  MIN_SUMMARY_OUTPUT_TOKENS,
+  MAX_SUMMARY_OUTPUT_TOKENS,
   SUMMARY_ATTEMPT_TIMEOUT_MS,
 } from "./compactor.js";
+import { remapAnchorForCompaction } from "../session-history.js";
 import { estimateConversationTokens } from "./token-estimator.js";
 import { MODELS, getContextWindow } from "@abukhaled/gg-core";
 import type { Message, ContentPart, ToolResult } from "@abukhaled/gg-ai";
@@ -433,15 +443,54 @@ describe("selectMessagesInBudget", () => {
     expect(selected.length).toBeLessThan(msgs.length);
   });
 
-  it("walks forward from start", () => {
+  it("pins the earliest request and fills the remaining budget from newest messages", () => {
     const msgs = [
-      makeMessage("user", "first"),
-      makeMessage("assistant", "second"),
-      makeMessage("user", "third"),
+      makeMessage("user", `first ${"a".repeat(2_000)}`),
+      makeMessage("assistant", `old ${"b".repeat(2_000)}`),
+      makeMessage("user", `latest ${"c".repeat(2_000)}`),
     ];
-    const selected = selectMessagesInBudget(msgs, 100_000);
-    expect(selected[0].content as string).toBe("first");
-    expect(selected[2].content as string).toBe("third");
+    const budget = estimateConversationTokens([msgs[0], msgs[2]]);
+    const selected = selectMessagesInBudget(msgs, budget);
+    expect(selected).toEqual([msgs[0], msgs[2]]);
+  });
+});
+
+describe("summary provenance classification", () => {
+  it("anchors the latest previous summary and excludes low-value runtime controls", () => {
+    const previous = {
+      role: "user" as const,
+      content: "[Previous conversation summary]\n\nold memory",
+      provenance: {
+        source: "runtime" as const,
+        kind: "compaction_summary" as const,
+        visibility: "summary" as const,
+      },
+    };
+    const messages: Message[] = [
+      previous,
+      {
+        role: "user",
+        content: "keep this correction",
+        provenance: { source: "human", kind: "steering", visibility: "transcript" },
+      },
+      {
+        role: "user",
+        content: "continue",
+        provenance: { source: "runtime", kind: "continuation", visibility: "hidden" },
+      },
+      {
+        role: "user",
+        content: "model changed",
+        provenance: { source: "runtime", kind: "model_switch", visibility: "hidden" },
+      },
+    ];
+
+    expect(findLatestPreviousSummary(messages)).toEqual({ index: 0, text: "old memory" });
+    const classified = classifyMessagesForSummary(messages);
+    expect(classified.map((message) => message.content)).toEqual([
+      "[Human steering]\nkeep this correction",
+      "[Runtime fact: model_switch]\nmodel changed",
+    ]);
   });
 });
 
@@ -686,6 +735,106 @@ describe("compact", () => {
     expect(summaryMsg.role).toBe("user");
     expect(summaryMsg.content as string).toContain("[Previous conversation summary]");
     expect(summaryMsg.content as string).toContain("great summary");
+    expect(result.result.reductionStatus).toBe("material");
+    expect(result.result.summarizedCount).toBeGreaterThan(0);
+    expect(result.result.retainedCount).toBeGreaterThanOrEqual(0);
+    expect(result.result.tokensAfterEstimate).toBeLessThan(result.result.targetTokens);
+  });
+
+  it("feeds query-relevant older evidence to the summarizer when its prompt budget is constrained", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockImplementation((request) => {
+      const requestText = (request.messages as Message[])
+        .map((message) =>
+          typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+        )
+        .join("\n");
+      expect(requestText).toContain("OLD_EVIDENCE_MARKER");
+      return mockStreamResult(
+        Promise.resolve({
+          message: { role: "assistant", content: "Relevant summary." },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1000, outputTokens: 50 },
+        }),
+      ) as never;
+    });
+
+    const messages: Message[] = [makeMessage("system", "sys")];
+    messages.push(makeMessage("user", `Original account task ${"a".repeat(10_000)}`));
+    for (let index = 0; index < 100; index++) {
+      const detail =
+        index === 5
+          ? "OAuth verifier mismatch root cause OLD_EVIDENCE_MARKER"
+          : `Unrelated dashboard detail ${index}`;
+      messages.push(makeMessage("user", `${detail} ${"x".repeat(10_000)}`));
+      messages.push(makeMessage("assistant", `Handled detail ${index}`));
+    }
+    messages.push(makeMessage("user", "Fix the OAuth verifier mismatch."));
+
+    const result = await compact(messages, baseOptions);
+    expect(mockStream).toHaveBeenCalled();
+    expect(result.result.contextSelection).toMatchObject({
+      strategy: "query_aware",
+      queryTerms: expect.any(Number),
+      selectedTokens: expect.any(Number),
+      droppedMessages: expect.any(Number),
+    });
+  });
+
+  it("updates an anchored prior summary and preserves the approved plan reference", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockImplementation((request) => {
+      const requestMessages = request.messages as Message[];
+      expect(requestMessages[0].content).toContain("/tmp/approved-plan.md");
+      expect(requestMessages[0].content).toContain("Update the anchored <previous-summary>");
+      expect(requestMessages[1].content).toContain("<previous-summary>\nold durable memory");
+      expect(requestMessages[1].content).toContain("</previous-summary>");
+      expect(
+        requestMessages.filter(
+          (message) =>
+            typeof message.content === "string" && message.content.includes("old durable memory"),
+        ),
+      ).toHaveLength(1);
+      return mockStreamResult(
+        Promise.resolve({
+          message: { role: "assistant", content: "Updated summary." },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1000, outputTokens: 50 },
+        }),
+      ) as never;
+    });
+
+    const messages = buildConversation(30);
+    messages.splice(1, 0, {
+      role: "user",
+      content: "[Previous conversation summary]\n\nold durable memory",
+      provenance: { source: "runtime", kind: "compaction_summary", visibility: "summary" },
+    });
+    const result = await compact(messages, {
+      ...baseOptions,
+      approvedPlanPath: "/tmp/approved-plan.md",
+    });
+    expect(result.result.compacted).toBe(true);
+  });
+
+  it("rejects a rewrite that cannot land below the configured target", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockReturnValue(
+      mockStreamResult(
+        Promise.resolve({
+          message: { role: "assistant", content: "Summary." },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1000, outputTokens: 50 },
+        }),
+      ) as never,
+    );
+
+    const messages = buildConversation(30);
+    const result = await compact(messages, { ...baseOptions, targetTokens: 1 });
+    expect(result.result.compacted).toBe(false);
+    expect(result.result.reason).toBe("above_target");
+    expect(result.result.reductionStatus).toBe("above_target");
+    expect(result.messages).toEqual(messages);
   });
 
   it("caps the preserved recent tail at ~8K tokens", async () => {
@@ -732,6 +881,33 @@ describe("compact", () => {
     expect(summaryMsg.content as string).toContain("[Previous conversation summary]");
     expect(summaryMsg.content as string).toContain("## Goal");
     expect(summaryMsg.content as string).toContain("## Progress");
+  });
+
+  it("preserves previous compacted memory in the fallback summary", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockReturnValue(
+      mockStreamResult(
+        Promise.resolve({
+          message: { role: "assistant", content: "" },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1000, outputTokens: 0 },
+        }),
+      ) as never,
+    );
+
+    const messages = buildConversation(30);
+    messages[1] = {
+      role: "user",
+      content:
+        "[Previous conversation summary]\n\nCritical earlier decision: retain durable lineage.",
+      provenance: { source: "runtime", kind: "compaction_summary", visibility: "summary" },
+    };
+    const result = await compact(messages, baseOptions);
+
+    expect(result.messages[1]?.content as string).toContain(
+      "Critical earlier decision: retain durable lineage.",
+    );
+    expect(result.messages[1]?.content as string).toContain("## Update since the previous summary");
   });
 
   it("uses fallback summary when LLM throws error", async () => {
@@ -908,5 +1084,300 @@ describe("compact", () => {
     expect(callCount).toBe(3);
     const summaryMsg = result.messages[1];
     expect(summaryMsg.content as string).toContain("Summary on third try");
+  });
+
+  // anchorRemap is what lets callers move transcript markers (Ken turns,
+  // autopilot verdicts, error rows) onto the rewritten message list. If it
+  // disagrees with the actual collapse, restored markers land in the wrong
+  // place — the "everything bunched at the bottom" bug.
+  it("reports an anchorRemap that matches the real collapse (ack skipped)", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockReturnValue(
+      mockStreamResult(
+        Promise.resolve({
+          message: { role: "assistant", content: "Summary." },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1000, outputTokens: 50 },
+        }),
+      ) as never,
+    );
+
+    const messages = buildConversation(30);
+    const result = await compact(messages, baseOptions);
+    const remap = result.result.anchorRemap;
+    expect(remap).toBeDefined();
+    // This fixture's retained tail starts with an assistant message, so the
+    // ack is skipped and the summary block is a single message.
+    expect(remap!.prefixCount).toBe(1);
+
+    const newNonSystem = result.messages.filter((m) => m.role !== "system").length;
+    const oldNonSystem = messages.filter((m) => m.role !== "system").length;
+
+    // The reported new length must be the real one — everything downstream
+    // clamps against it.
+    expect(remap!.newNonSystemCount).toBe(newNonSystem);
+
+    // The summary block replaces the summarized head; the untouched tail is
+    // exactly what remains after it.
+    const keptTail = oldNonSystem - remap!.summarizedCount;
+    expect(remap!.prefixCount + keptTail).toBe(newNonSystem);
+
+    // That tail really is the ORIGINAL trailing messages, so an anchor in that
+    // region only shifts — it never needs re-interpreting.
+    expect(result.messages.slice(-keptTail)).toEqual(messages.slice(-keptTail));
+
+    // Remapping the last pre-compaction anchor must land exactly at the end of
+    // the new transcript — never past it (past-the-end is what gets dropped or
+    // clamped to the bottom on resume).
+    expect(remapAnchorForCompaction(oldNonSystem, remap!)).toBe(newNonSystem);
+    for (let anchor = 0; anchor <= oldNonSystem; anchor++) {
+      const moved = remapAnchorForCompaction(anchor, remap!);
+      expect(moved).toBeGreaterThanOrEqual(0);
+      expect(moved).toBeLessThanOrEqual(newNonSystem);
+    }
+  });
+
+  it("keeps anchorRemap correct when the ack IS emitted", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockReturnValue(
+      mockStreamResult(
+        Promise.resolve({
+          message: { role: "assistant", content: "Summary." },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1000, outputTokens: 50 },
+        }),
+      ) as never,
+    );
+
+    // A huge trailing assistant message pushes the cut point past it, so the
+    // retained tail starts with a user message and the ack is emitted — the
+    // summary block is 2 messages, and the remap must account for both.
+    const messages = buildConversation(30);
+    messages.push(makeMessage("assistant", `tail ${"y".repeat(40_000)}`));
+    messages.push(makeMessage("user", "and finally this"));
+
+    const result = await compact(messages, baseOptions);
+    const remap = result.result.anchorRemap;
+    expect(remap).toBeDefined();
+    expect(remap!.prefixCount).toBe(2);
+
+    const newNonSystem = result.messages.filter((m) => m.role !== "system").length;
+    const oldNonSystem = messages.filter((m) => m.role !== "system").length;
+    expect(remap!.newNonSystemCount).toBe(newNonSystem);
+    expect(remap!.prefixCount + (oldNonSystem - remap!.summarizedCount)).toBe(newNonSystem);
+    expect(remapAnchorForCompaction(oldNonSystem, remap!)).toBe(newNonSystem);
+  });
+
+  // repairToolPairing and the trailing-assistant pop can shorten the retained
+  // tail AFTER the collapse is decided. Deriving the new length from
+  // summarizedCount alone then overshoots, pushing tail anchors past the end —
+  // where markers get dropped and Ken turns clamp to the bottom, which is the
+  // exact symptom this remap exists to prevent.
+  it("never maps an anchor past the end when the trailing assistant is popped", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockReturnValue(
+      mockStreamResult(
+        Promise.resolve({
+          message: { role: "assistant", content: "Summary." },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1000, outputTokens: 50 },
+        }),
+      ) as never,
+    );
+
+    // Ends with an assistant message, so the pop loop fires and trims the tail.
+    const messages = buildConversation(30);
+    messages.push(makeMessage("assistant", "trailing assistant reply"));
+    expect(messages[messages.length - 1].role).toBe("assistant");
+
+    const result = await compact(messages, baseOptions);
+    const remap = result.result.anchorRemap;
+    expect(remap).toBeDefined();
+
+    const newNonSystem = result.messages.filter((m) => m.role !== "system").length;
+    const oldNonSystem = messages.filter((m) => m.role !== "system").length;
+    expect(remap!.newNonSystemCount).toBe(newNonSystem);
+
+    // Every anchor — especially the last one — stays inside the new transcript.
+    for (let anchor = 0; anchor <= oldNonSystem; anchor++) {
+      expect(remapAnchorForCompaction(anchor, remap!)).toBeLessThanOrEqual(newNonSystem);
+    }
+  });
+
+  it("appends one merged modified-files block and never lists read files", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockReturnValue(
+      mockStreamResult(
+        Promise.resolve({
+          message: { role: "assistant", content: "Fresh summary." },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1000, outputTokens: 50 },
+        }),
+      ) as never,
+    );
+
+    const messages = buildConversation(30);
+    // Prior compacted memory already carrying tracked edits from a collapsed segment.
+    messages.splice(1, 0, {
+      role: "user",
+      content:
+        "[Previous conversation summary]\n\nOlder work.\n\n" +
+        "<read-files>\nsrc/legacy-read.ts\n</read-files>\n" +
+        "<modified-files>\nsrc/carried.ts\n</modified-files>",
+      provenance: { source: "runtime", kind: "compaction_summary", visibility: "summary" },
+    } as Message);
+    messages.splice(2, 0, makeToolCallMessage("edit", { file_path: "src/fresh.ts" }, "e1"));
+    messages.splice(3, 0, makeToolCallMessage("grep", { path: "src/" }, "g1"));
+
+    const result = await compact(messages, baseOptions);
+    const summary = result.messages[1].content as string;
+
+    expect(summary).not.toContain("<read-files>");
+    expect(summary).not.toContain("src/legacy-read.ts");
+    // Exactly one block, carrying both the pre-collapse and the fresh edit.
+    expect(summary.match(/<modified-files>/gu)).toHaveLength(1);
+    expect(summary).toContain("src/carried.ts");
+    expect(summary).toContain("src/fresh.ts");
+    // grep's path argument is a directory, not a file the agent opened.
+    expect(summary).not.toContain("src/\n");
+
+    // The prior block is stripped from the prose handed back to the summarizer,
+    // so it cannot be transcribed into the new summary a second time.
+    // Mocks are not reset between tests in this file — inspect this test's call.
+    const lastCall = vi.mocked(stream).mock.calls.at(-1)!;
+    const sentText = (lastCall[0].messages as Message[])
+      .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
+      .join("\n");
+    expect(sentText).toContain("<previous-summary>");
+    expect(sentText).not.toContain("<modified-files>");
+    expect(sentText).toContain("SUPERSEDES");
+  });
+});
+
+// ── extractFileOperations ──────────────────────────────────
+
+describe("extractFileOperations", () => {
+  it("counts only the read tool as a read, not grep/find directory scans", () => {
+    const ops = extractFileOperations([
+      makeToolCallMessage("read", { file_path: "src/opened.ts" }, "r1"),
+      makeToolCallMessage("grep", { path: "src/components" }, "g1"),
+      makeToolCallMessage("find", { path: "packages" }, "f1"),
+      makeToolCallMessage("edit", { file_path: "src/changed.ts" }, "e1"),
+    ]);
+
+    expect([...ops.read]).toEqual(["src/opened.ts"]);
+    expect([...ops.modified]).toEqual(["src/changed.ts"]);
+  });
+});
+
+// ── modified-file tracking ─────────────────────────────────
+
+describe("splitTrackedModifiedFiles", () => {
+  it("extracts tracked paths and strips both tracking blocks from the prose", () => {
+    const { text, files } = splitTrackedModifiedFiles(
+      "Prose body.\n\n<read-files>\nsrc/a.ts\n</read-files>\n" +
+        "<modified-files>\nsrc/b.ts\nsrc/c.ts\n</modified-files>",
+    );
+
+    expect(text).toBe("Prose body.");
+    expect(files).toEqual(["src/b.ts", "src/c.ts"]);
+  });
+
+  it("leaves prose without tracking blocks untouched", () => {
+    const { text, files, omitted } = splitTrackedModifiedFiles("Just a summary.");
+    expect(text).toBe("Just a summary.");
+    expect(files).toEqual([]);
+    expect(omitted).toBe(0);
+  });
+
+  it("reads the overflow note as a count, never as a file path", () => {
+    const { files, omitted } = splitTrackedModifiedFiles(
+      "Prose.\n\n<modified-files>\nsrc/a.ts\n[... 7 earlier modified files omitted]\n</modified-files>",
+    );
+
+    expect(files).toEqual(["src/a.ts"]);
+    expect(omitted).toBe(7);
+  });
+});
+
+describe("buildModifiedFilesSection", () => {
+  it("returns empty string when nothing was modified", () => {
+    expect(buildModifiedFilesSection([])).toBe("");
+    expect(buildModifiedFilesSection(["  ", ""])).toBe("");
+  });
+
+  it("dedupes carried and fresh paths into a single block", () => {
+    const section = buildModifiedFilesSection(["src/a.ts", "src/b.ts", "src/a.ts"]);
+    expect(section.match(/src\/a\.ts/gu)).toHaveLength(1);
+    expect(section).toContain("src/b.ts");
+  });
+
+  it("keeps the most recent paths when the list overflows", () => {
+    const paths = Array.from({ length: MAX_TRACKED_MODIFIED_FILES + 5 }, (_v, i) => `src/f${i}.ts`);
+    const section = buildModifiedFilesSection(paths);
+
+    expect(section).toContain(`src/f${paths.length - 1}.ts`);
+    expect(section).not.toContain("src/f0.ts\n");
+    expect(section).toContain("[... 5 earlier modified files omitted]");
+  });
+
+  it("accumulates the omitted count across generations instead of resetting", () => {
+    const section = buildModifiedFilesSection(["src/a.ts"], 7);
+    expect(section).toContain("[... 7 earlier modified files omitted]");
+
+    const overflowing = Array.from(
+      { length: MAX_TRACKED_MODIFIED_FILES + 5 },
+      (_v, i) => `src/f${i}.ts`,
+    );
+    expect(buildModifiedFilesSection(overflowing, 7)).toContain(
+      "[... 12 earlier modified files omitted]",
+    );
+  });
+
+  it("still reports prior omissions when nothing survives the merge", () => {
+    expect(buildModifiedFilesSection([], 4)).toContain("[... 4 earlier modified files omitted]");
+  });
+
+  it("survives repeated build/split generations without stacking notes", () => {
+    // Generation 1: overflow by 5.
+    let section = buildModifiedFilesSection(
+      Array.from({ length: MAX_TRACKED_MODIFIED_FILES + 5 }, (_v, i) => `src/f${i}.ts`),
+    );
+
+    // Three further generations, each adding two fresh edits.
+    let carried = splitTrackedModifiedFiles(`Prose.${section}`);
+    for (let gen = 0; gen < 3; gen++) {
+      expect(carried.files).toHaveLength(MAX_TRACKED_MODIFIED_FILES);
+      // The note must never be mistaken for a path.
+      expect(carried.files.some((f) => f.startsWith("[..."))).toBe(false);
+
+      section = buildModifiedFilesSection(
+        [...carried.files, `src/new-${gen}-a.ts`, `src/new-${gen}-b.ts`],
+        carried.omitted,
+      );
+      carried = splitTrackedModifiedFiles(`Prose.${section}`);
+    }
+
+    // Exactly one note line, with the running total (5 + 2 + 2 + 2).
+    expect(section.match(/earlier modified files omitted/gu)).toHaveLength(1);
+    expect(section).toContain("[... 11 earlier modified files omitted]");
+    expect(carried.omitted).toBe(11);
+    expect(carried.files).toHaveLength(MAX_TRACKED_MODIFIED_FILES);
+    expect(section).toContain("src/new-2-b.ts");
+  });
+});
+
+// ── resolveSummaryOutputTokens ─────────────────────────────
+
+describe("resolveSummaryOutputTokens", () => {
+  it("floors at the minimum for small or unknown windows", () => {
+    expect(resolveSummaryOutputTokens(32_000)).toBe(MIN_SUMMARY_OUTPUT_TOKENS);
+    expect(resolveSummaryOutputTokens(0)).toBe(MIN_SUMMARY_OUTPUT_TOKENS);
+    expect(resolveSummaryOutputTokens(Number.NaN)).toBe(MIN_SUMMARY_OUTPUT_TOKENS);
+  });
+
+  it("scales with the window and caps at the maximum", () => {
+    expect(resolveSummaryOutputTokens(200_000)).toBe(6000);
+    expect(resolveSummaryOutputTokens(1_000_000)).toBe(MAX_SUMMARY_OUTPUT_TOKENS);
   });
 });

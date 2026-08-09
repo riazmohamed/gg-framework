@@ -22,7 +22,11 @@ describe("resolveResumePath", () => {
     // The whole point: AgentSession's `sessionId` option takes a path, so an
     // unresolved id would load nothing and start an empty conversation.
     const calls: { cwd?: string; id?: string } = {};
-    const path = await resolveResumePath("abc123", "/work/app", store("/s/app/x_abc123.jsonl", calls));
+    const path = await resolveResumePath(
+      "abc123",
+      "/work/app",
+      store("/s/app/x_abc123.jsonl", calls),
+    );
 
     expect(path).toBe("/s/app/x_abc123.jsonl");
     expect(calls).toEqual({ cwd: "/work/app", id: "abc123" });

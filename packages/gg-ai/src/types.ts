@@ -128,22 +128,49 @@ export type ContentPart =
 
 // ── Messages ───────────────────────────────────────────────
 
-export interface SystemMessage {
+export type MessageProvenanceSource = "human" | "agent" | "runtime";
+
+export type MessageProvenanceKind =
+  | "prompt"
+  | "steering"
+  | "notification"
+  | "completion_gate"
+  | "review_follow_up"
+  | "continuation"
+  | "model_switch"
+  | "automation"
+  | "compaction_summary"
+  | "compaction_ack";
+
+export type MessageProvenanceVisibility = "transcript" | "hidden" | "summary";
+
+/** Internal message metadata. `stream()` removes it before provider dispatch. */
+export interface MessageProvenance {
+  source: MessageProvenanceSource;
+  kind: MessageProvenanceKind;
+  visibility: MessageProvenanceVisibility;
+}
+
+interface MessageMetadata {
+  provenance?: MessageProvenance;
+}
+
+export interface SystemMessage extends MessageMetadata {
   role: "system";
   content: string;
 }
 
-export interface UserMessage {
+export interface UserMessage extends MessageMetadata {
   role: "user";
   content: string | (TextContent | ImageContent | VideoContent | DocumentContent)[];
 }
 
-export interface AssistantMessage {
+export interface AssistantMessage extends MessageMetadata {
   role: "assistant";
   content: string | ContentPart[];
 }
 
-export interface ToolResultMessage {
+export interface ToolResultMessage extends MessageMetadata {
   role: "tool";
   content: ToolResult[];
 }
@@ -256,7 +283,10 @@ export interface StreamResponse {
 
 export interface Usage {
   inputTokens: number;
+  /** Total billed output tokens, including reasoning tokens when the provider reports them separately. */
   outputTokens: number;
+  /** Reasoning/thinking-token subset of outputTokens. */
+  reasoningTokens?: number;
   cacheRead?: number;
   cacheWrite?: number;
   serverToolUse?: { webSearchRequests?: number; webFetchRequests?: number };

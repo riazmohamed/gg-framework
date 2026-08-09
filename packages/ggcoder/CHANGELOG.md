@@ -1,5 +1,277 @@
 # @kenkaiiii/ggcoder
 
+## 5.37.0
+
+### Minor Changes
+
+- Add Grok subscription OAuth (SuperGrok / X Premium) with OAuth-first credential resolution and automatic API-key fallback, plus a session-archive file-descriptor leak fix
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.37.0
+- @kenkaiiii/gg-agent@5.37.0
+- @kenkaiiii/gg-core@5.37.0
+
+## 5.36.0
+
+### Minor Changes
+
+- Extend the rank ladder from 50 to 1000 levels with 145 named ranks across 29 tiers. Levels 1-50 keep their exact names, tiers, and XP costs, so existing progress is never re-ranked; past level 50 the XP curve switches from the exponential to a steady ramp that starts at the level-50 step and grows to ~3.6k per level.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.36.0
+- @kenkaiiii/gg-agent@5.36.0
+- @kenkaiiii/gg-core@5.36.0
+
+## 5.35.1
+
+### Patch Changes
+
+- 8e124fd: Fix "no low surrogate in string" / Bad Request errors from Anthropic and OpenAI.
+
+  An unpaired UTF-16 surrogate anywhere in the conversation (a model streaming a
+  split emoji inside tool-call arguments, or a character-indexed truncation that
+  cut an astral character in half) made the JSON request body unparseable for
+  every provider — and it persisted in history, so retries and model switches
+  failed identically.
+
+  `stream()` now scrubs lone surrogates from all messages at the single provider
+  boundary, and the tool-result/shell/web-fetch/grep truncation paths cut on
+  character boundaries instead of splitting surrogate pairs.
+
+- Updated dependencies [8e124fd]
+  - @kenkaiiii/gg-ai@5.35.1
+  - @kenkaiiii/gg-agent@5.35.1
+  - @kenkaiiii/gg-core@5.35.1
+
+## 5.35.0
+
+### Minor Changes
+
+- 3b9705d: Share MCP connections and language servers across sessions instead of spawning a set per session.
+
+  A daemon runs many sessions at once — one per window, plus Ken chat and Ken autopilot within each — and each used to spawn its own child process for every MCP server and every language server. Measured on a four-window daemon: 34 processes and 3.3 GB, most of it identical work duplicated.
+  - **MCP connections are now pooled per process** and reference counted, so one stdio child serves every session and exits when the last releases it. Sharing is the default for stdio servers; `shared: false` opts out a server that keeps per-caller state, and HTTP servers are never pooled because their auth and session id are per-connection. Elicitation is routed to the session whose tool call is in flight, and cancelled rather than guessed when that is ambiguous. A pooled server that exits on its own is retired from the pool, so the next session reconnects instead of inheriting a dead connection.
+  - **Language servers are now pooled per (server, project root)**, so two windows open on one repo share a single tsserver stack instead of running two. Servers left unused for five minutes are reclaimed, which also releases roots that no window has open.
+  - **tsserver runs two processes per root instead of four**, by disabling the syntax server and automatic typing acquisition — both exist for an interactive editor and are unused here — and caps its heap at the VS Code default.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.35.0
+- @kenkaiiii/gg-agent@5.35.0
+- @kenkaiiii/gg-core@5.35.0
+
+## 5.34.3
+
+### Patch Changes
+
+- Rework auto-compaction summaries: lead with the next step, cut redundant user-message transcripts and read-file lists, and supersede prior summaries instead of concatenating them
+  - @kenkaiiii/gg-ai@5.34.3
+  - @kenkaiiii/gg-agent@5.34.3
+  - @kenkaiiii/gg-core@5.34.3
+
+## 5.34.2
+
+### Patch Changes
+
+- Prevent macOS temp folders from flooding and blanking the desktop project picker.
+  - @kenkaiiii/gg-ai@5.34.2
+  - @kenkaiiii/gg-agent@5.34.2
+  - @kenkaiiii/gg-core@5.34.2
+
+## 5.34.1
+
+### Patch Changes
+
+- List project folders on disk in project discovery, add hidden-project support, and never prune skill output from context
+  - @kenkaiiii/gg-ai@5.34.1
+  - @kenkaiiii/gg-agent@5.34.1
+  - @kenkaiiii/gg-core@5.34.1
+
+## 5.34.0
+
+### Minor Changes
+
+- Add ACP file diffs and tool locations, publish plan progress as `plan` updates, and implement session/resume, session/close, session/delete, session_info_update, and message ids
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.34.0
+- @kenkaiiii/gg-agent@5.34.0
+- @kenkaiiii/gg-core@5.34.0
+
+## 5.33.0
+
+### Minor Changes
+
+- Emit ACP `usage_update` session notifications so clients can show context-window usage, including the post-compaction drop and usage on session/new and session/load
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.33.0
+- @kenkaiiii/gg-agent@5.33.0
+- @kenkaiiii/gg-core@5.33.0
+
+## 5.32.0
+
+### Minor Changes
+
+- Count Gemini reasoning tokens toward billed output usage, gate verification claims behind a fail-closed command classifier, select context by relevance when compacting, and add portable Agent Plugin bundles. Also ships an opt-in OS command sandbox.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.32.0
+- @kenkaiiii/gg-agent@5.32.0
+- @kenkaiiii/gg-core@5.32.0
+
+## 5.31.0
+
+### Minor Changes
+
+- Advertise built-in and project slash commands to ACP clients when sessions open or load.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.31.0
+- @kenkaiiii/gg-agent@5.31.0
+- @kenkaiiii/gg-core@5.31.0
+
+## 5.30.3
+
+### Patch Changes
+
+- Restore complete compacted-session history in ACP clients without duplicate retained messages or internal replay noise.
+  - @kenkaiiii/gg-ai@5.30.3
+  - @kenkaiiii/gg-agent@5.30.3
+  - @kenkaiiii/gg-core@5.30.3
+
+## 5.30.2
+
+### Patch Changes
+
+- Recover useful subagent findings after timeouts and prevent nested delegation from exhausting child turn budgets.
+  - @kenkaiiii/gg-ai@5.30.2
+  - @kenkaiiii/gg-agent@5.30.2
+  - @kenkaiiii/gg-core@5.30.2
+
+## 5.30.1
+
+### Patch Changes
+
+- Keep long autonomous tool runs lean by pruning stale outputs and oversized completed tool arguments.
+  - @kenkaiiii/gg-ai@5.30.1
+  - @kenkaiiii/gg-agent@5.30.1
+  - @kenkaiiii/gg-core@5.30.1
+
+## 5.30.0
+
+### Minor Changes
+
+- Add ACP session controls and make conversation compaction durable across resumes and concurrent processes.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.30.0
+- @kenkaiiii/gg-agent@5.30.0
+- @kenkaiiii/gg-core@5.30.0
+
+## 5.29.1
+
+### Patch Changes
+
+- Fix sub-agents hanging until their timeout instead of exiting when finished, and stop the Ideal review coverage gate from looping forever on deleted or unreadable files
+  - @kenkaiiii/gg-ai@5.29.1
+  - @kenkaiiii/gg-agent@5.29.1
+  - @kenkaiiii/gg-core@5.29.1
+
+## 5.29.0
+
+### Minor Changes
+
+- Add step-boundary transcript checkpoints and a run journal so crashes preserve completed work, MCP HTTP session recovery with single reconnect-and-replay, server-initiated elicitation support, a visual token budget for image downscaling, and capped backoff for background-process notifications.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.29.0
+- @kenkaiiii/gg-agent@5.29.0
+- @kenkaiiii/gg-core@5.29.0
+
+## 5.28.0
+
+### Minor Changes
+
+- List Claude Code and Codex sessions alongside GG Coder's own for a project, tagged with their source and resumable on open, replacing the `/import` slash command
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.28.0
+- @kenkaiiii/gg-agent@5.28.0
+- @kenkaiiii/gg-core@5.28.0
+
+## 5.27.0
+
+### Minor Changes
+
+- Add `/import` for resuming Claude Code, Codex and Cursor transcripts, gate turn completion on unread background processes, and migrate MCP to SDK v2 with an on-disk tool catalog cache
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.27.0
+- @kenkaiiii/gg-agent@5.27.0
+- @kenkaiiii/gg-core@5.27.0
+
+## 5.26.3
+
+### Patch Changes
+
+- Fix session transcript restore: rebase marker anchors when compaction rewrites a session, heal stale anchors in existing session files, skip duplicate autopilot-injected user bubbles, and restore slash commands from the persisted invocation instead of matching drifted templates
+  - @kenkaiiii/gg-ai@5.26.3
+  - @kenkaiiii/gg-agent@5.26.3
+  - @kenkaiiii/gg-core@5.26.3
+
+## 5.26.2
+
+### Patch Changes
+
+- Fix concurrent prompts starting two runs on the same session, and announce queue depth the moment the agent consumes queued steering.
+  - @kenkaiiii/gg-ai@5.26.2
+  - @kenkaiiii/gg-agent@5.26.2
+  - @kenkaiiii/gg-core@5.26.2
+
+## 5.26.1
+
+### Patch Changes
+
+- Remove the project memory journal: it duplicated what the repo already tells the agent and suppressed real verification.
+  - @kenkaiiii/gg-ai@5.26.1
+  - @kenkaiiii/gg-agent@5.26.1
+  - @kenkaiiii/gg-core@5.26.1
+
+## 5.26.0
+
+### Minor Changes
+
+- Keep long tasks running and carry project history across sessions: the agent loop can now extend an exhausted turn budget when it is still making progress, finished sub-agents and background processes announce themselves instead of needing to be polled, mid-session model switches are recorded as durable replayable state, and compaction writes past-tense project history to `.gg/memory.md` (on by default, `/memory-off` to disable).
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.26.0
+- @kenkaiiii/gg-agent@5.26.0
+- @kenkaiiii/gg-core@5.26.0
+
+## 5.25.0
+
+### Minor Changes
+
+- Add local model support (Ollama, LM Studio, llama.cpp, vLLM) with runtime discovery, capability-gated tool/thinking support, and per-endpoint auth; add `/remove-dir` workspace command; keep the subscription usage meter from blanking on transient provider rate limits.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.25.0
+- @kenkaiiii/gg-agent@5.25.0
+- @kenkaiiii/gg-core@5.25.0
+
 ## 5.24.0
 
 ### Minor Changes

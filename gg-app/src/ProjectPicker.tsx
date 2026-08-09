@@ -4,8 +4,10 @@ import { theme } from "./theme";
 import {
   waitForReady,
   listProjects,
+  setProjectHidden,
   listSessions,
   selectProject,
+  importTranscript,
   getSettings,
   focusWindowByOffset,
   arrangeAllWindows,
@@ -18,6 +20,14 @@ import { BackButton } from "./BackButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
 import { RadioButton } from "./RadioButton";
 import { NewProjectModal } from "./NewProjectModal";
+
+/**
+ * Does this row point at another tool's transcript rather than a GG Coder
+ * session? Those need an import before they can be opened.
+ */
+function isForeignSession(session: RecentSession): boolean {
+  return session.source === "claude-code" || session.source === "codex";
+}
 
 interface Props {
   /** Called after the agent has been re-pointed at `cwd` (+ optional session). */
@@ -114,6 +124,31 @@ export function ProjectPicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * Drop a project from the list and persist the decision. Removed optimistically
+   * because discovery is a multi-store filesystem scan — re-listing to confirm
+   * would leave the row sitting there for a visible beat.
+   */
+  function hideProject(project: DiscoveredProject): void {
+    let index = -1;
+    setProjects((prev) => {
+      index = prev.findIndex((p) => p.path === project.path);
+      return prev.filter((p) => p.path !== project.path);
+    });
+    void setProjectHidden(project.path, true).catch(() => {
+      // Persisting failed, so the row is still real: put it back at its old
+      // position rather than leaving the list disagreeing with what the next
+      // launch will show. Rows are sorted by recency server-side, so restoring
+      // by index preserves that order without duplicating the sort here.
+      setProjects((prev) => {
+        if (prev.some((p) => p.path === project.path)) return prev;
+        const next = [...prev];
+        next.splice(index < 0 ? next.length : index, 0, project);
+        return next;
+      });
+    });
+  }
+
   function openProject(project: DiscoveredProject): void {
     setSelected(project);
     setSessions([]);
@@ -139,6 +174,41 @@ export function ProjectPicker({
           message
             .replace(/Run ["'`]?ggcoder login["'`]?/gi, "Use AI Providers to sign in")
             .replace(/ggcoder login/gi, "AI Providers"),
+        );
+        setBusy(false);
+      });
+  }
+
+  /**
+   * Open a session row. A native row resumes directly; a Claude Code / Codex row
+   * is imported into a real GG Coder session first, then opened by its new path.
+   * The import is silent — from the user's side this is just "open that
+   * conversation", which is why there is no separate import affordance.
+   */
+  function chooseSession(cwd: string, session: RecentSession): void {
+    if (busy) return;
+    if (!isForeignSession(session)) {
+      choose(cwd, session.path);
+      return;
+    }
+    setBusy(true);
+    setResumeError(null);
+    void importTranscript(session.path, cwd)
+      .then((result) => {
+        if (!result.ok) {
+          setResumeError(`Could not import that conversation: ${result.error}`);
+          setBusy(false);
+          return;
+        }
+        // Re-enter the normal resume path with the freshly written session.
+        setBusy(false);
+        choose(cwd, result.sessionPath);
+      })
+      .catch((reason: unknown) => {
+        setResumeError(
+          `Could not import that conversation: ${
+            reason instanceof Error ? reason.message : String(reason)
+          }`,
         );
         setBusy(false);
       });
@@ -238,32 +308,37 @@ export function ProjectPicker({
           {!loading && filteredProjects.length > 0 && (
             <div className="picker-reveal">
               {filteredProjects.map((p) => (
-                <button
-                  key={p.path}
-                  className="picker-item"
-                  onClick={() => openProject(p)}
-                  title={p.path}
-                >
-                  <span className="picker-row">
-                    <span className="picker-name" style={{ color: theme.text }}>
-                      {p.name}
+                <div key={p.path} className="picker-item-wrap">
+                  <button className="picker-item" onClick={() => openProject(p)} title={p.path}>
+                    <span className="picker-row">
+                      <span className="picker-name" style={{ color: theme.text }}>
+                        {p.name}
+                      </span>
+                      <Badge>{p.lastActiveDisplay}</Badge>
                     </span>
-                    <Badge>{p.lastActiveDisplay}</Badge>
-                  </span>
-                  <span className="picker-sources">
-                    {p.sources.map((s, i) => {
-                      const { label, color } = sourceStyle(s);
-                      return (
-                        <span key={s} style={{ color }}>
-                          {i > 0 ? (
-                            <span style={{ color: theme.textDim }}>{" \u00b7 "}</span>
-                          ) : null}
-                          {label}
-                        </span>
-                      );
-                    })}
-                  </span>
-                </button>
+                    <span className="picker-sources">
+                      {p.sources.map((s, i) => {
+                        const { label, color } = sourceStyle(s);
+                        return (
+                          <span key={s} style={{ color }}>
+                            {i > 0 ? (
+                              <span style={{ color: theme.textDim }}>{" \u00b7 "}</span>
+                            ) : null}
+                            {label}
+                          </span>
+                        );
+                      })}
+                    </span>
+                  </button>
+                  <button
+                    className="picker-hide"
+                    aria-label={`Hide ${p.name}`}
+                    title="Hide from this list"
+                    onClick={() => hideProject(p)}
+                  >
+                    {"\u00d7"}
+                  </button>
+                </div>
               ))}
             </div>
           )}
@@ -295,7 +370,12 @@ export function ProjectPicker({
                   key={s.id}
                   className="picker-item"
                   disabled={busy}
-                  onClick={() => choose(selected.path, s.path)}
+                  onClick={() => chooseSession(selected.path, s)}
+                  title={
+                    isForeignSession(s)
+                      ? `From ${sourceStyle(s.source ?? "").label} — opens as a GG Coder session`
+                      : undefined
+                  }
                 >
                   <span className="picker-row">
                     <span className="picker-name picker-preview" style={{ color: theme.text }}>
@@ -304,6 +384,14 @@ export function ProjectPicker({
                     <Badge>{s.lastActiveDisplay}</Badge>
                   </span>
                   <span className="picker-meta" style={{ color: theme.textMuted }}>
+                    {isForeignSession(s) && (
+                      <span
+                        className="picker-source-tag"
+                        style={{ color: sourceStyle(s.source ?? "").color }}
+                      >
+                        {sourceStyle(s.source ?? "").label}
+                      </span>
+                    )}
                     {`${s.messageCount} msgs`}
                   </span>
                 </button>

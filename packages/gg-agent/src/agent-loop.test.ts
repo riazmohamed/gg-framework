@@ -28,14 +28,18 @@ import { stream } from "@abukhaled/gg-ai";
 const mockStream = vi.mocked(stream);
 const emptyParams = z.object({});
 
-function makeResponse(text: string, stopReason = "end_turn") {
+function makeResponse(
+  text: string,
+  stopReason = "end_turn",
+  usage: Usage = { inputTokens: 100, outputTokens: 50 },
+) {
   return {
     message: {
       role: "assistant" as const,
       content: text ? [{ type: "text" as const, text }] : "",
     },
     stopReason,
-    usage: { inputTokens: 100, outputTokens: 50 },
+    usage,
   };
 }
 
@@ -374,6 +378,47 @@ describe("agentLoop", () => {
       expect(turnEnd.timing.completedAt).toBeGreaterThanOrEqual(turnEnd.timing.startedAt);
       expect(turnEnd.timing.providerDurationMs).toBeGreaterThanOrEqual(0);
     }
+  });
+
+  it("sums reasoning-token detail without double-counting aggregate output", async () => {
+    const response = makeResponse("Done", "end_turn", {
+      inputTokens: 60,
+      outputTokens: 40,
+      reasoningTokens: 20,
+    });
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("context_probe", {
+          inputTokens: 40,
+          outputTokens: 30,
+          reasoningTokens: 10,
+        }) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: "text_delta" as const, text: "Done" };
+        },
+        response: Promise.resolve(response),
+      } as unknown as ReturnType<typeof stream>);
+
+    const { result } = await collectLoop([{ role: "user", content: "test" }], {
+      provider: "gemini",
+      model: "test",
+      tools: [
+        {
+          name: "context_probe",
+          description: "continue the test",
+          parameters: emptyParams,
+          execute: () => "ok",
+        },
+      ],
+    });
+
+    expect(result.totalUsage).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 70,
+      reasoningTokens: 30,
+    });
   });
 
   it("forwards Codex transport identity separately from prompt cache routing", async () => {
@@ -1220,7 +1265,10 @@ describe("agentLoop", () => {
     const partialIdx = texts.findIndex((t) => t === partial);
     expect(partialIdx).toBeGreaterThan(-1);
     expect(messages[partialIdx].role).toBe("assistant");
-    expect(messages[partialIdx + 1].role).toBe("user");
+    expect(messages[partialIdx + 1]).toMatchObject({
+      role: "user",
+      provenance: { source: "runtime", kind: "continuation", visibility: "hidden" },
+    });
     expect(texts[partialIdx + 1]).toContain("cut off");
     expect(texts.some((t) => t === "and the second half.")).toBe(true);
   }, 30_000);
@@ -1722,6 +1770,182 @@ describe("agentLoop", () => {
   });
 });
 
+describe("agentLoop turn budget extension", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  const tools = [
+    {
+      name: "test_tool",
+      description: "test",
+      parameters: { parse: () => ({}) } as never,
+      execute: () => "result",
+    },
+  ];
+
+  /** Calls a tool for `toolTurns` turns, then answers cleanly. */
+  function mockToolThenDone(toolTurns: number) {
+    let calls = 0;
+    mockStream.mockImplementation(() => {
+      calls++;
+      const result =
+        calls <= toolTurns
+          ? mockToolCallResult("test_tool", { inputTokens: 1, outputTokens: 1 })
+          : mockOkResult("finished");
+      return result as unknown as ReturnType<typeof stream>;
+    });
+  }
+
+  function baseMessages(): Message[] {
+    return [
+      { role: "system", content: "sys" },
+      { role: "user", content: "do the long thing" },
+    ];
+  }
+
+  it("completes a task that needs more than maxTurns when an extension is granted", async () => {
+    // Needs 4 tool turns + 1 answer turn, but the budget is 2.
+    mockToolThenDone(4);
+    const grants: Array<{ turn: number; maxTurns: number; extension: number }> = [];
+
+    const { events, result } = await collectLoop(baseMessages(), {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 2,
+      tools,
+      onTurnBudgetExhausted: (ctx) => {
+        grants.push(ctx);
+        return true;
+      },
+    });
+
+    expect(grants).toEqual([
+      { turn: 2, maxTurns: 2, extension: 1 },
+      { turn: 4, maxTurns: 4, extension: 2 },
+    ]);
+    const extended = events.filter((e) => e.type === "turn_budget_extended");
+    expect(extended).toEqual([
+      { type: "turn_budget_extended", turn: 2, grantedTurns: 4, extension: 1 },
+      { type: "turn_budget_extended", turn: 4, grantedTurns: 6, extension: 2 },
+    ]);
+    // Finished cleanly inside the extended budget — no cut-off signal.
+    expect(events.some((e) => e.type === "max_turns")).toBe(false);
+    expect(result.totalTurns).toBe(5);
+  });
+
+  it("injects a continuation that never re-sends text already in context", async () => {
+    mockToolThenDone(2);
+    const messages = baseMessages();
+
+    await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 2,
+      tools,
+      onTurnBudgetExhausted: () => true,
+    });
+
+    const continuation = messages.find(
+      (m) => m.role === "user" && typeof m.content === "string" && m.content.includes("turn limit"),
+    );
+    expect(continuation).toMatchObject({
+      provenance: { source: "runtime", kind: "continuation", visibility: "hidden" },
+    });
+    // The original request is already in `messages`; echoing it back would be
+    // paid-for duplication of tokens the model can already see.
+    expect(continuation!.content).not.toContain("do the long thing");
+    expect(continuation!.content).toContain("do not restart work that is already complete");
+    // Small enough that granting turns is never a meaningful token cost.
+    expect(String(continuation!.content).length).toBeLessThan(400);
+  });
+
+  it("keeps today's max_turns behaviour when the extension is refused", async () => {
+    mockToolThenDone(Number.POSITIVE_INFINITY);
+
+    const { events, result } = await collectLoop(baseMessages(), {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 3,
+      tools,
+      onTurnBudgetExhausted: () => false,
+    });
+
+    expect(events.some((e) => e.type === "turn_budget_extended")).toBe(false);
+    const maxTurnsEvents = events.filter((e) => e.type === "max_turns");
+    expect(maxTurnsEvents).toHaveLength(1);
+    expect(maxTurnsEvents[0]).toMatchObject({ totalTurns: 3, maxTurns: 3 });
+    expect(result.totalTurns).toBe(3);
+  });
+
+  it("treats a throwing hook as a refusal", async () => {
+    mockToolThenDone(Number.POSITIVE_INFINITY);
+
+    const { events } = await collectLoop(baseMessages(), {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 2,
+      tools,
+      onTurnBudgetExhausted: () => {
+        throw new Error("host exploded");
+      },
+    });
+
+    expect(events.some((e) => e.type === "turn_budget_extended")).toBe(false);
+    expect(events.filter((e) => e.type === "max_turns")).toHaveLength(1);
+  });
+
+  it("stops at the extension cap and emits max_turns after the last extension", async () => {
+    mockToolThenDone(Number.POSITIVE_INFINITY);
+    let calls = 0;
+
+    const { events, result } = await collectLoop(baseMessages(), {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 2,
+      maxTurnExtensions: 1,
+      tools,
+      onTurnBudgetExhausted: () => {
+        calls++;
+        return true;
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(events.filter((e) => e.type === "turn_budget_extended")).toHaveLength(1);
+    // Cut-off reports the *extended* budget, which is what actually ran out.
+    expect(events.filter((e) => e.type === "max_turns")[0]).toMatchObject({
+      totalTurns: 4,
+      maxTurns: 4,
+    });
+    expect(result.totalTurns).toBe(4);
+
+    // Ordering: every extension precedes the terminal max_turns, which precedes agent_done.
+    const extendIndex = events.findIndex((e) => e.type === "turn_budget_extended");
+    const maxTurnsIndex = events.findIndex((e) => e.type === "max_turns");
+    const doneIndex = events.findIndex((e) => e.type === "agent_done");
+    expect(extendIndex).toBeLessThan(maxTurnsIndex);
+    expect(maxTurnsIndex).toBeLessThan(doneIndex);
+  });
+
+  it("never consults the hook when maxTurnExtensions is 0", async () => {
+    mockToolThenDone(Number.POSITIVE_INFINITY);
+    const hook = vi.fn(() => true);
+
+    const { events } = await collectLoop(baseMessages(), {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 2,
+      maxTurnExtensions: 0,
+      tools,
+      onTurnBudgetExhausted: hook,
+    });
+
+    expect(hook).not.toHaveBeenCalled();
+    expect(events.filter((e) => e.type === "max_turns")).toHaveLength(1);
+  });
+});
+
 describe("agentLoop truncation handling", () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -1772,7 +1996,9 @@ describe("agentLoop truncation handling", () => {
         typeof m.content === "string" &&
         m.content.includes("output-token limit"),
     );
-    expect(continuation).toBeDefined();
+    expect(continuation).toMatchObject({
+      provenance: { source: "runtime", kind: "continuation", visibility: "hidden" },
+    });
     // Both parts are preserved in history — no replay.
     const assistantTexts = messages
       .filter((m) => m.role === "assistant")

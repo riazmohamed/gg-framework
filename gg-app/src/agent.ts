@@ -282,6 +282,9 @@ export interface DiscoveredProject {
   sources: string[];
 }
 
+/** Store a session row came from; absent means a native GG Coder session. */
+export type SessionSource = "ggcoder" | "claude-code" | "codex";
+
 export interface RecentSession {
   id: string;
   path: string;
@@ -289,6 +292,11 @@ export interface RecentSession {
   lastActiveDisplay: string;
   messageCount: number;
   chatAgent?: ChatAgentId;
+  /**
+   * Absent (or `ggcoder`) means this resumes directly. A foreign value means
+   * `path` is that tool's own transcript, imported before it opens.
+   */
+  source?: SessionSource;
 }
 
 export interface SwitchModelResult extends ThinkingState {
@@ -309,7 +317,8 @@ export async function getState(): Promise<AgentState> {
 
 // ── Progress (Ranks) ─────────────────────────────────────────────────────
 
-/** One rung of the 50-rank ladder, as computed by the sidecar. */
+/** One named rank of the 1000-level ladder, as computed by the sidecar.
+ *  Ranks span 10 levels above level 50, so `level` is the rank's first level. */
 export interface RankLadderEntry {
   level: number;
   name: string;
@@ -372,6 +381,9 @@ export interface SubscriptionUsageProviderSnapshot {
   windows: SubscriptionUsageWindow[];
   fetchedAt: number;
   error?: string;
+  /** True when the sidecar is replaying its last good snapshot because the
+   *  provider's quota endpoint is currently failing (usually a 429). */
+  stale?: boolean;
 }
 
 /** Fetch OAuth subscription quota. Tokens never leave the sidecar. */
@@ -732,6 +744,19 @@ export interface ApiKeyVariant {
   baseUrl?: string;
 }
 
+/** What one auth method bills against and when to pick it. */
+export interface AuthMethodGuidance {
+  method: AuthMethod;
+  /** Button/row label, e.g. "Sign in with Grok". */
+  label: string;
+  /** What the user spends on this method. */
+  billing: string;
+  /** When to choose it. */
+  when: string;
+  /** Prerequisite the user must already have, if any. */
+  requires?: string;
+}
+
 export interface AuthProvider {
   value: string;
   label: string;
@@ -743,6 +768,23 @@ export interface AuthProvider {
   apiKeyVariants?: ApiKeyVariant[];
   /** Live connection status from ~/.gg/auth.json. */
   connected: boolean;
+  /**
+   * Which methods actually hold a credential. Providers supporting both (Kimi,
+   * Grok) can have two at once, so `connected` alone cannot say whether the user
+   * is on their subscription, their API key, or both.
+   */
+  connectedMethods: AuthMethod[];
+  /**
+   * The method a request would use right now: OAuth wins when connected, unless
+   * its usage window is exhausted and an API key is configured to cover it.
+   */
+  activeMethod?: AuthMethod;
+  /** Epoch ms until which OAuth is sidelined for spent plan usage, if it is. */
+  oauthExhaustedUntil?: number;
+  /** How the two methods interact — only set when a provider has both. */
+  priorityNote?: string;
+  /** Per-method guidance — only set when a provider offers a real choice. */
+  methodGuidance?: AuthMethodGuidance[];
 }
 
 /**
@@ -791,13 +833,37 @@ export async function authOAuthCode(code: string): Promise<void> {
   await invoke("agent_auth_oauth_code", { code });
 }
 
+/** How the user answered an MCP server's request for input. */
+export type McpElicitAction = "accept" | "decline" | "cancel";
+
+/**
+ * Answer an MCP server's mid-tool-call request for user input (the `mcp_elicit`
+ * SSE event). `content` is the filled form and applies only to `accept`.
+ *
+ * The MCP tool call — and therefore the whole turn — is blocked until this
+ * lands, so every dismissal path must call it. The sidecar only auto-cancels
+ * after a multi-minute timeout.
+ */
+export async function mcpElicit(
+  id: string,
+  action: McpElicitAction,
+  content?: Record<string, unknown>,
+): Promise<void> {
+  await waitForReady();
+  await invoke("agent_mcp_elicit", { id, action, content: content ?? null });
+}
+
 /**
  * Disconnect a provider (clear stored credentials). Handled NATIVELY in Rust
- * (removes the provider from ~/.gg/auth.json; moonshot also clears its OAuth
- * key) so it never depends on the sidecar.
+ * (removes the provider from ~/.gg/auth.json, including a dual-auth provider's
+ * separate OAuth key) so it never depends on the sidecar.
+ *
+ * `method` disconnects just ONE credential of a provider that holds both — e.g.
+ * drop a spent xAI API key without signing out of the Grok subscription. Omit it
+ * to disconnect the provider entirely.
  */
-export async function authLogout(provider: string): Promise<void> {
-  await invoke("app_auth_logout", { provider });
+export async function authLogout(provider: string, method?: AuthMethod): Promise<void> {
+  await invoke("app_auth_logout", { provider, method });
 }
 
 /** Start a fresh session (clears history) for this window's current project. */
@@ -852,6 +918,33 @@ export async function setRadioVolume(volume: number): Promise<number> {
   return Number.isFinite(res.volume) ? res.volume : volume;
 }
 
+/** One user message waiting to be injected into the running turn. */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+}
+
+/**
+ * Cancel one pending queued message by id.
+ *
+ * Returns the remaining queue, or null if the call itself failed. A `cancelled:
+ * false` from the sidecar is NOT a failure: it means the agent consumed the
+ * message between the row rendering and the click landing, so the caller should
+ * simply reconcile to the returned list.
+ */
+export async function cancelQueued(id: string): Promise<QueuedMessage[] | null> {
+  try {
+    const res = await invoke<{ cancelled?: boolean; queued?: QueuedMessage[] }>(
+      "agent_cancel_queued",
+      { id },
+    );
+    return res.queued ?? [];
+  } catch (e) {
+    await logError(`agent_cancel_queued failed: ${String(e)}`);
+    return null;
+  }
+}
+
 /** Stop a background task by id. Returns the sidecar's status message, if any. */
 export async function killTask(id: string): Promise<string | null> {
   try {
@@ -860,6 +953,38 @@ export async function killTask(id: string): Promise<string | null> {
   } catch (e) {
     await logError(`agent_kill_task failed: ${String(e)}`);
     return null;
+  }
+}
+
+/** Result of importing a foreign coding-agent transcript. */
+export type ImportTranscriptResult =
+  | {
+      ok: true;
+      sessionId: string;
+      sessionPath: string;
+      cwd: string;
+      format: "claude" | "codex" | "cursor";
+      messageCount: number;
+      /** Human-readable summary of what the lossy import discarded. */
+      dropped: string;
+      preview?: string;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Import a Claude Code / Codex / Cursor transcript as a resumable GG Coder
+ * session. Failures come back as `{ ok: false, error }` rather than throwing,
+ * so the caller can render the reason directly.
+ */
+export async function importTranscript(
+  path: string,
+  cwd?: string,
+): Promise<ImportTranscriptResult> {
+  try {
+    return await invoke<ImportTranscriptResult>("agent_import_transcript", { path, cwd });
+  } catch (e) {
+    await logError(`agent_import_transcript failed: ${String(e)}`);
+    return { ok: false, error: String(e) };
   }
 }
 
@@ -884,14 +1009,23 @@ export async function listCommands(): Promise<SlashCommand[]> {
   }
 }
 
-/** List models available to the logged-in providers. */
-export async function listModels(): Promise<ModelOption[]> {
+/**
+ * List models available to the logged-in providers, or `null` when the fetch
+ * itself failed.
+ *
+ * The distinction matters: an empty array is a real answer (every provider was
+ * disconnected) and must clear the picker, whereas a failed IPC call must leave
+ * the previous list alone. Collapsing both to `[]` meant callers had to guard
+ * with `length > 0`, which made disconnecting your last provider leave a picker
+ * full of models you can no longer authenticate against.
+ */
+export async function listModels(): Promise<ModelOption[] | null> {
   try {
     const res = await invoke<{ models: ModelOption[] }>("agent_models");
     return res.models ?? [];
   } catch (e) {
     await logError(`agent_models failed: ${String(e)}`);
-    return [];
+    return null;
   }
 }
 
@@ -972,6 +1106,37 @@ export async function saveSettings(projectsRoot: string): Promise<void> {
   await invoke("app_settings_save", { projectsRoot });
 }
 
+export interface InstalledPlugin {
+  schemaVersion: 1;
+  id: string;
+  name: string;
+  version: string;
+  entry: string;
+  description?: string;
+  commands?: string[];
+  installPath: string;
+}
+
+export async function listPlugins(): Promise<InstalledPlugin[]> {
+  await waitForReady();
+  const result = await invoke<{ plugins: InstalledPlugin[] }>("agent_plugins");
+  return result.plugins;
+}
+
+export async function installPluginBundle(
+  bundlePath: string,
+): Promise<{ plugin: InstalledPlugin; restartRequired: boolean }> {
+  await waitForReady();
+  return invoke("agent_install_plugin", { bundlePath });
+}
+
+export async function removePluginBundle(
+  pluginId: string,
+): Promise<{ removed: string; restartRequired: boolean }> {
+  await waitForReady();
+  return invoke("agent_remove_plugin", { pluginId });
+}
+
 export interface PermissionsStatus {
   /** False on platforms with nothing to grant (Windows/Linux today) — the
    *  caller should hide the permissions row entirely rather than show a
@@ -1027,6 +1192,16 @@ export async function listProjects(): Promise<DiscoveredProject[]> {
     await logError(`agent_projects failed: ${String(e)}`);
     return [];
   }
+}
+
+/**
+ * Hide a project from the picker, or restore it with `hidden: false`. Keyed by
+ * path so a dismissed scratch directory stays gone even though its sessions
+ * keep turning up in every scan.
+ */
+export async function setProjectHidden(projectPath: string, hidden: boolean): Promise<void> {
+  await waitForReady();
+  await invoke("agent_set_project_hidden", { path: projectPath, hidden });
 }
 
 /** A project file surfaced in the chat input's `@` picker. */
@@ -1173,6 +1348,57 @@ export async function gazeFocus(
 export async function onGazeTarget(cb: (e: GazeTargetEvent) => void): Promise<() => void> {
   const un = await appWindow.listen<GazeTargetEvent>("gaze-target", (e) => cb(e.payload));
   return un;
+}
+
+// ── macOS menu-bar tray ────────────────────────────────────────────────────
+
+/** An action picked from the macOS menu-bar menu. */
+export type TrayIntent = "update" | "new-chat" | "new-code" | "remote" | "settings";
+
+/**
+ * Subscribe THIS window to tray actions routed to it. Returns an unlisten fn.
+ * Used when the tray reuses an already-open window.
+ */
+export async function onTrayIntent(cb: (intent: TrayIntent) => void): Promise<() => void> {
+  return await appWindow.listen<TrayIntent>("tray-intent", (e) => cb(e.payload));
+}
+
+/**
+ * Claim (once) the tray action THIS window was opened for, or null when the user
+ * opened it themselves. A window built by the tray isn't listening yet when the
+ * menu is clicked, so Rust parks the intent and the webview claims it on mount.
+ */
+export async function takeTrayIntent(): Promise<TrayIntent | null> {
+  try {
+    return await invoke<TrayIntent | null>("window_tray_intent");
+  } catch (e) {
+    await logError(`window_tray_intent failed: ${String(e)}`);
+    return null;
+  }
+}
+
+/**
+ * Tell the tray whether an app update is pending, so "Update now" appears in the
+ * menu-bar menu (and disappears again when up to date). `null` = up to date.
+ */
+export async function setUpdateAvailable(version: string | null): Promise<void> {
+  try {
+    await invoke("set_update_available", { version });
+  } catch (e) {
+    await logError(`set_update_available failed: ${String(e)}`);
+  }
+}
+
+/**
+ * Tell the tray whether Remote (the Telegram serve loop) is running, so its menu
+ * item reads "Remote" or "Remote · Turn off".
+ */
+export async function setRemoteActive(active: boolean): Promise<void> {
+  try {
+    await invoke("set_remote_active", { active });
+  } catch (e) {
+    await logError(`set_remote_active failed: ${String(e)}`);
+  }
 }
 
 /** Open a single new project window (Cmd/Ctrl+N). Never re-tiles existing ones. */

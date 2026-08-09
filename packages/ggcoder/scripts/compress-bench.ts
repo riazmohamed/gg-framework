@@ -10,7 +10,7 @@
  * A compressor that scores 95% reduction but eats a needle is a correctness bug,
  * not a win. We score both methods on both axes and print a table.
  *
- * Run:  pnpm --filter @kenkaiiii/ggcoder exec tsx scripts/compress-bench.ts
+ * Run:  pnpm --filter @abukhaled/ogcoder exec tsx scripts/compress-bench.ts
  */
 import { truncateTail, truncateHead } from "../src/tools/truncate.js";
 import { compressOutput } from "../src/tools/compress.js";

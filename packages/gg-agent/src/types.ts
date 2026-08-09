@@ -39,6 +39,13 @@ export interface AgentTool<T extends z.ZodType = z.ZodType> extends Tool {
    * batch runs in source order so stateful mutations cannot race each other.
    */
   executionMode?: ToolExecutionMode;
+  /**
+   * Overrides the loop's default per-tool timeout. A tool that owns a longer
+   * internal budget than the default must declare it here, or the loop cancels
+   * it first and the tool's own timeout — with its specific, actionable error
+   * message — becomes unreachable.
+   */
+  timeoutMs?: number;
   execute: (
     args: z.infer<T>,
     context: ToolContext,
@@ -112,6 +119,22 @@ export interface AgentTurnEndEvent {
   timing: AgentTurnTiming;
 }
 
+/**
+ * A safe point between steps: the assistant message and every tool result for
+ * this turn are now in the message array, and no provider call is in flight.
+ *
+ * Hosts that persist a transcript flush here. Without it a crash mid-run loses
+ * the WHOLE turn — including tool results whose side effects already landed on
+ * disk — because the only flush happens after the loop returns.
+ *
+ * Yielded immediately after tool results are appended, so it pairs with
+ * `turn_end` (which covers the assistant half) to cover every message.
+ */
+export interface AgentCheckpointEvent {
+  type: "checkpoint";
+  turn: number;
+}
+
 export interface AgentDoneEvent {
   type: "agent_done";
   totalTurns: number;
@@ -129,6 +152,22 @@ export interface AgentMaxTurnsEvent {
   type: "max_turns";
   totalTurns: number;
   maxTurns: number;
+}
+
+/**
+ * Emitted when the loop was about to stop on an exhausted turn budget but the
+ * host granted an extension instead. The effective budget is raised and the
+ * loop continues with a continuation prompt, so this is NOT terminal — unlike
+ * `max_turns`, which still fires if the extended budget is also spent.
+ */
+export interface AgentTurnBudgetExtendedEvent {
+  type: "turn_budget_extended";
+  /** Turn number at which the budget was exhausted. */
+  turn: number;
+  /** New effective `maxTurns` after the extension. */
+  grantedTurns: number;
+  /** 1-based extension count for this run. */
+  extension: number;
 }
 
 /**
@@ -231,8 +270,10 @@ export type AgentEvent =
   | AgentFollowUpMessageEvent
   | AgentRetryEvent
   | AgentTurnEndEvent
+  | AgentCheckpointEvent
   | AgentDoneEvent
   | AgentMaxTurnsEvent
+  | AgentTurnBudgetExtendedEvent
   | AgentTruncatedEvent
   | AgentErrorEvent;
 
@@ -258,6 +299,12 @@ export interface AgentOptions {
   /** Control whether tools may/must be called, or select a named tool when supported. */
   toolChoice?: StreamOptions["toolChoice"];
   maxTurns?: number;
+  /**
+   * How many times `onTurnBudgetExhausted` may grant extra turns in one run.
+   * Each grant raises the effective budget by the original `maxTurns`.
+   * Default: 2. Set 0 to disable extensions entirely.
+   */
+  maxTurnExtensions?: number;
   maxTokens?: number;
   temperature?: number;
   thinking?: StreamOptions["thinking"];
@@ -338,6 +385,18 @@ export interface AgentOptions {
    * on read.
    */
   getFollowUpMessages?: () => Promise<Message[] | null> | Message[] | null;
+  /**
+   * Consulted when a tool-running turn exhausts the turn budget mid-task,
+   * before the loop emits the terminal `max_turns` event. Return true to grant
+   * another `maxTurns` worth of turns; false (the default when unset) keeps
+   * today's hard cut-off. Hosts should only grant on evidence of progress —
+   * extending a spinning agent just buys it more tokens to spin with.
+   */
+  onTurnBudgetExhausted?: (ctx: {
+    turn: number;
+    maxTurns: number;
+    extension: number;
+  }) => Promise<boolean> | boolean;
 }
 
 // ── Agent Result ────────────────────────────────────────────

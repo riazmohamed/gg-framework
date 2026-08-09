@@ -27,10 +27,11 @@ import {
 import type { AddressInfo } from "node:net";
 import { runJsonMode } from "./modes/json-mode.js";
 import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
-import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
+import type { MessageProvenance, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { setStreamDiagnostic } from "@abukhaled/gg-agent";
 import { AgentSession } from "./core/agent-session.js";
 import { RunLifecycle } from "./core/run-lifecycle.js";
+import { RunClaim } from "./core/run-claim.js";
 import {
   CHAT_AGENT_IDS,
   chatAgentSessionsDir,
@@ -58,13 +59,16 @@ import {
 } from "./core/autopilot-gate.js";
 import { driveAutopilotCycle, frameAutopilotInjection } from "./core/autopilot-cycle.js";
 import { validateKenModelPref, effectiveKenModel, type KenModelPref } from "./core/ken-model.js";
-import type { KenTurnPayload, AppMarkerPayload } from "./core/session-manager.js";
+import type { KenTurnPayload, AppMarkerPayload, RunOutcome } from "./core/session-manager.js";
 import {
   normalizeAutopilotMarkersForHistory,
   normalizeAppMarkersForHistory,
   normalizeKenTurnsForHistory,
+  getHistoryMessageVisibility,
+  replayMessagesInOrder,
   restoreUserRow,
   restoreAssistantTexts,
+  resolveRestoredCommand,
   autopilotMarkerCopySeed,
 } from "./core/session-history.js";
 import {
@@ -77,9 +81,10 @@ import { cleanupToolOutputs } from "./tools/overflow.js";
 import { readCappedBody } from "./utils/http-body.js";
 import {
   fetchSubscriptionUsage,
-  MOONSHOT_OAUTH_KEY,
   SubscriptionUsageError,
   XIAOMI_CREDITS_KEY,
+  dualAuthProvider,
+  oauthStorageKey,
   discoverLocalModels,
   findProbedModel,
   formatLocalModelId,
@@ -102,10 +107,23 @@ import { loginAnthropic } from "./core/oauth/anthropic.js";
 import { loginOpenAI } from "./core/oauth/openai.js";
 import { loginGemini } from "./core/oauth/gemini.js";
 import { loginKimi } from "./core/oauth/kimi.js";
+import { loginXai } from "./core/oauth/xai.js";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "./core/oauth/types.js";
-import { AUTH_PROVIDERS, type AuthProviderMeta } from "./core/auth-providers.js";
+import {
+  AUTH_PROVIDERS,
+  authPriorityNote,
+  describeAuthMethods,
+  type AuthMethod,
+  type AuthMethodMeta,
+  type AuthProviderMeta,
+} from "./core/auth-providers.js";
 import { ensureAppDirs, loadSavedSettings } from "./config.js";
 import { SettingsManager, type Settings } from "./core/settings-manager.js";
+import {
+  installPlugin,
+  listInstalledPlugins,
+  removePlugin,
+} from "./core/extensions/plugin-bundles.js";
 import {
   getModel,
   getDefaultThinkingLevel,
@@ -155,9 +173,11 @@ import {
   parseMcpAddCommand,
   MCPClientManager,
   McpOAuthStore,
+  createElicitationBridge,
   type MCPScope,
   type MCPServerConfig,
 } from "./core/mcp/index.js";
+import type { ElicitResult } from "@modelcontextprotocol/client";
 import { buildSnapshot, levelForXp, rankForLevel } from "./core/progress/ranks.js";
 import { loadProgress, peekProgress, updateProgress } from "./core/progress/store.js";
 import { awardPrompt, awardCommits } from "./core/progress/engine.js";
@@ -171,6 +191,12 @@ import {
   shouldCaptureUsagePollingError,
   wrapSidecarHandler,
 } from "./core/sidecar-error-reporter.js";
+
+const AUTOMATION_PROVENANCE: MessageProvenance = {
+  source: "runtime",
+  kind: "automation",
+  visibility: "hidden",
+};
 
 const ALL_PROVIDERS: Provider[] = [
   // US
@@ -216,6 +242,16 @@ interface AppSettings {
    *  GG Coder's model (the historical behavior). Set → Ken (chat + autopilot)
    *  uses this model regardless of GG Coder's. */
   kenModels?: Record<string, KenModelPref>;
+  /** Extra folders scanned for projects alongside `projectsRoot`. */
+  projectRoots?: string[];
+  /** Project paths dismissed from the picker, as normalized cwds. */
+  hiddenProjects?: string[];
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out = value.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+  return out.length > 0 ? out : undefined;
 }
 
 function appSettingsFile(): string {
@@ -246,6 +282,8 @@ async function loadAppSettings(): Promise<AppSettings> {
         raw.projectModels && typeof raw.projectModels === "object" ? raw.projectModels : undefined,
       autopilot: raw.autopilot && typeof raw.autopilot === "object" ? raw.autopilot : undefined,
       kenModels: raw.kenModels && typeof raw.kenModels === "object" ? raw.kenModels : undefined,
+      projectRoots: stringArray(raw.projectRoots),
+      hiddenProjects: stringArray(raw.hiddenProjects),
     };
   } catch {
     return { projectsRoot: defaultProjectsRoot() };
@@ -586,33 +624,6 @@ function detectHookKind(text: string): "ideal" | "loop_break" | "regrounding" | 
   return null;
 }
 
-// Separator AgentSession.prompt() inserts between a command's prompt body and
-// the user's trailing args. Must stay in sync with the expansion there.
-const COMMAND_ARGS_SEP = "\n\n## User Instructions\n\n";
-
-/**
- * Reverse a prompt-template command's expansion. When a `/name` command runs,
- * the agent persists the FULL expanded prompt body as the user message — so on
- * resume the raw body would render instead of the short `/name` chip the user
- * saw live. Given the candidate commands (built-in + custom) and a restored
- * message body, recover the original `/name [args]` invocation. Returns null
- * when the text isn't a known command body (an ordinary user message).
- */
-function detectPromptCommand(
-  text: string,
-  candidates: ReadonlyArray<{ name: string; prompt: string }>,
-): string | null {
-  for (const c of candidates) {
-    if (!c.prompt) continue;
-    if (text === c.prompt) return `/${c.name}`;
-    if (text.startsWith(c.prompt + COMMAND_ARGS_SEP)) {
-      const args = text.slice(c.prompt.length + COMMAND_ARGS_SEP.length).trim();
-      return args ? `/${c.name} ${args}` : `/${c.name}`;
-    }
-  }
-  return null;
-}
-
 // ── MCP server management (mirrors `ggcoder mcp`) ───────────────────────────
 // The webview's MCP modal lists configured servers with live connection status,
 // adds them via the same paste-a-`claude mcp add …` grammar, and removes them.
@@ -863,6 +874,22 @@ async function main(): Promise<void> {
   // request to its window's session via the `x-gg-session` header (and the
   // `?session=` query for the SSE /events stream).
   const sessions = new Map<string, SessionContext>();
+
+  /**
+   * Fan one frame out to every window.
+   *
+   * For state that is genuinely global rather than per-session — `~/.gg/auth.json`
+   * is shared by all windows, so connecting a provider in one must refresh the
+   * model picker in all of them. Mirrors the memory/jiwa/progress fan-outs.
+   */
+  const broadcastAll = (type: string, data: unknown): void => {
+    for (const ctx of sessions.values()) ctx.broadcast(type, data);
+  };
+
+  // Providers currently mid-OAuth in some window. Daemon-level so two windows
+  // cannot race two browser flows for the same provider into one auth file.
+  const oauthInFlightProviders = new Set<string>();
+
   const memoryStore = new MemoryStore({
     onChange: ({ memories }) => {
       for (const ctx of sessions.values()) {
@@ -887,7 +914,7 @@ async function main(): Promise<void> {
   });
 
   type UsageResult =
-    | (SubscriptionUsageSnapshot & { connected: true; error?: never })
+    | (SubscriptionUsageSnapshot & { connected: true; error?: never; stale?: boolean })
     | {
         provider: SubscriptionUsageProvider;
         displayName: string;
@@ -895,12 +922,20 @@ async function main(): Promise<void> {
         windows: [];
         fetchedAt: number;
         error?: string;
+        stale?: boolean;
       };
   const usageCache = new Map<
     SubscriptionUsageProvider,
     { expiresAt: number; result: UsageResult }
   >();
   const usageRequests = new Map<SubscriptionUsageProvider, Promise<UsageResult>>();
+  // Last snapshot that actually carried windows, per provider. Replayed while a
+  // fetch is failing so the title meter never blinks out of existence. Bounded
+  // by USAGE_LAST_GOOD_MAX_AGE_MS — a provider that never recovers must stop
+  // reporting rather than freeze a percentage (and a long-past reset time) on
+  // screen forever. The 429 backoff alone runs to 24h, far past any usefulness.
+  const usageLastGood = new Map<SubscriptionUsageProvider, UsageResult>();
+  const USAGE_LAST_GOOD_MAX_AGE_MS = 30 * 60_000;
   // 429 backoff: quota endpoints are auxiliary UI data. Honor Retry-After when
   // provided; otherwise retain the unavailable snapshot for 30 minutes. Clamp
   // the provider value so a malformed header can neither hammer the endpoint
@@ -915,8 +950,11 @@ async function main(): Promise<void> {
       provider === "anthropic" ? "Anthropic" : provider === "openai" ? "Codex" : "Kimi";
     // Kimi plan usage is tracked on the OAuth credential specifically — the
     // Moonshot platform API key is metered per-token, not per plan window.
-    const authKey = provider === "moonshot" ? MOONSHOT_OAUTH_KEY : provider;
+    const authKey = oauthStorageKey(provider) ?? provider;
     if (!(await auth.hasProviderAuth(authKey))) {
+      // Logged out: drop the replay cache so a later login on a DIFFERENT
+      // account can never inherit the previous one's numbers.
+      usageLastGood.delete(provider);
       return { provider, displayName, connected: false, windows: [], fetchedAt: Date.now() };
     }
     try {
@@ -965,6 +1003,17 @@ async function main(): Promise<void> {
       });
 
       const connected = await auth.hasProviderAuth(authKey);
+      // Transient failures (notably the 429s these auxiliary quota endpoints
+      // hand out) must not blank the meter. Keep serving the last good
+      // snapshot, flagged `stale`, so the bar stays put instead of flickering
+      // out for the whole backoff window and back in on the next success.
+      // Past the max age it's dropped — no data beats confidently wrong data.
+      const lastGood = usageLastGood.get(provider);
+      if (lastGood && Date.now() - lastGood.fetchedAt >= USAGE_LAST_GOOD_MAX_AGE_MS) {
+        usageLastGood.delete(provider);
+      } else if (connected && lastGood) {
+        return { ...lastGood, stale: true };
+      }
       return {
         provider,
         displayName,
@@ -985,6 +1034,11 @@ async function main(): Promise<void> {
     usageRequests.set(provider, request);
     try {
       const result = await request;
+      // Never re-store a replay — it would keep its original `fetchedAt`, but
+      // writing it back muddies the "last GOOD" contract for no gain.
+      if (result.connected && !result.error && !result.stale && result.windows.length > 0) {
+        usageLastGood.set(provider, result);
+      }
       // Anthropic can return utilization before it assigns reset timestamps
       // (notably before the account's first active request). Retry that partial
       // snapshot quickly; complete snapshots keep the normal one-minute cache.
@@ -1057,7 +1111,15 @@ async function main(): Promise<void> {
           const id = randomUUID();
           try {
             const ctx = await createSession(
-              { auth, paths, progress, memoryStore, jiwaStore },
+              {
+                auth,
+                paths,
+                progress,
+                memoryStore,
+                jiwaStore,
+                broadcastAll,
+                oauthInFlightProviders,
+              },
               { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
             );
             sessions.set(id, ctx);
@@ -1397,6 +1459,13 @@ async function createSession(
     progress: ProgressManager;
     memoryStore: MemoryStore;
     jiwaStore: JiwaStore;
+    /** Fan one frame out to EVERY window, not just this session's. */
+    broadcastAll: (type: string, data: unknown) => void;
+    /**
+     * Providers with an OAuth flow in progress in SOME window. Daemon-wide
+     * because a login writes the shared auth file — see `/auth/oauth/start`.
+     */
+    oauthInFlightProviders: Set<string>;
   },
   opts: {
     id: string;
@@ -1406,7 +1475,7 @@ async function createSession(
     sessionPath?: string;
   },
 ): Promise<SessionContext> {
-  const { auth, progress, memoryStore, jiwaStore } = deps;
+  const { auth, progress, memoryStore, jiwaStore, broadcastAll, oauthInFlightProviders } = deps;
   const paths = deps.paths;
   const mode = opts.mode;
   let chatAgent = opts.chatAgent;
@@ -1568,6 +1637,19 @@ async function createSession(
       .catch(() => {});
   }
 
+  // ── MCP elicitation bridge ─────────────────────────────────
+  // An MCP server can ask for user input in the middle of a tool call. The
+  // bridge parks the promise; we broadcast the prompt over SSE and resolve it
+  // when the webview POSTs /mcp/elicit/:id.
+  const elicitations = createElicitationBridge({
+    broadcast: (prompt) => broadcast("mcp_elicit", prompt),
+    onTimeout: (prompt) =>
+      log("WARN", "app-sidecar", "MCP elicitation timed out", {
+        id: prompt.id,
+        server: prompt.server,
+      }),
+  });
+
   // The session file path to resume (passed by the daemon's POST /session);
   // empty/unset starts a fresh session.
   const resumeSessionPath = opts.sessionPath;
@@ -1582,6 +1664,7 @@ async function createSession(
     signal: abort.signal,
     // Keep MCP startup off the readiness path in both modes.
     backgroundMcpConnect: true,
+    onMcpElicit: elicitations.onElicit,
     // Keep restore-time auto-compaction off the readiness path too: its summary
     // LLM call (30s timeout) used to freeze waitForReady — and with it the whole
     // window (project picker, session list) — whenever a resumed session was
@@ -1939,6 +2022,12 @@ async function createSession(
     recordApprovedPlanMarkers(d.text);
   });
   session.eventBus.on("thinking_delta", (d) => broadcast("thinking_delta", d));
+  // The agent consumed queued steering at a turn boundary. Re-broadcast as the
+  // usual `queued` depth update so the webview drops the pending affordance the
+  // moment the message lands in the loop, not at run_end.
+  session.eventBus.on("queue_drained", (d) =>
+    broadcast("queued", { count: d.count, messages: session.listQueuedMessages() }),
+  );
   session.eventBus.on("tool_call_start", (d) => {
     toolCallNames.set(d.toolCallId, d.name);
     broadcast("tool_call_start", d);
@@ -1984,10 +2073,33 @@ async function createSession(
   session.eventBus.on("compaction_end", (d) => broadcast("compaction_end", d));
 
   let running = false;
-  const runLifecycle = new RunLifecycle((runState) => {
-    running = runState !== "idle";
-    if (runState === "cancelling") broadcast("run_cancelling", { runState });
-  });
+  // Closes the window between `/prompt` deciding to start a run and `runAgent`
+  // flipping `running` — that stretch awaits, so Node yields inside it. See
+  // RunClaim.
+  const runClaim = new RunClaim();
+  const runLifecycle = new RunLifecycle(
+    (runState) => {
+      running = runState !== "idle";
+      if (runState === "cancelling") broadcast("run_cancelling", { runState });
+    },
+    // Durable run journal. Fire-and-forget on purpose: an unwritten journal
+    // entry is a missed crash hint, while a journal write that throws inside
+    // begin()/settle() would break run ownership itself.
+    {
+      started: (generation) =>
+        void session.persistRunStarted(generation).catch((err) => {
+          log("WARN", "app-sidecar", "failed to journal run start", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }),
+      finished: (generation, outcome) =>
+        void session.persistRunFinished(generation, outcome).catch((err) => {
+          log("WARN", "app-sidecar", "failed to journal run finish", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }),
+    },
+  );
   const cancelledRunEndGenerations = new Set<number>();
   let pendingCancelDrain: { generation: number; text: string } | null = null;
   // Bumped by /cancel — a run whose cancel generation changed mid-flight was
@@ -2128,6 +2240,13 @@ async function createSession(
       allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
       transient: true,
       signal: kenAbort.signal,
+      // Ken belongs to THIS window, so its window is where an MCP prompt
+      // should appear. Passing the bridge also keeps every session in the
+      // daemon uniformly interactive, which is what lets them share ONE pooled
+      // MCP connection: the pool separates interactive from headless callers,
+      // because a connection declares its elicitation capability once, at
+      // initialize (see core/mcp/shared-pool.ts).
+      onMcpElicit: elicitations.onElicit,
       // Ken's bursty, spread-out turns (chat) outlast the default 5-min cache
       // TTL regardless of the user's global speedProfile pick.
       forceLongCacheRetention: true,
@@ -2197,6 +2316,10 @@ async function createSession(
       allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
       transient: true,
       signal: kenAutoAbort.signal,
+      // Same as Ken chat: this reviewer belongs to a window, so route prompts
+      // there, and keep the daemon's sessions uniformly interactive so they
+      // share one pooled MCP connection.
+      onMcpElicit: elicitations.onElicit,
       // Autopilot review rounds routinely span the injected GG Coder run
       // (often >5 min) regardless of the user's global speedProfile pick.
       forceLongCacheRetention: true,
@@ -2218,6 +2341,10 @@ async function createSession(
   function abortOwnedWork(): void {
     cancelGeneration++;
     abort.abort();
+    // An MCP tool call parked on user input is not cancelled by the signal —
+    // the promise lives in the bridge. Release it, or the aborted turn's tool
+    // call never returns.
+    elicitations.cancelAll();
     // Stop a run-all sweep and every async child through AgentSession's signal.
     taskRunAll = false;
     autopilotCancelled = true;
@@ -2231,9 +2358,13 @@ async function createSession(
     kenAutoSession?.setSignal(kenAutoAbort.signal);
   }
 
-  function finishOwnedGeneration(generation: number, emitCancelledFallback: boolean): boolean {
+  function finishOwnedGeneration(
+    generation: number,
+    emitCancelledFallback: boolean,
+    outcome: RunOutcome = "completed",
+  ): boolean {
     const cancelled = runLifecycle.isCancellationRequested(generation);
-    const settlement = runLifecycle.settle(generation);
+    const settlement = runLifecycle.settle(generation, outcome);
     if (!settlement.settled) return cancelled;
     // A replacement signal is safe only after the provider-backed owner settled.
     installFreshRunControllers();
@@ -2310,7 +2441,9 @@ async function createSession(
           });
         }
       }
-      if (ownsGeneration) finishOwnedGeneration(generation, false);
+      if (ownsGeneration) {
+        finishOwnedGeneration(generation, false, runSucceeded ? "completed" : "failed");
+      }
       // A cancelled injected run is still owned by the surrounding autopilot
       // cycle; its outer finalizer emits the one terminal cancelled run_end.
       if (!(cancelled && !ownsGeneration)) {
@@ -2324,7 +2457,10 @@ async function createSession(
       // runAutopilotCycle), NOT from this shared finally — that keeps injected
       // runs from recursively entering the same review loop.
       broadcast("tasks_list", { tasks: pruneDoneTasksSync(cwd) });
-      broadcast("queued", { count: session.getQueuedCount() });
+      broadcast("queued", {
+        count: session.getQueuedCount(),
+        messages: session.listQueuedMessages(),
+      });
       broadcast("extras", footerExtras());
     }
   }
@@ -2476,7 +2612,9 @@ async function createSession(
           // label stays the clean prompt.
           const framed = frameAutopilotInjection(IMPLEMENT_PLAN_PROMPT);
           injectedAutopilotPrompts.push(framed);
-          return runAgent(IMPLEMENT_PLAN_PROMPT, () => session.prompt(framed));
+          return runAgent(IMPLEMENT_PLAN_PROMPT, () =>
+            session.prompt(framed, AUTOMATION_PROVENANCE),
+          );
         },
         // Lean context per user turn: wipe prior review history so each new
         // turn starts cheap, while within this cycle the few review messages
@@ -2505,19 +2643,24 @@ async function createSession(
         },
         // Autopilot-injected run: GG Coder receives the framed prompt (no human
         // is watching this turn) while run_start keeps the clean label.
-        runPrompt: (body) => runAgent(body, () => session.prompt(frameAutopilotInjection(body))),
+        runPrompt: (body) =>
+          runAgent(body, () =>
+            session.prompt(frameAutopilotInjection(body), AUTOMATION_PROVENANCE),
+          ),
         emit: (event) => {
           // Persist the terminal verdict marker so a resumed session renders the
           // same Ken bubble the live run showed instead of dropping it or
           // falling back to the raw verdict text (e.g. ALL_CLEAR).
           if (event.type === "autopilot_done") {
             // Broadcast the SAME copySeed the persisted marker will produce on
-            // resume, so the live all-clear wording matches the resumed one
-            // (computed before persist — same synchronous message count).
+            // resume, so the live all-clear wording matches the resumed one.
+            // Must use the PERSISTED count — that's what persistAutopilotMarker
+            // anchors against, and it trails the in-memory list after a run
+            // whose messages never made it to disk.
             const seed = autopilotMarkerCopySeed({
               version: 1,
               phase: "done",
-              afterMessageCount: session.getMessages().filter((m) => m.role !== "system").length,
+              afterMessageCount: session.getPersistedTranscriptCount(),
             });
             broadcast(event.type, { ...event.data, copySeed: seed });
             void session.persistAutopilotMarker("done");
@@ -2558,7 +2701,10 @@ async function createSession(
         if (running || autopilotActive) return;
         const next = session.takeNextQueuedMessage();
         if (!next) return;
-        broadcast("queued", { count: session.getQueuedCount() });
+        broadcast("queued", {
+          count: session.getQueuedCount(),
+          messages: session.listQueuedMessages(),
+        });
         if (!next.text.trim() && next.attachments.length === 0) continue;
         // A queued message draining as a fresh turn supersedes any pending
         // plan, exactly like a direct POST /prompt turn.
@@ -2632,7 +2778,9 @@ async function createSession(
     const completionHint =
       `\n\n---\nWhen you have fully completed this task, call the tasks tool to mark it done:\n` +
       `tasks({ action: "done", id: "${shortId}" })`;
-    await runAgent(task.title, () => session.prompt(task.prompt + completionHint));
+    await runAgent(task.title, () =>
+      session.prompt(task.prompt + completionHint, AUTOMATION_PROVENANCE),
+    );
     // The agent typically marks the task done via the tasks tool during the run;
     // prune completed tasks and push the refreshed list so the modal drops them.
     broadcast("tasks_list", { tasks: pruneDoneTasksSync(cwd) });
@@ -2675,13 +2823,65 @@ async function createSession(
   }
 
   async function authStatusPayload(): Promise<{
-    providers: (AuthProviderMeta & { connected: boolean })[];
+    providers: (AuthProviderMeta & {
+      connected: boolean;
+      connectedMethods: AuthMethod[];
+      activeMethod?: AuthMethod;
+      oauthExhaustedUntil?: number;
+      priorityNote?: string;
+      methodGuidance: AuthMethodMeta[];
+    })[];
   }> {
     const providers = await Promise.all(
-      AUTH_PROVIDERS.map(async (p) => ({
-        ...p,
-        connected: await auth.hasProviderAuth(p.value),
-      })),
+      AUTH_PROVIDERS.map(async (p) => {
+        const dual = dualAuthProvider(p.value);
+        // Which methods hold a credential right now. Dual-auth providers can hold
+        // both at once, and the app needs them separately: one "connected" bit
+        // cannot express "OAuth signed in, key also on file as backup", nor offer
+        // a per-method disconnect.
+        const oauthKey = dual?.oauthKey;
+        const hasOAuth = oauthKey ? await auth.hasCredentials(oauthKey) : false;
+        const apiKeyKeys = p.apiKeyVariants?.map((v) => v.key) ?? [p.value];
+        const hasApiKey = p.methods.includes("apikey")
+          ? (await Promise.all(apiKeyKeys.map((k) => auth.hasCredentials(k)))).some(Boolean)
+          : false;
+        const connectedMethods: AuthMethod[] = [];
+        // OAuth-only providers (Anthropic/OpenAI/Gemini) store under the provider
+        // id itself, so `hasProviderAuth` is what proves their OAuth connection.
+        if (
+          p.methods.includes("oauth") &&
+          (hasOAuth || (!dual && (await auth.hasCredentials(p.value))))
+        )
+          connectedMethods.push("oauth");
+        if (hasApiKey) connectedMethods.push("apikey");
+
+        // Which one a request would actually use, mirroring AuthStorage's
+        // resolution: OAuth wins unless its usage window is exhausted AND a key
+        // is configured to cover it.
+        const exhaustedUntil = oauthKey
+          ? ((await auth.getCredentials(oauthKey))?.usageExhaustedUntil ?? 0)
+          : 0;
+        const oauthSidelined = hasOAuth && Date.now() < exhaustedUntil && hasApiKey;
+        const activeMethod = connectedMethods.includes("oauth")
+          ? oauthSidelined
+            ? ("apikey" as const)
+            : ("oauth" as const)
+          : connectedMethods[0];
+
+        // `methodDetails` is the server-side lookup table behind
+        // `methodGuidance` — shipping both would duplicate every string on the
+        // wire for no consumer.
+        const { methodDetails: _table, ...wireMeta } = p;
+        return {
+          ...wireMeta,
+          connected: await auth.hasProviderAuth(p.value),
+          connectedMethods,
+          ...(activeMethod ? { activeMethod } : {}),
+          ...(oauthSidelined ? { oauthExhaustedUntil: exhaustedUntil } : {}),
+          ...(authPriorityNote(p.value) ? { priorityNote: authPriorityNote(p.value)! } : {}),
+          methodGuidance: describeAuthMethods(p.value),
+        };
+      }),
     );
     return { providers };
   }
@@ -2884,6 +3084,46 @@ async function createSession(
       return;
     }
 
+    if (method === "GET" && url === "/plugins") {
+      void listInstalledPlugins(paths.extensionsDir)
+        .then((plugins) => json(res, 200, { plugins }))
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.plugins.list");
+          json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+        });
+      return;
+    }
+
+    if (method === "POST" && url === "/plugins/install") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        try {
+          const bundlePath = (JSON.parse(raw) as { bundlePath?: unknown }).bundlePath;
+          if (typeof bundlePath !== "string" || !path.isAbsolute(bundlePath)) {
+            json(res, 400, { error: "bundlePath must be an absolute path" });
+            return;
+          }
+          const plugin = await installPlugin(bundlePath, paths.extensionsDir);
+          json(res, 200, { plugin, restartRequired: true });
+        } catch (error) {
+          captureSidecarError(error, "app-sidecar.plugins.install");
+          json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        }
+      });
+      return;
+    }
+
+    if (method === "DELETE" && url.startsWith("/plugins/")) {
+      const pluginId = decodeURIComponent(url.slice("/plugins/".length));
+      void removePlugin(pluginId, paths.extensionsDir)
+        .then(() => json(res, 200, { removed: pluginId, restartRequired: true }))
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.plugins.remove");
+          json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        });
+      return;
+    }
+
     if (method === "GET" && url === "/settings") {
       // `configured` is true only when the user explicitly saved a projects root
       // (the gg-app.json file exists with a value) — not when we fall back to the
@@ -2969,9 +3209,53 @@ async function createSession(
       return;
     }
 
+    // Dismiss a project from the picker (or restore it with hidden:false). The
+    // path is kept rather than the row: sessions in scratch dirs keep
+    // re-surfacing, so the user's decision has to outlive any one scan.
+    if (method === "POST" && url === "/projects/hidden") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { path?: string; hidden?: boolean };
+        try {
+          body = JSON.parse(raw) as { path?: string; hidden?: boolean };
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const target = body.path?.trim();
+        if (!target) {
+          json(res, 400, { error: "path is required" });
+          return;
+        }
+        const key = path.resolve(target);
+        try {
+          const settings = await loadAppSettings();
+          const current = new Set((settings.hiddenProjects ?? []).map((p) => path.resolve(p)));
+          if (body.hidden === false) current.delete(key);
+          else current.add(key);
+          settings.hiddenProjects = current.size > 0 ? Array.from(current) : undefined;
+          await saveAppSettings(settings);
+          json(res, 200, { hidden: Array.from(current) });
+        } catch (err) {
+          captureSidecarError(err, "app-sidecar.projects.hidden");
+          json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        }
+      });
+      return;
+    }
+
     if (method === "GET" && url === "/projects") {
-      // Scan ggcoder + Claude Code + Codex session stores for known projects.
-      void discoverProjects()
+      // Session stores (ggcoder + Claude Code + Codex) for projects with
+      // history, plus a filesystem scan of the configured projects folder so
+      // projects you have not opened yet are still listed.
+      void loadAppSettings()
+        .then(({ projectsRoot, projectRoots, hiddenProjects }) =>
+          discoverProjects({
+            projectsRoot,
+            extraRoots: projectRoots,
+            hiddenPaths: hiddenProjects,
+          }),
+        )
         .then((projects) => json(res, 200, { projects }))
         .catch((err) => {
           captureSidecarError(err, "app-sidecar.projects.discover");
@@ -3116,9 +3400,9 @@ async function createSession(
         // Autopilot verdict markers to interleave, same anchor scheme as Ken
         // turns — each becomes a single assistant row the webview renders
         // exactly like the live `autopilot` item (never a raw verdict string).
-        // Compact/continuation rewrites can carry old markers whose original
-        // afterMessageCount is beyond the restored message list; dropping those
-        // prevents stale all-clear bubbles from bunching at the bottom on resume.
+        // Normalization pulls anchors left over from an unrebased compaction
+        // back to where the marker was actually written, so stale all-clear
+        // bubbles no longer bunch at the bottom of a reopened session.
         const restoredMessageCount = messages.filter((m) => m.role !== "system").length;
         const autopilotByCount = new Map<
           number,
@@ -3207,6 +3491,22 @@ async function createSession(
                   ...(typeof d.guidance === "string" ? { guidance: d.guidance } : {}),
                 },
               });
+            } else if (marker.kind === "interrupted_run") {
+              // Rendered as an error row: the run's tools already changed the
+              // repo, so the user needs to see it and decide what to do. We
+              // never replay it — that would duplicate those changes.
+              history.push({
+                role: "assistant",
+                text: "",
+                error: {
+                  scope: "interrupted_run",
+                  headline: "A run was interrupted",
+                  message:
+                    "GG Coder stopped mid-run, so this turn is incomplete. Any files its tools already changed are still on disk.",
+                  guidance:
+                    "Review the working tree, then re-send the request if you still want it.",
+                },
+              });
             }
           }
         };
@@ -3217,147 +3517,178 @@ async function createSession(
         flushAutopilot(0);
         flushAppMarkers(0);
 
-        for (const msg of messages) {
-          if (msg.role === "system") continue;
-          nonSystemCount++;
+        await replayMessagesInOrder(
+          messages,
+          async (msg, count) => {
+            nonSystemCount = count;
+            const visibility = getHistoryMessageVisibility(msg);
+            if (visibility === "hidden") return;
 
-          if (msg.role === "tool") {
-            // Tool result messages: check for ImageContent blocks (screenshots,
-            // generated images) and emit a toolImages entry.
-            for (const tr of msg.content) {
-              if (typeof tr.content === "string") continue;
-              const imageBlocks = tr.content.filter((c) => c.type === "image");
-              if (imageBlocks.length === 0) continue;
-              // Extract the path from the text block (e.g. "Generated image → /path").
-              const textBlock = tr.content.find(
-                (c) => c.type === "text" && "text" in c && typeof c.text === "string",
-              );
-              const textContent = textBlock && textBlock.type === "text" ? textBlock.text : "";
-              const pathMatch = textContent.match(/→\s*(\S+)/);
-              const imgPath = pathMatch?.[1];
+            if (msg.role === "tool") {
+              // Tool result messages: check for ImageContent blocks (screenshots,
+              // generated images) and emit a toolImages entry.
+              for (const tr of msg.content) {
+                if (typeof tr.content === "string") continue;
+                const imageBlocks = tr.content.filter((c) => c.type === "image");
+                if (imageBlocks.length === 0) continue;
+                // Extract the path from the text block (e.g. "Generated image → /path").
+                const textBlock = tr.content.find(
+                  (c) => c.type === "text" && "text" in c && typeof c.text === "string",
+                );
+                const textContent = textBlock && textBlock.type === "text" ? textBlock.text : "";
+                const pathMatch = textContent.match(/→\s*(\S+)/);
+                const imgPath = pathMatch?.[1];
 
-              // Downscale each image for the webview preview.
-              const toolImages: Array<{ src: string; path?: string }> = [];
-              for (const block of imageBlocks) {
-                if (block.type !== "image") continue;
-                try {
-                  const rawBuf = Buffer.from(block.data, "base64");
-                  const previewBuf = await downscaleForPreview(rawBuf);
-                  toolImages.push({
-                    src: `data:${block.mediaType};base64,${previewBuf.toString("base64")}`,
-                    path: imgPath,
-                  });
-                } catch {
-                  // Downscale failed — use the raw data.
-                  toolImages.push({
-                    src: `data:${block.mediaType};base64,${block.data}`,
-                    path: imgPath,
+                // Downscale each image for the webview preview.
+                const toolImages: Array<{ src: string; path?: string }> = [];
+                for (const block of imageBlocks) {
+                  if (block.type !== "image") continue;
+                  try {
+                    const rawBuf = Buffer.from(block.data, "base64");
+                    const previewBuf = await downscaleForPreview(rawBuf);
+                    toolImages.push({
+                      src: `data:${block.mediaType};base64,${previewBuf.toString("base64")}`,
+                      path: imgPath,
+                    });
+                  } catch {
+                    // Downscale failed — use the raw data.
+                    toolImages.push({
+                      src: `data:${block.mediaType};base64,${block.data}`,
+                      path: imgPath,
+                    });
+                  }
+                }
+                if (toolImages.length > 0) {
+                  history.push({
+                    role: "assistant",
+                    text: "",
+                    toolImages,
                   });
                 }
               }
-              if (toolImages.length > 0) {
+              return;
+            }
+
+            // User or assistant message — text/hook/command/compacted extraction,
+            // plus sub-agent group detection for assistant tool_calls.
+            if (msg.role === "user") {
+              // Rebuild the live bubble: strip the steering wrapper, drop
+              // attachment/file notes the model saw but the bubble never showed.
+              const restored = restoreUserRow(msg.content, msg.provenance);
+              const text = restored.text;
+              const hook = msg.provenance ? null : detectHookKind(text);
+              const compacted =
+                visibility === "summary" ||
+                (!msg.provenance && !hook && text.startsWith("[Previous conversation summary]"));
+              const hint = userHintByCount.get(nonSystemCount);
+              // The typed invocation persisted alongside the prompt is
+              // authoritative. Reversing the expanded body only works while the
+              // template is byte-identical, and templates drift (edited
+              // `.gg/commands/*.md`, reworded built-ins, app-vs-CLI phrasing) —
+              // after which the resumed session dumped the raw multi-KB body
+              // instead of the `/name` chip. Older sessions have no hint, so the
+              // body match stays as the fallback.
+              const command =
+                !hook && !compacted
+                  ? resolveRestoredCommand(
+                      typeof hint?.command === "string" ? hint.command : null,
+                      text,
+                      commandCandidates,
+                    )
+                  : null;
+              // Autopilot injected this turn — live showed only the Ken-tinted
+              // marker for it, never a user bubble. Emitting one here would print
+              // the injected instruction a second time, unstyled.
+              //
+              // Pushed background-status updates are skipped for the same reason:
+              // the live run rendered no bubble for them, so showing them here
+              // would fill a reopened session with machine-facing status lines
+              // the user never saw while working.
+              if (
+                (!msg.provenance || (!restored.autopilotInjected && !restored.notification)) &&
+                (text.trim() || restored.images.length > 0)
+              ) {
+                history.push({
+                  role: "user",
+                  text: command ?? text,
+                  images: restored.images,
+                  hook,
+                  command: command !== null,
+                  compacted,
+                  // Markers accumulate across continuation files (each rewrite
+                  // re-persists prior ones) but only the LATEST summary row
+                  // survives compaction — so consume from the newest end.
+                  ...(compacted && compactionCounts.length > 0
+                    ? { compactionCounts: compactionCounts.pop() }
+                    : {}),
+                  ...(hint?.kenSent === true ? { kenSent: true } : {}),
+                  ...(Array.isArray(hint?.enhancements) ? { enhancements: hint.enhancements } : {}),
+                });
+                // Live showed the video-capability warning right after the bubble.
+                if (restored.videoWarning) {
+                  history.push({ role: "assistant", text: "", infoKind: "video_warning" });
+                }
+              }
+            } else if (!hiddenIdealDrafts.has(msg)) {
+              // Assistant: one wire row per persisted text block — live streaming
+              // splits bubbles at server_tool_call boundaries, and the persisted
+              // content keeps those blocks separate. Ideal-review candidate drafts
+              // are intentionally omitted to match the live pre-final hook flow.
+              for (const blockText of restoreAssistantTexts(msg.content)) {
                 history.push({
                   role: "assistant",
-                  text: "",
-                  toolImages,
+                  text: blockText,
+                  images: [],
+                  hook: null,
+                  command: false,
+                  compacted: false,
                 });
               }
             }
-            continue;
-          }
 
-          // User or assistant message — text/hook/command/compacted extraction,
-          // plus sub-agent group detection for assistant tool_calls.
-          if (msg.role === "user") {
-            // Rebuild the live bubble: strip the steering wrapper, drop
-            // attachment/file notes the model saw but the bubble never showed.
-            const restored = restoreUserRow(msg.content);
-            const text = restored.text;
-            const hook = detectHookKind(text);
-            const compacted = !hook && text.startsWith("[Previous conversation summary]");
-            const command =
-              !hook && !compacted ? detectPromptCommand(text, commandCandidates) : null;
-            if (text.trim() || restored.images.length > 0) {
-              const hint = userHintByCount.get(nonSystemCount);
-              history.push({
-                role: "user",
-                text: command ?? text,
-                images: restored.images,
-                hook,
-                command: command !== null,
-                compacted,
-                // Markers accumulate across continuation files (each rewrite
-                // re-persists prior ones) but only the LATEST summary row
-                // survives compaction — so consume from the newest end.
-                ...(compacted && compactionCounts.length > 0
-                  ? { compactionCounts: compactionCounts.pop() }
-                  : {}),
-                ...(hint?.kenSent === true ? { kenSent: true } : {}),
-                ...(Array.isArray(hint?.enhancements) ? { enhancements: hint.enhancements } : {}),
-              });
-              // Live showed the video-capability warning right after the bubble.
-              if (restored.videoWarning) {
-                history.push({ role: "assistant", text: "", infoKind: "video_warning" });
+            // Assistant tool_call blocks: detect sub-agent delegations.
+            if (msg.role === "assistant" && typeof msg.content !== "string") {
+              const subagentCalls = msg.content.filter(
+                (
+                  c,
+                ): c is typeof c & {
+                  type: "tool_call";
+                  id: string;
+                  name: string;
+                  args: Record<string, unknown>;
+                } => c.type === "tool_call" && (c.name === "subagent" || c.name === "spawn_agent"),
+              );
+              if (subagentCalls.length > 0) {
+                const agents = subagentCalls.map((c) => {
+                  const result = toolResultMap.get(c.id);
+                  return {
+                    agentName:
+                      c.name === "spawn_agent" && typeof c.args?.task_name === "string"
+                        ? c.args.task_name
+                        : typeof c.args?.agent === "string"
+                          ? c.args.agent
+                          : undefined,
+                    // Async workers are intentionally non-resumable; restored rows are historical.
+                    status: result?.isError ? ("error" as const) : ("done" as const),
+                    toolUseCount: 0,
+                  };
+                });
+                history.push({
+                  role: "assistant",
+                  text: "",
+                  subagentGroup: agents,
+                });
               }
             }
-          } else if (!hiddenIdealDrafts.has(msg)) {
-            // Assistant: one wire row per persisted text block — live streaming
-            // splits bubbles at server_tool_call boundaries, and the persisted
-            // content keeps those blocks separate. Ideal-review candidate drafts
-            // are intentionally omitted to match the live pre-final hook flow.
-            for (const blockText of restoreAssistantTexts(msg.content)) {
-              history.push({
-                role: "assistant",
-                text: blockText,
-                images: [],
-                hook: null,
-                command: false,
-                compacted: false,
-              });
-            }
-          }
-
-          // Assistant tool_call blocks: detect sub-agent delegations.
-          if (msg.role === "assistant" && typeof msg.content !== "string") {
-            const subagentCalls = msg.content.filter(
-              (
-                c,
-              ): c is typeof c & {
-                type: "tool_call";
-                id: string;
-                name: string;
-                args: Record<string, unknown>;
-              } => c.type === "tool_call" && (c.name === "subagent" || c.name === "spawn_agent"),
-            );
-            if (subagentCalls.length > 0) {
-              const agents = subagentCalls.map((c) => {
-                const result = toolResultMap.get(c.id);
-                return {
-                  agentName:
-                    c.name === "spawn_agent" && typeof c.args?.task_name === "string"
-                      ? c.args.task_name
-                      : typeof c.args?.agent === "string"
-                        ? c.args.agent
-                        : undefined,
-                  // Async workers are intentionally non-resumable; restored rows are historical.
-                  status: result?.isError ? ("error" as const) : ("done" as const),
-                  toolUseCount: 0,
-                };
-              });
-              history.push({
-                role: "assistant",
-                text: "",
-                subagentGroup: agents,
-              });
-            }
-          }
-
-          // Interleave any Ken turns / autopilot / app markers recorded right
-          // after this message.
-          flushKen(nonSystemCount);
-          flushAutopilot(nonSystemCount);
-          flushAppMarkers(nonSystemCount);
-        }
+          },
+          (count) => {
+            // Markers flush after every physical message, including tools and
+            // provenance-hidden runtime context.
+            flushKen(count);
+            flushAutopilot(count);
+            flushAppMarkers(count);
+          },
+        );
 
         // Flush remaining Ken turns whose anchor is at/after the message count so
         // none are dropped. Autopilot/app markers beyond the restored message
@@ -3423,131 +3754,170 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/prompt") {
-      void readBody(req, res).then(async (raw) => {
-        if (raw === null) return;
-        let text: string;
-        let attachments: AppAttachment[];
-        let meta: { kenSent?: boolean; enhancements?: unknown[] } | undefined;
-        try {
-          const body = JSON.parse(raw) as {
-            text?: string;
-            attachments?: AppAttachment[];
-            meta?: { kenSent?: boolean; enhancements?: unknown[] };
-          };
-          text = body.text ?? "";
-          attachments = Array.isArray(body.attachments) ? body.attachments : [];
-          meta = typeof body.meta === "object" && body.meta !== null ? body.meta : undefined;
-        } catch {
-          json(res, 400, { error: "invalid JSON body" });
-          return;
-        }
-        if (!text.trim() && attachments.length === 0) {
-          json(res, 400, { error: "empty prompt" });
-          return;
-        }
-        if (runLifecycle.running && runLifecycle.isCancellationRequested(runLifecycle.generation)) {
-          json(res, 409, {
-            error: runLifecycle.state === "cancelling" ? "run_cancelling" : "cancel_failed",
-            runState: runLifecycle.state,
-          });
-          return;
-        }
-        if (running || autopilotActive) {
-          // Queue prompts as mid-run steering (mirrors the CLI). Also queue while
-          // an autopilot cycle is active but between injected runs (build idle,
-          // Ken reviewing) so the message never starts a run that collides with
-          // an injected one on the same session. Attachments are persisted to
-          // .gg/uploads first so the queued media rides the same native-block
-          // path as a non-queued attachment prompt when it drains.
-          const prepared = attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
-          const count = session.queueMessage(text, prepared);
-          broadcast("queued", { count });
-          json(res, 202, { queued: true, count });
-          return;
-        }
-        json(res, 202, { accepted: true });
-        // Webview display hint for this prompt's user bubble (kenSent shimmer
-        // label / enhancer highlight segments). Anchored +1 so it attaches to
-        // the user message the prompt below is about to push. Queued prompts
-        // skip this (their position in the run is unpredictable).
-        if (meta && (meta.kenSent === true || Array.isArray(meta.enhancements))) {
-          void session
-            .persistAppMarker(
-              "user_hint",
-              {
-                ...(meta.kenSent === true ? { kenSent: true } : {}),
-                ...(Array.isArray(meta.enhancements) ? { enhancements: meta.enhancements } : {}),
-              },
-              1,
-            )
-            .catch(() => {});
-        }
-        // Fresh user turn: clear any cancel flag left from a prior cycle so this
-        // turn's autopilot review can run.
-        autopilotCancelled = false;
-        // A typed message while a plan modal/review is pending (reject,
-        // feedback, anything) supersedes the pending plan — the bump also
-        // invalidates any in-flight Ken plan review.
-        clearPendingPlan();
-        // Gate inputs captured around the run: whether this turn is a workflow
-        // slash command (attachment prompts skip slash expansion entirely), and
-        // how many assistant messages the run actually adds. Computed even when
-        // autopilot is currently off — the toggle can flip ON mid-run, and the
-        // gate reads the post-run value.
-        const workflowCommand =
-          attachments.length === 0 && isWorkflowCommandText(text, await loadWorkflowCommandSpecs());
-        const assistantsBefore = countAssistantMessages(session.getMessages());
-        const messagesBefore = session.getMessages().length;
-        await runAgent(text, async () => {
-          if (attachments.length > 0) {
-            // Persist each attachment under .gg/uploads so files are inspectable
-            // by the agent's tools, then prompt with the media as native blocks.
-            const prepared = await prepareAttachments(cwd, attachments);
-            await session.promptWithAttachments(text, prepared);
-          } else {
-            // Pass the raw text straight through. AgentSession.prompt() is the
-            // single source of truth for slash-command expansion (built-in +
-            // `.gg/commands/*.md` custom), so the agent gets the right body
-            // while the webview keeps showing the short `/name`.
-            await session.prompt(text);
+      // Per-request: only the prompt that actually claimed the start may release
+      // it. A bare release would let an early-returning request (bad JSON, or a
+      // prompt that queued) clear a claim another request is still holding.
+      let claimedStart = false;
+      void readBody(req, res)
+        .then(async (raw) => {
+          if (raw === null) return;
+          let text: string;
+          let attachments: AppAttachment[];
+          let meta: { kenSent?: boolean; enhancements?: unknown[] } | undefined;
+          try {
+            const body = JSON.parse(raw) as {
+              text?: string;
+              attachments?: AppAttachment[];
+              meta?: { kenSent?: boolean; enhancements?: unknown[] };
+            };
+            text = body.text ?? "";
+            attachments = Array.isArray(body.attachments) ? body.attachments : [];
+            meta = typeof body.meta === "object" && body.meta !== null ? body.meta : undefined;
+          } catch {
+            json(res, 400, { error: "invalid JSON body" });
+            return;
           }
+          if (!text.trim() && attachments.length === 0) {
+            json(res, 400, { error: "empty prompt" });
+            return;
+          }
+          if (
+            runLifecycle.running &&
+            runLifecycle.isCancellationRequested(runLifecycle.generation)
+          ) {
+            json(res, 409, {
+              error: runLifecycle.state === "cancelling" ? "run_cancelling" : "cancel_failed",
+              runState: runLifecycle.state,
+            });
+            return;
+          }
+          // `runClaim` covers the gap before `runAgent` flips `running`: a
+          // prompt arriving in that window must queue, not start a second run.
+          if (running || runClaim.active || autopilotActive) {
+            // Queue prompts as mid-run steering (mirrors the CLI). Also queue while
+            // an autopilot cycle is active but between injected runs (build idle,
+            // Ken reviewing) so the message never starts a run that collides with
+            // an injected one on the same session. Attachments are persisted to
+            // .gg/uploads first so the queued media rides the same native-block
+            // path as a non-queued attachment prompt when it drains.
+            const prepared =
+              attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
+            const count = session.queueMessage(text, prepared);
+            broadcast("queued", { count, messages: session.listQueuedMessages() });
+            json(res, 202, { queued: true, count });
+            return;
+          }
+          // Claim the run NOW, synchronously. Everything below this line may
+          // yield, and `running` does not flip until runAgent begins.
+          claimedStart = runClaim.claim();
+          json(res, 202, { accepted: true });
+          // Gate inputs captured around the run: whether this turn is a workflow
+          // slash command (attachment prompts skip slash expansion entirely), and
+          // how many assistant messages the run actually adds. Computed even when
+          // autopilot is currently off — the toggle can flip ON mid-run, and the
+          // gate reads the post-run value.
+          const workflowCommand =
+            attachments.length === 0 &&
+            isWorkflowCommandText(text, await loadWorkflowCommandSpecs());
+          // Does this input actually expand into a persisted user message? Asked
+          // of the session itself, because only it knows whether the command
+          // resolves here (name/alias casing, custom `.gg/commands`, non-coder
+          // agents that don't expand at all). A looser guess would anchor the
+          // hint at +1 with no message to land on — decorating an unrelated
+          // later bubble with the wrong `/name`.
+          const expandsToTemplate =
+            attachments.length === 0 && (await session.willExpandPromptTemplate(text));
+          // Webview display hint for this prompt's user bubble (kenSent shimmer
+          // label / enhancer highlight segments / the `/name` a command was typed
+          // as). Anchored +1 so it attaches to the user message the prompt below
+          // is about to push. Queued prompts skip this (their position in the run
+          // is unpredictable).
+          //
+          // Recording the invocation matters because the agent persists the
+          // EXPANDED template as the user message. Resume used to recover
+          // `/name` by matching that body against the current templates, which
+          // silently fails the moment a template is edited or reworded — the
+          // reopened session then rendered the raw multi-KB prompt instead of
+          // the command chip.
+          if (
+            expandsToTemplate ||
+            (meta && (meta.kenSent === true || Array.isArray(meta.enhancements)))
+          ) {
+            void session
+              .persistAppMarker(
+                "user_hint",
+                {
+                  ...(expandsToTemplate ? { command: text.trim() } : {}),
+                  ...(meta?.kenSent === true ? { kenSent: true } : {}),
+                  ...(Array.isArray(meta?.enhancements) ? { enhancements: meta.enhancements } : {}),
+                },
+                1,
+              )
+              .catch(() => {});
+          }
+          // Fresh user turn: clear any cancel flag left from a prior cycle so this
+          // turn's autopilot review can run.
+          autopilotCancelled = false;
+          // A typed message while a plan modal/review is pending (reject,
+          // feedback, anything) supersedes the pending plan — the bump also
+          // invalidates any in-flight Ken plan review.
+          clearPendingPlan();
+          const assistantsBefore = countAssistantMessages(session.getMessages());
+          const messagesBefore = session.getMessages().length;
+          await runAgent(text, async () => {
+            if (attachments.length > 0) {
+              // Persist each attachment under .gg/uploads so files are inspectable
+              // by the agent's tools, then prompt with the media as native blocks.
+              const prepared = await prepareAttachments(cwd, attachments);
+              await session.promptWithAttachments(text, prepared);
+            } else {
+              // Pass the raw text straight through. AgentSession.prompt() is the
+              // single source of truth for slash-command expansion (built-in +
+              // `.gg/commands/*.md` custom), so the agent gets the right body
+              // while the webview keeps showing the short `/name`.
+              await session.prompt(text);
+            }
+          });
+          // After the user's run settles, kick off Ken's auto-review loop — but
+          // only when the turn is actually reviewable (shouldStartAutopilotCycle):
+          // workflow commands (/compare, /bullet-proof, …) end with reports or
+          // A/B/C choices reserved for the USER; registry commands (/help) and
+          // failed runs add no assistant work to judge; a turn that ended in plan
+          // mode has a pending Accept/Reject modal Ken must not preempt. This is
+          // the ONLY entry point into the cycle besides the stranded-queue drain —
+          // it drives any follow-up GG Coder runs itself, so the shared runAgent
+          // finally never recurses.
+          const decision = shouldStartAutopilotCycle({
+            enabled: autopilot,
+            cancelled: autopilotCancelled,
+            planMode: session.getPlanMode(),
+            // A submitted plan (exit_plan fired) routes into the PLAN review
+            // branch — the cycle reviews the plan itself instead of skipping.
+            planPending: pendingPlanPath !== null,
+            workflowCommand,
+            assistantMessagesAdded:
+              countAssistantMessages(session.getMessages()) - assistantsBefore,
+            // Skip the review API call outright for turns that only started a
+            // background process (dev server/watcher), ran a read-only lookup, or
+            // committed/pushed — Ken's autopilot contract already IGNOREs these,
+            // so there's no reason to pay for that verdict.
+            mechanicalOnly: isMechanicalOnlyTurn(
+              extractTurnToolCalls(session.getMessages(), messagesBefore),
+            ),
+          });
+          if (decision.start) {
+            log("INFO", "app-sidecar", "autopilot cycle starting", { kind: decision.kind });
+            await runAutopilotCycle(text);
+          } else if (autopilot) {
+            log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
+          }
+          // A prompt sent while Ken was reviewing (build idle) queued but had no
+          // run to steer into — run it now as a fresh turn so it never strands.
+          await runStrandedQueue();
+        })
+        .finally(() => {
+          if (claimedStart) runClaim.release();
         });
-        // After the user's run settles, kick off Ken's auto-review loop — but
-        // only when the turn is actually reviewable (shouldStartAutopilotCycle):
-        // workflow commands (/compare, /bullet-proof, …) end with reports or
-        // A/B/C choices reserved for the USER; registry commands (/help) and
-        // failed runs add no assistant work to judge; a turn that ended in plan
-        // mode has a pending Accept/Reject modal Ken must not preempt. This is
-        // the ONLY entry point into the cycle besides the stranded-queue drain —
-        // it drives any follow-up GG Coder runs itself, so the shared runAgent
-        // finally never recurses.
-        const decision = shouldStartAutopilotCycle({
-          enabled: autopilot,
-          cancelled: autopilotCancelled,
-          planMode: session.getPlanMode(),
-          // A submitted plan (exit_plan fired) routes into the PLAN review
-          // branch — the cycle reviews the plan itself instead of skipping.
-          planPending: pendingPlanPath !== null,
-          workflowCommand,
-          assistantMessagesAdded: countAssistantMessages(session.getMessages()) - assistantsBefore,
-          // Skip the review API call outright for turns that only started a
-          // background process (dev server/watcher), ran a read-only lookup, or
-          // committed/pushed — Ken's autopilot contract already IGNOREs these,
-          // so there's no reason to pay for that verdict.
-          mechanicalOnly: isMechanicalOnlyTurn(
-            extractTurnToolCalls(session.getMessages(), messagesBefore),
-          ),
-        });
-        if (decision.start) {
-          log("INFO", "app-sidecar", "autopilot cycle starting", { kind: decision.kind });
-          await runAutopilotCycle(text);
-        } else if (autopilot) {
-          log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
-        }
-        // A prompt sent while Ken was reviewing (build idle) queued but had no
-        // run to steer into — run it now as a fresh turn so it never strands.
-        await runStrandedQueue();
-      });
       return;
     }
 
@@ -3945,6 +4315,38 @@ async function createSession(
       return;
     }
 
+    // Pending queued steering, for the composer's cancel affordance.
+    if (method === "GET" && url === "/queued") {
+      json(res, 200, { queued: session.listQueuedMessages() });
+      return;
+    }
+
+    // Cancel one pending queued message by id.
+    if (method === "POST" && url === "/queued/cancel") {
+      void readBody(req, res).then((raw) => {
+        if (raw === null) return;
+        let id: string;
+        try {
+          id = (JSON.parse(raw) as { id?: string }).id ?? "";
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        if (!id.trim()) {
+          json(res, 400, { error: "missing queued message id" });
+          return;
+        }
+        // `false` means it already drained into the run between render and
+        // click. That is a race, not an error, so report it as a normal result
+        // and let the client reconcile from the fresh list.
+        const cancelled = session.cancelQueuedMessage(id);
+        const queued = session.listQueuedMessages();
+        broadcast("queued", { count: queued.length, messages: queued });
+        json(res, 200, { cancelled, queued });
+      });
+      return;
+    }
+
     if (method === "POST" && url === "/kill") {
       void readBody(req, res).then(async (raw) => {
         if (raw === null) return;
@@ -3963,6 +4365,32 @@ async function createSession(
         // Push the updated task list right away rather than waiting for the poll.
         broadcast("tasks", { tasks: session.listBackgroundProcesses() });
         json(res, 200, { message });
+      });
+      return;
+    }
+
+    // Import a Claude Code / Codex / Cursor transcript into a resumable GG
+    // Coder session. The importer never throws — it returns a typed failure so
+    // the app can show the reason verbatim.
+    if (method === "POST" && url === "/import-transcript") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { path?: string; cwd?: string };
+        try {
+          body = JSON.parse(raw) as { path?: string; cwd?: string };
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const filePath = body.path?.trim();
+        if (!filePath) {
+          json(res, 400, { error: "missing transcript path" });
+          return;
+        }
+        const result = await session.importForeignTranscript(filePath, {
+          ...(body.cwd ? { cwd: body.cwd } : {}),
+        });
+        json(res, result.ok ? 200 : 400, result);
       });
       return;
     }
@@ -4003,7 +4431,7 @@ async function createSession(
         const generation = runLifecycle.generation;
         if (!pendingCancelDrain || pendingCancelDrain.generation !== generation) {
           pendingCancelDrain = { generation, text: session.drainQueue() };
-          broadcast("queued", { count: 0 });
+          broadcast("queued", { count: 0, messages: [] });
         }
         const result = await runLifecycle.cancel(CANCEL_TIMEOUT_MS);
         const drained = pendingCancelDrain.text;
@@ -4163,7 +4591,17 @@ async function createSession(
           ...(baseUrl ? { baseUrl } : {}),
         };
         await auth.setCredentials(storageKey, creds);
-        broadcast("auth_done", { provider });
+        // auth.json is shared by every window, so this is a global change:
+        // close their login modals and refresh their provider lists too.
+        broadcastAll("auth_done", { provider });
+        // `auth_done` means "a login succeeded" (modals close on it).
+        // `auth_change` means "auth.json changed" — which a DISCONNECT also is,
+        // so connection state has one signal that covers both directions.
+        broadcastAll("auth_change", { provider });
+        // A newly connected provider unlocks its models. `/models` filters on
+        // who is logged in, so every window's picker is now stale — without
+        // this the new models don't appear until the session is reopened.
+        broadcastAll("models_change", {});
         json(res, 200, { ok: true });
       });
       return;
@@ -4188,7 +4626,18 @@ async function createSession(
           json(res, 409, { error: "a login is already in progress" });
           return;
         }
+        // A login writes the shared ~/.gg/auth.json, so two windows racing the
+        // same provider means two browser tabs and two token exchanges whose
+        // writes clobber each other. The per-session flag above cannot see
+        // that — guard the provider daemon-wide as well.
+        if (oauthInFlightProviders.has(provider)) {
+          json(res, 409, {
+            error: `a ${meta.label} login is already in progress in another window`,
+          });
+          return;
+        }
         oauthInFlight = true;
+        oauthInFlightProviders.add(provider);
         json(res, 202, { accepted: true });
         void (async () => {
           const cb = authCallbacks();
@@ -4198,22 +4647,34 @@ async function createSession(
             if (provider === "anthropic") creds = await loginAnthropic(cb);
             else if (provider === "openai") creds = await loginOpenAI(cb);
             else if (provider === "gemini") creds = await loginGemini(cb);
-            else if (provider === "moonshot") {
-              creds = await loginKimi(cb);
-              storageKey = MOONSHOT_OAUTH_KEY;
+            else if (provider === "moonshot" || provider === "xai") {
+              // Subscription OAuth (Kimi plan / SuperGrok-X Premium) stores under
+              // a distinct key so it can coexist with the provider's API key.
+              creds = provider === "moonshot" ? await loginKimi(cb) : await loginXai(cb);
+              storageKey = dualAuthProvider(provider)!.oauthKey;
             } else {
               throw new Error(`OAuth not implemented for ${provider}`);
             }
             await auth.setCredentials(storageKey, creds);
-            broadcast("auth_done", { provider });
+            // Terminal outcome of a GLOBAL change: every window's login modal
+            // should close and its provider list refresh, not just the one
+            // that started the flow.
+            broadcastAll("auth_done", { provider });
+            broadcastAll("auth_change", { provider });
+            // The OAuth provider's models just became selectable everywhere.
+            broadcastAll("models_change", {});
           } catch (err) {
             captureSidecarError(err, "app-sidecar.auth.oauth", { provider });
+            // Deliberately session-scoped: this is the outcome of ONE window's
+            // attempt. Another window that never pressed Connect has nothing to
+            // show an error about, and its modal correctly still offers login.
             broadcast("auth_error", {
               provider,
               message: err instanceof Error ? err.message : String(err),
             });
           } finally {
             oauthInFlight = false;
+            oauthInFlightProviders.delete(provider);
             pendingCode = null;
           }
         })();
@@ -4242,23 +4703,73 @@ async function createSession(
       return;
     }
 
-    if (method === "POST" && url === "/auth/logout") {
-      void readBody(req, res).then(async (raw) => {
+    if (method === "POST" && url.startsWith("/mcp/elicit/")) {
+      const id = decodeURIComponent(url.slice("/mcp/elicit/".length));
+      void readBody(req, res).then((raw) => {
         if (raw === null) return;
-        let provider: string;
+        let result: ElicitResult;
         try {
-          provider = (JSON.parse(raw) as { provider?: string }).provider ?? "";
+          const parsed = JSON.parse(raw) as {
+            action?: string;
+            content?: Record<string, unknown>;
+          };
+          if (
+            parsed.action !== "accept" &&
+            parsed.action !== "decline" &&
+            parsed.action !== "cancel"
+          ) {
+            json(res, 400, { error: "action must be accept, decline, or cancel" });
+            return;
+          }
+          result =
+            parsed.action === "accept"
+              ? ({ action: "accept", content: parsed.content ?? {} } as ElicitResult)
+              : { action: parsed.action };
         } catch {
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        await auth.clearCredentials(provider);
-        // Moonshot's OAuth credential lives under a distinct key — clear both so
-        // "disconnect" fully removes Kimi OAuth and the API key.
-        if (provider === "moonshot") await auth.clearCredentials(MOONSHOT_OAUTH_KEY);
-        // Xiaomi's API Credits credential lives under a distinct key — clear it
-        // too so "disconnect" fully removes both the Token Plan and Credits keys.
-        if (provider === "xiaomi") await auth.clearCredentials(XIAOMI_CREDITS_KEY);
+        // Unknown id means it already timed out or was cancelled by an abort —
+        // the tool call has moved on, so the answer has nowhere to go.
+        if (!elicitations.settle(id, result)) {
+          json(res, 409, { error: "no elicitation is awaiting a response" });
+          return;
+        }
+        json(res, 200, { ok: true });
+      });
+      return;
+    }
+
+    if (method === "POST" && url === "/auth/logout") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let provider: string;
+        let logoutMethod: AuthMethod | undefined;
+        try {
+          const body = JSON.parse(raw) as { provider?: string; method?: string };
+          provider = body.provider ?? "";
+          logoutMethod =
+            body.method === "oauth" || body.method === "apikey" ? body.method : undefined;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const dual = dualAuthProvider(provider);
+        // A dual-auth provider can be disconnected one method at a time: dropping
+        // a spent API key should not sign the user out of their subscription, and
+        // vice versa. Omitting `method` still clears everything (the plain
+        // "Disconnect" action).
+        if (logoutMethod !== "apikey") {
+          await auth.clearCredentials(dual ? dual.oauthKey : provider);
+        }
+        if (logoutMethod !== "oauth") {
+          // Non-dual providers store their only credential under the provider id,
+          // so this covers both them and a dual provider's API key.
+          await auth.clearCredentials(provider);
+          // Xiaomi's API Credits credential lives under a distinct key — clear it
+          // too so "disconnect" fully removes both the Token Plan and Credits keys.
+          if (provider === "xiaomi") await auth.clearCredentials(XIAOMI_CREDITS_KEY);
+        }
         broadcast("auth_done", { provider });
         json(res, 200, { ok: true });
       });
@@ -4633,6 +5144,7 @@ async function createSession(
   }
 
   async function dispose(): Promise<void> {
+    elicitations.cancelAll();
     tasksPollStopped = true;
     if (tasksPoll) clearTimeout(tasksPoll);
     gitPollStopped = true;

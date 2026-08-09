@@ -9,9 +9,12 @@ import { theme } from "./theme";
 export function Badge({
   children,
   color,
+  title,
 }: {
   children: React.ReactNode;
   color?: string;
+  /** Native tooltip, for badges whose colour carries state worth spelling out. */
+  title?: string;
 }): React.ReactElement {
   const style = color
     ? {
@@ -22,7 +25,7 @@ export function Badge({
       }
     : undefined;
   return (
-    <span className="badge" style={style}>
+    <span className="badge" style={style} title={title}>
       {children}
     </span>
   );
@@ -33,6 +36,7 @@ const SOURCE_STYLES: Record<string, { label: string; color: string }> = {
   ggcoder: { label: "gg-coder", color: theme.primary }, // blue
   "claude-code": { label: "Claude Code", color: "#d97757" }, // Anthropic clay
   codex: { label: "Codex", color: "#aeb6c2" }, // neutral silver
+  folder: { label: "Folder", color: theme.textDim }, // on disk, never opened
   ken: { label: "Ken Kai", color: theme.ken }, // orchid/magenta mentor
 };
 

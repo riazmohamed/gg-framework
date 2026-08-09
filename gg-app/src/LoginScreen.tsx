@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Cpu } from "lucide-react";
 import { theme } from "./theme";
-import { authStatus, type AuthProvider } from "./agent";
+import { authStatus, subscribe, type AuthProvider, type SidecarEvent } from "./agent";
 import { Badge } from "./Badge";
 import { BackButton } from "./BackButton";
 import { ProviderLoginModal } from "./ProviderLoginModal";
@@ -50,6 +50,18 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
     };
   }, []);
 
+  // ~/.gg/auth.json is shared by every window, so connecting or disconnecting
+  // anywhere changes what THIS screen should show. `auth_change` covers both
+  // directions (unlike `auth_done`, which only means a login succeeded);
+  // without re-reading here the connection dots and the "N connected" badge
+  // stay stale until the screen is reopened.
+  useEffect(() => {
+    const unsub = subscribe((e: SidecarEvent) => {
+      if (e.type === "auth_change") void refresh();
+    });
+    return () => unsub();
+  }, [refresh]);
+
   const connectedCount = providers.filter((p) => p.connected).length;
 
   return (
@@ -87,9 +99,30 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
                 </span>
                 <span className="login-tile-name">{p.label}</span>
                 <span className="login-tile-methods">
-                  {p.methods.map((m) => (
-                    <Badge key={p.value}>{m === "oauth" ? "OAuth" : "API key"}</Badge>
-                  ))}
+                  {p.methods.map((m) => {
+                    // Providers can support two methods and have BOTH connected, so
+                    // colour each badge by its own state instead of the tile's one
+                    // dot: green = this credential is on file. The dot above still
+                    // answers "is this provider usable at all".
+                    const isConnected = (p.connectedMethods ?? []).includes(m);
+                    const isActive = p.activeMethod === m;
+                    const label = m === "oauth" ? "OAuth" : "API key";
+                    return (
+                      <Badge
+                        key={m}
+                        color={isConnected ? theme.success : undefined}
+                        title={
+                          isConnected
+                            ? isActive
+                              ? `${label} — connected, in use`
+                              : `${label} — connected, standby`
+                            : `${label} — not connected`
+                        }
+                      >
+                        {label}
+                      </Badge>
+                    );
+                  })}
                 </span>
               </button>
             );
