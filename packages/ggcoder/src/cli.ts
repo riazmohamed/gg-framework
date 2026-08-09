@@ -368,6 +368,9 @@ function main(): void {
       model: rpcModel,
       cwd,
       systemPrompt,
+      // Without this, `--rpc --resume <id>` parsed the flag and silently
+      // started an empty conversation.
+      resume: values.resume,
     }).catch((err: unknown) => {
       process.stderr.write(formatUserError(err) + "\n");
       process.exit(1);

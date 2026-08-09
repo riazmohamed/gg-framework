@@ -4,6 +4,8 @@ import { AgentSession } from "../core/agent-session.js";
 import { isAbortError } from "@abukhaled/gg-agent";
 import { formatUserError } from "../utils/error-handler.js";
 import { closeLogger } from "../core/logger.js";
+import { getAppPaths } from "../config.js";
+import { SessionManager } from "../core/session-manager.js";
 
 export interface RpcModeOptions {
   provider: Provider;
@@ -12,6 +14,16 @@ export interface RpcModeOptions {
   baseUrl?: string;
   systemPrompt?: string;
   thinkingLevel?: ThinkingLevel;
+  /**
+   * A conversation to reopen, given as a session id or a `.jsonl` path.
+   *
+   * `--resume` was parsed by the CLI and then dropped on the way into RPC mode,
+   * so an editor or bridge that reopened a thread got a process with none of
+   * its history: the transcript rendered from disk while the agent behind it
+   * answered as though the conversation had just begun. The TUI never showed
+   * this because it passes the resolved path itself.
+   */
+  resume?: string;
 }
 
 // ── RPC Command Types ──────────────────────────────────────
@@ -97,10 +109,34 @@ function emitError(id: string, message: string): void {
  * - { id, command: "get_state" } → return current session state
  * - { id, command: "abort" } → abort current operation
  */
+/**
+ * Turn a `--resume` argument into the session path `AgentSession` expects.
+ *
+ * Its `sessionId` option is named for an id but takes a *path*, so passing a
+ * bare id straight through silently loads nothing — which is the bug this
+ * function exists to prevent recurring.
+ *
+ * An unresolvable id yields `undefined` rather than throwing: starting a fresh
+ * conversation is a better answer than refusing to start because one id was
+ * stale, and the caller cannot distinguish "typo" from "session since deleted".
+ */
+export async function resolveResumePath(
+  resume: string | undefined,
+  cwd: string,
+  sessionManager = new SessionManager(getAppPaths().sessionsDir),
+): Promise<string | undefined> {
+  if (!resume) return undefined;
+  // A path is already what the option wants; only bare ids need the store.
+  if (resume.includes("/")) return resume;
+  return (await sessionManager.findById(cwd, resume)) ?? undefined;
+}
+
 export async function runRpcMode(options: RpcModeOptions): Promise<void> {
   const ac = new AbortController();
   const onSigint = () => ac.abort();
   process.on("SIGINT", onSigint);
+
+  const resumePath = await resolveResumePath(options.resume, options.cwd);
 
   const session = new AgentSession({
     provider: options.provider,
@@ -109,6 +145,7 @@ export async function runRpcMode(options: RpcModeOptions): Promise<void> {
     baseUrl: options.baseUrl,
     systemPrompt: options.systemPrompt,
     thinkingLevel: options.thinkingLevel,
+    sessionId: resumePath,
     signal: ac.signal,
   });
 
