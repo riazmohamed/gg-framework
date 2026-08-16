@@ -22,6 +22,139 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.48.2",
+    date: "2026-08-15",
+    items: [
+      "No more prompts that just vanish into thin air. Once in a while a model would come back with literally nothing, and GG Coder would quietly stop like nothing happened, leaving you staring at a dead chat. Now I retry it for you, and if the model truly ghosts, you get a clear `empty response` warning instead of silence. Even better, that blank reply used to poison the whole session so every message after it came back empty too. That is gone for good.",
+    ],
+  },
+  {
+    version: "0.48.1",
+    date: "2026-08-15",
+    items: [
+      "Edits that used to kill a run now recover on the spot. Roughly `1%` of file edits came back garbled, and GG Coder would resend the exact same broken payload until `three strikes` ended your whole turn. I made the error tell it precisely what broke, so a long task stops collapsing seconds from the finish line.",
+    ],
+  },
+  {
+    version: "0.48.0",
+    date: "2026-08-15",
+    items: [
+      "`GLM-5.3` just landed and it is a monster at coding. Z.AI says it is `50%` better at code than the model it replaces, and it is the strongest open model out there right now on real terminal work. I made it the one and only GLM you get, so picking a weaker sibling by accident is no longer a thing. Same `1M` context, same login, way more firepower.",
+      "GLM thinking levels are finally real. Every level you picked used to secretly run at full blast, burning your quota and your patience on questions that never needed it. Now `low` truly is a quick think and `max` truly is a deep one, so you can spend big on the hard stuff and fly through the easy stuff. Nothing gets slower by default, you just got the dial you thought you already had.",
+    ],
+  },
+  {
+    version: "0.47.4",
+    date: "2026-08-14",
+    items: [
+      "GG Coder now writes dramatically less code to do the exact same job. I taught it to think like a lazy senior dev getting paged at 3am: reuse what your repo already has, reach for the standard library, never bolt on a dependency for something a few lines can do. I benchmarked it head to head against the old brain with every single result executed against real tests, and it holds a `100%` pass rate while shipping `50-76%` less code and up to `38%` fewer output tokens. Smaller diffs, cheaper runs, far less to review. The one thing it will never trim is your safety net: validation, error handling, security and accessibility stay untouchable.",
+      "No more watching an answer appear and then vanish. When GG Coder decides to double check its own work, it now knows that before it starts typing, so you only ever see the final reviewed answer land whole. `Zero` ghost drafts.",
+      "Your queued messages now glide into the conversation instead of snapping into place, and the view stays pinned to your newest message while everything settles. I also fixed the chat box landing at the wrong height when you zoom with `Cmd +/-` or resize the window.",
+    ],
+  },
+  {
+    version: "0.47.3",
+    date: "2026-08-13",
+    items: [
+      "You can now switch the meme GIFs on your home screen on or off whenever you want. Pop into `Settings` and you will find a new toggle right next to the sound effects switch. Your pick sticks across restarts, so your home screen stays exactly how you like it.",
+    ],
+  },
+  {
+    version: "0.47.2",
+    date: "2026-08-13",
+    items: [
+      "Your home screen and wake screen no longer choke when you have multiple project windows open. I made each window pause its canvas the moment it loses focus, so only the window you are looking at is doing the work. No more black frames, frozen star fields, or matrix rain bunched into a corner when you restore a minimized window.",
+      "Those meme cards on your home screen actually show up now. They were loading from a remote CDN that your app's own security policy blocks, so you were staring at blank cards. I bundled every `GIF` locally so they load instantly every time with zero network calls.",
+      "Project-scoped MCP servers just got way less annoying. Adding a server to a repo's `.gg/mcp.json` now trusts that one project automatically. You never have to flip the global `trustProjectMcpServers` toggle and trust every repo on your machine just to use one project's tools.",
+    ],
+  },
+  {
+    version: "0.47.1",
+    date: "2026-08-13",
+    items: [
+      "Your agent now has a locked front door. I sealed the internal connection between GG Coder and its engine so no other app or website on your machine can silently drive it, run commands, or touch your keys. What happens in your workspace stays in your workspace.",
+      "Opening a project is now safe from booby-trapped repos. A repo's config files can no longer launch commands the moment you open them. If a project needs that kind of power, you flip it on yourself with `trustProjectMcpServers`.",
+    ],
+  },
+  {
+    version: "0.47.0",
+    date: "2026-08-12",
+    items: [
+      "Attackers now use AI to find holes in your code at machine speed, so I stopped waiting to be asked about security. The new `bulletproof` skill hardens what you are building while you build it, on whatever you are actually making: a `CLI` tool, a desktop app, an iPhone or Android app, a smart contract, firmware, or an AI pipeline. It ranks by what actually breaks small teams, like a key left in your code or a page that quietly shows one customer another customer's data. And it will never tell you your code is `secure`, because nobody can promise that: you get what was checked, what got fixed, and what is still open.",
+      "`/bullet-proof` is gone from your slash menu, and that is the upgrade. It only ever ran when you remembered to type it, which was usually after the risky code already shipped. The skill now shows up on its own the moment you touch a login, an upload, a payment, or a new dependency, and you can still just ask me if something is safe to ship.",
+    ],
+  },
+  {
+    version: "0.46.1",
+    date: "2026-08-11",
+    items: [
+      "You never have to hunt for what I need from you again. When I get stuck on something only you can decide, that one question now lands in its own highlighted quote block at the very end of my reply. One question, never five. If you see that block, you know instantly that I am waiting on you.",
+      "I stopped burying the answer in a wall of text. My replies now lead with what actually happened, cut the reasoning you cannot act on, and never re-explain something I already told you. Same work, a fraction of the reading.",
+      "Jargon now comes with the stakes attached. I still use the real file name, the real command, the real setting, but the first time it shows up I tell you what it actually does or risks in the same breath. You get the precision without needing to know the codebase.",
+    ],
+  },
+  {
+    version: "0.46.0",
+    date: "2026-08-11",
+    items: [
+      "Find out what you're legally missing *before* you launch, not after a demand letter. Ask GG Coder if your app is safe to ship and the new `compliance-guard` skill reads your actual code \u2014 your schema, your tracking scripts, your checkout, your uploads \u2014 then tells you what you owe in plain English, fixes what code can fix, and ranks the rest by what really gets small apps sued.",
+      "It tells you straight when something can't legally ship. An `AI vet` that prescribes medication, cash prizes for spins, cashing out a wallet balance, cloning someone's voice without asking \u2014 these are licensed or banned, not to-do items, and you get told before the code gets written, with the version you *can* build.",
+      "Skills stay out of your way now. They used to jump in whenever a task merely sounded like their topic; they now match the actual work, skip routine changes, and never reload themselves mid-conversation.",
+    ],
+  },
+  {
+    version: "0.45.4",
+    date: "2026-08-11",
+    items: [
+      "Long runs stop dying halfway through. If anything else refreshed your login while your agent was working, every remaining turn used to fail with an `authentication error` until you restarted. Now each turn picks up your live credentials, and your windows quit logging each other out.",
+      "A slow provider no longer ends your run. `Request timed out` used to escape straight to you as a dead end. Now it quietly replays the turn like any other blip and carries on.",
+      "Your `MCP` tools can finally show pictures. A server sending back a screenshot, chart, or rendered diagram used to arrive as `(empty response)`, so your agent saw nothing at all. Those images now go straight to the model, sized to fit.",
+      "A small touch up in the title bar: when your provider reports only one usage window, the meter stops pretending to be a button. No phantom hover, no click sound for a press that does nothing.",
+    ],
+  },
+  {
+    version: "0.45.3",
+    date: "2026-08-10",
+    items: [
+      "The radio just grew a whole dark side. I added `14` new stations built to drop you into another world while you work: `The Dark Zone` for staring into the abyss, `Cryosleep` for zero-beat deep space, and `Nightride FM` when you want rain on neon. I streamed every single one before shipping it, so nothing in that list is dead air.",
+    ],
+  },
+  {
+    version: "0.45.2",
+    date: "2026-08-10",
+    items: [
+      "When your provider or proxy throttles you, you finally see why. Errors buried inside a `200` response used to surface as a mystery stall, then quietly burn `10` retries that re-billed your whole prompt every time. Now the real reason lands straight away and your credits stay yours.",
+      "Your conversation stops getting thrown away for no reason. A per-minute token limit used to look like a full context overflow, so your agent would compact your history, lose the thread, and still fail. Now it waits the limit out and picks up right where you left off.",
+    ],
+  },
+  {
+    version: "0.45.1",
+    date: "2026-08-10",
+    items: [
+      "Your code map got a serious cleanup. Ask for a file's structure and you get a clean list that reads straight down the file, real declarations only. On one of my own files that took the outline from `89` cluttered entries to the `17` that actually matter.",
+      "Now you can just say the name. No hunting for a line number first: give `code_nav` any function or class and it goes straight to where that lives and every place it gets used.",
+    ],
+  },
+  {
+    version: "0.45.0",
+    date: "2026-08-10",
+    items: [
+      "Your agent now understands your code the way your editor does. It can `go to definition` and `find all references` across your whole project instead of guessing from text matches. Renames catch every caller and edits land where they should.",
+      "Search stopped missing your files. It now looks inside folders like `.github` that it used to skip completely, leaves out the build junk your project already ignores, and runs nearly twice as fast while doing it.",
+      "Smart code search finally speaks your language. I taught it `five` more: Python, Go, Rust, Java and C#. Describe what a function does and it finds the right one, even when you cannot recall the name.",
+      "Every conversation got cheaper. I stripped out invisible baggage riding along with your requests and cut billed input by `15%` in my testing, and your agent still reaches for every tool it needs.",
+    ],
+  },
+  {
+    version: "0.44.0",
+    date: "2026-08-09",
+    items: [
+      "Your agent now has a real crew. `Six` specialists ship with every install: `bee` builds things, `owl` maps your codebase, `researcher` digs through real docs, `worker` opens PRs, plus an auditor and a skeptic for security passes. They arrive ready to go and quietly refresh themselves with each update, so you never get stuck with a stale copy.",
+      "Delegated work comes back sharper. Helpers used to get silently dropped onto the cheap model and handed a stripped down brief, so they missed things you would never accept from your main agent. Now they inherit your model by default and keep your project rules, tools, and environment, and I stretched their time budget so long jobs actually finish.",
+      "Quitting means quitting. Closing a terminal or hitting `Ctrl+C` no longer leaves a stubborn background process clinging to its port when a slow plugin refuses to let go. Shutdown gets `5` seconds, then it exits for real.",
+    ],
+  },
+  {
     version: "0.43.0",
     date: "2026-08-08",
     items: [

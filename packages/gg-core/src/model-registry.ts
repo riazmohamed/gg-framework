@@ -30,6 +30,15 @@ export interface ModelInfo {
    * Only meaningful when `supportsVideo` is true.
    */
   maxVideoBytes?: number;
+  /**
+   * True for models registered *only* to serve image/video turns — GLM's 4.6V
+   * line, whose entries exist so `getVisionModel` has a fallback chain. They
+   * are not general text models (128k window, 16k output), so cheap-sibling
+   * routing (`getFastModel` / `getSummaryModel`) must skip them: since GLM's
+   * text-side flash models were retired, the first low-tier GLM entry is a
+   * vision model, and scout/summary work would silently land on it.
+   */
+  visionSpecialist?: boolean;
   costTier: "low" | "medium" | "high";
   /**
    * The top reasoning tier this model genuinely uses. Used when thinking is
@@ -337,11 +346,16 @@ export const MODELS: ModelInfo[] = [
     maxThinkingLevel: "high",
   },
   // ── Z.AI (GLM) ─────────────────────────────────────────
-  // GLM-5.2: coding-first flagship with a usable 1M-token context window
-  // (5x jump over GLM-5.1's ~200K) and 131K max output. Released 2026-06-13.
+  // GLM-5.3 is the only GLM entry: it supersedes 5.2 (same GLM-5 base, all
+  // gains from post-training) and the coding endpoint already answers
+  // `glm-5.2` requests as glm-5.3, so the older ids were menu clutter that
+  // routed to strictly worse coding for the same plan quota.
+  // Released 2026-08-14; live on the coding endpoint (verified), while the
+  // standard paas API is still "coming soon". `max` is both the ceiling and
+  // Z.AI's own default — the rungs below it live in thinking-level.ts.
   {
-    id: "glm-5.2",
-    name: "GLM-5.2",
+    id: "glm-5.3",
+    name: "GLM-5.3",
     provider: "glm",
     contextWindow: 1_000_000,
     maxOutputTokens: 131_072,
@@ -349,43 +363,7 @@ export const MODELS: ModelInfo[] = [
     supportsImages: false,
     supportsVideo: false,
     costTier: "medium",
-    maxThinkingLevel: "high",
-  },
-  {
-    id: "glm-5.1",
-    name: "GLM-5.1",
-    provider: "glm",
-    contextWindow: 204_800,
-    maxOutputTokens: 131_072,
-    supportsThinking: true,
-    supportsImages: false,
-    supportsVideo: false,
-    costTier: "medium",
-    maxThinkingLevel: "high",
-  },
-  {
-    id: "glm-4.7",
-    name: "GLM-4.7",
-    provider: "glm",
-    contextWindow: 200_000,
-    maxOutputTokens: 131_072,
-    supportsThinking: true,
-    supportsImages: false,
-    supportsVideo: false,
-    costTier: "low",
-    maxThinkingLevel: "high",
-  },
-  {
-    id: "glm-4.7-flash",
-    name: "GLM-4.7 Flash",
-    provider: "glm",
-    contextWindow: 200_000,
-    maxOutputTokens: 131_072,
-    supportsThinking: true,
-    supportsImages: false,
-    supportsVideo: false,
-    costTier: "low",
-    maxThinkingLevel: "high",
+    maxThinkingLevel: "max",
   },
   // ── GLM (Z.AI) — Vision ───────────────────────────────────
   {
@@ -398,6 +376,7 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     supportsVideo: true,
     supportsDocuments: true,
+    visionSpecialist: true,
     costTier: "high",
     maxThinkingLevel: "high",
   },
@@ -411,6 +390,7 @@ export const MODELS: ModelInfo[] = [
     supportsImages: true,
     supportsVideo: true,
     supportsDocuments: true,
+    visionSpecialist: true,
     costTier: "medium",
     maxThinkingLevel: "high",
   },
@@ -422,6 +402,7 @@ export const MODELS: ModelInfo[] = [
     maxOutputTokens: 16_384,
     supportsThinking: true,
     supportsImages: true,
+    visionSpecialist: true,
     costTier: "low",
     maxThinkingLevel: "high",
   },
@@ -433,6 +414,7 @@ export const MODELS: ModelInfo[] = [
     maxOutputTokens: 16_384,
     supportsThinking: false,
     supportsImages: true,
+    visionSpecialist: true,
     costTier: "low",
     maxThinkingLevel: "low",
   },
@@ -622,7 +604,7 @@ export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "xiaomi") return MODELS.find((m) => m.id === "mimo-v2.5-pro")!;
   if (provider === "openai") return MODELS.find((m) => m.id === "gpt-5.6-sol")!;
   if (provider === "gemini") return MODELS.find((m) => m.id === "gemini-3.1-flash-lite")!;
-  if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.2")!;
+  if (provider === "glm") return MODELS.find((m) => m.id === "glm-5.3")!;
   if (provider === "moonshot") return MODELS.find((m) => m.id === "kimi-k3")!;
   if (provider === "minimax") return MODELS.find((m) => m.id === "MiniMax-M3")!;
   if (provider === "deepseek") return MODELS.find((m) => m.id === "deepseek-v4-pro")!;
@@ -779,8 +761,7 @@ export function getDefaultThinkingLevel(
  * - Anthropic: always Sonnet 5
  * - OpenAI: cheapest (Codex Mini)
  * - Gemini: use the current model
- * - GLM: GLM-4.7 Flash (cheap alternative)
- * - Moonshot: use the current model (no cheap alternative)
+ * - GLM / Moonshot: use the current model (no cheap alternative registered)
  */
 export function getSummaryModel(provider: Provider, currentModelId: string): ModelInfo {
   if (provider === "anthropic") {
@@ -793,7 +774,7 @@ export function getSummaryModel(provider: Provider, currentModelId: string): Mod
     provider === "xiaomi" ||
     provider === "deepseek"
   ) {
-    const low = getModelsForProvider(provider).find((m) => m.costTier === "low");
+    const low = getCheapTextSibling(provider);
     if (low) return low;
   }
   // Moonshot or fallback: use current model
@@ -807,11 +788,20 @@ export function getSummaryModel(provider: Provider, currentModelId: string): Mod
  *
  * Routes off each model's `costTier` — the single source of truth that already
  * travels with the registry entry — so a model rename/bump needs no change
- * here. Providers with no low-tier sibling (Moonshot, MiniMax, Xiaomi, Sakana,
- * OpenRouter) gracefully keep the parent model, so there's never a crash or a
- * cross-provider jump to a login the user may not have.
+ * here. Providers with no low-tier sibling (GLM, Moonshot, MiniMax, Xiaomi,
+ * Sakana, OpenRouter) gracefully keep the parent model, so there's never a
+ * crash or a cross-provider jump to a login the user may not have.
  */
 export function getFastModel(provider: Provider, currentModelId: string): ModelInfo {
-  const low = getModelsForProvider(provider).find((m) => m.costTier === "low");
+  const low = getCheapTextSibling(provider);
   return low ?? getModel(currentModelId) ?? getDefaultModel(provider);
+}
+
+/**
+ * The cheapest low-tier model of a provider that can serve general text work.
+ * Vision specialists are skipped — they're registered for `getVisionModel`'s
+ * fallback chain, not as cheap text siblings.
+ */
+function getCheapTextSibling(provider: Provider): ModelInfo | undefined {
+  return getModelsForProvider(provider).find((m) => m.costTier === "low" && !m.visionSpecialist);
 }

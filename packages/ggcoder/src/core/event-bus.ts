@@ -16,6 +16,8 @@ export interface BusEventMap {
     durationMs: number;
     /** Tool-specific extras (e.g. screenshot/read image previews). */
     details?: unknown;
+    /** Consecutive count for a repeated schema-validation failure; see AgentToolCallEndEvent. */
+    invalidArgAttempt?: number;
   };
   turn_end: {
     turn: number;
@@ -38,7 +40,10 @@ export interface BusEventMap {
   max_turns: { totalTurns: number; maxTurns: number };
   /** Turn budget was exhausted but extended because the run showed progress. */
   turn_budget_extended: { turn: number; grantedTurns: number; extension: number };
-  truncated: { reason: "max_tokens" | "refusal" | "provider_error"; continued: boolean };
+  truncated: {
+    reason: "max_tokens" | "refusal" | "provider_error" | "empty_response";
+    continued: boolean;
+  };
   error: { error: Error };
 
   // Server tool events
@@ -61,6 +66,12 @@ export interface BusEventMap {
     coverageExpected?: string[];
     coverageMissing?: string[];
   };
+
+  /** The Ideal review would fire if the agent stopped right now. Emitted as soon
+   *  as the run's stats cross the gate — i.e. BEFORE the candidate final answer
+   *  streams — so a client can hold that answer back instead of painting a draft
+   *  the review then discards. */
+  hook_armed: { kind: "ideal"; armed: boolean };
 
   // Persistent async child lifecycle (bounded metadata/output snapshot).
   subagent_state: SubAgentSnapshot;
@@ -168,6 +179,7 @@ export class EventBus {
           isError: event.isError,
           durationMs: event.durationMs,
           details: event.details,
+          invalidArgAttempt: event.invalidArgAttempt,
         });
         break;
       case "turn_end":

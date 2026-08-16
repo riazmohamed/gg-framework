@@ -71,13 +71,18 @@ import {
 import type { RouterMode } from "./model-router.js";
 import { discoverSkills, type Skill } from "./skills.js";
 import { ensureAppDirs } from "../config.js";
-import { buildSystemPrompt, type SystemPromptEnvironment } from "../system-prompt.js";
+import {
+  buildSubAgentSystemPrompt,
+  buildSystemPrompt,
+  type SystemPromptEnvironment,
+} from "../system-prompt.js";
 import {
   createTools,
   createWebSearchTool,
   type LspManager,
   type ProcessManager,
 } from "../tools/index.js";
+import { partitionToolsByTier } from "../tools/tool-tiers.js";
 import type { BackgroundProcess } from "./process-manager.js";
 import { buildProcessCompletionFollowUp } from "./process-gate.js";
 import { buildSubAgentCompletionFollowUp, type SubAgentManager } from "./subagent-manager.js";
@@ -157,7 +162,21 @@ export interface AgentSessionOptions {
   model: string;
   cwd: string;
   baseUrl?: string;
+  /** Replaces the whole system prompt — nothing else is rendered. */
   systemPrompt?: string;
+  /**
+   * A sub-agent definition's body, COMPOSED with the standard scaffolding
+   * (Tools, project context, return contract, Environment) instead of replacing
+   * it — see `buildSubAgentSystemPrompt`.
+   *
+   * Prefer this over `systemPrompt` for delegated children: a bare replacement
+   * leaves the child with no Tools section and no Environment facts, which is
+   * precisely how a sub-agent ends up misusing tools it was never told it had.
+   * Ignored when `systemPrompt` is set.
+   */
+  agentPrompt?: string;
+  /** Whether `agentPrompt` composition includes project instruction files. Default `"project"`. */
+  agentContext?: "project" | "none";
   /** Synchronous volatile prompt suffix, refreshed immediately before every run. */
   getSystemPromptTail?: () => string;
   sessionId?: string;
@@ -393,6 +412,14 @@ export class AgentSession {
   private idealReviewPhase: "idle" | "reviewing" | "complete" = "idle";
   /** Runtime-only suppression while Ken owns verification in autopilot mode. */
   private idealReviewSuppressed = false;
+  /** Mirror of the last `hook_armed` value broadcast this run, so the event
+   *  fires only on a real edge. */
+  private idealReviewArmed = false;
+  /** Cached test-drift probe, keyed by the size of the edited-file set. Drift
+   *  depends only on WHICH files were edited and that set only grows, so this
+   *  keeps the arming check off the filesystem on most tool results — the probe
+   *  is several sync existsSync calls per edited file. */
+  private idealDriftProbe: { files: number; drifted: boolean } | null = null;
   private readonly reviewCoverage: ReviewCoverageTracker;
   /** Coverage follow-ups spent this run, capped by MAX_REVIEW_COVERAGE_INJECTIONS. */
   private reviewCoverageInjected = 0;
@@ -435,8 +462,14 @@ export class AgentSession {
     void this.subAgentManager?.interruptAll();
   };
   private mcpManager?: MCPClientManager;
-  /** Deferred MCP tools awaiting discovery via tool_search (bench A win). */
+  /** Deferred MCP tools awaiting discovery via tool_search. */
   private mcpCatalog?: DeferredToolCatalog;
+  /**
+   * Built-in tools held in the catalog instead of the live toolset. Their names
+   * still render as one-line hints in the prompt's Tools section, so the model
+   * can discover and promote them; a promoted name drops out of this list.
+   */
+  private deferredBuiltinToolNames: string[] = [];
   /** Live (connected) MCP tools by name — the reconcile target for cached stubs. */
   private liveMcpTools = new Map<string, AgentTool>();
   /** Server name for each cached-only tool, so a stub knows what to wait on. */
@@ -455,6 +488,8 @@ export class AgentSession {
   private thinkingLevel?: ThinkingLevel;
   private routerMode: RouterMode = "vision";
   private customSystemPrompt?: string;
+  /** Sub-agent definition body composed into the standard prompt scaffolding. */
+  private agentPrompt?: string;
   /** Stable prompt prefix retained separately from the volatile uncached tail. */
   private baseSystemPrompt = "";
   /** Shared with the tool layer so plan-mode restrictions read live state. */
@@ -518,6 +553,7 @@ export class AgentSession {
     this.maxTokens = this.resolveMaxTokens(options.model);
     this.thinkingLevel = options.thinkingLevel;
     this.customSystemPrompt = options.systemPrompt;
+    this.agentPrompt = options.agentPrompt;
   }
 
   /**
@@ -612,6 +648,7 @@ export class AgentSession {
         additionalRoots: this.additionalRoots,
         allowOutsideWorkspaceWrites: this.settingsManager.get("allowOutsideWorkspaceWrites"),
       }),
+      getUseExternalGrep: () => this.settingsManager.get("grepUseRipgrep"),
       authStorage: this.authStorage,
       onFileRead: (filePath) => this.reviewCoverage.recordRead(filePath),
       onFileMutated: (filePath) => {
@@ -649,6 +686,23 @@ export class AgentSession {
     // a hallucinated call can't mutate the repo — and buildSystemPrompt below is
     // fed the same filtered names so the Tools section matches exactly.
     this.tools = this.opts.allowedTools ? tools.filter((t) => this.isToolAllowed(t.name)) : tools;
+    // Tier the built-ins: rarely reached schemas move into the tool_search
+    // catalog and cost one hint line each instead of a full parameter schema on
+    // every request. Allow-listed sessions keep the eager path — their fixed
+    // tool expectations predate the catalog, and tool_search isn't allow-listed.
+    if (!this.opts.allowedTools && this.settingsManager.get("deferredBuiltinTools")) {
+      const { core, deferred } = partitionToolsByTier(this.tools);
+      if (deferred.length > 0) {
+        // Append-only: `core` preserves the original relative order and
+        // tool_search is pushed after it, so the serialized tool block that
+        // sits inside the cached prefix stays byte-stable across turns.
+        this.tools = core;
+        this.deferredBuiltinToolNames = deferred.map((t) => t.name);
+        this.mcpCatalog ??= new DeferredToolCatalog();
+        this.mcpCatalog.add(deferred);
+        this.ensureToolSearchTool();
+      }
+    }
     this.rebuildReadTool = rebuildReadTool;
     this.processManager = processManager;
     this.lspManager = lspManager;
@@ -673,18 +727,7 @@ export class AgentSession {
       await this.connectMcpServers();
     }
 
-    const basePrompt =
-      this.customSystemPrompt ??
-      (await buildSystemPrompt(
-        this.cwd,
-        this.skills,
-        false,
-        undefined,
-        this.tools.map((tool) => tool.name),
-        undefined,
-        this.provider,
-        this.promptEnvironment(),
-      ));
+    const basePrompt = await this.buildBasePrompt(false, undefined);
     this.baseSystemPrompt = basePrompt;
     this.messages = [{ role: "system", content: this.withSystemPromptTail(basePrompt) }];
 
@@ -835,7 +878,9 @@ export class AgentSession {
           // GLM not configured — skip Z.AI MCP servers
         }
       }
-      let servers = await getAllMcpServers(this.provider, apiKey, this.cwd);
+      let servers = await getAllMcpServers(this.provider, apiKey, this.cwd, {
+        allowProjectScope: this.settingsManager.isProjectTrusted(this.cwd),
+      });
       // Whitelisted allow-listed session: connect ONLY the named servers, never
       // the user's full configured set (which could include mutating tools). The
       // whitelist only restricts in allow-list mode (the documented contract) so
@@ -867,6 +912,9 @@ export class AgentSession {
       if (this.opts.backgroundMcpConnect && mcpTools.length > 0) {
         await this.rebuildSystemPromptInPlace();
       }
+      // Detect project-scope servers excluded because the repo isn't trusted,
+      // so the host can offer a per-repo "Trust" button. Computed after the
+      // connect so the blocked list reflects the same connect attempt.
     } catch (err) {
       log(
         "WARN",
@@ -876,10 +924,18 @@ export class AgentSession {
     }
   }
 
+  /** Persist `cwd` as a trusted project for project-scope MCP. Called by the
+   *  sidecar's `/mcp/add` handler when a user adds a project-scope server via
+   *  the MCP modal — the explicit add is itself the trust signal. The next
+   *  session load connects its `.gg/mcp.json` servers. */
+  async trustProject(cwd: string): Promise<void> {
+    await this.settingsManager.trustProject(cwd);
+  }
+
   /**
    * Route freshly connected MCP tools: deferred into the tool_search catalog
-   * (default — keeps ~8k tokens of schema out of every cache-miss turn, see
-   * bench/RESULTS.md bench A) or pushed eagerly when the user opted out.
+   * (default — keeps ~8k tokens of schema out of every cache-miss turn) or
+   * pushed eagerly when the user opted out.
    * Allow-listed sessions (Ken) always get the eager path — their fixed tool
    * expectations predate the catalog, and tool_search isn't allow-listed.
    * Promotion pushes onto the live `this.tools` array the running agent loop
@@ -909,9 +965,13 @@ export class AgentSession {
    * Register `tool_search` once. Promotion of a cached-only entry waits for its
    * server so the model is told immediately when that capability turns out to
    * be unreachable, instead of promoting a tool that fails on first call.
+   *
+   * The catalog is created on demand rather than required up front: deferred
+   * built-in tools populate it with zero MCP servers connected, so gating
+   * registration on an existing catalog would leave those tools unreachable.
    */
   private ensureToolSearchTool(): void {
-    if (!this.mcpCatalog) return;
+    this.mcpCatalog ??= new DeferredToolCatalog();
     if (this.tools.some((t) => t.name === "tool_search")) return;
     this.tools.push(
       createToolSearchTool(
@@ -1218,6 +1278,9 @@ export class AgentSession {
     this.reviewCoverage.reset();
     this.reviewCoverageInjected = 0;
     this.idealReviewPhase = "idle";
+    // No event here: clients reset their own hold on run_start.
+    this.idealReviewArmed = false;
+    this.idealDriftProbe = null;
     this.loopBreakInjected = 0;
     this.regroundingInjected = false;
     this.runStartedAt = Date.now();
@@ -1267,10 +1330,15 @@ export class AgentSession {
           const removed = (diff.match(/^-[^-]/gm) ?? []).length;
           this.hookStats.changedLines += added + removed;
         }
+        // Tool results are what push the run over the review gate, and they all
+        // land before the model writes its candidate final answer — so this is
+        // the point where arming still beats the draft's first token.
+        this.refreshIdealReviewArmed();
         break;
       }
       case "turn_end":
         this.hookStats.turns = event.turn;
+        this.refreshIdealReviewArmed();
         for (let index = this.messages.length - 1; index >= 0; index--) {
           const anchor = this.messages[index];
           if (anchor?.role === "assistant") {
@@ -1467,6 +1535,48 @@ export class AgentSession {
   }
 
   /**
+   * Would the stop AFTER the current turn inject the Ideal review? Same inputs
+   * as the pre-stop gate below, evaluated early so clients know a candidate
+   * final answer is a review draft BEFORE it streams.
+   *
+   * The turn count is looked ahead by one on purpose. `hookStats.turns` only
+   * advances at `turn_end`, so while the model is writing the draft the counter
+   * still reads the PREVIOUS turn; the real gate sees one more. Without the
+   * lookahead a run sitting on score 3 crosses to 4 on the draft's own
+   * `turn_end` — after the text already streamed — which is precisely the
+   * appear-then-vanish flash. Over-arming by one turn point costs only live
+   * token streaming on a final answer that then shows whole; under-arming costs
+   * the flash, so this errs toward arming.
+   */
+  private wouldInjectIdealReview(): boolean {
+    if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) return false;
+    if (this.idealReviewPhase !== "idle") return false;
+    if (!this.settingsManager.get("idealReviewEnabled")) return false;
+    if (evaluateIdealReview({ ...this.hookStats, turns: this.hookStats.turns + 1 }).shouldReview) {
+      return true;
+    }
+    const files = this.hookFileEditCounts.size;
+    if (files === 0) return false;
+    if (this.idealDriftProbe?.files !== files) {
+      this.idealDriftProbe = {
+        files,
+        drifted: detectTestDrift(this.hookFileEditCounts.keys(), this.cwd).length > 0,
+      };
+    }
+    return this.idealDriftProbe.drifted;
+  }
+
+  /** Broadcast Ideal-review arming on change. Both edges matter: armed=false
+   *  after the review fires is what lets a client stream the REVIEWED final
+   *  answer live again. */
+  private refreshIdealReviewArmed(): void {
+    const armed = this.wouldInjectIdealReview();
+    if (armed === this.idealReviewArmed) return;
+    this.idealReviewArmed = armed;
+    this.eventBus.emit("hook_armed", { kind: "ideal", armed });
+  }
+
+  /**
    * Pre-stop Ideal review phase machine. Once review starts, completion is
    * blocked until harness-owned post-injection reads cover every changed file.
    */
@@ -1538,6 +1648,11 @@ export class AgentSession {
       coverageExpected: coverage.expected,
       coverageMissing: coverage.missing,
     });
+    // Disarm strictly AFTER the hook event. Clients release held text on
+    // disarm, so the reverse order would paint the draft and then delete it —
+    // the exact flash arming exists to prevent. Leaving `idle` is what lets the
+    // reviewed final answer stream live instead of being held.
+    this.refreshIdealReviewArmed();
     log("INFO", "ideal", "Injecting ideal review before final response", {
       coverageExpected: coverage.expected,
       coverageMissing: coverage.missing,
@@ -1621,6 +1736,10 @@ export class AgentSession {
     // Cache for sync callers (see field doc) — kept in step with `creds`
     // through the 401 force-refresh retry below.
     this.lastAccountId = creds.accountId;
+    // The access token most recently handed to the provider. Tracked separately
+    // from `creds` because the per-turn resolver can rotate it mid-run, and the
+    // 401 handler must name the token that was actually rejected.
+    let lastResolvedAccessToken = creds.accessToken;
 
     // Auto-compact if needed. This must happen after credential resolution so
     // OpenAI OAuth/Codex sessions use the Codex product context window instead
@@ -1688,6 +1807,7 @@ export class AgentSession {
     const loopMessages = await this.prepareDynamicContext();
 
     const runAgentLoop = async (apiKey: string, accountId?: string, projectId?: string) => {
+      lastResolvedAccessToken = apiKey;
       const modelInfo = getModel(this.model);
       const effectiveBaseUrl = this.baseUrl ?? creds.baseUrl;
       const generator = agentLoop(loopMessages, {
@@ -1700,6 +1820,23 @@ export class AgentSession {
         maxTurnExtensions: this.opts.maxTurnExtensions,
         thinking: this.thinkingLevel,
         apiKey,
+        // Per-turn credential resolution. A run can span many minutes; if any
+        // process sharing auth.json refreshes this grant meanwhile, the token
+        // captured above is invalidated server-side and every remaining turn
+        // would fail with an authentication error until the user restarted.
+        // Static API keys resolve to the same value, so this is a no-op for them.
+        resolveCredentials: async () => {
+          const live = await this.authStorage.resolveCredentials(this.provider, {
+            storageKeys: this.currentAuthStorageKeys(),
+          });
+          this.lastAccountId = live.accountId;
+          lastResolvedAccessToken = live.accessToken;
+          return {
+            apiKey: live.accessToken,
+            ...(live.accountId !== undefined ? { accountId: live.accountId } : {}),
+            ...(live.projectId !== undefined ? { projectId: live.projectId } : {}),
+          };
+        },
         baseUrl: effectiveBaseUrl,
         signal: this.opts.signal,
         accountId,
@@ -1955,6 +2092,12 @@ export class AgentSession {
         creds = await this.authStorage.resolveCredentials(this.provider, {
           forceRefresh: true,
           storageKeys: this.currentAuthStorageKeys(),
+          // Name the token the provider actually rejected (which the per-turn
+          // resolver may have rotated since the run started). If disk already
+          // holds a newer one, adopt it instead of minting another — a fresh
+          // refresh would invalidate the token every sibling process is using
+          // and turn one 401 into a cascade of them.
+          rejectedToken: lastResolvedAccessToken,
         });
         this.lastAccountId = creds.accountId;
         await runAgentLoop(creds.accessToken, creds.accountId, creds.projectId);
@@ -2076,7 +2219,9 @@ export class AgentSession {
             }
           }
           // Use getAllMcpServers so user-configured servers survive the reconnect.
-          const servers = await getAllMcpServers(this.provider, apiKey, this.cwd);
+          const servers = await getAllMcpServers(this.provider, apiKey, this.cwd, {
+            allowProjectScope: this.settingsManager.isProjectTrusted(this.cwd),
+          });
           const mcpTools = await this.mcpManager.connectAll(servers);
           // Drop stale MCP tools from both the live set and deferred catalog before
           // re-adding. Some tools may already have been promoted out of the catalog.
@@ -2381,18 +2526,7 @@ export class AgentSession {
     this.autopilotMarkers = [];
     this.appMarkers = [];
     this.turnMetrics = [];
-    const basePrompt =
-      this.customSystemPrompt ??
-      (await buildSystemPrompt(
-        this.cwd,
-        this.skills,
-        false,
-        undefined,
-        this.tools.map((tool) => tool.name),
-        undefined,
-        this.provider,
-        this.promptEnvironment(),
-      ));
+    const basePrompt = await this.buildBasePrompt(false, undefined);
     this.baseSystemPrompt = basePrompt;
     this.messages = [{ role: "system", content: this.withSystemPromptTail(basePrompt) }];
     // Fresh conversation — new entries must not chain onto the old DAG's leaf.
@@ -2541,6 +2675,9 @@ export class AgentSession {
       this.idealReviewPhase = "idle";
       this.reviewCoverage.reset();
     }
+    // Suppression flips mid-run (autopilot takes over verification), so a client
+    // holding a draft under a stale arming must be released.
+    this.refreshIdealReviewArmed();
   }
 
   /** Queue a user message (optionally with attachments) to be injected mid-run
@@ -2701,6 +2838,17 @@ export class AgentSession {
     return { ok: true, root: resolved };
   }
 
+  /**
+   * Names to advertise as available-on-demand. A tool the model already
+   * promoted lives in `this.tools` and carries its own schema, so it drops out
+   * of the index rather than being listed twice.
+   */
+  private deferredToolNamesForPrompt(liveNames: readonly string[]): string[] {
+    if (this.deferredBuiltinToolNames.length === 0) return [];
+    const live = new Set(liveNames);
+    return this.deferredBuiltinToolNames.filter((name) => !live.has(name));
+  }
+
   /** Environment facts that vary per session rather than per host. */
   private promptEnvironment(): SystemPromptEnvironment {
     const networkAllow =
@@ -2710,19 +2858,46 @@ export class AgentSession {
     return { additionalRoots: this.additionalRoots, networkAllow };
   }
 
-  /** Rebuild messages[0] from current plan-mode + approved-plan state. */
-  private async rebuildSystemPromptInPlace(): Promise<void> {
-    if (this.customSystemPrompt) return;
-    const rebuilt = await buildSystemPrompt(
+  /**
+   * Build the stable system-prompt prefix for the current tool set and state.
+   *
+   * Three modes, in precedence order: a full replacement (`systemPrompt`), a
+   * composed sub-agent prompt (`agentPrompt` — agent body plus Tools, project
+   * context, return contract and Environment), or the standard prompt.
+   */
+  private async buildBasePrompt(planMode: boolean, approvedPlanPath?: string): Promise<string> {
+    if (this.customSystemPrompt) return this.customSystemPrompt;
+    const toolNames = this.tools.map((tool) => tool.name);
+    const deferredToolNames = this.deferredToolNamesForPrompt(toolNames);
+    if (this.agentPrompt !== undefined) {
+      return buildSubAgentSystemPrompt(this.agentPrompt, {
+        cwd: this.cwd,
+        toolNames,
+        deferredToolNames,
+        context: this.opts.agentContext,
+        environment: this.promptEnvironment(),
+      });
+    }
+    return buildSystemPrompt(
       this.cwd,
       this.skills,
-      this.planModeRef.current,
-      this.approvedPlanPath,
-      this.tools.map((tool) => tool.name),
+      planMode,
+      approvedPlanPath,
+      toolNames,
       undefined,
       this.provider,
       this.promptEnvironment(),
+      deferredToolNames,
     );
+  }
+
+  /** Rebuild messages[0] from current plan-mode + approved-plan state. */
+  private async rebuildSystemPromptInPlace(): Promise<void> {
+    // A full replacement is verbatim by contract — there is nothing to rebuild.
+    // A composed agent prompt still must be: its Tools section has to follow
+    // late-arriving MCP tools, or a compacted child loses tools it can call.
+    if (this.customSystemPrompt) return;
+    const rebuilt = await this.buildBasePrompt(this.planModeRef.current, this.approvedPlanPath);
     this.baseSystemPrompt = rebuilt;
     const content = this.withSystemPromptTail(rebuilt);
     if (this.messages[0]?.role === "system") {

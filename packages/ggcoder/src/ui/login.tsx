@@ -50,7 +50,7 @@ const PROVIDERS: { label: string; value: Provider; description: string }[] = [
     value: "moonshot",
     description: "Kimi K3, K2.7 Code · OAuth or API key",
   },
-  { label: "Z.AI (GLM)", value: "glm", description: "GLM-5.2, GLM-5.1, GLM-4.7, GLM-4.7 Flash" },
+  { label: "Z.AI (GLM)", value: "glm", description: "GLM-5.3" },
   { label: "MiniMax", value: "minimax", description: "MiniMax M3" },
   {
     label: "Xiaomi (MiMo)",

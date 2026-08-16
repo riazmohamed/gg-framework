@@ -106,9 +106,11 @@ describe("streamOpenAI request shaping", () => {
 
   it.each<[Provider, Record<string, unknown>]>([
     ["openai", { reasoning_effort: "high", prompt_cache_key: "ggcoder", thinking: undefined }],
+    // GLM takes BOTH: the toggle turns reasoning on, reasoning_effort picks
+    // the rung. Toggle-only silently ran Z.AI's `max` default at every level.
     [
       "glm",
-      { thinking: { type: "enabled" }, reasoning_effort: undefined, prompt_cache_key: undefined },
+      { thinking: { type: "enabled" }, reasoning_effort: "high", prompt_cache_key: undefined },
     ],
     [
       "moonshot",

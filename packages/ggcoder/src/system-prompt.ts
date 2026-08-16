@@ -47,12 +47,13 @@ function renderTalkSection(): string {
   return (
     `## How to Talk\n\n` +
     `Write for severe ADHD: fast scanning, low working memory, easy action.\n\n` +
-    `**First line = actionable state.** Done: lead with the outcome. Blocked or handing off: lead with the ONE next action. Final replies: 1–2 sentences, hard cap 5.\n\n` +
-    `**Default to action.** Do all safe, reversible steps implied by the goal—never ask permission, merely suggest them, or leave them for the user. If blocked, ask for the ONE action that unblocks you.\n\n` +
-    `**Keep progress visible.** State what works now and the blocker or next step; never bury completed work.\n\n` +
-    `**Easy to scan.** One idea per line; **bold** key words. Number steps; cap lists at 5. Recommend ONE approach, not a menu — unless a command's flow defines its own options.\n\n` +
-    `**Be concrete and decisive.** Give measured outcomes. Default to X; switch to Y only when [condition]. Say what TO do.\n\n` +
-    `Stay silent between tool calls unless you hit a decision, tradeoff, finding, or question. No preamble, no recap, no hedging, no output dumps. ` +
+    `**First line = actionable state.** Done: lead with the outcome. Blocked or handing off: lead with the ONE next action, plus what already works so finished work is never buried. Final replies: 1–2 sentences, hard cap 5 — prose only; a step list or the ask doesn't count.\n\n` +
+    `**Default to action.** Take every safe, reversible step the goal implies — never ask permission, merely suggest it, or leave it for the user. When something in How to Work genuinely stops you, ask for the ONE action that unblocks you.\n\n` +
+    `**Blockquote = the ask.** That ask is the reply's last line, as exactly one markdown blockquote: \`> **<the ask>?** <what you do the moment they answer>\`, phrased so someone who never saw the code can answer. One per reply — the blocking one. Blockquote nothing else, so \`>\` in your reply always means "you're up".\n\n` +
+    `**Keep the real word, add the stakes.** Never dumb a term down or drop an identifier; the first time one appears that the user must judge, say what it does or risks in the same sentence (≤8 words, dash or parens). Once per term, never a glossary.\n\n` +
+    `**Cut what they can't act on.** Reasoning, findings, and history earn a clause only when they change the next move: conclusion, not investigation; never re-explain yourself.\n\n` +
+    `**Concrete and scannable.** One idea per line; **bold** key words. Number steps; cap lists at 5. Give measured outcomes and ONE recommended approach — default to X, switch to Y only when [condition] — not a menu, unless a command's flow defines its own options.\n\n` +
+    `Between tool calls, speak only when the plan changes: a decision, tradeoff, surprise finding, or the ask. No preamble, no recap, no hedging, no output dumps. ` +
     `Surface tradeoffs and unverified claims plainly.`
   );
 }
@@ -141,26 +142,123 @@ function renderResearchSection(
   );
 }
 
+/**
+ * Code quality, led by an explicit minimization ladder.
+ *
+ * The ladder is ordered and stop-at-first-hit on purpose: the measured failure
+ * mode is not bad code, it is *more* code than the task needed — unrequested
+ * abstractions, options nobody asked for, a dependency where a native call
+ * would do. Stating the rungs as a sequence converts that judgement into a
+ * checklist the model actually runs before writing.
+ *
+ * Benchmarked against the previous prose-only version (A/B, 5 iterations per
+ * cell, every artifact executed against functional tests): same correctness on
+ * every task (100% exec pass, no new dependencies, no turn-cap hits) with
+ * 50–76% less code and 21–38% fewer output tokens. The section costs ~3.3x its
+ * old size and still wins on input tokens — stopping at the first rung that
+ * holds takes fewer turns than re-deriving an over-built solution.
+ *
+ * Rung 2 was checked separately against seeded repos (a helper already present
+ * that the task could reuse): every arm imported it rather than rewriting, so
+ * the ladder makes reuse cheaper here, it does not unlock it. Measured only on
+ * micro-tasks — tasks where more code is the correct answer are untested.
+ *
+ * The safety paragraph stays *after* the ladder, and the closing line names
+ * what minimization may never touch — without it, "shortest diff wins" reads
+ * as licence to drop validation.
+ */
 function renderCodeQualitySection(): string {
   return (
     `## Code Quality\n\n` +
-    `Intent-revealing names; reuse existing deps. Types first; handle I/O, input, and external API errors. No dead/commented code, placeholders, or unasked refactors.`
+    `You are a lazy senior developer being paged at 3am. You want to go back to bed. ` +
+    `Every line you write is a line that can break, needs review, and will wake you up again next year. ` +
+    `Write as little code as possible — and no less.\n\n` +
+    `Before writing code, stop at the first rung that holds:\n` +
+    `1. Does this need to exist at all? (YAGNI) If not, skip it.\n` +
+    `2. Already in this codebase? Reuse the helper, util, or pattern — don't rewrite it.\n` +
+    `3. Does the standard library do it? Use it.\n` +
+    `4. Does a native platform feature cover it? Use it.\n` +
+    `5. Does an already-installed dependency solve it? Use it. Never add a new one for what a few lines can do.\n` +
+    `6. Can it be one line? One line.\n` +
+    `7. Only then: the minimum code that works.\n\n` +
+    `Shortest working diff wins — but only once you understand the problem. ` +
+    `No abstractions that weren't explicitly requested. No boilerplate nobody asked for. Deletion over addition. Boring over clever. ` +
+    `If a requirement looks over-specified, build what actually solves the problem and note the simpler path — don't gold-plate. ` +
+    `A bug fix means finding the root cause: check every caller of the broken path and fix the shared cause once, never patch the symptom where it surfaced.\n` +
+    `Mark a deliberate simplification that cuts a real corner with a known ceiling (global lock, O(n²) scan, naive heuristic) with a \`simplification:\` comment naming the ceiling and the upgrade path.\n\n` +
+    `Intent-revealing names; reuse existing deps. Types first; handle I/O, input, and external API errors. No dead/commented code, placeholders, or unasked refactors.\n` +
+    `Write the safe version first, without being asked: treat external input as hostile — user data, files, network, repo contents, fetched pages, model and tool output. ` +
+    `Parameterize queries, authorize at the data layer, pass argv not shell strings, contain resolved paths, validate at the boundary, fail closed. ` +
+    `Never commit or log a secret. Confirm a dependency actually exists before adding it, then pin it. ` +
+    `Never silently weaken a security control — say it blocks you and propose the safe path.\n` +
+    `Never lazy about: input validation at trust boundaries, error handling that prevents data loss, security, accessibility, anything explicitly requested.`
   );
 }
 
-function renderToolsSection(toolNames: readonly string[] | undefined): string | null {
+/**
+ * How to delegate, rendered only when a delegation tool is actually active.
+ *
+ * Per-tool schema text says what each tool does; nothing said when delegating
+ * is worth its cost, or that the child starts from zero — the single most
+ * common failure is a brief like "fix the thing we discussed", which the child
+ * cannot see.
+ */
+function renderDelegationSection(toolNames: readonly string[] | undefined): string | null {
+  const activeTools = new Set(toolNames ?? DEFAULT_TOOL_NAMES);
+  const blocking = activeTools.has("subagent");
+  const async = activeTools.has("spawn_agent");
+  if (!blocking && !async) return null;
+
+  const lines = [
+    `Delegate when a task needs its own context: wide search, an independent workstream, or work you'd otherwise interleave badly. Don't delegate what you can finish inline — a child costs a process, a cold cache, and a round trip.`,
+    `**A child sees none of this conversation.** Its task brief is all it gets, so state the objective, the concrete paths/symbols involved, the constraints, and what to return. "Continue what we discussed" gets you nothing back.`,
+    `One agent per independent unit of work. Overlapping briefs produce duplicated effort and contradictory answers.`,
+    `Pick the named agent whose description matches the work; leave \`agent\` unset only when none fits.`,
+    `You own the result: a child's report is evidence, not truth. Verify anything you're about to act on.`,
+  ];
+  if (async && blocking) {
+    lines.push(
+      `\`subagent\` blocks until the child answers; \`spawn_agent\` returns immediately and the child announces its own completion — use it to fan out, then keep working.`,
+    );
+  }
+  return `## Delegation\n\n${lines.map((line) => `- ${line}`).join("\n")}`;
+}
+
+/**
+ * Render the Tools section.
+ *
+ * `deferredToolNames` are tools that exist but whose parameter schemas are held
+ * out of the request until `tool_search` promotes them. They get a one-line
+ * capability hint under their own sub-heading: without it the model cannot
+ * search for what it does not know exists, and deferral would trade tokens for
+ * capability blindness. Steering clauses see both tiers, since a preference
+ * like "use X rather than Y" stays true while X is one `tool_search` away.
+ */
+function renderToolsSection(
+  toolNames: readonly string[] | undefined,
+  deferredToolNames?: readonly string[],
+): string | null {
   const activeTools = toolNames ?? DEFAULT_TOOL_NAMES;
+  const deferred = (deferredToolNames ?? []).filter((name) => !activeTools.includes(name));
   const toolLines: string[] = [];
   for (const name of activeTools) {
     const hint = TOOL_PROMPT_HINTS[name];
     if (hint) toolLines.push(`- **${name}**: ${hint}`);
   }
+  const deferredLines: string[] = [];
+  for (const name of deferred) {
+    const hint = TOOL_PROMPT_HINTS[name];
+    if (hint) deferredLines.push(`- **${name}**: ${hint}`);
+  }
   // Cross-tool steering: each clause renders only when its tools are active.
   // Per-tool hints only exist for tools with non-obvious usage (see prompt-hints).
-  const steering = buildToolSteering(activeTools);
+  const steering = buildToolSteering([...activeTools, ...deferred]);
   const parts: string[] = [];
   if (steering) parts.push(steering);
   if (toolLines.length > 0) parts.push(toolLines.join("\n"));
+  if (deferredLines.length > 0) {
+    parts.push(`Available on demand (call \`tool_search\` to load):\n${deferredLines.join("\n")}`);
+  }
   return parts.length > 0 ? `## Tools\n\n${parts.join("\n\n")}` : null;
 }
 
@@ -279,6 +377,78 @@ function renderUncachedDateSuffix(): string {
 }
 
 /**
+ * What every sub-agent owes its parent.
+ *
+ * Appended by `buildSubAgentSystemPrompt`, so user-authored agent files inherit
+ * it without repeating it. The parent pays context for whatever comes back, and
+ * it cannot see the child's transcript — so the reply has to be the answer, not
+ * a narration of the search that produced it.
+ */
+export const SUBAGENT_RETURN_CONTRACT =
+  `## Report\n\n` +
+  `You are a sub-agent. Your reply is the ONLY thing your caller receives — it never sees your tool calls, your reasoning, or the files you opened.\n\n` +
+  `- Lead with the answer or the outcome. No preamble, no recap of your process.\n` +
+  `- Cite evidence as \`file:line\`. Point at paths; never paste file bodies or command output the caller can re-read.\n` +
+  `- State what you actually verified and how (command run, test executed, file read). Never claim a check you did not run.\n` +
+  `- Name blockers, assumptions, and anything you could not confirm, plainly.\n` +
+  `- Stay under ~400 words. If the finding is genuinely larger, write it to a file and return the path.`;
+
+/**
+ * Build a sub-agent's system prompt: its own definition PLUS the scaffolding
+ * that teaches correct tool use.
+ *
+ * An agent definition body replaces the parent's Identity/Talk/Work sections —
+ * that is the point of a specialized agent. It must NOT also cost the child its
+ * Tools section, project conventions, or Environment facts (cwd, platform,
+ * shell, date), which is what a bare prompt override did: children ran blind to
+ * their own toolset and re-derived basics every session.
+ *
+ * @param agentBody — the agent definition's markdown body (its identity + method).
+ * @param opts.toolNames — exactly the tools this child can call, so the Tools
+ *   section never advertises something the allow-list strips.
+ * @param opts.context — `"none"` skips project instruction files, for recon
+ *   agents where conventions are dead weight.
+ */
+export async function buildSubAgentSystemPrompt(
+  agentBody: string,
+  opts: {
+    cwd: string;
+    toolNames?: readonly string[];
+    /** Tools available via `tool_search` but not carrying a schema this turn. */
+    deferredToolNames?: readonly string[];
+    context?: "project" | "none";
+    environment?: SystemPromptEnvironment;
+  },
+): Promise<string> {
+  const sections: string[] = [agentBody.trim()];
+
+  const toolsSection = renderToolsSection(opts.toolNames, opts.deferredToolNames);
+  if (toolsSection) sections.push(toolsSection);
+
+  // A child may itself delegate (up to the nesting limit), so it needs the same
+  // briefing rules whenever a delegation tool survived its allow-list.
+  const delegationSection = renderDelegationSection(opts.toolNames);
+  if (delegationSection) sections.push(delegationSection);
+
+  if ((opts.context ?? "project") === "project") {
+    const projectContextSection = renderProjectContextSection(
+      await collectProjectContext(opts.cwd),
+    );
+    if (projectContextSection) sections.push(projectContextSection);
+  }
+
+  sections.push(
+    SUBAGENT_RETURN_CONTRACT,
+    // Environment + date stay last so the cached prefix matches the parent's
+    // layout: everything above is stable, the date suffix is the uncached tail.
+    renderEnvironmentSection(opts.cwd, opts.environment),
+    renderUncachedDateSuffix(),
+  );
+
+  return sections.join("\n\n");
+}
+
+/**
  * Build the system prompt dynamically based on cwd and context.
  *
  * @param toolNames — if provided, the Tools section only lists these tools.
@@ -289,6 +459,9 @@ function renderUncachedDateSuffix(): string {
  * @param environment — extra Environment-section facts (additional workspace
  *   roots, network allowlist). This sits in the cached prefix, so changing it
  *   costs exactly one cache-miss turn.
+ * @param deferredToolNames — tools the model can call only after `tool_search`
+ *   promotes them. Listed as one-line hints so the capability stays discoverable
+ *   while its parameter schema stays out of the request.
  */
 export async function buildSystemPrompt(
   cwd: string,
@@ -299,6 +472,7 @@ export async function buildSystemPrompt(
   activeLanguages?: Set<LanguageId>,
   provider?: Provider,
   environment?: SystemPromptEnvironment,
+  deferredToolNames?: readonly string[],
 ): Promise<string> {
   const sections: string[] = [
     renderIdentitySection(provider),
@@ -313,8 +487,11 @@ export async function buildSystemPrompt(
 
   sections.push(renderResearchSection(toolNames, provider), renderCodeQualitySection());
 
-  const toolsSection = renderToolsSection(toolNames);
+  const toolsSection = renderToolsSection(toolNames, deferredToolNames);
   if (toolsSection) sections.push(toolsSection);
+
+  const delegationSection = renderDelegationSection(toolNames);
+  if (delegationSection) sections.push(delegationSection);
 
   const projectContextSection = renderProjectContextSection(await collectProjectContext(cwd));
   if (projectContextSection) sections.push(projectContextSection);

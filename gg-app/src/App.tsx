@@ -221,8 +221,12 @@ export type Item =
       // sent unedited straight after an enhance. Drives the highlighted bubble.
       enhancements?: PromptSegment[];
       // True while this message is still waiting in the mid-run steering queue.
-      // Rendered dimmed; cleared at run_end once the agent has consumed it.
+      // Rendered dimmed; cleared once the agent has consumed it.
       queued?: boolean;
+      // Set for one animation beat as `queued` clears, so the bubble can morph
+      // into a normal one (dim → solid, "queued" pill collapsing away) instead of
+      // snapping. Cleared by a timer in useAgentEvents once the motion is done.
+      promoted?: boolean;
       // True when this prompt was addressed to Ken (`@Ken …`). Renders the bubble
       // in Ken's color so the transcript shows it went to the mentor, not GG Coder.
       ken?: boolean;
@@ -836,13 +840,44 @@ function App(): React.ReactElement {
   // just-sent user prompt) scrolled under the fold. Keying this layout effect on
   // the live-region's height inputs (tool feed, run state, done status) AND
   // `items` re-pins synchronously after layout but before paint, so the prompt
-  // is never hidden. useLayoutEffect (not a ResizeObserver) avoids the post-paint
-  // flash and the RO's unreliable timing relative to the flex re-layout. The
+  // is never hidden. useLayoutEffect runs before paint, so this pass never
+  // flashes; animated chrome growth is caught by the ResizeObserver below. The
   // stick-to-bottom gate keeps it from yanking the view away while the user is
   // scrolled up reading mid-stream.
   useLayoutEffect(() => {
     maybeScrollToBottom();
   }, [items, liveToolFeed, running, doneStatus, queuedCount, maybeScrollToBottom]);
+
+  // …and keep re-pinning while the chrome below the transcript ANIMATES its
+  // height. The queued-message strip (`.queued-bar`) slides open over 260ms, the
+  // attachment / referenced-file bars and the live tool panel do the same; every
+  // frame of that animation steals a few more pixels from the transcript AFTER
+  // the layout effect above has already run, which is why a just-queued user
+  // bubble ends up sliding under the composer while a normal send (no strip, no
+  // height animation) looks fine. A ResizeObserver on the transcript viewport
+  // fires on each of those frames, so the newest row stays visible for the whole
+  // transition. It complements the layout effect rather than replacing it: an RO
+  // only fires when the VIEWPORT resizes, so content growth (streaming tokens,
+  // images) still needs the effect above. Shrinking the viewport never fires a
+  // scroll event (scrollTop stays valid), so the stick-to-bottom pin survives and
+  // a user scrolled up reading is still left alone.
+  //
+  // Attached through a callback ref, not an effect on `scrollRef.current`: the
+  // transcript unmounts whenever a picker/home view takes over the window, and a
+  // mount-time effect would observe a stale (or null) node after it comes back.
+  const transcriptRoRef = useRef<ResizeObserver | null>(null);
+  const attachTranscript = useCallback(
+    (el: HTMLDivElement | null) => {
+      scrollRef.current = el;
+      transcriptRoRef.current?.disconnect();
+      transcriptRoRef.current = null;
+      if (!el || typeof ResizeObserver === "undefined") return;
+      const ro = new ResizeObserver(() => maybeScrollToBottom());
+      ro.observe(el);
+      transcriptRoRef.current = ro;
+    },
+    [maybeScrollToBottom],
+  );
 
   // Settle the scroll position after a session hydrates. The single layout-effect
   // scroll above runs the instant `items` is set, but the transcript keeps
@@ -984,30 +1019,88 @@ function App(): React.ReactElement {
     workspaceMode,
   ]);
 
-  // Auto-grow the chat textarea to fit its content (up to a CSS max-height,
-  // after which it scrolls). Runs whenever the input value changes.
+  // Auto-grow the chat textarea to fit its content, up to a CSS max-height
+  // after which it scrolls.
   //
+  // Measure with the scrollbar suppressed. `height: auto` collapses the
+  // textarea to its rows=1 intrinsic height, so any wrapped draft overflows
+  // during measurement, and `.input::-webkit-scrollbar` is a classic
+  // (space-consuming) scrollbar in WebKit — verified 8px of content width lost
+  // while it shows. Suppressing it first means every read below sees the width
+  // the text is actually laid out at, including the overflow decision itself.
+  const autosizeInput = useCallback(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.overflowY = "hidden";
+    el.style.height = "auto";
+    const max = parseFloat(getComputedStyle(el).maxHeight) || Infinity;
+    const content = el.scrollHeight;
+    el.style.height = `${Math.min(content, max)}px`;
+    // Only past the cap does the scrollbar earn its width. Below it, keeping
+    // overflow hidden also avoids a phantom grey scrollbar under CSS zoom > 1,
+    // where scrollHeight rounds down to an integer of unzoomed px and leaves
+    // the content a hair taller than the height just set.
+    if (content > max) el.style.overflowY = "auto";
+  }, []);
+
   // useLayoutEffect (not useEffect) so the height is recomputed BEFORE the
   // browser paints. This matters most when the enhance animation tears down and
   // hands its multi-line text back to the textarea: with a post-paint effect the
   // textarea would flash at its default height for one frame, then resize — a
   // visible layout shift. Sizing pre-paint makes the handoff seamless.
+  //
+  // enhanceAnim is a dependency because the textarea is position:absolute during
+  // the animation (stretched to the overlay's height), so a measurement taken
+  // then is wrong; re-running once it clears sizes the now-in-flow textarea.
   useLayoutEffect(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    const max = parseFloat(getComputedStyle(el).maxHeight) || Infinity;
-    // Toggle scrolling only when content truly overflows the cap. Otherwise keep
-    // overflow hidden: under CSS zoom > 1, scrollHeight rounds down to an integer
-    // of unzoomed px, leaving the content a hair taller than the set height —
-    // `auto` would then flash a phantom grey scrollbar inside a single-line input.
-    el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden";
-    el.style.height = `${Math.min(el.scrollHeight, max)}px`;
-    // Also re-measure when the enhance animation overlay is removed: during the
-    // animation the textarea is position:absolute (stretched to the overlay's
-    // height), so a measurement taken then is wrong. Re-running once enhanceAnim
-    // clears sizes the now-in-flow textarea to its real content height.
-  }, [input, enhanceAnim]);
+    autosizeInput();
+  }, [input, enhanceAnim, autosizeInput]);
+
+  // The height is only recomputed when `input` changes, so anything else that
+  // re-wraps the draft leaves it stale until the next keystroke — the input
+  // sitting at the wrong height and then settling as you type.
+  //
+  // Width is the recurring one: Cmd +/- zoom, a window resize, a sibling bar
+  // appearing. Stale is worse than a jump here — overflow is pinned hidden below
+  // the cap, so re-wrapped lines are clipped rather than scrollable. Only width
+  // is acted on; reacting to height would feed our own resize back in as a loop.
+  // Attached via a callback ref because the composer unmounts whenever a
+  // picker/home view takes over the window.
+  const inputRoRef = useRef<ResizeObserver | null>(null);
+  const attachInput = useCallback(
+    (el: HTMLTextAreaElement | null) => {
+      inputRef.current = el;
+      inputRoRef.current?.disconnect();
+      inputRoRef.current = null;
+      if (!el || typeof ResizeObserver === "undefined") return;
+      let lastWidth = el.clientWidth;
+      const ro = new ResizeObserver(() => {
+        const width = el.clientWidth;
+        if (width === lastWidth) return;
+        lastWidth = width;
+        autosizeInput();
+      });
+      ro.observe(el);
+      inputRoRef.current = ro;
+    },
+    [autosizeInput],
+  );
+
+  // Geist Mono is a webfont, so an early draft (a restored one, or fast typing
+  // right after launch) is measured in the fallback mono — which is WIDER than
+  // Geist Mono (8.65 vs 8.40px per char, measured in WebKit), wrapping text near
+  // a boundary a line further and leaving the box a line too tall. Re-measure
+  // once the real metrics are in. `ready` specifically: WebKit never dispatches
+  // the `loadingdone` event, so a listener there would be dead code.
+  useEffect(() => {
+    let cancelled = false;
+    void document.fonts?.ready.then(() => {
+      if (!cancelled) autosizeInput();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [autosizeInput]);
 
   // Keyboard shortcuts for multi-window navigation.
   //   Cmd/Ctrl+N         → new project window
@@ -2391,7 +2484,7 @@ function App(): React.ReactElement {
         {workspaceMode === "code" && kenPowerBanner && (
           <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
         )}
-        <div className="transcript" ref={scrollRef} onScroll={onTranscriptScroll}>
+        <div className="transcript" ref={attachTranscript} onScroll={onTranscriptScroll}>
           {!hydrated && items.length === 0 ? (
             <TranscriptSkeleton />
           ) : (
@@ -2532,7 +2625,7 @@ function App(): React.ReactElement {
               </div>
             )}
             <textarea
-              ref={inputRef}
+              ref={attachInput}
               className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
               rows={1}
               // Lock the input while the dissolve→decode animation plays: the caret
@@ -2901,8 +2994,21 @@ const TranscriptRow = memo(function TranscriptRow({
         );
       }
       return (
-        <div className={`user-msg${item.queued ? " queued" : ""}${item.ken ? " user-ken" : ""}`}>
-          {item.queued && <span className="queued-pill">queued</span>}
+        <div
+          className={`user-msg${item.queued ? " queued" : ""}${
+            item.promoted ? " promoted" : ""
+          }${item.ken ? " user-ken" : ""}`}
+        >
+          {/* Kept mounted through the promotion beat so it can collapse
+              smoothly; unmounting it outright shrinks the bubble in a single
+              frame and shunts the whole transcript. Hidden from screen readers
+              as soon as the message stops actually being queued, since the
+              remaining frames are decoration. */}
+          {(item.queued || item.promoted) && (
+            <span className="queued-pill" aria-hidden={item.promoted}>
+              queued
+            </span>
+          )}
           {item.images && item.images.length > 0 && (
             <div className="user-img-row">
               {item.images.map((src, i) => (

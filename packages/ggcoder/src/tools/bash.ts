@@ -11,10 +11,7 @@ import { resolveShell, type ResolveShellOpts } from "../core/shell.js";
 import { PersistentShell } from "../core/persistent-shell.js";
 import { isReadOnlyCommand } from "./read-only-bash.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
-import {
-  isCatastrophicCommand,
-  type WriteGuardSettings,
-} from "../core/workspace-guard.js";
+import { isCatastrophicCommand, type WriteGuardSettings } from "../core/workspace-guard.js";
 import { checkCommandPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import {
   prepareSandboxLaunch,

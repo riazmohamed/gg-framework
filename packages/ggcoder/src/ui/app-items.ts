@@ -117,6 +117,10 @@ export const TRUNCATED_REFUSAL_NOTICE_TEXT =
 export const TRUNCATED_PROVIDER_ERROR_NOTICE_TEXT =
   "The provider reported an error mid-response — the response may be incomplete.";
 
+/** Copy shown when the provider returned no content after all retries. */
+export const TRUNCATED_EMPTY_RESPONSE_NOTICE_TEXT =
+  "The model returned an empty response after retries — try sending again.";
+
 /**
  * Semantic tone for an agent-hook notice. Each maps to a theme color so the
  * three hooks read distinctly: a reflective review, a corrective break, and

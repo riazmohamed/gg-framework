@@ -176,7 +176,7 @@ async function main() {
   // and time out; 120s clears it with margin.
   const LOADED_BUT_UNAUTHED = Symbol("loaded-but-unauthed");
 
-  const port = await new Promise((resolve, reject) => {
+  const handshake = await new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error("timed out waiting for GG_APP_LISTENING")),
       120000,
@@ -185,10 +185,10 @@ async function main() {
     let err = "";
     child.stdout.on("data", (d) => {
       out += d.toString();
-      const m = out.match(/GG_APP_LISTENING (\d+)/);
+      const m = out.match(/GG_APP_LISTENING (\d+) (\S+)/);
       if (m) {
         clearTimeout(timer);
-        resolve(Number(m[1]));
+        resolve({ port: Number(m[1]), token: m[2] });
       }
     });
     child.stderr.on("data", (d) => {
@@ -208,11 +208,12 @@ async function main() {
     fail(err.message);
   });
 
-  if (port === LOADED_BUT_UNAUTHED) {
+  if (handshake === LOADED_BUT_UNAUTHED) {
     console.log("smoke: bundle loaded cleanly (sidecar reached auth check; no credentials on CI)");
     console.log("SMOKE PASS");
     process.exit(0);
   }
+  const { port, token } = handshake;
 
   // The daemon holds sessions as in-process objects keyed by id. Create one
   // (POST /session), then read its /state via the `x-gg-session` header — the
@@ -222,7 +223,7 @@ async function main() {
   try {
     const mk = await fetch(`http://127.0.0.1:${port}/session`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-gg-token": token },
       body: JSON.stringify({ cwd: process.cwd() }),
     });
     if (mk.status !== 200) {
@@ -243,7 +244,7 @@ async function main() {
   let res;
   try {
     res = await fetch(`http://127.0.0.1:${port}/state`, {
-      headers: { "x-gg-session": sessionId },
+      headers: { "x-gg-session": sessionId, "x-gg-token": token },
     });
   } catch (err) {
     child.kill("SIGKILL");

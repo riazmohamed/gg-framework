@@ -16,6 +16,7 @@ import {
 } from "./agent";
 import { toast } from "./toast";
 import { SoundButton } from "./SoundButton";
+import { MemesButton } from "./MemesButton";
 
 interface Props {
   onClose: () => void;
@@ -143,10 +144,11 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
         </>
       )}
       <div className="modal-label" style={{ color: theme.textMuted }}>
-        Sound effects
+        Effects
       </div>
       <div className="modal-row">
         <SoundButton variant="settings" />
+        <MemesButton variant="settings" />
       </div>
       <div className="modal-label" style={{ color: theme.textMuted }}>
         Agent plugins

@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "gg-app"
-version = "0.43.0"
+version = "0.48.2"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -1444,6 +1444,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

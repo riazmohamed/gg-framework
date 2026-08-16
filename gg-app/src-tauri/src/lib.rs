@@ -49,6 +49,11 @@ struct Daemon {
     /// Consecutive short-lived crashes. A daemon that stays up for the stable
     /// window resets this budget; repeated crashes hit a circuit breaker.
     respawn_attempts: Mutex<u32>,
+    /// Per-launch bearer token the daemon requires as `x-gg-token` on every
+    /// request. Generated here, handed to the daemon via GG_APP_TOKEN, and
+    /// attached by the shared reqwest client's default headers — without it
+    /// any local process could drive the agent through the loopback port.
+    token: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2240,7 +2245,7 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "glm",
         label: "Z.AI (GLM)",
-        description: "GLM-5.2, GLM-5.1, GLM-4.7, GLM-4.7 Flash",
+        description: "GLM-5.3",
         methods: &["apikey"],
         oauth_key: None,
         oauth_label: None,
@@ -4401,6 +4406,7 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         // Port 0 → the OS assigns a free port, reported back via the
         // GG_APP_LISTENING handshake.
         .env("GG_APP_PORT", "0")
+        .env("GG_APP_TOKEN", &app.state::<Daemon>().token)
         .env("ERROR_MOM_RELEASE", env!("CARGO_PKG_VERSION"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -4440,7 +4446,9 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
                 if let Some(rest) = line.strip_prefix("GG_APP_LISTENING ") {
-                    if let Ok(port) = rest.trim().parse::<u16>() {
+                    // Format: `GG_APP_LISTENING <port> <token>` (token consumed
+                    // by non-Rust spawners; ours arrives via GG_APP_TOKEN).
+                    if let Ok(port) = rest.split_whitespace().next().unwrap_or("").parse::<u16>() {
                         log::info!("daemon listening on port {port}");
                         *app2.state::<Daemon>().port.lock().unwrap() = Some(port);
                         // On a respawn the windows already exist with (now
@@ -4842,6 +4850,21 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Per-launch daemon auth token (see `Daemon::token`). The shared reqwest
+    // client attaches it as a default header so all ~60 proxy call sites are
+    // authenticated without per-site changes.
+    let daemon_token = uuid::Uuid::new_v4().to_string();
+    let mut default_headers = reqwest::header::HeaderMap::new();
+    default_headers.insert(
+        "x-gg-token",
+        reqwest::header::HeaderValue::from_str(&daemon_token)
+            .expect("uuid v4 is valid header ASCII"),
+    );
+    let http_client = reqwest::Client::builder()
+        .default_headers(default_headers)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -4860,7 +4883,10 @@ pub fn run() {
                 ))
                 .build(),
         )
-        .manage(Daemon::default())
+        .manage(Daemon {
+            token: daemon_token,
+            ..Default::default()
+        })
         .manage(Windows::default())
         .manage(RestoreTargets::default())
         .manage(AppExiting::default())
@@ -4868,7 +4894,7 @@ pub fn run() {
         .manage(MoveDebounce::default())
         .manage(TrayState::default())
         .manage(TrayIntents::default())
-        .manage(reqwest::Client::new())
+        .manage(http_client)
         .invoke_handler(tauri::generate_handler![
             sidecar_port,
             dropped_path_info,

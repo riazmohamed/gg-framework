@@ -136,7 +136,7 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "glm",
     label: "Z.AI (GLM)",
-    description: "GLM-5.2, GLM-5.1, GLM-4.7, GLM-4.7 Flash",
+    description: "GLM-5.3",
     methods: ["apikey"],
     apiKeyLabel: "Z.AI",
   },

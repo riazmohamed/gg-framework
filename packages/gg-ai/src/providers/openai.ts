@@ -22,6 +22,7 @@ import {
   downgradeUnsupportedVideos,
   normalizeOpenAIStopReason,
   toOpenAIMessages,
+  toGlmReasoningEffort,
   toLocalReasoningEffort,
   toOpenAIReasoningEffort,
   toOpenAIToolChoice,
@@ -275,6 +276,15 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   if (usesThinkingParam) {
     if (options.thinking) {
       (params as unknown as Record<string, unknown>).thinking = { type: "enabled" };
+      // GLM pairs the toggle with a real effort ladder (verified: an unknown
+      // value 400s listing `none, minimal, low, medium, high, xhigh, max`).
+      // The toggle alone silently runs Z.AI's `max` default, which made every
+      // rung below the ceiling a lie in the UI.
+      if (options.provider === "glm") {
+        (params as unknown as Record<string, unknown>).reasoning_effort = toGlmReasoningEffort(
+          options.thinking,
+        );
+      }
     } else {
       // The providers/models routed through this block support explicit disabled.
       // MiMo is an always-on reasoning model — without { type: "disabled" } it
@@ -341,7 +351,18 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         ({ inputTokens, outputTokens, cacheRead, cacheWrite } = extractOpenAIUsage(chunk.usage));
       }
 
-      if (!choice) continue;
+      if (!choice) {
+        // A frame with no `choices` key is either gateway metadata (skip) or the
+        // provider's real error smuggled inside a 200 response (raise, so the
+        // agent loop sees the true status instead of a generic transport stall).
+        const gatewayError = classifyChoicelessFrame(chunk);
+        if (gatewayError) {
+          throw new ProviderError(providerName, gatewayError.message, {
+            statusCode: gatewayError.statusCode,
+          });
+        }
+        continue;
+      }
 
       if (choice.finish_reason) {
         finishReason = choice.finish_reason;
@@ -597,6 +618,73 @@ function completionToResponse(
 }
 
 /**
+ * Classify a stream frame that carries no `choices` key.
+ *
+ * Gateways (Portkey, Azure APIM, OpenRouter, FastAPI fronts) answer HTTP 200 and
+ * then deliver the real failure as an in-stream frame. The OpenAI SDK only
+ * throws for frames with a top-level `error` key, so shapes like
+ * `{"statusCode":429,...}` or `{"detail":[{"msg":...}]}` arrive here as ordinary
+ * chunks. Skipping them loses the provider's status AND message: a rate limit
+ * degrades into our generic 504 "stream ended before completion", which the
+ * agent loop retries up to 10 times with blind backoff, re-billing the full
+ * prompt each attempt and ignoring the server's reset time. A gateway-reported
+ * context overflow is worse — `isContextOverflow` never matches, so we never
+ * compact and every one of those 10 retries is guaranteed to fail.
+ *
+ * Returns `null` for genuine metadata (trace ids, guardrail hook results) and
+ * for the standard usage-only chunk, which carries `choices: []` — an empty
+ * array is not a missing `choices` key and must never be treated as an error.
+ */
+export function classifyChoicelessFrame(
+  frame: unknown,
+): { message: string; statusCode?: number } | null {
+  if (!frame || typeof frame !== "object" || Array.isArray(frame)) return null;
+  const rec = frame as Record<string, unknown>;
+
+  // `choices: []` is the final usage chunk, not an error frame.
+  if (Array.isArray(rec.choices)) return null;
+
+  const statusOf = (value: unknown): number | undefined => {
+    const n = typeof value === "string" ? Number(value) : value;
+    return typeof n === "number" && Number.isFinite(n) && n >= 400 && n <= 599 ? n : undefined;
+  };
+  const statusCode = statusOf(rec.status) ?? statusOf(rec.statusCode) ?? statusOf(rec.code);
+
+  const typeIsError = typeof rec.type === "string" && rec.type.toLowerCase() === "error";
+
+  // FastAPI validation/error shape: `detail` is a string or an array of {msg}.
+  let detailText: string | undefined;
+  const detail = rec.detail;
+  if (typeof detail === "string" && detail.trim()) {
+    detailText = detail.trim();
+  } else if (Array.isArray(detail)) {
+    const parts = detail
+      .map((d) =>
+        d && typeof d === "object" && typeof (d as Record<string, unknown>).msg === "string"
+          ? ((d as Record<string, unknown>).msg as string)
+          : typeof d === "string"
+            ? d
+            : "",
+      )
+      .filter(Boolean);
+    if (parts.length) detailText = parts.join("; ");
+  }
+
+  if (statusCode === undefined && !typeIsError && !detailText) return null;
+
+  const rawMessage =
+    (typeof rec.message === "string" && rec.message.trim() ? rec.message.trim() : undefined) ??
+    detailText ??
+    (typeof rec.error === "string" && rec.error.trim() ? rec.error.trim() : undefined) ??
+    (statusCode !== undefined ? `Gateway returned status ${statusCode}.` : "Gateway error.");
+
+  // Never hand a whole edge/proxy page or an unbounded blob to the user.
+  const message = rawMessage.slice(0, 500);
+
+  return { message, statusCode };
+}
+
+/**
  * Classify an OpenAI-compatible error as a hard usage/quota stop, a transient
  * throttle, or neither. "hard" stops must NOT be retried (credit/balance/quota
  * exhaustion); "transient" 429s are retriable (per-minute throttle).
@@ -623,6 +711,10 @@ function classifyOpenAICompatLimit(args: {
 }
 
 function toError(err: unknown, provider: string = "openai"): ProviderError {
+  // Already classified (e.g. an in-stream gateway error frame). Re-wrapping via
+  // the generic Error branch below would discard statusCode/resetsAt and demote
+  // a 429 to an unclassified failure.
+  if (err instanceof ProviderError) return err;
   if (err instanceof OpenAI.APIError) {
     const body = err.error as Record<string, unknown> | undefined;
     const bodyMessage =

@@ -1,3 +1,4 @@
+import path from "node:path";
 import fs from "node:fs/promises";
 import { z } from "zod";
 import { getAppPaths } from "../config.js";
@@ -72,13 +73,30 @@ const SettingsSchema = z.object({
    */
   sandboxMode: z.enum(["auto", "workspace", "off"]).default("off"),
   /** Defer MCP tool schemas out of the prompt until discovered via tool_search.
-   *  Cuts ~8k tokens/cache-miss turn with two MCP servers (bench/RESULTS.md). */
+   *  Cuts ~8k tokens/cache-miss turn with two MCP servers connected. */
   deferredMcpTools: z.boolean().default(true),
+  /** Defer rarely reached BUILT-IN tool schemas the same way, leaving a one-line
+   *  capability hint in the prompt that `tool_search` expands on demand. Trades
+   *  per-request tokens against how reliably the model still finds the tool. */
+  deferredBuiltinTools: z.boolean().default(true),
+  /** Use the `rg` binary for `grep` content search when it is on PATH, falling
+   *  back to the in-process scanner otherwise. */
+  grepUseRipgrep: z.boolean().default(true),
   /** Opt into the 2026-07-28 MCP protocol revision. When on, a connect probes
    *  with `server/discover` and falls back to the 2025 `initialize` handshake,
    *  so a legacy server still connects. Off by default: the probe costs a round
    *  trip, and a legacy stdio server that ignores it pays the probe timeout. */
   mcpModernProtocol: z.boolean().default(false),
+  /** Connect MCP servers declared in the OPENED REPO's `.gg/mcp.json`. That
+   *  file is repo-controlled: a malicious repo can declare a stdio `command`
+   *  that executes the moment the project opens. Off by default — enable only
+   *  for repos you trust (global ~/.gg/mcp.json is always connected). */
+  trustProjectMcpServers: z.boolean().default(false),
+  /** Repo paths the user has individually trusted for project-scope MCP (the
+   *  per-repo complement to the global `trustProjectMcpServers`). Stored as
+   *  resolved absolute paths so symlink/relative mismatches can't flip the
+   *  decision. */
+  trustedProjects: z.array(z.string()).default([]),
   /** Max concurrent subagents per resolved child model. Unset = only the
    *  global limit applies. Can only REDUCE concurrency, never raise it. */
   subagentMaxPerModel: z.number().int().min(1).max(4).optional(),
@@ -108,7 +126,11 @@ export const DEFAULT_SETTINGS: Settings = {
   networkAllow: [],
   sandboxMode: "off",
   deferredMcpTools: true,
+  deferredBuiltinTools: true,
+  grepUseRipgrep: true,
   mcpModernProtocol: false,
+  trustProjectMcpServers: false,
+  trustedProjects: [],
   sessionRetentionDays: 30,
   speedProfile: "optimized",
 };
@@ -153,5 +175,24 @@ export class SettingsManager {
 
   getAll(): Settings {
     return { ...this.settings };
+  }
+
+  /** Whether the project at `cwd` is trusted for project-scope MCP. True when
+   *  EITHER the global `trustProjectMcpServers` toggle is on OR the resolved
+   *  cwd appears in `trustedProjects`. */
+  isProjectTrusted(cwd: string): boolean {
+    if (this.settings.trustProjectMcpServers) return true;
+    const resolved = path.resolve(cwd);
+    return this.settings.trustedProjects.includes(resolved);
+  }
+
+  /** Persist `cwd` as a trusted project (resolved absolute path, deduped) and
+   *  save settings immediately. */
+  async trustProject(cwd: string): Promise<void> {
+    const resolved = path.resolve(cwd);
+    if (!this.settings.trustedProjects.includes(resolved)) {
+      this.settings.trustedProjects = [...this.settings.trustedProjects, resolved];
+      await this.save();
+    }
   }
 }

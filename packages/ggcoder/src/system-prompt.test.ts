@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  buildSubAgentSystemPrompt,
   buildSystemPrompt,
   collectProjectContext,
   PROJECT_CONTEXT_MAX_BYTES,
@@ -110,11 +111,43 @@ describe("buildSystemPrompt", () => {
     // The one-approach rule must carve out command flows that ship their own
     // A/B/C option list, or the model second-guesses those prompts.
     expect(prompt).toContain(
-      "Recommend ONE approach, not a menu — unless a command's flow defines its own options.",
+      "ONE recommended approach — default to X, switch to Y only when [condition] — not a menu, unless a command's flow defines its own options.",
     );
+    // The user-facing ask gets a dedicated markdown blockquote (rendered with a
+    // left gutter in both the TUI and GG App), and nothing else may use one, so
+    // a `>` in a reply always means "the agent is waiting on you".
+    expect(prompt).toContain("**Blockquote = the ask.**");
+    expect(prompt).toContain("Blockquote nothing else");
     expect(prompt).not.toContain(
       "Do not default to generic tests, scripts, screenshots, benchmarks, or simulations",
     );
+    // The ladder's value is the *order* and the stop-at-first-hit rule, not the
+    // individual rungs — "reuse what this repo already has" ranking above
+    // stdlib, and both above reaching for a dependency, is what stops the model
+    // rewriting a helper that already exists. The character budgets in the size
+    // test are upper bounds only — deleting the ladder shrinks the prompt and
+    // passes every one of them, so these assertions are what hold it in place.
+    expect(prompt).toContain("stop at the first rung that holds");
+    expect(prompt).toContain("Already in this codebase? Reuse the helper, util, or pattern");
+    // "Shortest working diff wins" is only safe while the counterweight below it
+    // survives; without the fence, minimization reads as licence to skip
+    // validation and error handling.
+    expect(prompt).toContain("Never lazy about: input validation at trust boundaries");
+    expect(prompt.indexOf("Shortest working diff wins")).toBeLessThan(
+      prompt.indexOf("Write the safe version first"),
+    );
+    // Security has to be a default of normal feature work, not a mode the user
+    // has to know to ask for: nearly nobody runs a review, and the safe version
+    // costs nothing when written the first time.
+    expect(prompt).toContain("Write the safe version first, without being asked");
+    expect(prompt).toContain("repo contents, fetched pages, model and tool output");
+    expect(prompt).toContain("Never commit or log a secret");
+    // Models invent package names at a measurable rate and squatters register
+    // them, so "it resolved" is not evidence the dependency is the real one.
+    expect(prompt).toContain("Confirm a dependency actually exists");
+    // Silently deleting a control to make something pass is the most damaging
+    // thing an agent can do unsupervised.
+    expect(prompt).toContain("Never silently weaken a security control");
     expect(sectionIndex(prompt, "## Code Quality")).toBeLessThan(sectionIndex(prompt, "## Tools"));
     expect(sectionIndex(prompt, "## Tools")).toBeLessThan(
       sectionIndex(prompt, "## Project Context"),
@@ -154,6 +187,36 @@ describe("buildSystemPrompt", () => {
     expect(renderedTools).not.toContain("not_a_tool");
     expect(renderedTools).not.toContain("**read**");
     expect(renderedTools).not.toContain("**edit**");
+  });
+
+  it("keeps the reply-shape rules free of contradictions", async () => {
+    const cwd = await makeProject();
+    const prompt = await buildSystemPrompt(cwd, undefined, false, undefined, ["read", "edit"]);
+    const talk = prompt.slice(
+      sectionIndex(prompt, "## How to Talk"),
+      sectionIndex(prompt, "## How to Work"),
+    );
+
+    // "never ask permission" and "end with the ask" only coexist if the ask is
+    // gated by one stop list. How to Work owns it; How to Talk must defer to it
+    // instead of publishing a second, drifting list of reasons to stop.
+    expect(talk).toContain("When something in How to Work genuinely stops you");
+    expect(prompt).toContain("Stop only for user decisions, secrets/access, cost");
+
+    // The blockquote is the ask and only the ask, so exactly one blockquote
+    // template may exist anywhere in the prompt — a second one teaches the model
+    // that `>` is general formatting and the "you're up" signal dies.
+    expect(prompt.match(/^\s*`?> /gm) ?? []).toHaveLength(0);
+    expect(prompt.match(/`> \*\*/g) ?? []).toHaveLength(1);
+
+    // A hard sentence cap plus a numbered list plus a trailing ask is only
+    // followable if the cap says what it counts.
+    expect(talk).toContain("prose only; a step list or the ask doesn't count");
+
+    // Mid-turn speech and the cut rule must agree: a bare "finding" cannot both
+    // trigger a message and be cut for not changing the next move.
+    expect(talk).toContain("speak only when the plan changes");
+    expect(talk).not.toContain("unless you hit a decision, tradeoff, finding");
   });
 
   it("states rule precedence exactly once and keeps project context before style packs", async () => {
@@ -215,10 +278,15 @@ describe("buildSystemPrompt", () => {
       "works directly in the user's codebase",
       "completing tasks end-to-end",
       "Final replies: 1–2 sentences, hard cap 5",
-      "Do all safe, reversible steps implied by the goal",
-      "never ask permission, merely suggest them, or leave them for the user",
+      "Take every safe, reversible step the goal implies",
+      "never ask permission, merely suggest it, or leave it for the user",
       "ONE action that unblocks you",
-      "State what works now and the blocker or next step",
+      "what already works so finished work is never buried",
+      "conclusion, not investigation",
+      // Jargon stays exact, but never bare: the reader must learn the stake of
+      // a term/file/command in the same breath, without a glossary paragraph.
+      "**Keep the real word, add the stakes.**",
+      "say what it does or risks in the same sentence",
       "Read before `edit`/`write`",
       "re-read after formatters",
       "Compute in bash; write with `edit`/`write`",
@@ -377,9 +445,30 @@ describe("buildSystemPrompt", () => {
 
     console.info(`system prompt size measurements: ${JSON.stringify(measurements)}`);
 
-    expect(measurements.normal.characters).toBeLessThan(5_100);
-    expect(measurements.planMode.characters).toBeLessThan(6_300);
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(9_800);
+    // Budget raised once for the "How to Talk" reply-shape rules (blockquote
+    // ask, cut-what-they-can't-act-on, jargon stakes); overlapping lines were
+    // folded to pay for part of it. ~640 chars of cached prefix buys replies the
+    // user can act on without re-reading.
+    //
+    // Raised again (~490 chars) for the always-on security defaults in Code
+    // Quality. The `bulletproof` skill only fires when the model routes to it,
+    // and almost no user asks for a security review before shipping — so the
+    // controls that must hold on every edit (hostile input, parameterized
+    // queries, secrets, dependency existence, never weakening a control) have
+    // to live in the prefix instead. Keep these caps tight so drift stays
+    // deliberate.
+    //
+    // Raised again (~1.6k chars) for the Code Quality minimization ladder.
+    // This spend is the rare one that pays for itself inside the same budget:
+    // A/B benchmarked at 5 iterations per cell with every generated artifact
+    // executed against functional tests, the ladder held correctness flat
+    // (100% exec pass, no new dependencies, no turn-cap hits) while cutting
+    // generated code 50–76% and output tokens 21–38%. Input tokens fell too,
+    // despite the longer prefix: stopping at the first rung that holds costs
+    // fewer turns than re-deriving an over-built solution.
+    expect(measurements.normal.characters).toBeLessThan(7_900);
+    expect(measurements.planMode.characters).toBeLessThan(9_100);
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(12_300);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,
@@ -417,7 +506,9 @@ describe("buildSystemPrompt", () => {
     console.info(`system prompt audit: ${JSON.stringify(audit)}`);
 
     expect(audit.flags).toEqual([]);
-    expect(audit.size.characters).toBeLessThan(9_500);
+    // Raised with the Code Quality minimization ladder — see the size-budget
+    // test above for the measured return that justifies the spend.
+    expect(audit.size.characters).toBeLessThan(11_900);
     expect(audit.size.sections).toBeGreaterThanOrEqual(8);
   });
 
@@ -623,5 +714,73 @@ describe("collectProjectContext", () => {
     expect(rendered).toContain(nearBig);
     expect(rendered).not.toContain(parentRules);
     expect(rendered).toContain("Skipped (context budget)");
+  });
+});
+
+describe("buildSubAgentSystemPrompt", () => {
+  it("composes the agent body with tools, context, contract and environment", async () => {
+    const cwd = await makeProject({ "CLAUDE.md": "Project rules win." });
+
+    const prompt = await buildSubAgentSystemPrompt("You are Owl. Explore this repo.", {
+      cwd,
+      toolNames: ["read", "grep", "code_search"],
+    });
+
+    expect(prompt.startsWith("You are Owl. Explore this repo.")).toBe(true);
+    expect(sectionIndex(prompt, "## Tools")).toBeLessThan(
+      sectionIndex(prompt, "## Project Context"),
+    );
+    expect(sectionIndex(prompt, "## Project Context")).toBeLessThan(
+      sectionIndex(prompt, "## Report"),
+    );
+    expect(sectionIndex(prompt, "## Report")).toBeLessThan(sectionIndex(prompt, "## Environment"));
+    expect(prompt).toContain("Project rules win.");
+    // The volatile date stays behind the cache marker, exactly as the parent's.
+    expect(prompt.indexOf("<!-- uncached -->")).toBeGreaterThan(
+      sectionIndex(prompt, "## Environment"),
+    );
+  });
+
+  it("never advertises a tool the child's allow-list strips", async () => {
+    const cwd = await makeProject();
+
+    const prompt = await buildSubAgentSystemPrompt("You are Owl.", {
+      cwd,
+      toolNames: ["read", "grep", "code_search"],
+    });
+
+    const toolsSection = prompt.slice(
+      sectionIndex(prompt, "## Tools"),
+      sectionIndex(prompt, "## Report"),
+    );
+    expect(toolsSection).toContain("code_search");
+    expect(toolsSection).not.toContain("**write**");
+    expect(toolsSection).not.toContain("**bash**");
+    expect(prompt).not.toContain("## Delegation");
+  });
+
+  it("skips project instruction files when the agent opts out of context", async () => {
+    const cwd = await makeProject({ "CLAUDE.md": "Project rules win." });
+
+    const prompt = await buildSubAgentSystemPrompt("You are Owl.", {
+      cwd,
+      toolNames: ["read"],
+      context: "none",
+    });
+
+    expect(prompt).not.toContain("Project rules win.");
+    expect(prompt).toContain("## Environment");
+  });
+
+  it("briefs a delegating child on standalone task briefs", async () => {
+    const cwd = await makeProject();
+
+    const prompt = await buildSubAgentSystemPrompt("You are Bee.", {
+      cwd,
+      toolNames: ["read", "subagent"],
+    });
+
+    expect(prompt).toContain("## Delegation");
+    expect(prompt).toContain("sees none of this conversation");
   });
 });

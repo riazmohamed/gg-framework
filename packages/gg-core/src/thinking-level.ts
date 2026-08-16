@@ -37,6 +37,14 @@ const ANTHROPIC_ADAPTIVE_THINKING_LEVELS: readonly ThinkingLevel[] = [
 // Coding OAuth endpoint (default high) — verified live 2026-07-21. Unlisted
 // efforts are rejected with a 400, so expose exactly the declared rungs.
 const MOONSHOT_K3_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "high", "max"];
+// GLM's ladder is declared by the endpoint itself: an unknown effort 400s with
+// `reasoning_effort must be one of: none, minimal, low, medium, high, xhigh,
+// max` (verified live against glm-5.3, 2026-08-14). `none` is the thinking
+// toggle's job and `minimal` has no ThinkingLevel counterpart, so expose the
+// five rungs we can actually name. Effort is real, not cosmetic — measured
+// end-to-end on one hard reasoning prompt: low 0.8K reasoning chars / 15s,
+// high 3.2K / 28s, max 24.9K / 129s.
+const GLM_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
 /**
  * Effort ladder for locally hosted models. `xhigh`/`ultra` are deliberately
  * absent: no local server defines them (Ollama 0.32 answers
@@ -60,6 +68,10 @@ function isXaiModel(provider: Provider): boolean {
 
 function isMoonshotK3Model(provider: Provider, model: string): boolean {
   return provider === "moonshot" && model === "kimi-k3";
+}
+
+function isGlmModel(provider: Provider): boolean {
+  return provider === "glm";
 }
 
 function isAnthropicXhighModel(provider: Provider, model: string): boolean {
@@ -116,6 +128,12 @@ export function getSupportedThinkingLevels(
 
   if (isMoonshotK3Model(provider, model)) return MOONSHOT_K3_THINKING_LEVELS;
 
+  if (isGlmModel(provider)) {
+    const maxIndex = GLM_THINKING_LEVELS.indexOf(maxLevel);
+    if (maxIndex === -1) return GLM_THINKING_LEVELS;
+    return GLM_THINKING_LEVELS.slice(0, maxIndex + 1);
+  }
+
   if (!isOpenAIGptModel(provider, model)) return [maxLevel];
 
   const levels = model.startsWith("gpt-5.6-")
@@ -146,6 +164,7 @@ export function getNextThinkingLevel(
     isSakanaModel(provider) ||
     isXaiModel(provider) ||
     isMoonshotK3Model(provider, model) ||
+    isGlmModel(provider) ||
     // Local servers take a real effort level, not just on/off: Ollama accepts
     // low/medium/high on `reasoning_effort` (verified against 0.32) and the
     // other OpenAI-compatible servers use the same three. A model that can't

@@ -1,5 +1,184 @@
 # @kenkaiiii/ggcoder
 
+## 5.44.2
+
+### Patch Changes
+
+- Fix silent agent stop when the provider returns empty responses: after retries exhaust, the loop now emits an `empty_response` truncated event, keeps the contentless assistant message out of session history so later requests aren't poisoned, and hosts (TUI + desktop sidecar) surface a clear warning instead of ending silently. Also refreshed the bulletproof skill references.
+  - @kenkaiiii/gg-ai@5.44.2
+  - @kenkaiiii/gg-agent@5.44.2
+  - @kenkaiiii/gg-core@5.44.2
+
+## 5.44.1
+
+### Patch Changes
+
+- Tell the model what went wrong when `edit` receives `edits` as a JSON-encoded string, and log the consecutive schema-rejection count so retry loops are visible.
+  - @kenkaiiii/gg-ai@5.44.1
+  - @kenkaiiii/gg-agent@5.44.1
+  - @kenkaiiii/gg-core@5.44.1
+
+## 5.44.0
+
+### Minor Changes
+
+- bc99e74: **GLM-5.3 is now the only GLM model.** Z.AI's new coding-first flagship (released 2026-08-14) replaces GLM-5.2, and GLM-5.1 / GLM-4.7 / GLM-4.7 Flash are retired from the registry — they routed to strictly worse coding for the same plan quota, and the coding endpoint already answers `glm-5.2` requests as glm-5.3. Sessions saved on any retired id fall back to the provider default.
+
+  Same GLM-5 base as 5.2 with every gain from post-training: Z.AI reports ~50% better coding and open-source SOTA on Terminal-Bench 3.0 and Agent's Last Exam. Context window (1M) and max output (131K) are unchanged, so compaction budgeting is untouched.
+
+  **GLM thinking is now a real effort ladder, not an on/off toggle.** ggcoder previously sent only `thinking: { type: "enabled" }`, which silently ran Z.AI's `max` default at every setting. The endpoint in fact declares `none, minimal, low, medium, high, xhigh, max` (an unknown value 400s with that list), so `low / medium / high / xhigh / max` are now selectable and sent as `reasoning_effort` alongside the toggle. Measured end-to-end on one hard reasoning prompt: `low` → 0.8K reasoning chars in 15s, `high` → 3.2K in 28s, `max` → 24.9K in 129s. The default stays `max`, matching what the server was already doing, so existing behaviour is unchanged — but dialing effort _down_ is now possible for the first time.
+
+  Note `max` is kept as `max` on the wire for GLM rather than remapped to `xhigh` the way OpenAI-compatible efforts are: GLM spells its own top rung `max`.
+
+  With no low-cost GLM sibling left, compaction-summary and scout sub-agent routing keep GLM-5.3 instead of downshifting — the existing graceful fallback, no crash and no cross-provider jump.
+
+### Patch Changes
+
+- Updated dependencies [bc99e74]
+  - @kenkaiiii/gg-ai@5.44.0
+  - @kenkaiiii/gg-core@5.44.0
+  - @kenkaiiii/gg-agent@5.44.0
+
+## 5.43.0
+
+### Minor Changes
+
+- Add an explicit code-minimization ladder to the Code Quality prompt section, and a `hook_armed` event so clients can hold a candidate final answer back until the Ideal review decides.
+
+  The ladder is ordered and stop-at-first-hit (YAGNI, reuse what the repo already has, standard library, native platform feature, installed dependency, one line, then the minimum code that works). Benchmarked A/B against the previous prose-only section — 5 iterations per cell, every artifact executed against functional tests — it holds correctness (100% exec pass, no new dependencies, no turn-cap hits) while producing 50-76% less code and 21-38% fewer output tokens. Safety is explicitly exempt: input validation at trust boundaries, error handling that prevents data loss, security, accessibility, and anything explicitly requested are never minimized away.
+
+  `hook_armed` fires on both edges as soon as a run crosses the Ideal-review gate, before the candidate final answer streams, so a client renders hook then reviewed answer instead of flashing a draft it deletes.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.43.0
+- @kenkaiiii/gg-agent@5.43.0
+- @kenkaiiii/gg-core@5.43.0
+
+## 5.42.0
+
+### Minor Changes
+
+- Add per-repo MCP trust: adding a project-scope MCP server now auto-trusts that repo so its `.gg/mcp.json` servers connect on next load without enabling the global `trustProjectMcpServers` toggle.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.42.0
+- @kenkaiiii/gg-agent@5.42.0
+- @kenkaiiii/gg-core@5.42.0
+
+## 5.41.1
+
+### Patch Changes
+
+- Security hardening: authenticate the app sidecar daemon with a per-launch bearer token, drop open CORS, gate repo-controlled `.gg/mcp.json` servers behind a trust setting, and bump vulnerable dependencies.
+  - @kenkaiiii/gg-ai@5.41.1
+  - @kenkaiiii/gg-agent@5.41.1
+  - @kenkaiiii/gg-core@5.41.1
+
+## 5.41.0
+
+### Minor Changes
+
+- 5f49c4a: Add a bundled `bulletproof` skill that hardens what you are shipping against a real attacker, on any target — web, API, CLI, desktop, mobile, embedded, smart contract, ML pipeline, or game. It profiles the attack surface from the code, ranks by what actually breaches small teams (exposed secrets, missing authorization at the data layer, supply-chain and install-time execution) rather than by what is most interesting, builds the control instead of describing it, and leaves a regression test and CI gate behind. It never certifies software as secure and never produces exploit code.
+
+  Its references cover the 2026 threat landscape — AI-orchestrated intrusion, self-propagating registry worms, slopsquatted packages, CI cache poisoning — plus per-platform playbooks, agent/LLM/MCP surfaces, and the secure defaults to write the first time. Every dated claim carries a verified/snapshot/uncertain marker so stale advisories are not asserted as current.
+
+  **The `/bullet-proof` slash command is removed** — it is now the `bulletproof` skill. The skill routes itself, so security review no longer depends on remembering a command, and it also fires inline while you build instead of only after. One source of truth instead of a command prompt that drifts from it.
+
+  Security defaults are also always on: the system prompt now tells the agent to write the safe version during normal feature work — treat external input as hostile, parameterize queries, authorize at the data layer, never commit or log a secret, confirm a dependency exists before adding it, and never silently weaken a security control.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.41.0
+- @kenkaiiii/gg-agent@5.41.0
+- @kenkaiiii/gg-core@5.41.0
+
+## 5.40.1
+
+### Patch Changes
+
+- 356db7d: Make replies answerable at a glance: the "How to Talk" section now reserves markdown blockquotes for the one thing only the user can decide (`> **<the ask>?** <what happens next>`) and forbids them everywhere else, so a `>` in a reply always means "you're up". Adds a compression rule (reasoning, findings, and history earn a clause only when they change the next move) and a plain-language rule: keep the exact term or identifier, but say what it does or risks in the same sentence the first time it appears, so a reply is answerable without knowing the codebase. Overlapping progress/scannability lines were folded together to pay for part of the added length.
+
+  The rules are also reconciled so they can't pull the model in two directions: the ask defers to How to Work's single stop list instead of publishing a second one, the sentence cap says what it counts (prose — not a step list or the ask), and mid-turn speech is gated on "the plan changes" so a bare finding can't both trigger a message and be cut for not changing the next move. A new test locks all four in place.
+  - @kenkaiiii/gg-ai@5.40.1
+  - @kenkaiiii/gg-agent@5.40.1
+  - @kenkaiiii/gg-core@5.40.1
+
+## 5.40.0
+
+### Minor Changes
+
+- f56f240: Add a bundled `compliance-guard` skill that reviews what you are shipping for legal, privacy, and regulatory exposure — profiling the product from its own code, mapping observable facts to the obligations they trigger, flagging the litigation patterns that actually hit small teams, and saying plainly when a feature cannot lawfully ship as described. It never certifies compliance and routes genuinely legal questions to a lawyer.
+
+  Skill routing now also damps unnecessary invocation: match the work rather than the topic, skip routine or narrow changes, and never re-invoke a skill already loaded in the conversation.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.40.0
+- @kenkaiiii/gg-agent@5.40.0
+- @kenkaiiii/gg-core@5.40.0
+
+## 5.39.4
+
+### Patch Changes
+
+- Keep long runs alive across cross-process OAuth token rotation, stop the debug log from wedging just under its size cap, retry provider timeouts that carry no error code, render the full MCP content-block union including images, theme the TUI banner and tool output instead of hardcoding dark hexes, and offer the OAuth paste route immediately on headless hosts.
+  - @kenkaiiii/gg-ai@5.39.4
+  - @kenkaiiii/gg-agent@5.39.4
+  - @kenkaiiii/gg-core@5.39.4
+
+## 5.39.3
+
+### Patch Changes
+
+- Add 14 deep ambient, space ambient, and synthwave stations to the radio picker, including SomaFM's The Dark Zone, Echoes of Bluemars Cryosleep, Ambient Sleeping Pill, and Nightride FM.
+  - @kenkaiiii/gg-ai@5.39.3
+  - @kenkaiiii/gg-agent@5.39.3
+  - @kenkaiiii/gg-core@5.39.3
+
+## 5.39.2
+
+### Patch Changes
+
+- Surface gateway error frames delivered inside HTTP 200 streams instead of swallowing them, and stop treating tokens-per-minute rate limits as context overflow.
+  - @kenkaiiii/gg-ai@5.39.2
+  - @kenkaiiii/gg-agent@5.39.2
+  - @kenkaiiii/gg-core@5.39.2
+
+## 5.39.1
+
+### Patch Changes
+
+- Fix the `code_nav` file outline: list symbols in document order instead of the language server's name-grouped order, and drop locals declared inside function bodies so real declarations are no longer buried or truncated away. `definition`, `references` and `hover` now also resolve from a symbol name alone, with no line number required.
+  - @kenkaiiii/gg-ai@5.39.1
+  - @kenkaiiii/gg-agent@5.39.1
+  - @kenkaiiii/gg-core@5.39.1
+
+## 5.39.0
+
+### Minor Changes
+
+- Add the `code_nav` language-server tool (definition, references, file outline, hover), tier rarely used built-in tool schemas behind `tool_search` to cut per-request tokens, widen `code_search` to Python, Go, Rust, Java and C#, and fix `grep` recall so dot-directories are searched and `.gitignore` is honoured.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.39.0
+- @kenkaiiii/gg-agent@5.39.0
+- @kenkaiiii/gg-core@5.39.0
+
+## 5.38.0
+
+### Minor Changes
+
+- 1e8efde: Make sub-agent delegation reliable: ship six bundled agents (bee, owl, researcher, worker, auditor, skeptic) on every install instead of seeding two into `~/.gg/agents`, compose a child's prompt from its agent body PLUS the Tools, project context, return contract and Environment sections rather than replacing everything, resolve a child's model from explicit `model:` frontmatter (`inherit` by default) instead of silently downgrading read-only agents to the cheap tier, expose the agent roster in `spawn_agent`'s schema, validate `tools:` names, and align wait/output budgets with the child's real timeout.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.38.0
+- @kenkaiiii/gg-agent@5.38.0
+- @kenkaiiii/gg-core@5.38.0
+
 ## 5.37.0
 
 ### Minor Changes

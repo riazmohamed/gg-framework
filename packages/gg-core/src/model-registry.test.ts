@@ -14,6 +14,7 @@ import {
   getDefaultThinkingLevel,
   getFastModel,
   getModelsForProvider,
+  getSummaryModel,
   getToolResultCharLimit,
   usesOpenAICodexTransport,
 } from "./model-registry.js";
@@ -104,9 +105,16 @@ describe("getFastModel", () => {
       const fast = getFastModel(provider, current.id);
       // Never crosses providers — the user may only have this one connected.
       expect(fast.provider).toBe(provider);
-      const hasLowTier = getModelsForProvider(provider).some((m) => m.costTier === "low");
-      if (hasLowTier) {
+      // Vision specialists don't count: GLM's low-tier entries are all 4.6V
+      // models, registered for the vision fallback chain, not as cheap text
+      // siblings — routing scout/summary work to one would be a silent
+      // downgrade to a 128k/16k image model.
+      const hasCheapTextSibling = getModelsForProvider(provider).some(
+        (m) => m.costTier === "low" && !m.visionSpecialist,
+      );
+      if (hasCheapTextSibling) {
         expect(fast.costTier).toBe("low");
+        expect(fast.visionSpecialist).toBeFalsy();
       } else {
         // No cheap sibling — gracefully keeps the current model.
         expect(fast.id).toBe(current.id);
@@ -204,6 +212,41 @@ describe("model registry context windows", () => {
     ).toBe("high");
     expect(getDefaultThinkingLevel("claude-opus-5")).toBe("max");
     expect(getDefaultThinkingLevel("claude-opus-5")).toBe("max");
+  });
+
+  it("makes GLM-5.3 the sole GLM model, at a max thinking ceiling", () => {
+    expect(getDefaultModel("glm")).toMatchObject({
+      id: "glm-5.3",
+      name: "GLM-5.3",
+      provider: "glm",
+      contextWindow: 1_000_000,
+      maxOutputTokens: 131_072,
+      supportsThinking: true,
+      // `max` is the top rung GLM declares, and Z.AI's own default effort.
+      maxThinkingLevel: "max",
+    });
+    expect(getDefaultThinkingLevel("glm-5.3")).toBe("max");
+    // 5.3 is the only GLM *coding* entry: the older coding ids route to
+    // strictly worse coding for the same plan quota, and the coding endpoint
+    // already answers glm-5.2 requests as glm-5.3. Saved sessions on any of
+    // them fall back to the provider default. The 4.6V/5V vision models are
+    // deliberately kept — they are text-incapable siblings, not coding
+    // alternatives, and `getVisionModel` routes image turns to glm-4.6v as the
+    // head of the vision fallback chain.
+    expect(getModelsForProvider("glm").map((model) => model.id)).toEqual([
+      "glm-5.3",
+      "glm-4.6v",
+      "glm-5v-turbo",
+      "glm-4.6v-flashx",
+      "glm-4.6v-flash",
+    ]);
+    for (const retired of ["glm-5.2", "glm-5.1", "glm-4.7", "glm-4.7-flash"]) {
+      expect(getModel(retired), `${retired} retired`).toBeUndefined();
+    }
+    // No cheap sibling left, so scout/summary routing must keep 5.3 rather
+    // than crash or jump to another provider's login.
+    expect(getFastModel("glm", "glm-5.3").id).toBe("glm-5.3");
+    expect(getSummaryModel("glm", "glm-5.3").id).toBe("glm-5.3");
   });
 
   it("defaults MiniMax to the multimodal M3 with a 1M context window", () => {

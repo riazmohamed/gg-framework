@@ -238,13 +238,24 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // canonical live-file count on session_reset; this content supplies the fallback
   // count when connected to an older sidecar.
   const planReviewContentRef = useRef<string | null>(null);
+  // Ideal review is armed: a stop right now would inject the review, so the text
+  // the model is streaming is a candidate final answer the review will replace.
+  // Hold it in `heldTextRef` instead of painting it — the sidecar tells us this
+  // BEFORE the first token, so the user never reads a draft that then vanishes.
+  // Released (rendered) the moment the turn proves it was not a draft: tool
+  // calls, a non-ideal hook, or the run ending with no review.
+  const idealArmedRef = useRef(false);
+  const heldTextRef = useRef<string>("");
 
   // Streaming deltas arrive faster than React can usefully render each one.
   // We buffer chunks in a ref and flush every 100ms — imperceptible for prose
   // but roughly halves streaming render CPU vs per-frame flushing, since the
-  // Markdown re-render dominates and CPU scales with flush count
-  // (bench/RESULTS.md, bench B). First token still paints immediately.
+  // Markdown re-render dominates and CPU scales with flush count.
+  // First token still paints immediately.
   const STREAM_FLUSH_MS = 100;
+
+  /** Queued→sent morph duration. Must match `.user-msg.promoted` in App.css. */
+  const PROMOTE_MS = 300;
   const flushChunks = useCallback(() => {
     flushTimerRef.current = null;
     const chunk = pendingChunksRef.current;
@@ -261,6 +272,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
 
   const appendAssistant = useCallback(
     (text: string) => {
+      // Armed: this text is a review draft until proven otherwise. Accumulate it
+      // off-screen; releaseHeldText paints it if the turn turns out to be real.
+      if (idealArmedRef.current) {
+        heldTextRef.current += text;
+        return;
+      }
       const current = streamingIdRef.current;
       if (current === null) {
         // First token of a new assistant turn: create immediately (no delay
@@ -278,6 +295,19 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     },
     [flushChunks, nextId, setItems],
   );
+
+  // Paint text held under arming. Called the moment the turn proves it was not
+  // a review draft — a tool call, a server tool, a non-ideal hook, or the run
+  // ending without the review firing. It lands as one complete bubble rather
+  // than a stream, which is the whole cost of never showing a draft.
+  const releaseHeldText = useCallback(() => {
+    const held = heldTextRef.current;
+    heldTextRef.current = "";
+    if (!held) return;
+    const id = nextId();
+    streamingIdRef.current = id;
+    setItems((prev) => [...prev, { kind: "assistant", id, text: held }]);
+  }, [nextId, setItems]);
 
   // Flush any pending buffered text and end the current streaming section.
   // Called whenever streaming transitions to tool calls, a new prompt, etc.
@@ -303,15 +333,18 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   }, [setItems]);
 
   // Ideal review is a pre-final hook: the no-tool response immediately before
-  // it is an internal draft, not a transcript answer. Drop that active bubble
-  // (including any throttled chunks) before rendering the hook notice, so the
-  // user sees hook → reviewed final response rather than draft → hook → final.
+  // it is an internal draft, not a transcript answer. Normally the draft was
+  // held (never painted) because `hook_armed` arrived first; this drops the
+  // visible bubble in the cases arming cannot cover — an older sidecar that
+  // never sends `hook_armed`, or a gate that only crossed on the draft's own
+  // turn — so the user still ends up with hook → reviewed final response.
   const discardStreamingDraft = useCallback(() => {
     if (flushTimerRef.current !== null) {
       clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
     }
     pendingChunksRef.current = "";
+    heldTextRef.current = "";
     const current = streamingIdRef.current;
     streamingIdRef.current = null;
     if (current !== null) {
@@ -327,6 +360,35 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     },
     [setItems],
   );
+
+  // End the queued→sent morph: drop `promoted` once its animation has played, so
+  // the flag never outlives the motion. Leaving it set would replay the collapse
+  // on old bubbles whenever the transcript remounts (a picker/home view taking
+  // over the window and coming back).
+  //
+  // One shared timer, restarted whenever another message is promoted. That can
+  // clear an earlier bubble's flag late, which is harmless: its animation has
+  // already finished and settled on exactly the resting style (the pill keeps
+  // its collapsed state via `forwards`), so removing the class changes nothing
+  // on screen.
+  const promoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const schedulePromotionEnd = useCallback(() => {
+    if (promoteTimerRef.current !== null) clearTimeout(promoteTimerRef.current);
+    promoteTimerRef.current = setTimeout(() => {
+      promoteTimerRef.current = null;
+      setItems((prev) =>
+        prev.some((it) => it.kind === "user" && it.promoted)
+          ? prev.map((it) => (it.kind === "user" && it.promoted ? { ...it, promoted: false } : it))
+          : prev,
+      );
+    }, PROMOTE_MS);
+  }, [setItems]);
+
+  useEffect(() => {
+    return () => {
+      if (promoteTimerRef.current !== null) clearTimeout(promoteTimerRef.current);
+    };
+  }, []);
 
   // Apply one sub-agent snapshot to its transcript group (creating the group
   // on first sight). Called from the buffered flush below — multiple snapshots
@@ -499,6 +561,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           toolsUsedRef.current = new Set();
           tokensRef.current = 0;
           assistantTextRef.current = "";
+          // Arming is per-run state on the sidecar; start every run streaming
+          // live and let hook_armed hold text back once the gate is crossed.
+          idealArmedRef.current = false;
+          heldTextRef.current = "";
           thinkingStartRef.current = null;
           thinkingAccumRef.current = 0;
           setLiveToolFeed([]);
@@ -545,6 +611,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // assistant bubble so the post-tool text starts a fresh paragraph
           // instead of gluing onto the pre-tool text ("…command.Let me pull…").
           finalizeThinking();
+          releaseHeldText();
           endStreamingText();
           assistantTextRef.current = "";
           break;
@@ -566,6 +633,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         }
         case "tool_call_start": {
           finalizeThinking();
+          // Text followed by a tool call is narration, not a review draft.
+          releaseHeldText();
           endStreamingText();
           const toolCallId = String(d.toolCallId ?? "");
           const name = String(d.name ?? "tool");
@@ -740,6 +809,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         }
         case "agent_done": {
+          // The loop stopped and no review was injected, so anything held under
+          // arming was the real final answer after all — paint it.
+          releaseHeldText();
           const usage = d.totalUsage as { outputTokens?: number } | undefined;
           if (usage && typeof usage.outputTokens === "number") {
             // Authoritative final total — set rather than add to avoid
@@ -807,6 +879,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         }
         case "run_end": {
+          // Cancels and errors end a run without agent_done; never strand held
+          // text, and clear arming so the next run starts streaming live.
+          releaseHeldText();
+          idealArmedRef.current = false;
           // Flush first so final sub-agent statuses are in place before the
           // aborted-marking pass below reads them.
           flushSubagentSnapshots();
@@ -1031,22 +1107,42 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             if (toClear.size === 0) return prev;
 
             // Clear from the FRONT: the queue is FIFO, so the earliest matching
-            // bubble is the one the agent just consumed.
+            // bubble is the one the agent just consumed. `promoted` marks the
+            // bubble for one animation beat so it morphs into a normal one
+            // instead of snapping out of the dim/dashed queued look.
             return prev.map((it) => {
               if (it.kind !== "user" || !it.queued) return it;
               const left = toClear.get(it.text) ?? 0;
               if (left <= 0) return it;
               toClear.set(it.text, left - 1);
-              return { ...it, queued: false };
+              return { ...it, queued: false, promoted: true };
             });
           });
+          schedulePromotionEnd();
+          break;
+        }
+        case "hook_armed": {
+          // Only the ideal review holds text back; other hooks are mid-loop.
+          if (String(d.kind ?? "ideal") !== "ideal") break;
+          const armed = d.armed !== false;
+          idealArmedRef.current = armed;
+          // Disarming without the review firing (autopilot takes verification
+          // over mid-run) must not strand text collected while armed.
+          if (!armed) releaseHeldText();
           break;
         }
         case "hook": {
           const kind = String(d.kind ?? "ideal") as HookKind;
           if (kind in HOOK_PRESENTATION) {
-            if (kind === "ideal") discardStreamingDraft();
-            else endStreamingText();
+            if (kind === "ideal") {
+              // Draft dies here — held (never painted) in the normal armed path,
+              // or removed from the transcript when arming came too late.
+              discardStreamingDraft();
+            } else {
+              // Mid-loop hooks interrupt real work: keep what was said.
+              releaseHeldText();
+              endStreamingText();
+            }
             pushItem({ kind: "hook", id: nextId(), hook: kind });
           }
           break;
@@ -1059,6 +1155,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // The transcript is going away, so acked queue texts from the old
           // session must not gate clears in the new one.
           ackedQueueTextsRef.current.clear();
+          idealArmedRef.current = false;
+          heldTextRef.current = "";
           stickToBottomRef.current = true;
           setItems([]);
           setLiveToolFeed([]);
@@ -1143,6 +1241,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       finalizeThinking,
       endStreamingText,
       discardStreamingDraft,
+      releaseHeldText,
+      schedulePromotionEnd,
       flushSubagentSnapshots,
       dropPendingSubagentSnapshots,
       nextId,
