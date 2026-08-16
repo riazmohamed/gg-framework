@@ -258,8 +258,12 @@ describe("model registry context windows", () => {
       supportsImages: true,
       supportsVideo: true,
     });
-    expect(getModelsForProvider("minimax").map((model) => model.id)).toEqual(["MiniMax-M3"]);
+    expect(getModelsForProvider("minimax").map((model) => model.id)).toEqual([
+      "MiniMax-H3",
+      "MiniMax-M3",
+    ]);
     expect(getContextWindow("MiniMax-M3", { provider: "minimax" })).toBe(1_000_000);
+    expect(getContextWindow("MiniMax-H3", { provider: "minimax" })).toBe(1_000_000);
   });
 
   it("every other provider defaults to a single-entry [provider] auth-storage key", () => {

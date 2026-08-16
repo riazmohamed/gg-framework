@@ -420,6 +420,19 @@ export const MODELS: ModelInfo[] = [
   },
   // ── MiniMax ───────────────────────────────────────────────
   {
+    id: "MiniMax-H3",
+    name: "MiniMax H3",
+    provider: "minimax",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 131_072,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 50 * 1024 * 1024,
+    costTier: "medium",
+    maxThinkingLevel: "high",
+  },
+  {
     id: "MiniMax-M3",
     name: "MiniMax M3",
     provider: "minimax",
