@@ -351,6 +351,17 @@ global commands unless it fakes home first. Upstream tests won't do this — add
 
 After code changes that need compiled outputs, also run `pnpm build`.
 
+> **A registry edit is invisible until `gg-core` is rebuilt.** `MODELS` lives in
+> `packages/gg-core/src/model-registry.ts`, but ogcoder consumes gg-core through its compiled
+> `dist/` — and a globally linked `ogcoder` (`pnpm --filter @abukhaled/ogcoder link --global`
+> symlinks straight at `packages/ggcoder`) therefore runs against whatever the last build
+> produced, not the working tree. Add a model, pass `pnpm check`/`pnpm test`, restart the CLI,
+> and the model is simply **absent from `/model` with no error** — the symptom looks like a
+> missing entry or a provider-auth filter, not a stale artifact. Run
+> `pnpm --filter @abukhaled/gg-core build && pnpm --filter @abukhaled/ogcoder build` after any
+> registry change (gg-app needs no extra step — it bundles `app-sidecar.js` from source at
+> build time). Same trap for any gg-core edit: auth storage, app paths, thinking levels.
+
 Fix errors from checks you do run before continuing. Quick fixes:
 
 - `pnpm lint:fix` — auto-fix ESLint issues
