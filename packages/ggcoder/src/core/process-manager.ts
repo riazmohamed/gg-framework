@@ -31,6 +31,9 @@ export interface StartResult {
   id: string;
   pid: number;
   logFile: string;
+  /** False when wake rules were requested but no notification queue is wired,
+   *  so callers must not promise the model a wake that can never fire. */
+  wakeArmed: boolean;
 }
 
 export interface ReadOutputResult {
@@ -57,6 +60,9 @@ const BG_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
 /** Delay before a running process may first report progress. */
 const WATCH_INTERVAL_MS = 5_000;
+/** Tick for model-declared wake rules (match/silence). Cheap: one stat + a
+ * bounded tail read, so a flat interval (no backoff) is fine. */
+const WAKE_INTERVAL_MS = 5_000;
 /** Ceiling on the progress interval as it backs off between reports. */
 const WATCH_INTERVAL_MAX_MS = 120_000;
 /**
@@ -87,6 +93,43 @@ const WATCH_INTERVAL_MAX_MS = 120_000;
 const WATCH_MAX_REPORTS = 3;
 /** Chars of log tail carried in a progress checkpoint. */
 const CHECKPOINT_TAIL_CHARS = 320;
+/** Chars of the matched log line carried in a pattern-wake notification. */
+const WAKE_LINE_CHARS = 200;
+
+/** One log line, whitespace-collapsed and tail-bounded — never the raw log. */
+function boundedLine(text: string): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  if (!collapsed) return "";
+  return collapsed.length <= WAKE_LINE_CHARS
+    ? collapsed
+    : `\u2026${collapsed.slice(collapsed.length - WAKE_LINE_CHARS)}`;
+}
+
+/**
+ * Model-declared wake conditions for a background task. The agent states up
+ * front what output it cares about (or what silence means), and the watcher
+ * turns exactly that into a steering-path notification — instead of the model
+ * polling `task_output` (measured elsewhere at 71 wasted turns on one build)
+ * or re-reading generic progress checkpoints hoping to spot the signal.
+ */
+export interface WakeRules {
+  /** Wake the moment new log output matches this regex. One-shot. */
+  pattern?: RegExp;
+  /** Wake when the process is still running but has logged nothing for this
+   *  many milliseconds (a stalled build/hang detector). One-shot. */
+  silenceMs?: number;
+}
+
+interface WakeState {
+  rules: WakeRules;
+  /** Log offset already scanned for `pattern`; new bytes only. */
+  scanOffset: number;
+  /** Log size at the last tick that saw growth; drives the silence rule. */
+  lastSize: number;
+  lastGrowthAt: number;
+  matched: boolean;
+  silenceFired: boolean;
+}
 
 /** Last line(s) of the log, collapsed and bounded — never the raw log. */
 function tailDigest(text: string): string {
@@ -121,6 +164,17 @@ export interface ProcessManagerOps {
    * real logs off a machine before this parameter existed.
    */
   bgDir?: string;
+  /**
+   * Base delay before the first progress report, in ms. Defaults to
+   * {@link WATCH_INTERVAL_MS}.
+   *
+   * Injectable so tests can assert the watcher's BEHAVIOUR (reports, backoff,
+   * budget, retirement) without waiting out the production 5s/10s/20s cadence.
+   * A test that waits real seconds for a real subprocess is a test whose result
+   * depends on how loaded the machine is: the budget test used to fail under
+   * `pnpm test` (12 packages in parallel) while passing when run alone.
+   */
+  watchIntervalMs?: number;
 }
 
 function stopProcessTree(pid: number, ops: ProcessManagerOps = {}): void {
@@ -137,6 +191,9 @@ export class ProcessManager {
   private children = new Map<string, ChildProcess>();
   /** Per-process progress timers. Cleared on exit, stop and shutdown. */
   private watchers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Per-process wake-rule timers (model-declared match/silence conditions). */
+  private wakeWatchers = new Map<string, ReturnType<typeof setTimeout>>();
+  private wakeStates = new Map<string, WakeState>();
   /** Log size at the last emitted checkpoint, so a quiet process stays quiet. */
   private watchedSizes = new Map<string, number>();
   /** Timestamp of the last retention sweep; 0 means "never swept". */
@@ -184,7 +241,12 @@ export class ProcessManager {
     }
   }
 
-  async start(command: string, cwd: string, launch?: ShellResolution): Promise<StartResult> {
+  async start(
+    command: string,
+    cwd: string,
+    launch?: ShellResolution,
+    wake?: WakeRules,
+  ): Promise<StartResult> {
     await fsp.mkdir(this.bgDir, { recursive: true });
     void this.pruneOldLogs();
 
@@ -237,8 +299,12 @@ export class ProcessManager {
     });
 
     this.armWatcher(proc);
+    let wakeArmed = false;
+    if (wake && (wake.pattern || wake.silenceMs)) {
+      wakeArmed = this.armWakeWatcher(proc, wake);
+    }
 
-    return { id, pid, logFile };
+    return { id, pid, logFile, wakeArmed };
   }
 
   /**
@@ -264,7 +330,7 @@ export class ProcessManager {
     if (!queue) return;
     this.watchedSizes.set(proc.id, 0);
 
-    let delay = WATCH_INTERVAL_MS;
+    let delay = this.ops.watchIntervalMs ?? WATCH_INTERVAL_MS;
     let reports = 0;
     const schedule = (): void => {
       const timer = setTimeout(() => {
@@ -316,10 +382,16 @@ export class ProcessManager {
     const size = await this.refreshLogSize(proc);
     const previous = this.watchedSizes.get(proc.id) ?? 0;
     if (size <= previous) return false;
-    this.watchedSizes.set(proc.id, size);
     if (proc.exitCode !== null) return false;
 
     const tail = await this.readTail(proc.logFile, size);
+    // The tail read can race a dispose: a wake rule firing (its declared
+    // signal outranks generic progress) or the process exiting (the terminal
+    // notification owns that case). An enqueue after that would supersede
+    // that notification in the latest-only queue, so a disposed watcher
+    // stays silent.
+    if (!this.watchers.has(proc.id)) return false;
+    this.watchedSizes.set(proc.id, size);
     queue.enqueue(
       "process",
       proc.id,
@@ -365,8 +437,151 @@ export class ProcessManager {
     }
   }
 
+  /** Read the bytes of a log in `[start, end)` without loading the file. */
+  private async readRange(logFile: string, start: number, end: number): Promise<string> {
+    try {
+      const fh = await fsp.open(logFile, "r");
+      try {
+        const buf = Buffer.alloc(Math.max(0, end - start));
+        const { bytesRead } = await fh.read(buf, 0, buf.length, start);
+        return buf.subarray(0, bytesRead).toString("utf-8");
+      } finally {
+        await fh.close();
+      }
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * Wake-rule watcher: evaluates the model's `pattern`/`silenceMs` conditions
+   * every {@link WAKE_INTERVAL_MS} and pushes a steering-path notification the
+   * moment one holds. Each rule is one-shot; once every declared rule has fired
+   * (or the process exits) the watcher retires. Unlike the progress watcher it
+   * never backs off — the agent asked for exactly this signal, however long it
+   * takes, and a late match on a quiet dev server is precisely the point.
+   */
+  private armWakeWatcher(proc: BackgroundProcess, rules: WakeRules): boolean {
+    if (!this.ops.notifications) return false; // No queue wired: nothing to wake.
+    const state: WakeState = {
+      rules,
+      scanOffset: 0,
+      lastSize: 0,
+      lastGrowthAt: proc.startedAt,
+      matched: false,
+      silenceFired: false,
+    };
+    this.wakeStates.set(proc.id, state);
+    const patternSource = rules.pattern?.source ?? "";
+    // Re-scan a little before the last offset so a match straddling the tick
+    // boundary is still seen; the offset only ever advances to full size.
+    const overlap = Math.min(256, patternSource.length + 16);
+    const tick = (): void => {
+      const timer = setTimeout(() => {
+        void this.evaluateWakeRules(proc, state, overlap).then(() => {
+          if (proc.exitCode !== null || !this.wakeStates.has(proc.id)) {
+            this.disposeWakeWatcher(proc.id);
+            return;
+          }
+          const done =
+            (!state.rules.pattern || state.matched) &&
+            (!state.rules.silenceMs || state.silenceFired);
+          if (done) {
+            this.disposeWakeWatcher(proc.id);
+            return;
+          }
+          tick();
+        });
+      }, WAKE_INTERVAL_MS);
+      timer.unref?.();
+      this.wakeWatchers.set(proc.id, timer);
+    };
+    tick();
+    return true;
+  }
+
+  private async evaluateWakeRules(
+    proc: BackgroundProcess,
+    state: WakeState,
+    overlap: number,
+  ): Promise<void> {
+    const queue = this.ops.notifications;
+    if (!queue) return;
+    const size = await this.refreshLogSize(proc);
+
+    if (size > state.lastSize) {
+      state.lastSize = size;
+      state.lastGrowthAt = Date.now();
+    }
+
+    const { pattern, silenceMs } = state.rules;
+    if (pattern && !state.matched && size > state.scanOffset) {
+      const start = Math.max(0, state.scanOffset - overlap);
+      const chunk = await this.readRange(proc.logFile, start, size);
+      state.scanOffset = size;
+      const match = pattern.exec(chunk);
+      if (match) {
+        state.matched = true;
+        // The declared signal outranks generic progress: retire the progress
+        // watcher so its next tick cannot supersede this notification in the
+        // latest-only queue. Exit notifications come from the exit handler.
+        this.disposeProgressWatcher(proc.id);
+        const line =
+          chunk
+            .slice(Math.max(0, match.index - WAKE_LINE_CHARS))
+            .split("\n")
+            .find((l) => pattern.test(l)) ?? match[0];
+        queue.enqueue(
+          "process",
+          proc.id,
+          `Background process ${proc.id} (${proc.command}) produced output matching your wake ` +
+            `pattern /${pattern.source}/: ${boundedLine(line)}. Still running — ` +
+            `task_output id="${proc.id}" for full context.`,
+        );
+      }
+    }
+
+    if (
+      silenceMs &&
+      !state.silenceFired &&
+      proc.exitCode === null &&
+      Date.now() - state.lastGrowthAt >= silenceMs
+    ) {
+      state.silenceFired = true;
+      this.disposeProgressWatcher(proc.id);
+      const tail = await this.readTail(proc.logFile, size);
+      queue.enqueue(
+        "process",
+        proc.id,
+        `Background process ${proc.id} (${proc.command}) has produced no output for ` +
+          `${Math.round((Date.now() - state.lastGrowthAt) / 1000)}s — it may be stalled` +
+          `${tail ? `. Last output: ${tail}` : " (no output so far)"}. ` +
+          `Check task_output id="${proc.id}" and decide whether to wait, send input, or stop it.`,
+      );
+    }
+  }
+
+  /** Stop and forget a process's wake watcher. */
+  private disposeWakeWatcher(id: string): void {
+    const timer = this.wakeWatchers.get(id);
+    if (timer) clearTimeout(timer);
+    this.wakeWatchers.delete(id);
+    this.wakeStates.delete(id);
+  }
+
+  /** Live wake-watcher ids. Exposed for leak assertions in tests. */
+  activeWakeWatchers(): string[] {
+    return [...this.wakeWatchers.keys()];
+  }
+
   /** Stop and forget a process's watcher. A finished process keeps no timer. */
   private disposeWatcher(id: string): void {
+    this.disposeProgressWatcher(id);
+    this.disposeWakeWatcher(id);
+  }
+
+  /** Stop and forget a process's progress watcher only. */
+  private disposeProgressWatcher(id: string): void {
     const timer = this.watchers.get(id);
     if (timer) clearTimeout(timer);
     this.watchers.delete(id);

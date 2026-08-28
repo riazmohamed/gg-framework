@@ -214,13 +214,20 @@ Reusable behaviors across projects. Drop `.md` files in:
 
 They get loaded into the system prompt automatically. The agent knows what it can do without you explaining it each session. <kbd>Ctrl+S</kbd> opens a pane to browse and toggle them.
 
-Three ship built in, and route themselves when the work matches:
+Ten ship built in, and route themselves when the work matches:
 
 | Skill              | Fires on                                                                                                                                                                                                                            |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bulletproof`      | Code an attacker will reach — auth, untrusted input, secrets, dependencies, CI/release, agent/MCP tool surfaces — and "is this safe to ship" reviews. Works on any target: web, API, CLI, desktop, mobile, embedded, contracts, ML. |
+| `clarify`          | Requirements or a design genuinely unsettled — interrogating or stress-testing a plan before building, or a mid-build decision that materially changes the result.                                                                                                                                    |
+| `code-review`      | Reviewing written work — a diff, PR, or branch — on both what was asked for and how well it is built.                                                                                                                                 |
 | `compliance-guard` | Legal exposure — personal data, payments, UGC, email/SMS, minors, or a licensed/regulated feature.                                                                                                                                  |
+| `durable`          | User data must not be lost — first database/table, migrations, backfills/imports, destructive operations, backups and recovery; any store (Postgres, MySQL, SQLite, Mongo, serverless).                                              |
 | `evidence-led-ui`  | Broad or design-sensitive UI work — new screens, redesigns, design systems, accessibility passes.                                                                                                                                   |
+| `lean`             | Speed and resource efficiency — slow loading/startup, jank, high CPU, memory leaks and hogging, zombie/orphan processes, bundle bloat, dead code/styles, Core Web Vitals; while building anything that should stay fast, or a perf pass on an existing project. Any stack: web, backend, Electron, Tauri, mobile, native, game, ML. |
+| `root-cause`       | A bug that resists the obvious fix, makes no sense, or keeps coming back — gated diagnosis from red repro to ranked hypotheses to regression test.                                                                                  |
+| `shared-language`  | Fuzzy or drifting domain vocabulary, recurring naming decisions, and hard-to-reverse decisions worth recording (glossary + decision records).                                                                                        |
+| `tdd`              | Test-driven development — red-green-refactor with pre-agreed seams, when the user asks for test-first work.                                                                                                                          |
 
 ---
 

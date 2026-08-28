@@ -19,6 +19,7 @@ const SettingsSchema = z.object({
       "xiaomi",
       "deepseek",
       "openrouter",
+      "huggingface",
       "sakana",
       "xai",
     ])
@@ -40,6 +41,10 @@ const SettingsSchema = z.object({
     .default("auto"),
   showTokenUsage: z.boolean().default(true),
   idealReviewEnabled: z.boolean().default(true),
+  /** Pre-stop gate: when code was edited but no test/typecheck/lint/build
+   *  command completed since the last edit, the turn is continued once with a
+   *  demand to verify (then one escalation demanding an honest statement). */
+  verificationGateEnabled: z.boolean().default(true),
   /** Append LSP diagnostics to edit/write tool results. */
   lspDiagnostics: z.boolean().default(true),
   /** Allow write/edit outside the workspace (cwd, tmpdir, ~/.gg). Off by
@@ -72,6 +77,15 @@ const SettingsSchema = z.object({
    * large share of users immediately after an update, with no obvious cause.
    */
   sandboxMode: z.enum(["auto", "workspace", "off"]).default("off"),
+  /**
+   * Unix sockets sandboxed commands may open (macOS; on Linux/WSL2 the seccomp
+   * filter blocks AF_UNIX by syscall and cannot match paths). Empty by default:
+   * `/var/run/docker.sock` is unauthenticated root-equivalent control of the
+   * host, and the SSH agent socket signs whatever it is asked to. Set this only
+   * to run `docker` (or similar) from sandboxed bash, and only knowing that the
+   * socket is a full bypass of the isolation around it.
+   */
+  sandboxAllowUnixSockets: z.array(z.string()).default([]),
   /** Defer MCP tool schemas out of the prompt until discovered via tool_search.
    *  Cuts ~8k tokens/cache-miss turn with two MCP servers connected. */
   deferredMcpTools: z.boolean().default(true),
@@ -100,6 +114,23 @@ const SettingsSchema = z.object({
   /** Max concurrent subagents per resolved child model. Unset = only the
    *  global limit applies. Can only REDUCE concurrency, never raise it. */
   subagentMaxPerModel: z.number().int().min(1).max(4).optional(),
+  /** Per-input byte budgets for prompt-injected content (skills, MCP tool
+   *  descriptions/schemas, project instructions, total prompt ceiling).
+   *  Unset keys fall back to the built-in defaults (core/context-limits.ts). */
+  contextLimits: z
+    .object({
+      skillDescriptionBytes: z.number().int().min(64).optional(),
+      skillCatalogBytes: z.number().int().min(1024).optional(),
+      mcpToolDescriptionBytes: z.number().int().min(64).optional(),
+      mcpToolSchemaBytes: z.number().int().min(1024).optional(),
+      projectContextBytes: z.number().int().min(1024).optional(),
+      systemPromptCeilingBytes: z
+        .number()
+        .int()
+        .min(16 * 1024)
+        .optional(),
+    })
+    .optional(),
   enabledTools: z.array(z.string()).optional(),
   /** Delete session transcripts older than this many days at startup. 0 disables pruning. */
   sessionRetentionDays: z.number().int().min(0).default(30),
@@ -128,11 +159,13 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "auto",
   showTokenUsage: true,
   idealReviewEnabled: true,
+  verificationGateEnabled: true,
   lspDiagnostics: true,
   allowOutsideWorkspaceWrites: false,
   networkMode: "off",
   networkAllow: [],
   sandboxMode: "off",
+  sandboxAllowUnixSockets: [],
   deferredMcpTools: true,
   deferredBuiltinTools: true,
   grepUseRipgrep: true,

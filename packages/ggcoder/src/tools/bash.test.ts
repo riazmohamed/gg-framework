@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createBashTool, renderBashOutput } from "./bash.js";
 import { getToolOutputRoot } from "./overflow.js";
 import { ProcessManager } from "../core/process-manager.js";
+import { AgentNotificationQueue } from "../core/agent-notifications.js";
 import { resolveShell } from "../core/shell.js";
 import { existsSync } from "node:fs";
 import { useFakeHome } from "../test-support/fake-home.js";
@@ -19,8 +20,42 @@ beforeEach(async () => {
 
 afterEach(async () => {
   restoreHome?.();
-  await fs.rm(tmpHome, { recursive: true, force: true });
+  // maxRetries: Windows releases a dead child's inherited log handle slightly
+  // after the process itself is gone, which surfaces here as EBUSY.
+  await fs.rm(tmpHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
+
+/**
+ * A background command that lives briefly and exists everywhere. `sleep` is a
+ * coreutils binary, not a shell builtin, so it is not guaranteed on the Windows
+ * shells `resolveShell` may pick; node is, because the test runner is node.
+ */
+const BRIEF_BACKGROUND_COMMAND = `node -e "setTimeout(() => {}, 500)"`;
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `shutdownAll()` only signals the process tree and returns. The child can
+ * still hold its log file under `tmpHome` open for a moment after that, and
+ * afterEach's recursive rm then fails with EBUSY on Windows. Wait for the OS to
+ * actually reap what this test started.
+ */
+async function shutdownAndWait(manager: ProcessManager): Promise<void> {
+  const pids = manager.list().map((proc) => proc.pid);
+  manager.shutdownAll();
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (!pids.some(isProcessAlive)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Background processes still alive after shutdown: ${pids.join(", ")}`);
+}
 
 async function listSavedOutputs(): Promise<string[]> {
   const root = getToolOutputRoot();
@@ -84,6 +119,11 @@ describe("createBashTool shell snapshot", () => {
     expect(tool.description).toContain("dir, findstr, type");
     expect(tool.description).toContain("will fail");
     expect(tool.description).not.toContain("Execute a bash command");
+    // 2026-08 guardrail additions (audit P1/P2) must survive in both shells.
+    expect(tool.description).toContain(
+      "Commit, push, amend, or rewrite git history only when the user explicitly asked",
+    );
+    expect(tool.description).toContain("Kill processes by exact PID");
   });
 
   it("keeps the bash description byte-for-byte when a POSIX shell resolves", () => {
@@ -96,6 +136,12 @@ describe("createBashTool shell snapshot", () => {
     expect(tool.description.startsWith("Execute a bash command.")).toBe(true);
     expect(tool.description).toContain("non-interactive bash shell with TERM=dumb");
     expect(tool.description).not.toContain("cmd.exe");
+    // 2026-08 guardrail additions (audit P1/P2); bash-only line below.
+    expect(tool.description).toContain(
+      "Commit, push, amend, or rewrite git history only when the user explicitly asked",
+    );
+    expect(tool.description).toContain("Never background a command with a trailing & or nohup");
+    expect(tool.description).toContain("Kill processes by exact PID");
   });
 });
 
@@ -111,6 +157,58 @@ describe("catastrophic-command guard", () => {
 
     expect(String(result)).toContain("Refusing to run");
     expect(String(result)).toContain("user confirmation");
+  });
+});
+
+describe("wake-condition validation", () => {
+  it("refuses wake without run_in_background", async () => {
+    const tool = createBashTool(tmpHome, new ProcessManager());
+    const result = await tool.execute(
+      { command: "echo hi", wake: { pattern: "done" } },
+      { signal: new AbortController().signal, toolCallId: "wake-1" },
+    );
+    expect(String(result)).toContain("run_in_background=true");
+  });
+
+  it("refuses an invalid wake pattern instead of arming a broken watcher", async () => {
+    const tool = createBashTool(tmpHome, new ProcessManager());
+    const result = await tool.execute(
+      { command: "echo hi", run_in_background: true, wake: { pattern: "([unclosed" } },
+      { signal: new AbortController().signal, toolCallId: "wake-2" },
+    );
+    expect(String(result)).toContain("not a valid regex");
+  });
+
+  it("arms wake rules and says so on a background start", async () => {
+    const manager = new ProcessManager({
+      bgDir: `${tmpHome}/bg-test`,
+      notifications: new AgentNotificationQueue(),
+    });
+    const tool = createBashTool(tmpHome, manager);
+    const result = await tool.execute(
+      {
+        command: BRIEF_BACKGROUND_COMMAND,
+        run_in_background: true,
+        wake: { pattern: "READY", silence_seconds: 30 },
+      },
+      { signal: new AbortController().signal, toolCallId: "wake-3" },
+    );
+    expect(String(result)).toContain("Wake rules armed");
+    expect(String(result)).toContain("silence 30s");
+    await shutdownAndWait(manager);
+  });
+
+  it("does not promise a wake when no notification path exists", async () => {
+    // TUI-style manager: no notifications queue wired.
+    const manager = new ProcessManager({ bgDir: `${tmpHome}/bg-noqueue` });
+    const tool = createBashTool(tmpHome, manager);
+    const result = await tool.execute(
+      { command: BRIEF_BACKGROUND_COMMAND, run_in_background: true, wake: { pattern: "READY" } },
+      { signal: new AbortController().signal, toolCallId: "wake-4" },
+    );
+    expect(String(result)).toContain("NOT armed");
+    expect(String(result)).toContain("Poll task_output");
+    await shutdownAndWait(manager);
   });
 });
 

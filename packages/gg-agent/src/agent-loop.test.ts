@@ -3,6 +3,7 @@ import { z } from "zod";
 import { GGAIError, ProviderError } from "@abukhaled/gg-ai";
 import {
   agentLoop,
+  setStreamDiagnostic,
   capToolResults,
   capTurnToolResults,
   classifyOverload,
@@ -1121,6 +1122,67 @@ describe("agentLoop", () => {
     ).toBeGreaterThanOrEqual(90_000);
   }, 30_000);
 
+  it("says so once when a session is running mostly on the non-streaming fallback", async () => {
+    // The fallback is silent, so a session can spend its whole life on it: no
+    // partial output, failed turns re-billed in full, and nothing anywhere
+    // saying why everything suddenly got slower and more expensive.
+    const phases: { phase: string; data?: Record<string, unknown> }[] = [];
+    setStreamDiagnostic((phase, data) => phases.push({ phase, data }));
+
+    // Each fallback entry costs two stalls first, and the flag is cleared again
+    // after every good response — so three entries means three full cycles.
+    let call = 0;
+    let fallbackTurns = 0;
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      call++;
+      if (opts.streaming === false) {
+        fallbackTurns++;
+        return (fallbackTurns < 3
+          ? mockToolCallResult("probe", { inputTokens: 1, outputTokens: 1 }, `t${call}`)
+          : mockOkResult("done")) as unknown as ReturnType<typeof stream>;
+      }
+      // Stall until the per-attempt abort fires — that is what flips the flag.
+      const abortPromise = new Promise<never>((_, reject) => {
+        opts.signal?.addEventListener(
+          "abort",
+          () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          { once: true },
+        );
+      });
+      abortPromise.catch(() => {});
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+          await abortPromise;
+        },
+        response: abortPromise,
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    vi.useFakeTimers();
+    const loopPromise = collectLoop([{ role: "user", content: "hi" }], {
+      provider: "anthropic",
+      model: "test",
+      tools: [
+        {
+          name: "probe",
+          description: "keeps the session going",
+          parameters: emptyParams,
+          execute: () => "ok",
+        },
+      ],
+    });
+    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(50_000);
+    await loopPromise;
+    vi.useRealTimers();
+    setStreamDiagnostic(null);
+
+    const warnings = phases.filter((p) => p.phase === "non_streaming_session");
+    expect(warnings).toHaveLength(1); // once per session, not once per call
+    expect(warnings[0].data).toMatchObject({ nonStreamingCalls: 3, providerCalls: 9 });
+    expect(String(warnings[0].data?.impact)).toContain("re-billed in full");
+  }, 30_000);
+
   it("classifies exhausted stalls as a device or network-path failure", async () => {
     vi.useFakeTimers();
 
@@ -1472,6 +1534,97 @@ describe("agentLoop", () => {
     );
 
     expect(calls).toEqual(["mutate:start", "mutate:end", "read_after"]);
+  });
+
+  it("tells a dispatched-then-aborted call apart from one that never started", async () => {
+    const controller = new AbortController();
+    mockStream.mockReturnValueOnce({
+      [Symbol.asyncIterator]: async function* () {
+        yield* [];
+      },
+      response: Promise.resolve({
+        message: {
+          role: "assistant" as const,
+          content: [
+            { type: "tool_call" as const, id: "t1", name: "deploy", args: {} },
+            { type: "tool_call" as const, id: "t2", name: "notify", args: {} },
+          ],
+        },
+        stopReason: "tool_use",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    } as unknown as ReturnType<typeof stream>);
+
+    // Sequential: `notify` cannot start until `deploy` returns, and the abort
+    // lands first — so `deploy` ran (outcome unknown) and `notify` never did.
+    const deployTool: AgentTool<typeof emptyParams> = {
+      name: "deploy",
+      description: "long-running effect",
+      parameters: emptyParams,
+      executionMode: "sequential",
+      async execute(_args, ctx) {
+        controller.abort();
+        await new Promise((_resolve, reject) => {
+          ctx.signal.addEventListener(
+            "abort",
+            () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            { once: true },
+          );
+        });
+        return "unreachable";
+      },
+    };
+    const notifyTool: AgentTool<typeof emptyParams> = {
+      name: "notify",
+      description: "never reached",
+      parameters: emptyParams,
+      executionMode: "sequential",
+      execute: () => Promise.resolve("sent"),
+    };
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+    ];
+    await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      tools: [deployTool, notifyTool],
+      signal: controller.signal,
+    });
+
+    const results = messages.find((m) => m.role === "tool")?.content as ToolResult[];
+    const deployResult = results.find((r) => r.toolCallId === "t1")?.content as string;
+    const notifyResult = results.find((r) => r.toolCallId === "t2")?.content as string;
+
+    // Dispatched: the model must not assume it did nothing and repeat it.
+    expect(deployResult).toContain("UNKNOWN");
+    expect(deployResult).toContain("deploy");
+    expect(deployResult).not.toContain("Safe to retry");
+    // Never dispatched: retrying is free and correct.
+    expect(notifyResult).toContain("Safe to retry");
+    expect(notifyResult).toContain("notify");
+  });
+
+  it("labels a tool call orphaned by restore as unknown, not as never-ran", async () => {
+    // A transcript that stops between the call and its result — what a crash,
+    // a compaction or a session restore leaves behind.
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "ship it" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_call" as const, id: "t9", name: "migrate", args: {} }],
+      },
+      { role: "user", content: "continue" },
+    ];
+    mockStream.mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    await collectLoop(messages, { provider: "anthropic", model: "test", tools: [] });
+
+    const results = messages.find((m) => m.role === "tool")?.content as ToolResult[];
+    expect(results[0]?.content).toContain("UNKNOWN");
+    expect(results[0]?.content).toContain("migrate");
   });
 
   it("redacts successful tool output before events and provider context", async () => {

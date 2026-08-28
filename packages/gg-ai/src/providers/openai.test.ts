@@ -395,32 +395,37 @@ describe("streamOpenAI tool argument parsing", () => {
     createMock.mockReset();
   });
 
-  it.each<Provider>(["openai", "glm", "moonshot", "xiaomi", "deepseek", "openrouter"])(
-    "preserves streamed function call arguments for %s",
-    async (provider) => {
-      const { events, response } = await collectResponse(provider, '{"command":"echo ok"}');
+  it.each<Provider>([
+    "openai",
+    "glm",
+    "moonshot",
+    "xiaomi",
+    "deepseek",
+    "openrouter",
+    "huggingface",
+  ])("preserves streamed function call arguments for %s", async (provider) => {
+    const { events, response } = await collectResponse(provider, '{"command":"echo ok"}');
 
-      expect(response).toMatchObject({
-        message: {
-          content: [
-            {
-              type: "tool_call",
-              id: "call_1",
-              name: "bash",
-              args: { command: "echo ok" },
-            },
-          ],
-        },
-        stopReason: "tool_use",
-      });
-      expect(events).toContainEqual({
-        type: "toolcall_done",
-        id: "call_1",
-        name: "bash",
-        args: { command: "echo ok" },
-      });
-    },
-  );
+    expect(response).toMatchObject({
+      message: {
+        content: [
+          {
+            type: "tool_call",
+            id: "call_1",
+            name: "bash",
+            args: { command: "echo ok" },
+          },
+        ],
+      },
+      stopReason: "tool_use",
+    });
+    expect(events).toContainEqual({
+      type: "toolcall_done",
+      id: "call_1",
+      name: "bash",
+      args: { command: "echo ok" },
+    });
+  });
 
   it("unwraps double-encoded streamed function call arguments", async () => {
     const { response } = await collectResponse("glm", JSON.stringify('{"command":"echo ok"}'));

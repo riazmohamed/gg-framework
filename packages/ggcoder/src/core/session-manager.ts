@@ -9,7 +9,7 @@ import {
   type Provider,
   type Usage,
 } from "@abukhaled/gg-ai";
-import type { AgentTurnTiming } from "@abukhaled/gg-agent";
+import { indeterminateOutcomeText, type AgentTurnTiming } from "@abukhaled/gg-agent";
 import { log } from "./logger.js";
 import { encodeCwd } from "./encode-cwd.js";
 import { getUserSessionPrompt } from "./session-preview.js";
@@ -416,6 +416,8 @@ export class SessionManager {
 
   private sessionsDir: string;
   private warnedPersistCodes = new Set<string>();
+  /** Session files whose tail this process already checked (see {@link sealTornTail}). */
+  private sealedTails = new Set<string>();
   /** Called once per error code when session persistence fails (e.g. ENOSPC). */
   onPersistError?: (error: NodeJS.ErrnoException) => void;
 
@@ -545,6 +547,43 @@ export class SessionManager {
     const temporaryPath = `${statePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
     await fs.writeFile(temporaryPath, JSON.stringify(state), "utf-8");
     await fs.rename(temporaryPath, statePath);
+  }
+
+  /**
+   * Terminate a half-written last line before appending after it.
+   *
+   * Entries are one JSON object per line, appended with a trailing newline. A
+   * process killed mid-append leaves that final line without its newline — and
+   * the next append then fuses onto it, so ONE torn write destroys TWO records:
+   * the incomplete one and the first record of the resumed turn. Both are then
+   * silently skipped as malformed at load, so the user loses a message from
+   * their own history with no error shown. Writing the missing newline first
+   * confines the loss to the record that was actually torn.
+   *
+   * Once per file per process: the fuse can only happen on the first append
+   * after opening a file that someone else left torn.
+   */
+  private async sealTornTail(filePath: string): Promise<void> {
+    if (this.sealedTails.has(filePath)) return;
+    this.sealedTails.add(filePath);
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+    try {
+      handle = await fs.open(filePath, "r+");
+      const { size } = await handle.stat();
+      if (size === 0) return;
+      const tail = Buffer.alloc(1);
+      await handle.read(tail, 0, 1, size - 1);
+      if (tail[0] === 0x0a) return;
+      await handle.write("\n", size, "utf-8");
+      log("WARN", "session", "Repaired a session file whose last line was cut short", {
+        path: filePath,
+      });
+    } catch {
+      // Missing file (the append below creates it) or an unwritable one — the
+      // append itself reports anything that actually matters.
+    } finally {
+      await handle?.close().catch(() => {});
+    }
   }
 
   /**
@@ -1264,6 +1303,7 @@ export class SessionManager {
       const writablePath = await thawSessionArchive(sessionPath);
       const normalized = await normalizeSessionEntryForStorage(safeEntry, writablePath);
       if (normalized === null) return;
+      await this.sealTornTail(writablePath);
       await fs.appendFile(writablePath, `${JSON.stringify(normalized)}\n`, "utf-8");
     } catch (error) {
       this.handlePersistError(error, "appendEntry");
@@ -1577,45 +1617,39 @@ export class SessionManager {
 
       if (msg.role !== "assistant") continue;
       const content = Array.isArray(msg.content) ? msg.content : [];
-      const toolUseIds = content
+      const toolUses = content
         .filter((p) => p.type === "tool_call")
-        .map((p) => (p as { type: "tool_call"; id: string }).id);
-      if (toolUseIds.length === 0) continue;
+        .map((p) => p as { type: "tool_call"; id: string; name: string });
+      if (toolUses.length === 0) continue;
+
+      // The transcript stops before the result, so whether the tool ran is
+      // unrecoverable here. Say "unknown" rather than "interrupted": a resumed
+      // session must not re-run a push or a migration that already landed.
+      const repair = (call: { id: string; name: string }) => ({
+        type: "tool_result" as const,
+        toolCallId: call.id,
+        content: indeterminateOutcomeText(call.name),
+        isError: true,
+      });
 
       // Check if the next message is a tool message with matching results
       const next = messages[i + 1];
       if (next?.role === "tool" && Array.isArray(next.content)) {
         const existingIds = new Set(next.content.map((r: { toolCallId: string }) => r.toolCallId));
-        const missing = toolUseIds.filter((id) => !existingIds.has(id));
-        if (missing.length > 0) {
-          // Patch the existing tool message with missing results
-          for (const id of missing) {
-            (
-              next.content as {
-                type: string;
-                toolCallId: string;
-                content: string;
-                isError: boolean;
-              }[]
-            ).push({
-              type: "tool_result",
-              toolCallId: id,
-              content: "Tool execution was interrupted.",
-              isError: true,
-            });
-          }
+        for (const call of toolUses) {
+          if (existingIds.has(call.id)) continue;
+          (
+            next.content as {
+              type: string;
+              toolCallId: string;
+              content: string;
+              isError: boolean;
+            }[]
+          ).push(repair(call));
         }
       } else {
         // No tool message follows — insert a synthetic one
-        repaired.push({
-          role: "tool" as const,
-          content: toolUseIds.map((id) => ({
-            type: "tool_result" as const,
-            toolCallId: id,
-            content: "Tool execution was interrupted.",
-            isError: true,
-          })),
-        });
+        repaired.push({ role: "tool" as const, content: toolUses.map(repair) });
       }
     }
 

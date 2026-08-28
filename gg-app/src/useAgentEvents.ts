@@ -45,10 +45,16 @@ export interface ImagePreview {
 }
 
 // Hook kind → notice copy + tone color, mirroring the TUI's app-items.ts.
-export type HookKind = "ideal" | "loop_break" | "regrounding";
+export type HookKind = "ideal" | "verification" | "loop_break" | "regrounding";
+/** Hooks that fire in place of a final answer, so their draft must be held. */
+export type PreFinalHookKind = Extract<HookKind, "ideal" | "verification">;
 export const HOOK_PRESENTATION: Record<HookKind, { text: string; color: string }> = {
   ideal: {
     text: "Hook engaged. Running an ideal review before finalizing.",
+    color: theme.secondary,
+  },
+  verification: {
+    text: "Hook engaged. Running the project's verification before finalizing.",
     color: theme.secondary,
   },
   loop_break: {
@@ -238,13 +244,18 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // canonical live-file count on session_reset; this content supplies the fallback
   // count when connected to an older sidecar.
   const planReviewContentRef = useRef<string | null>(null);
-  // Ideal review is armed: a stop right now would inject the review, so the text
-  // the model is streaming is a candidate final answer the review will replace.
-  // Hold it in `heldTextRef` instead of painting it — the sidecar tells us this
-  // BEFORE the first token, so the user never reads a draft that then vanishes.
-  // Released (rendered) the moment the turn proves it was not a draft: tool
-  // calls, a non-ideal hook, or the run ending with no review.
-  const idealArmedRef = useRef(false);
+  // Which pre-final hooks are armed: a stop right now would inject one of them,
+  // so the text the model is streaming is a candidate final answer that hook
+  // will replace. Hold it in `heldTextRef` instead of painting it — the sidecar
+  // tells us this BEFORE the first token, so the user never reads a draft that
+  // then vanishes. Released (rendered) the moment the turn proves it was not a
+  // draft: tool calls, a mid-loop hook, or the run ending with no injection.
+  //
+  // A Set, not a bool: the sidecar arms ideal review and the verification gate
+  // independently and emits each edge only once, so a shared flag would let one
+  // hook's disarm release a draft the other is still holding — with no re-arm
+  // ever coming, the draft paints and is then deleted.
+  const armedHooksRef = useRef<Set<PreFinalHookKind>>(new Set());
   const heldTextRef = useRef<string>("");
 
   // Streaming deltas arrive faster than React can usefully render each one.
@@ -274,7 +285,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     (text: string) => {
       // Armed: this text is a review draft until proven otherwise. Accumulate it
       // off-screen; releaseHeldText paints it if the turn turns out to be real.
-      if (idealArmedRef.current) {
+      if (armedHooksRef.current.size > 0) {
         heldTextRef.current += text;
         return;
       }
@@ -562,8 +573,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           tokensRef.current = 0;
           assistantTextRef.current = "";
           // Arming is per-run state on the sidecar; start every run streaming
-          // live and let hook_armed hold text back once the gate is crossed.
-          idealArmedRef.current = false;
+          // live and let hook_armed hold text back once a gate is crossed.
+          armedHooksRef.current.clear();
           heldTextRef.current = "";
           thinkingStartRef.current = null;
           thinkingAccumRef.current = 0;
@@ -882,7 +893,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // Cancels and errors end a run without agent_done; never strand held
           // text, and clear arming so the next run starts streaming live.
           releaseHeldText();
-          idealArmedRef.current = false;
+          armedHooksRef.current.clear();
           // Flush first so final sub-agent statuses are in place before the
           // aborted-marking pass below reads them.
           flushSubagentSnapshots();
@@ -1122,21 +1133,27 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         }
         case "hook_armed": {
-          // Only the ideal review holds text back; other hooks are mid-loop.
-          if (String(d.kind ?? "ideal") !== "ideal") break;
-          const armed = d.armed !== false;
-          idealArmedRef.current = armed;
-          // Disarming without the review firing (autopilot takes verification
-          // over mid-run) must not strand text collected while armed.
-          if (!armed) releaseHeldText();
+          // Pre-final hooks hold text back; other hooks are mid-loop.
+          const armedKind = String(d.kind ?? "ideal");
+          if (armedKind !== "ideal" && armedKind !== "verification") break;
+          if (d.armed !== false) {
+            armedHooksRef.current.add(armedKind);
+            break;
+          }
+          armedHooksRef.current.delete(armedKind);
+          // Disarming without the hook firing (autopilot takes verification over
+          // mid-run) must not strand text collected while armed — but only once
+          // no other pre-final hook still wants it held.
+          if (armedHooksRef.current.size === 0) releaseHeldText();
           break;
         }
         case "hook": {
           const kind = String(d.kind ?? "ideal") as HookKind;
           if (kind in HOOK_PRESENTATION) {
-            if (kind === "ideal") {
+            if (kind === "ideal" || kind === "verification") {
               // Draft dies here — held (never painted) in the normal armed path,
-              // or removed from the transcript when arming came too late.
+              // or removed from the transcript when arming came too late. Both
+              // pre-final hooks replace that draft with a later, better answer.
               discardStreamingDraft();
             } else {
               // Mid-loop hooks interrupt real work: keep what was said.
@@ -1155,7 +1172,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // The transcript is going away, so acked queue texts from the old
           // session must not gate clears in the new one.
           ackedQueueTextsRef.current.clear();
-          idealArmedRef.current = false;
+          armedHooksRef.current.clear();
           heldTextRef.current = "";
           stickToBottomRef.current = true;
           setItems([]);

@@ -11,8 +11,8 @@
 // its own runner, so copied native binaries match the target.
 import { build } from "esbuild";
 import { createRequire } from "node:module";
-import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -218,6 +218,78 @@ function pruneForeignNativePayloads() {
   console.log(`pruned onnxruntime-node payloads to ${process.platform}/${process.arch}`);
 }
 
+const mb = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
+
+/** Recursive non-symlink walk; visit(absPath, dirent) gets files and dirs. */
+function walk(root, visit) {
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      visit(p, entry);
+      if (entry.isDirectory()) stack.push(p);
+    }
+  }
+}
+
+/** Delete files matched by `dead(fileAbsPath)`; returns bytes freed. */
+function pruneFiles(dead) {
+  let freed = 0;
+  walk(nodeModulesOut, (p, entry) => {
+    if (entry.isFile() && dead(p)) {
+      freed += statSync(p).size;
+      rmSync(p);
+    }
+  });
+  return freed;
+}
+
+/**
+ * Source maps are dev-tooling payload: nothing in the packaged app loads them,
+ * and they were ~52 MB across the copied dependency tree.
+ */
+function stripSourceMaps() {
+  let count = 0;
+  walk(nodeModulesOut, (p, entry) => {
+    if (entry.isFile() && p.endsWith(".map")) count++;
+  });
+  const freed = pruneFiles((p) => p.endsWith(".map"));
+  console.log(`stripped ${count} source maps (${mb(freed)})`);
+}
+
+/**
+ * `onnxruntime-web` is statically imported by @huggingface/transformers but in
+ * Node the exports map resolves only `dist/ort.node.min.{js,mjs}` — thin
+ * wrappers around onnxruntime-node. The browser wasm binaries and webgl/webgpu
+ * bundle variants (~85 MB) can never execute in a Node sidecar. Fail open: if
+ * the node entries are missing (future version renamed them), keep everything
+ * rather than shipping a package that cannot load.
+ */
+function pruneBrowserOnnxPayloads() {
+  const KEEP = ["package.json", "types.d.ts", join("dist", "ort.node.min.js"), join("dist", "ort.node.min.mjs")];
+  const roots = [];
+  walk(nodeModulesOut, (p, entry) => {
+    if (entry.isDirectory() && entry.name === "onnxruntime-web" && existsSync(join(p, "package.json"))) {
+      roots.push(p);
+    }
+  });
+  for (const root of roots) {
+    if (!KEEP.every((rel) => existsSync(join(root, rel)))) {
+      console.warn(`skip onnxruntime-web prune (node entry missing): ${root}`);
+      continue;
+    }
+    let freed = 0;
+    walk(root, (p, entry) => {
+      if (!entry.isFile()) return;
+      if (KEEP.includes(relative(root, p))) return;
+      freed += statSync(p).size;
+      rmSync(p);
+    });
+    console.log(`pruned onnxruntime-web browser payloads (${mb(freed)})`);
+  }
+}
+
 async function main() {
   if (!existsSync(ggcoderSidecarEntry)) {
     throw new Error(
@@ -260,6 +332,8 @@ async function main() {
     copyPackage(name, ggcoderRequire, ggcoderRoot, copied);
   }
   pruneForeignNativePayloads();
+  pruneBrowserOnnxPayloads();
+  stripSourceMaps();
   console.log(
     `bundled sidecar → ${outFile}\ncopied ${copied.size} external packages → ${nodeModulesOut}`,
   );

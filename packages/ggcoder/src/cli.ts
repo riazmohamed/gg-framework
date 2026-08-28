@@ -407,9 +407,10 @@ function main(): void {
     if (p === "moonshot") return "kimi-k3";
     if (p === "minimax") return "MiniMax-M3";
     if (p === "deepseek") return "deepseek-v4-pro";
+    if (p === "huggingface") return "Qwen/Qwen3-Coder-480B-A35B-Instruct";
     if (p === "openrouter") return "qwen/qwen3.6-plus";
     if (p === "sakana") return "fugu";
-    if (p === "xai") return "grok-4.5";
+    if (p === "xai") return "grok-4.6";
     return "claude-opus-5";
   }
 
@@ -474,7 +475,10 @@ async function runInkTUI(opts: {
 
   // Wire stream stall diagnostics into the debug log
   setStreamDiagnostic((phase, data) => {
-    log("INFO", "stream", phase, data as Record<string, unknown>);
+    // A session stuck on the non-streaming fallback costs real money and real
+    // latency; it does not belong in the INFO noise floor.
+    const level = phase === "non_streaming_session" ? "WARN" : "INFO";
+    log(level, "stream", phase, data as Record<string, unknown>);
   });
   setProviderDiagnostic((phase, data) => {
     log("INFO", "provider", phase, data as Record<string, unknown>);
@@ -1015,8 +1019,9 @@ async function runSessions(): Promise<void> {
     if (p === "moonshot") return "kimi-k3";
     if (p === "minimax") return "MiniMax-M3";
     if (p === "deepseek") return "deepseek-v4-pro";
+    if (p === "huggingface") return "Qwen/Qwen3-Coder-480B-A35B-Instruct";
     if (p === "sakana") return "fugu";
-    if (p === "xai") return "grok-4.5";
+    if (p === "xai") return "grok-4.6";
     return "claude-opus-5";
   }
 

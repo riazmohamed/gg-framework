@@ -91,7 +91,8 @@ import { z } from "zod";
 import { MCPClientManager, getAllMcpServers } from "./mcp/index.js";
 import type { MCPElicitHandler } from "./mcp/index.js";
 import type { MCPServerConfig } from "./mcp/types.js";
-import { DeferredToolCatalog } from "./mcp/deferred-catalog.js";
+import { clampMcpToolDescription, DeferredToolCatalog } from "./mcp/deferred-catalog.js";
+import { CONTEXT_LIMITS, resolveContextLimits, type ContextLimits } from "./context-limits.js";
 import { McpCatalogCache, type CachedTool } from "./mcp/catalog-cache.js";
 import {
   describeDropped,
@@ -127,8 +128,16 @@ import {
   type CycleDetection,
 } from "./loop-breaker.js";
 import { buildRegroundingMessage } from "./regrounding.js";
+import { buildEnvDeltaMessage } from "./env-delta.js";
 import { wrapSteeringText, buildNotificationSteeringText, STEERING_PREFIX } from "./steering.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
+import {
+  VerificationGate,
+  extractAddedLines,
+  isCheckOwnFile,
+  isCodeFilePath,
+  isVerificationCommand,
+} from "./verification-gate.js";
 
 import { findUserSessionPrompt, getUserSessionPrompt } from "./session-preview.js";
 import { normalizeMessageImages } from "./message-images.js";
@@ -426,10 +435,21 @@ export class AgentSession {
   /** 0 = none; 1 = first nudge sent; 2 = final stop-and-report injected. */
   private loopBreakInjected: 0 | 1 | 2 = 0;
   private regroundingInjected = false;
+  /**
+   * The environment as the cached system prompt currently describes it.
+   * Re-recorded on every prompt build, so a rebuild (e.g. `/add-dir`) needs no
+   * delta; anything that changes WITHOUT one is caught by the hook below.
+   */
+  private renderedEnvironment: SystemPromptEnvironment = {};
   /** Wall-clock start of the current run; scopes the background-process gate. */
   private runStartedAt = 0;
   /** Gate injections spent this run, capped by MAX_PROCESS_GATE_INJECTIONS. */
   private processGateInjected = 0;
+  /** Verification gate: code edited this run, nothing proved it since. */
+  private readonly verificationGate = new VerificationGate();
+  /** Mirror of the last verification `hook_armed` value, so the event fires
+   *  only on a real edge. */
+  private verificationArmed = false;
   private compactionOccurred = false;
   private lastCompactionCompacted = false;
   private compactionRetryAfter = 0;
@@ -464,6 +484,8 @@ export class AgentSession {
   private mcpManager?: MCPClientManager;
   /** Deferred MCP tools awaiting discovery via tool_search. */
   private mcpCatalog?: DeferredToolCatalog;
+  /** Resolved prompt-injection byte budgets (contextLimits setting). */
+  private contextLimits: ContextLimits = CONTEXT_LIMITS;
   /**
    * Built-in tools held in the catalog instead of the live toolset. Their names
    * still render as one-line hints in the prompt's Tools section, so the model
@@ -583,6 +605,7 @@ export class AgentSession {
     // Load settings & auth
     this.settingsManager = new SettingsManager(paths.settingsFile);
     await this.settingsManager.load();
+    this.contextLimits = resolveContextLimits(this.settingsManager.get("contextLimits"));
 
     this.authStorage = new AuthStorage(paths.authFile);
     await this.authStorage.load();
@@ -625,6 +648,7 @@ export class AgentSession {
     } = await createTools(this.cwd, {
       agents,
       skills: this.skills,
+      contextLimits: this.contextLimits,
       provider: this.provider,
       model: this.model,
       lspDiagnostics: this.settingsManager.get("lspDiagnostics"),
@@ -647,6 +671,7 @@ export class AgentSession {
         // tool agree on which roots are writable.
         additionalRoots: this.additionalRoots,
         allowOutsideWorkspaceWrites: this.settingsManager.get("allowOutsideWorkspaceWrites"),
+        allowUnixSockets: this.settingsManager.get("sandboxAllowUnixSockets"),
       }),
       getUseExternalGrep: () => this.settingsManager.get("grepUseRipgrep"),
       authStorage: this.authStorage,
@@ -698,7 +723,7 @@ export class AgentSession {
         // sits inside the cached prefix stays byte-stable across turns.
         this.tools = core;
         this.deferredBuiltinToolNames = deferred.map((t) => t.name);
-        this.mcpCatalog ??= new DeferredToolCatalog();
+        this.mcpCatalog ??= new DeferredToolCatalog(this.contextLimits);
         this.mcpCatalog.add(deferred);
         this.ensureToolSearchTool();
       }
@@ -949,10 +974,13 @@ export class AgentSession {
     }
     const defer = !this.opts.allowedTools && this.settingsManager.get("deferredMcpTools");
     if (!defer) {
-      this.replaceOrPushTools(mcpTools);
+      // Eager path bypasses the catalog, so budget descriptions here too.
+      this.replaceOrPushTools(
+        mcpTools.map((tool) => clampMcpToolDescription(tool, this.contextLimits)),
+      );
       return;
     }
-    this.mcpCatalog ??= new DeferredToolCatalog();
+    this.mcpCatalog ??= new DeferredToolCatalog(this.contextLimits);
     // `add` is name-keyed, so live definitions replace cached stubs in place.
     this.mcpCatalog.add(mcpTools);
     // A stub the model already promoted lives in `this.tools`; swap it for the
@@ -971,7 +999,7 @@ export class AgentSession {
    * registration on an existing catalog would leave those tools unreachable.
    */
   private ensureToolSearchTool(): void {
-    this.mcpCatalog ??= new DeferredToolCatalog();
+    this.mcpCatalog ??= new DeferredToolCatalog(this.contextLimits);
     if (this.tools.some((t) => t.name === "tool_search")) return;
     this.tools.push(
       createToolSearchTool(
@@ -991,6 +1019,7 @@ export class AgentSession {
             ? { serverName, ok: true }
             : { serverName, ok: false, error: outcome.error };
         },
+        this.contextLimits,
       ),
     );
   }
@@ -1046,7 +1075,7 @@ export class AgentSession {
 
   /** Catalog-only registration for cached stubs — never marks them live. */
   private addCachedMcpTools(stubs: AgentTool[]): void {
-    this.mcpCatalog ??= new DeferredToolCatalog();
+    this.mcpCatalog ??= new DeferredToolCatalog(this.contextLimits);
     this.mcpCatalog.add(stubs);
     this.ensureToolSearchTool();
   }
@@ -1204,12 +1233,28 @@ export class AgentSession {
   ): Array<TextContent | ImageContent | VideoContent> {
     const parts: Array<TextContent | ImageContent | VideoContent> = [];
     const fileNotes: string[] = [];
-    const modelSupportsVideo = getModel(this.model)?.supportsVideo ?? false;
+    const modelInfo = getModel(this.model);
+    const modelSupportsVideo = modelInfo?.supportsVideo ?? false;
+    // GLM only: GLM models have no native image input, but the GLM session is
+    // the only one with the zai_vision MCP server connected (core/mcp/defaults.ts).
+    // Point at the real tool instead of an inline image the provider layer would
+    // blank into a placeholder. Every other provider keeps inline images.
+    const glmImageHint = this.provider === "glm" && modelInfo?.supportsImages === false;
     for (const a of attachments) {
       if (a.kind === "image") {
-        parts.push({ type: "image", mediaType: a.mediaType, data: a.data });
-        if (a.path) {
-          parts.push({ type: "text", text: `[Image saved at ${a.path}]` });
+        if (glmImageHint && a.path) {
+          parts.push({
+            type: "text",
+            text:
+              `[User attached an image saved at: ${a.path} — analyze it with the ` +
+              `mcp__zai_vision__analyze_image tool (if that tool is not available yet, ` +
+              `call tool_search with "analyze image" to unlock it first, then call it with image_source=${a.path})]`,
+          });
+        } else {
+          parts.push({ type: "image", mediaType: a.mediaType, data: a.data });
+          if (a.path) {
+            parts.push({ type: "text", text: `[Image saved at ${a.path}]` });
+          }
         }
       } else if (a.kind === "video") {
         // Mirror the CLI's buildUserContentWithAttachments: never send inline
@@ -1280,11 +1325,13 @@ export class AgentSession {
     this.idealReviewPhase = "idle";
     // No event here: clients reset their own hold on run_start.
     this.idealReviewArmed = false;
+    this.verificationArmed = false;
     this.idealDriftProbe = null;
     this.loopBreakInjected = 0;
     this.regroundingInjected = false;
     this.runStartedAt = Date.now();
     this.processGateInjected = 0;
+    this.verificationGate.reset();
     this.compactionOccurred = false;
     this.originalRequest = originalRequest;
   }
@@ -1330,15 +1377,53 @@ export class AgentSession {
           const removed = (diff.match(/^-[^-]/gm) ?? []).length;
           this.hookStats.changedLines += added + removed;
         }
+        // Verification-gate bookkeeping: successful code mutations and completed
+        // foreground verification commands, in occurrence order.
+        if (!event.isError && args) {
+          if (name === "edit" || name === "write") {
+            const filePath = String((args as { file_path?: unknown }).file_path ?? "");
+            // Check-owning files (tsconfig.json, pytest.ini, vitest.config.ts …)
+            // are tracked even when they are not source code: editing one is how
+            // a red suite is turned green without fixing anything.
+            if (filePath && (isCodeFilePath(filePath) || isCheckOwnFile(filePath))) {
+              const addedText =
+                name === "write"
+                  ? String((args as { content?: unknown }).content ?? "")
+                  : extractAddedLines(
+                      (event.details as { diff?: string } | undefined)?.diff ?? event.result,
+                    );
+              this.verificationGate.recordMutation(filePath, addedText);
+            }
+          }
+          if (
+            name === "bash" &&
+            !(args as { run_in_background?: unknown }).run_in_background &&
+            isVerificationCommand(String((args as { command?: unknown }).command ?? ""))
+          ) {
+            this.verificationGate.recordVerification();
+          }
+          // Reading the final output of an EXITED background verification run
+          // counts: the process gate forces this read anyway, so without it the
+          // gate would demand a redundant foreground re-run of tests the agent
+          // already watched finish.
+          if (name === "task_output") {
+            const proc = this.processManager
+              ?.list()
+              .find((p) => p.id === (args as { id?: unknown }).id);
+            if (proc && proc.exitCode !== null && isVerificationCommand(proc.command)) {
+              this.verificationGate.recordVerification();
+            }
+          }
+        }
         // Tool results are what push the run over the review gate, and they all
         // land before the model writes its candidate final answer — so this is
         // the point where arming still beats the draft's first token.
-        this.refreshIdealReviewArmed();
+        this.refreshHookArming();
         break;
       }
       case "turn_end":
         this.hookStats.turns = event.turn;
-        this.refreshIdealReviewArmed();
+        this.refreshHookArming();
         for (let index = this.messages.length - 1; index >= 0; index--) {
           const anchor = this.messages[index];
           if (anchor?.role === "assistant") {
@@ -1393,6 +1478,23 @@ export class AgentSession {
    * Mirrors the TUI's getSteeringMessages ordering.
    */
   private getHookSteeringMessages(): Message[] | null {
+    // Environment drift: settings can move the network allowlist mid-session
+    // with no prompt rebuild, leaving the cached Environment section describing
+    // hosts that are no longer the real policy. Correcting it by appending is
+    // ~30 tokens; re-rendering the prompt would invalidate every cached byte
+    // from that section onward. Unconditional and cheap: identical facts
+    // produce no message at all.
+    // A verbatim custom prompt has no Environment section to correct, so a
+    // note pointing at one would describe something the model cannot see.
+    const environmentDelta = this.customSystemPrompt
+      ? null
+      : buildEnvDeltaMessage(this.renderedEnvironment, this.promptEnvironment());
+    if (environmentDelta) {
+      // The model has now been told; only a further change re-triggers this.
+      this.renderedEnvironment = this.promptEnvironment();
+      log("INFO", "session", "Injecting an environment update the prompt is too stale to show");
+    }
+
     // Push notifications: a child that finished or a background build that
     // exited is new *fact*, not a correction, and it is cheap (bounded to 1 KiB
     // per drain). Drained above the loop-break checks so the agent can act on
@@ -1446,9 +1548,18 @@ export class AgentSession {
         ];
         return { role: "user", content: parts, provenance };
       });
-      return notificationMessage ? [...steeringMessages, notificationMessage] : steeringMessages;
+      return [
+        ...(environmentDelta ? [environmentDelta] : []),
+        ...steeringMessages,
+        ...(notificationMessage ? [notificationMessage] : []),
+      ];
     }
-    if (notificationMessage) return [notificationMessage];
+    if (environmentDelta || notificationMessage) {
+      return [
+        ...(environmentDelta ? [environmentDelta] : []),
+        ...(notificationMessage ? [notificationMessage] : []),
+      ];
+    }
     if (this.opts.selfCorrectionHooks === false) return null;
     if (!this.settingsManager.get("idealReviewEnabled")) return null;
     // Two-stage loop-breaker: stage 1 nudges; a FRESH detection after that
@@ -1566,9 +1677,33 @@ export class AgentSession {
     return this.idealDriftProbe.drifted;
   }
 
-  /** Broadcast Ideal-review arming on change. Both edges matter: armed=false
-   *  after the review fires is what lets a client stream the REVIEWED final
-   *  answer live again. */
+  /** Would a stop right now inject the verification gate? Same conditions as
+   *  the pre-stop branch below, so arming and injection cannot disagree. */
+  private wouldInjectVerification(): boolean {
+    if (this.opts.selfCorrectionHooks === false) return false;
+    if (!this.settingsManager.get("verificationGateEnabled")) return false;
+    if (this.opts.allowedTools && !this.opts.allowedTools.includes("bash")) return false;
+    return this.verificationGate.willInject();
+  }
+
+  /** Broadcast pre-final hook arming on change. Both edges matter: armed=false
+   *  after the hook fires is what lets a client stream the REVIEWED final
+   *  answer live again.
+   *
+   *  Callable before `initialize()`: the sidecar sets Ken's review suppression
+   *  on a freshly constructed session, and every arming predicate below reads
+   *  settings that `initialize()` has not loaded yet. Nothing can be armed
+   *  before the session can run a turn, and the first `tool_result`/`turn_end`
+   *  recomputes both edges — so skipping is the correct answer, not a patch. */
+  private refreshHookArming(): void {
+    if (!this.settingsManager) return;
+    this.refreshIdealReviewArmed();
+    const armed = this.wouldInjectVerification();
+    if (armed === this.verificationArmed) return;
+    this.verificationArmed = armed;
+    this.eventBus.emit("hook_armed", { kind: "verification", armed });
+  }
+
   private refreshIdealReviewArmed(): void {
     const armed = this.wouldInjectIdealReview();
     if (armed === this.idealReviewArmed) return;
@@ -1598,6 +1733,26 @@ export class AgentSession {
         injected: String(this.processGateInjected),
       });
       return processFollowUp;
+    }
+
+    // Verification gate: code was edited but nothing verified since the last
+    // edit. Above the Ideal review so checks RUN before the read-based review
+    // starts; off for allow-listed sessions that cannot run commands at all.
+    if (
+      this.opts.selfCorrectionHooks !== false &&
+      this.settingsManager.get("verificationGateEnabled") &&
+      (!this.opts.allowedTools || this.opts.allowedTools.includes("bash"))
+    ) {
+      const verificationFollowUp = this.verificationGate.followUp();
+      if (verificationFollowUp) {
+        log("INFO", "verification-gate", "Injecting verification follow-up", {});
+        // Announce, THEN disarm: clients release held text on disarm, so the
+        // reverse order paints the draft and immediately deletes it — the exact
+        // flash arming exists to prevent.
+        this.eventBus.emit("hook", { kind: "verification" });
+        this.refreshHookArming();
+        return verificationFollowUp;
+      }
     }
 
     if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) return null;
@@ -2677,7 +2832,7 @@ export class AgentSession {
     }
     // Suppression flips mid-run (autopilot takes over verification), so a client
     // holding a draft under a stale arming must be released.
-    this.refreshIdealReviewArmed();
+    this.refreshHookArming();
   }
 
   /** Queue a user message (optionally with attachments) to be injected mid-run
@@ -2849,6 +3004,17 @@ export class AgentSession {
     return this.deferredBuiltinToolNames.filter((name) => !live.has(name));
   }
 
+  /**
+   * The environment about to be rendered into a prompt, remembered as the
+   * truth the model has been told. Pairs with the env-delta hook: whatever the
+   * prompt states, the model is only corrected when reality moves away from it.
+   */
+  private recordRenderedEnvironment(): SystemPromptEnvironment {
+    const environment = this.promptEnvironment();
+    this.renderedEnvironment = environment;
+    return environment;
+  }
+
   /** Environment facts that vary per session rather than per host. */
   private promptEnvironment(): SystemPromptEnvironment {
     const networkAllow =
@@ -2875,7 +3041,8 @@ export class AgentSession {
         toolNames,
         deferredToolNames,
         context: this.opts.agentContext,
-        environment: this.promptEnvironment(),
+        environment: this.recordRenderedEnvironment(),
+        contextLimits: this.contextLimits,
       });
     }
     return buildSystemPrompt(
@@ -2886,8 +3053,9 @@ export class AgentSession {
       toolNames,
       undefined,
       this.provider,
-      this.promptEnvironment(),
+      this.recordRenderedEnvironment(),
       deferredToolNames,
+      this.contextLimits,
     );
   }
 

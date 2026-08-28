@@ -39,8 +39,9 @@ describe("buildSandboxSettings", () => {
     expect(settings.network).toMatchObject({
       strictAllowlist: true,
       allowUnixSockets: [],
-      // Dev servers and the screenshot tool bind loopback; blocking it would
-      // break core workflows without containing anything.
+      // Dev servers, preview servers and the screenshot tool all bind loopback,
+      // so this stays on by default; the daemons worth protecting listen on
+      // unix sockets, which allowUnixSockets keeps shut.
       allowLocalBinding: true,
     });
     // Egress is an allowlist, never open: an unknown host stays unreachable.
@@ -63,6 +64,88 @@ describe("buildSandboxSettings", () => {
     expect(settings.filesystem.allowWrite).not.toContain(os.homedir());
   });
 
+  it("refuses a write root a sandboxed command redirected at the filesystem root", () => {
+    // Every tool-cache dir is writable BY the sandboxed process, so a command
+    // can delete one and leave a symlink: `rm -rf ~/.deno && ln -s / ~/.deno`.
+    // Resolving that root would hand the next run write access to all of `/` —
+    // an escape that outlives the run that planted it.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "gg-sandbox-home-"));
+    const planted = path.join(fakeHome, ".deno");
+    fs.symlinkSync(path.parse(os.tmpdir()).root, planted);
+    const homeSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
+    try {
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gg-sandbox-workspace-"));
+      const settings = buildSandboxSettings(
+        cwd,
+        { mode: "workspace", allowedDomains: [] },
+        "darwin",
+      );
+
+      // Neither the symlink nor its target may be writable: writing through the
+      // symlink lands on the target, so keeping either one is the same escape.
+      expect(settings.filesystem.allowWrite).not.toContain(path.parse(os.tmpdir()).root);
+      expect(settings.filesystem.allowWrite).not.toContain(planted);
+      // The legitimate roots survive — this must not fail closed on everything.
+      expect(settings.filesystem.allowWrite).toEqual(
+        expect.arrayContaining([fs.realpathSync(path.resolve(cwd))]),
+      );
+    } finally {
+      homeSpy.mockRestore();
+    }
+  });
+
+  it("refuses a tool cache repointed at the SSH keys", () => {
+    // The subtler version of the same trick, and the reason $HOME is not a
+    // blanket-allowed landing zone: ~/.ssh sits inside the home directory, so
+    // treating "anywhere under $HOME" as intended authority would accept it.
+    // This list governs WRITES, so the ~/.ssh read denial does not cover it,
+    // and a writable authorized_keys is persistence.
+    // The fake home must sit outside `/tmp`, which is itself an intended zone.
+    // os.tmpdir() IS /tmp on Linux, so building the home under it would put
+    // ~/.ssh legitimately inside a permitted zone and the assertion would fail
+    // for the wrong reason (it passed on macOS only because os.tmpdir() there
+    // is /var/folders/…). node_modules is writable, git-ignored, and never a
+    // zone. Real machines put $HOME outside /tmp, which is the case under test.
+    const base = fs.mkdtempSync(
+      path.join(import.meta.dirname, "..", "..", "node_modules", ".gg-sandbox-base-"),
+    );
+    const fakeHome = path.join(base, "home");
+    const fakeTmp = path.join(base, "tmp");
+    const ssh = path.join(fakeHome, ".ssh");
+    fs.mkdirSync(ssh, { recursive: true });
+    fs.mkdirSync(fakeTmp);
+    fs.symlinkSync(ssh, path.join(fakeHome, ".deno"));
+    const homeSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
+    const tmpSpy = vi.spyOn(os, "tmpdir").mockReturnValue(fakeTmp);
+    try {
+      const cwd = path.join(base, "workspace");
+      fs.mkdirSync(cwd);
+      const settings = buildSandboxSettings(
+        cwd,
+        { mode: "workspace", allowedDomains: [] },
+        "darwin",
+      );
+
+      expect(settings.filesystem.allowWrite).not.toContain(ssh);
+      expect(settings.filesystem.allowWrite).not.toContain(fs.realpathSync(ssh));
+    } finally {
+      homeSpy.mockRestore();
+      tmpSpy.mockRestore();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("still follows the OS temp alias, so writes to /tmp are not silently denied", () => {
+    // The guard above must not break the reason withRealPath exists: macOS
+    // reaches the temp dir through /var → /private/var.
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gg-sandbox-workspace-"));
+    const settings = buildSandboxSettings(cwd, { mode: "workspace", allowedDomains: [] }, "darwin");
+
+    expect(settings.filesystem.allowWrite).toEqual(
+      expect.arrayContaining([fs.realpathSync(path.resolve(os.tmpdir()))]),
+    );
+  });
+
   it("honors the outside-workspace opt-out instead of contradicting the user", () => {
     const settings = buildSandboxSettings(
       path.join(os.tmpdir(), "gg-sandbox-workspace"),
@@ -73,6 +156,66 @@ describe("buildSandboxSettings", () => {
     expect(settings.filesystem.allowWrite).toContain(os.homedir());
     // Consenting to write outside the workspace is not consent to leak secrets.
     expect(settings.filesystem.denyRead).toContain(path.join(os.homedir(), ".ssh"));
+  });
+
+  it("always lets sandboxed commands bind a local port, on every platform", () => {
+    // Dev servers, preview servers and the screenshot tool all bind loopback.
+    // Upstream ties binding to loopback egress with no per-port form, so the
+    // egress half rides along rather than costing everyone a working dev
+    // server. There is deliberately no setting to turn this off.
+    for (const platform of ["darwin", "linux", "win32"] as const) {
+      const settings = buildSandboxSettings(
+        "/workspace",
+        { mode: "workspace", allowedDomains: [] },
+        platform,
+      );
+
+      expect(settings.network.allowLocalBinding, platform).toBe(true);
+      // Local ports being open is not egress being open, nor a route to the
+      // Docker socket — those stay governed independently.
+      expect(settings.network.strictAllowlist, platform).toBe(true);
+      expect(settings.network.allowedDomains, platform).not.toContain("api.example.com");
+      expect(settings.network.allowUnixSockets, platform).toEqual([]);
+    }
+  });
+
+  it("keeps unix sockets closed until the user names one", () => {
+    // The Docker socket is unauthenticated root-equivalent control of the host,
+    // and no domain allowlist can see it — no TCP is involved. So it is opt-in,
+    // per path, and never inferred.
+    const closed = buildSandboxSettings(
+      "/workspace",
+      { mode: "workspace", allowedDomains: [] },
+      "darwin",
+    );
+    expect(closed.network.allowUnixSockets).toEqual([]);
+
+    const opened = buildSandboxSettings(
+      "/workspace",
+      {
+        mode: "workspace",
+        allowedDomains: [],
+        allowUnixSockets: ["/var/run/docker.sock", "/var/run/docker.sock"],
+      },
+      "darwin",
+    );
+    expect(opened.network.allowUnixSockets).toEqual(["/var/run/docker.sock"]);
+    // Granting a socket is not granting anything else.
+    expect(opened.network.strictAllowlist).toBe(true);
+    expect(opened.network.allowedDomains).not.toContain("api.example.com");
+  });
+
+  it("ignores per-path socket grants on Linux, where they cannot be enforced", () => {
+    // SRT's Linux seccomp filter blocks AF_UNIX by syscall and cannot inspect
+    // paths. Passing the list through would read as enforcement that is not
+    // happening — better to visibly ignore it than to imply a guarantee.
+    const linux = buildSandboxSettings(
+      "/workspace",
+      { mode: "workspace", allowedDomains: [], allowUnixSockets: ["/var/run/docker.sock"] },
+      "linux",
+    );
+
+    expect(linux.network.allowUnixSockets).toEqual([]);
   });
 
   it("normalizes and de-duplicates explicit network domains deterministically", () => {
@@ -208,5 +351,41 @@ describe("prepareSandboxLaunch", () => {
     await expect(
       prepareSandboxLaunch(shell, os.tmpdir(), { mode: "workspace", allowedDomains: [] }),
     ).rejects.toThrow(/bubblewrap \+ socat|windows-install/);
+  });
+
+  it("refuses to call reduced isolation 'workspace', and warns about it in auto", async () => {
+    // Linux drops unix-socket blocking when the apply-seccomp helper is absent
+    // and keeps going: the sandbox starts, the probe succeeds, and AF_UNIX
+    // sockets (Docker, the SSH agent) are reachable again. `workspace` promises
+    // to fail closed, so a silent pass here would be a false promise.
+    const degraded = {
+      supported: true,
+      reason: "ok",
+      degraded: "seccomp not available - unix socket access not restricted",
+    };
+
+    resetSandboxSupportProbeForTests(degraded);
+    await expect(
+      prepareSandboxLaunch(shell, os.tmpdir(), { mode: "workspace", allowedDomains: [] }),
+    ).rejects.toThrow(/isolation is incomplete[\s\S]*apply-seccomp/);
+
+    resetSandboxSupportProbeForTests(degraded);
+    const launch = await prepareSandboxLaunch(shell, os.tmpdir(), {
+      mode: "auto",
+      allowedDomains: [],
+    });
+    // `auto` degrades rather than breaking every command — but still sandboxes.
+    expect(launch.sandboxed).toBe(true);
+  });
+
+  it("keeps sandboxing when isolation is intact", async () => {
+    resetSandboxSupportProbeForTests({ supported: true, reason: "ok", degraded: null });
+
+    const launch = await prepareSandboxLaunch(shell, os.tmpdir(), {
+      mode: "workspace",
+      allowedDomains: [],
+    });
+
+    expect(launch.sandboxed).toBe(true);
   });
 });

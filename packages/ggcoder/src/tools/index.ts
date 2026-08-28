@@ -1,8 +1,10 @@
 import type { AgentTool } from "@abukhaled/gg-agent";
 import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
+import type { ContextLimits } from "../core/context-limits.js";
 import { SubAgentManager, type SubAgentSnapshot } from "../core/subagent-manager.js";
 import { ProcessManager } from "../core/process-manager.js";
 import { LspManager } from "../core/lsp/manager.js";
+import type { EditSource } from "../core/lsp/edit-telemetry.js";
 import { createReadTool } from "./read.js";
 import { getVideoByteLimit } from "../core/model-registry.js";
 import { createWriteTool } from "./write.js";
@@ -45,6 +47,8 @@ export { BUILTIN_TOOL_NAMES } from "./prompt-hints.js";
 export interface CreateToolsOptions {
   agents?: AgentDefinition[];
   skills?: Skill[];
+  /** Byte budgets for skill catalog / MCP descriptions in tool schemas. */
+  contextLimits?: ContextLimits;
   provider?: Provider;
   model?: string;
   /** Custom I/O operations for remote execution (SSH, Docker, etc.). Defaults to local filesystem. */
@@ -160,8 +164,8 @@ export async function createTools(
   const lspEnabled = (opts?.lspDiagnostics ?? true) && ops === localOperations;
   const lspManager = lspEnabled ? new LspManager(cwd) : undefined;
   const getDiagnostics = lspManager
-    ? (filePath: string, content: string): Promise<string> =>
-        lspManager.diagnosticsAfterWrite(filePath, content)
+    ? (filePath: string, content: string, source?: EditSource): Promise<string> =>
+        lspManager.diagnosticsAfterWrite(filePath, content, source)
     : undefined;
 
   // Enable native video returns from the read tool for any video-capable model
@@ -254,7 +258,7 @@ export async function createTools(
   }
 
   if (opts?.skills && opts.skills.length > 0) {
-    tools.push(createSkillTool(opts.skills));
+    tools.push(createSkillTool(opts.skills, opts.contextLimits));
   }
 
   if (opts?.onEnterPlan) {

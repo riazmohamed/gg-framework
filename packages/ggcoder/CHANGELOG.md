@@ -1,5 +1,199 @@
 # @kenkaiiii/ggcoder
 
+## 5.49.11
+
+### Patch Changes
+
+- Cap file reads at 20 MiB and refuse symlinks and fifos at open, report interrupted tool calls as indeterminate rather than cancelled, repair crash-torn session lines, and correct a stale environment without breaking the prompt cache
+  - @kenkaiiii/gg-ai@5.49.11
+  - @kenkaiiii/gg-agent@5.49.11
+  - @kenkaiiii/gg-core@5.49.11
+
+## 5.49.10
+
+### Patch Changes
+
+- Harden the verification gate: an edited check now discloses the tamper instead of passing as proof, and a golden snapshot of the cached system-prompt prefix blocks unreviewed tool or prompt edits.
+  - @kenkaiiii/gg-ai@5.49.10
+  - @kenkaiiii/gg-agent@5.49.10
+  - @kenkaiiii/gg-core@5.49.10
+
+## 5.49.9
+
+### Patch Changes
+
+- Fix image and video attachments on Windows: write temp files to `os.tmpdir()` instead of a hardcoded `/tmp`, which does not exist on Windows and silently dropped the attachment.
+  - @kenkaiiii/gg-ai@5.49.9
+  - @kenkaiiii/gg-agent@5.49.9
+  - @kenkaiiii/gg-core@5.49.9
+
+## 5.49.8
+
+### Patch Changes
+
+- Fix GLM image attachments: route them to the real `mcp__zai_vision__analyze_image` MCP tool (with its `tool_search` unlock path) instead of a phantom tool name, gate the hint to the GLM provider only so other providers keep inline images, and raise the `zai_vision` tool-call timeout from 60s to 180s so long GLM-4.6V analyses stop getting killed mid-flight.
+  - @kenkaiiii/gg-ai@5.49.8
+  - @kenkaiiii/gg-agent@5.49.8
+  - @kenkaiiii/gg-core@5.49.8
+
+## 5.49.7
+
+### Patch Changes
+
+- Fix Hugging Face model downloads picking unpullable files and flickering progress: search now filters to real GGUF repos, repo trees are read recursively so quants in subfolders are found, split shards / vision projectors / imatrix blobs / speculative-decoding drafts are never chosen as the model, pull phase no longer jumps backwards, and failures explain rate limits instead of dumping raw terminal output.
+  - @kenkaiiii/gg-ai@5.49.7
+  - @kenkaiiii/gg-agent@5.49.7
+  - @kenkaiiii/gg-core@5.49.7
+
+## 5.49.6
+
+### Patch Changes
+
+- Shrink the published CLI bundle by 3.4MB by excluding the test suite from the build output
+  - @kenkaiiii/gg-ai@5.49.6
+  - @kenkaiiii/gg-agent@5.49.6
+  - @kenkaiiii/gg-core@5.49.6
+
+## 5.49.5
+
+### Patch Changes
+
+- Harden the sandbox against unix-socket and degraded-isolation escapes, strip invisible Unicode from MCP and web-fetch output, and attribute new diagnostics to the edit that caused them
+  - @kenkaiiii/gg-ai@5.49.5
+  - @kenkaiiii/gg-agent@5.49.5
+  - @kenkaiiii/gg-core@5.49.5
+
+## 5.49.4
+
+### Patch Changes
+
+- Tighten reply length with one total word budget nothing is exempt from, and give Ken's plan review a design bar that catches unnecessary steps, misplaced boundaries, and uncovered paths before code is written.
+  - @kenkaiiii/gg-ai@5.49.4
+  - @kenkaiiii/gg-agent@5.49.4
+  - @kenkaiiii/gg-core@5.49.4
+
+## 5.49.3
+
+### Patch Changes
+
+- Fix a crash that disabled autopilot entirely, and lock Ken's model plus the reasoning level while a run is in flight
+  - @kenkaiiii/gg-ai@5.49.3
+  - @kenkaiiii/gg-agent@5.49.3
+  - @kenkaiiii/gg-core@5.49.3
+
+## 5.49.2
+
+### Patch Changes
+
+- Verification gate now recognizes compound commands like `cd pkg && npm test`, demands verification at most once per run, and announces itself so it no longer surfaces as a second unexplained final answer.
+  - @kenkaiiii/gg-ai@5.49.2
+  - @kenkaiiii/gg-agent@5.49.2
+  - @kenkaiiii/gg-core@5.49.2
+
+## 5.49.1
+
+### Patch Changes
+
+- Close a sandbox write-root symlink escape, translate Git-Bash paths on Windows, and add a low-token outline mode to web_fetch
+  - @kenkaiiii/gg-ai@5.49.1
+  - @kenkaiiii/gg-agent@5.49.1
+  - @kenkaiiii/gg-core@5.49.1
+
+## 5.49.0
+
+### Minor Changes
+
+- 05685fe: Add Gemini 3.7 Flash (`gemini-3.7-flash`, released 2026-08-13) and retarget `deepseek-v4-pro` to DeepSeek-V4-Pro-0813 under the same API id. 3.7 Flash is Google's most capable Flash for coding and agents — 1M context, 64K output, thinking low/medium/high, video input (20 MB inline cap) — listed as a selectable option for Gemini but kept non-default because it ships on our Code Assist transport ahead of gemini-cli (issue #28802 tracks upstream); free/personal accounts get the existing account-gated 404 guidance while entitled Code Assist Standard/Enterprise accounts can use it. DeepSeek's `deepseek-v4-pro` alias now serves the first stable V4 Pro (0813, supersedes the April preview, calling name unchanged): max output corrected to 393,216 and costTier dropped to `medium` to match the ~$0.43/$0.87 per-MTok pricing; saved sessions keep working since the id is unchanged.
+- 05685fe: Add Grok 4.6 (`grok-4.6`, released 2026-08-12) to the model registry and make it the xAI default — 500K context, image input, $2/$6 MTok (under 200K prompt tokens), and a `reasoning_effort` ladder that adds a new `xhigh` top rung (`low`/`medium`/`high` default/`xhigh`), which `XAI_THINKING_LEVELS` now exposes; thinking starts at `xhigh`. Grok 4.5 stays registered as a legacy option, still capped at `high` since it rejects `xhigh`. The OpenAI-compatible transport needs no changes — `xhigh` passes through `toOpenAIReasoningEffort` unchanged — so both the public API and the Grok CLI OAuth proxy serve the new model; CLI/app login defaults point at `grok-4.6`.
+- 05685fe: Add "Add from Hugging Face" to the desktop app: search the Hub and pull models with Ollama, in one modal. From Connect AI Providers, the Hugging Face tile offers "Search Hugging Face and download with Ollama" next to its hosted-token login, and the Local models modal gains an "Add from Hugging Face" button. The modal debounces typed queries into a live dropdown of GGUF repos (downloads/likes inline, full keyboard navigation), and clicking a model starts `ollama pull hf.co/<repo>:<quant>` immediately — the sidecar picks the quant from the repo's real file list (Q4_K_M preferred), streams `hf_pull` progress events into a cancellable progress bar, re-scans local endpoints on success so the model appears in the picker without a restart, and maps known failures to fixes (the Ollama 0.32 hf.co pull bug → upgrade; 401 → connect an HF token, which is also passed to pulls for gated repos). Pull state lives in the sidecar, so closing the modal mid-download never cancels it — reopening reattaches. One pull at a time; client sends only validated `org/repo` ids, and the child is spawned with argv (never a shell string).
+- 05685fe: Add a first-class `huggingface` provider backed by Hugging Face's Inference Providers router (`https://router.huggingface.co/v1`, OpenAI-compatible Chat Completions, one HF token with "Make calls to Inference Providers" permission). Model ids are Hub repo paths: `Qwen/Qwen3-Coder-480B-A35B-Instruct` (default; 262K context, tool-native, non-thinking Coder line) and `openai/gpt-oss-120b` (low-tier sibling for summaries and scout sub-agents; reasoning effort low/medium/high). Auth is a static API key wired through the existing apikey login flow in both TUI and desktop app, with label/logo/order entries everywhere providers are enumerated (`config`/`settings-manager`/`app-sidecar`/`auth-providers`/`ModelSelector`/`login`/`provider-labels`/`provider-logos`). Local-weight users keep the existing routes: Ollama `hf.co/...` pulls and any self-hosted OpenAI-compatible server via local endpoints.
+
+### Patch Changes
+
+- Updated dependencies [05685fe]
+- Updated dependencies [05685fe]
+- Updated dependencies [05685fe]
+- Updated dependencies [05685fe]
+  - @kenkaiiii/gg-ai@5.49.0
+  - @kenkaiiii/gg-core@5.49.0
+  - @kenkaiiii/gg-agent@5.49.0
+
+## 5.48.0
+
+### Minor Changes
+
+- Add /setup-ci command: dual-mode CI setup for any stack (generate hardened CI from scratch, or audit + harden existing workflows) with Dependabot, branch-protection rulesets, and AGENTS.md
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.48.0
+- @kenkaiiii/gg-agent@5.48.0
+- @kenkaiiii/gg-core@5.48.0
+
+## 5.47.0
+
+### Minor Changes
+
+- 8d8a93b: Add five bundled workflow skills that ship by default and route themselves: `clarify` (frontier-based requirements interview — facts self-served, only decisions reach the user), `tdd` (red-green loop with pre-agreed seams and independent expected values), `root-cause` (gated diagnosis: red repro command → ranked falsifiable hypotheses → regression test before fix), `shared-language` (CONTEXT.md glossary + ADR discipline), and `code-review` (spec and standards axes kept separate; security defers to `bulletproof`). Plus two system-prompt lines: facts-vs-decisions sorting and batched questions with recommended answers.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.47.0
+- @kenkaiiii/gg-agent@5.47.0
+- @kenkaiiii/gg-core@5.47.0
+
+## 5.46.2
+
+### Patch Changes
+
+- System prompt guardrails (git safety, anti-fake-green verification, reproduce-before-fix, retry circuit-breaker, question-vs-fix), bash tool safety lines (git only when asked, no shell backgrounding, PID-specific kills), and an explicit kencode-search staple in Research. Bench A/B'd with zero regressions.
+  - @kenkaiiii/gg-ai@5.46.2
+  - @kenkaiiii/gg-agent@5.46.2
+  - @kenkaiiii/gg-core@5.46.2
+
+## 5.46.1
+
+### Patch Changes
+
+- Guard the `lean` skill against killing its own host daemon: the process-cleanup reference now leads with a hard rule to trace PPID ancestry before any kill, treat memory-heavy processes as findings rather than kill targets, and leave orphan cleanup to the host startup sweep. Fixes lean sessions dying mid-run after SIGTERM-ing the app-sidecar they run inside.
+  - @kenkaiiii/gg-ai@5.46.1
+  - @kenkaiiii/gg-agent@5.46.1
+  - @kenkaiiii/gg-core@5.46.1
+
+## 5.46.0
+
+### Minor Changes
+
+- 7a4a613: Add a bundled `durable` skill for data durability — user data must survive bad migrations, crashed writes, retried webhooks, and dead servers. Two modes like its siblings: binding defaults while building (migration tooling from the first table, guards on destructive operations, constraints in the store, transactions around multi-write invariants, idempotency keys on retried writes, batched resumable backfills, backups the moment real data exists, connection/session hygiene, SQLite runtime rules) and a full pass for existing projects (backups & recovery, destructive paths, migration health, transactions & idempotency, schema integrity, runtime data safety — ranked by survivability, verified with restore/guard/migration drills). References cover the expand-contract pattern with concrete lock behavior, ORM migration traps, backup tiers with 2026 managed-provider baselines, the restore drill, outbox/idempotency patterns, and transaction-pooling session-state pitfalls.
+- 7a4a613: Add a bundled `lean` skill for performance and resource efficiency — two modes like its siblings: binding defaults while building (teardown ships with the feature, bounded accumulation, lazy loading, right-sized media, streamed I/O, timeout everything) and a full-pass workflow for existing projects (baseline, sweep six areas — loading/startup, runtime responsiveness, memory, processes & lifecycle, payload & dead weight, styling consistency — rank by user impact, fix, re-verify with numbers, leave a CI guard). Covers every stack (web, backend, Electron, Tauri, mobile, native, Python, data) via per-stack playbooks, plus a memory-leak catalog and zombie/orphan process lifecycle playbook (process-tree kills, graceful shutdown, startup sweeps, container PID 1).
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.46.0
+- @kenkaiiii/gg-agent@5.46.0
+- @kenkaiiii/gg-core@5.46.0
+
+## 5.45.0
+
+### Minor Changes
+
+- Add background-task wake rules (bash `wake` pattern/silence conditions that notify the agent instead of task_output polling), a pre-stop verification gate (a run that edited code cannot finish until a test/typecheck/lint/build command ran after the last edit), and a flag-aware read-only bash classifier for plan mode (blocks `git branch -D`, `find -delete`, `date -s`, clustered flags like `sort -ro`, and sed exec/write scripting).
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.45.0
+- @kenkaiiii/gg-agent@5.45.0
+- @kenkaiiii/gg-core@5.45.0
+
+## 5.44.3
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@5.44.3
+  - @kenkaiiii/gg-agent@5.44.3
+  - @kenkaiiii/gg-core@5.44.3
+
 ## 5.44.2
 
 ### Patch Changes

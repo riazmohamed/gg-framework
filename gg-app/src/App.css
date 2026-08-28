@@ -1771,6 +1771,77 @@ body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* Hugging Face pull modal: search dropdown + progress. Same density as the
+   local-model rows; the progress bar is the modal's one focal element. */
+.hf-modal {
+  min-width: 460px;
+}
+.hf-results {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.hf-result {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hf-result-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hf-result-meta {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.hf-empty {
+  padding: 14px 4px;
+  font-size: 12px;
+}
+.hf-install-name {
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-all;
+}
+.hf-install-sub {
+  margin-top: 2px;
+  font-size: 11px;
+}
+.hf-progress {
+  height: 8px;
+  border-radius: 4px;
+  margin-top: 12px;
+  overflow: hidden;
+}
+.hf-progress-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: #9b8cf7;
+  transition: width 240ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .hf-progress-fill {
+    transition: none;
+  }
+}
+.hf-progress-line {
+  margin-top: 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
 .mcp-list {
   display: flex;
   flex-direction: column;
@@ -4273,8 +4344,13 @@ body {
   line-height: 1.55;
   transition: color var(--t-fast);
 }
-.thinking-toggle:hover {
+.thinking-toggle:hover:not(:disabled) {
   text-decoration: underline;
+}
+/* Locked mid-run: drop the hover affordance and the pointer, so the control
+   reads as unavailable before the click. Mirrors `.model-select:disabled`. */
+.thinking-toggle:disabled {
+  cursor: default;
 }
 
 /* ── Footer: context percentage ── */

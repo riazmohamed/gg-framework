@@ -9,7 +9,7 @@
 // it can gate CI.
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -146,6 +146,26 @@ function smokeSandboxRuntime(node) {
   console.log("smoke: bundled sandbox runtime starts cleanly");
 }
 
+/**
+ * Payload gate: bundle-sidecar strips dev-only weight after copying the
+ * dependency tree (source maps; onnxruntime-web's browser wasm/webgl/webgpu
+ * payloads, which the Node exports map never resolves). If either returns,
+ * ~120 MB of dead files ships in every desktop build unnoticed.
+ */
+function smokeLeanPayload() {
+  const nodeModules = join(srcTauri, "sidecar", "node_modules");
+  const files = existsSync(nodeModules)
+    ? readdirSync(nodeModules, { recursive: true }).filter((f) => {
+        const base = basename(String(f));
+        return base.endsWith(".map") || (String(f).includes("onnxruntime-web") && base.endsWith(".wasm"));
+      })
+    : [];
+  if (files.length > 0) {
+    fail(`bundled payload carries pruned file types (first 3: ${files.slice(0, 3).join(", ")})`);
+  }
+  console.log("smoke: bundled payload is lean (no source maps, no browser onnx wasm)");
+}
+
 async function main() {
   if (!existsSync(sidecar)) fail(`bundled sidecar missing: ${sidecar}`);
   if (!existsSync(evidenceSkill)) fail(`bundled evidence-led-ui skill missing: ${evidenceSkill}`);
@@ -156,6 +176,7 @@ async function main() {
   smokeTypescriptLanguageServer(node);
   smokeOpenSrc(node);
   smokeSandboxRuntime(node);
+  smokeLeanPayload();
 
   const child = spawn(node, [sidecar], {
     env: { ...process.env, GG_APP_PORT: "0", GG_APP_CWD: process.cwd() },

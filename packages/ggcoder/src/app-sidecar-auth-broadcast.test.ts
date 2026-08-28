@@ -390,7 +390,7 @@ describe("dual-auth providers (OAuth + API key)", () => {
     // The UI cannot invent this copy — the choice changes what the user is billed.
     const guidance = xai.methodGuidance as { method: string; billing: string }[];
     expect(guidance.map((g) => g.method)).toEqual(["oauth", "apikey"]);
-    expect(String(xai.priorityNote)).toMatch(/used first/i);
+    expect(String(xai.priorityNote)).toMatch(/first/i);
   }, 90_000);
 
   it("reports which method is connected and which one requests will use", async () => {

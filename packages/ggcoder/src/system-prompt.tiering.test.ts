@@ -145,7 +145,11 @@ describe("tool tiering in the system prompt", () => {
     // always-on security defaults in Code Quality, then again for the Code
     // Quality minimization ladder (benchmarked: same correctness, 50–76% less
     // generated code); the index block cap above is the one that guards
-    // tiering itself, and it is unchanged.
-    expect(prompt.length).toBeLessThan(10_700);
+    // tiering itself, and it is unchanged. Raised again with the 2026-08
+    // guardrail additions (git safety, anti-fake-green, reproduce-first,
+    // circuit-breaker, question-vs-fix, no-variants, test guidance). Raised
+    // again for the alignment guardrails (facts-vs-decisions, batched
+    // questions) — see the size-budget test in system-prompt.test.ts.
+    expect(prompt.length).toBeLessThan(12_200);
   });
 });

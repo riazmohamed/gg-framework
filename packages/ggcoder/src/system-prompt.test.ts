@@ -8,6 +8,8 @@ import {
   collectProjectContext,
   PROJECT_CONTEXT_MAX_BYTES,
 } from "./system-prompt.js";
+import { buildKenSystemPrompt } from "./core/ken-prompt.js";
+import { resolveContextLimits } from "./core/context-limits.js";
 import type { LanguageId } from "./core/language-detector.js";
 
 const tempDirs: string[] = [];
@@ -209,9 +211,22 @@ describe("buildSystemPrompt", () => {
     expect(prompt.match(/^\s*`?> /gm) ?? []).toHaveLength(0);
     expect(prompt.match(/`> \*\*/g) ?? []).toHaveLength(1);
 
-    // A hard sentence cap plus a numbered list plus a trailing ask is only
-    // followable if the cap says what it counts.
-    expect(talk).toContain("prose only; a step list or the ask doesn't count");
+    // The budget is the whole reply or it is nothing. Every earlier version
+    // carved out the parts that actually carried the bloat (step lists, the
+    // ask, batched question lists), so a 900-word reply satisfied every rule.
+    // These assertions keep the cap total and the escape hatches deleted.
+    expect(talk).toContain("Prose, lists, headers, the ask — everything counts, nothing is exempt");
+    expect(talk).toContain("still inside the budget");
+    expect(talk).not.toContain("prose only; a step list or the ask doesn't count");
+    expect(talk).not.toContain("exempt from the reply and list caps");
+    expect(talk).not.toContain("Question lists are payload");
+    // "exempt" survives in exactly one place: the line that denies exemptions.
+    expect(talk.match(/exempt/g) ?? []).toHaveLength(1);
+
+    // Cutting How to Talk was the point: it competes with the task for the
+    // model's attention, so the meta-instructions stay smaller than the reply
+    // budget they enforce is generous.
+    expect(talk.split(/\s+/).filter(Boolean).length).toBeLessThan(360);
 
     // Mid-turn speech and the cut rule must agree: a bare "finding" cannot both
     // trigger a message and be cut for not changing the next move.
@@ -277,16 +292,20 @@ describe("buildSystemPrompt", () => {
     for (const required of [
       "works directly in the user's codebase",
       "completing tasks end-to-end",
-      "Final replies: 1–2 sentences, hard cap 5",
+      "**Budget: ~120 words, whole reply.**",
+      "everything counts, nothing is exempt",
+      "**One line per item, ≤15 words, max 5 items.**",
       "Take every safe, reversible step the goal implies",
       "never ask permission, merely suggest it, or leave it for the user",
       "ONE action that unblocks you",
       "what already works so finished work is never buried",
       "conclusion, not investigation",
-      // Jargon stays exact, but never bare: the reader must learn the stake of
-      // a term/file/command in the same breath, without a glossary paragraph.
-      "**Keep the real word, add the stakes.**",
-      "say what it does or risks in the same sentence",
+      // Jargon is opt-in, not default: an identifier only earns a mention when
+      // the user has to act on it, and then it carries its stake in the same
+      // breath. Everything else is described by behavior, not by name.
+      "**Plain words by default.**",
+      "only when the user must act on it",
+      "say what it does, not what it's called",
       "Read before `edit`/`write`",
       "re-read after formatters",
       "Compute in bash; write with `edit`/`write`",
@@ -305,13 +324,28 @@ describe("buildSystemPrompt", () => {
       "Do not rely on memory for APIs",
       "Use `source_path`",
       "web_search` then `web_fetch",
-      "use the kencode-search tools (usage in Tools below)",
+      "mcp__kencode-search__searchCode",
+      "Build from real samples, not assumptions",
       "curated, categorized reference repos",
       "Search GitHub repos live",
       "literal text or RE2 regex; NOT semantic",
       "Skip checks after simple edits",
       "At coherent checkpoints or after risky/non-obvious changes",
       "run one targeted check",
+      // Guardrails added in the 2026-08 prompt audit (P1/P2):
+      "A question is not a fix request",
+      "only when the user explicitly asks — never update git config or force-push",
+      "Never revert or reset changes you did not make",
+      "reproduce it first",
+      "If the same fix fails three times, stop retrying",
+      "Never make a failing check pass by weakening it",
+      "never fork them into variants",
+      "exercise real code paths rather than mocks",
+      // Facts-vs-decisions + batched questions (alignment guardrails):
+      // asking is sanctioned for decisions only, and asking well means one
+      // batched, recommendation-annotated list instead of an interrogation drip.
+      "only decisions (taste, product calls, real tradeoffs) reach the user",
+      "one numbered list, every open question",
     ]) {
       expect(prompt).toContain(required);
     }
@@ -466,9 +500,18 @@ describe("buildSystemPrompt", () => {
     // generated code 50–76% and output tokens 21–38%. Input tokens fell too,
     // despite the longer prefix: stopping at the first rung that holds costs
     // fewer turns than re-deriving an over-built solution.
-    expect(measurements.normal.characters).toBeLessThan(7_900);
-    expect(measurements.planMode.characters).toBeLessThan(9_100);
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(12_300);
+    // Raised with the 2026-08 guardrail additions (git safety, anti-fake-green,
+    // reproduce-first, circuit-breaker, question-vs-fix, no-variants, test
+    // guidance) — each line field-verified as load-bearing across Tier-1 agents.
+    // Raised once more for the explicit kencode-search staple sentence in
+    // Research (names the MCP tools + build-from-samples philosophy).
+    // Raised for the alignment guardrails (facts-vs-decisions sorting,
+    // batched questions with recommended answers) — misalignment is the most
+    // common failure mode, and these two lines are the always-on floor the
+    // `clarify` skill then deepens on demand.
+    expect(measurements.normal.characters).toBeLessThan(9_600);
+    expect(measurements.planMode.characters).toBeLessThan(10_800);
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(14_000);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,
@@ -508,7 +551,10 @@ describe("buildSystemPrompt", () => {
     expect(audit.flags).toEqual([]);
     // Raised with the Code Quality minimization ladder — see the size-budget
     // test above for the measured return that justifies the spend.
-    expect(audit.size.characters).toBeLessThan(11_900);
+    // Raised again with the 2026-08 guardrail additions (see size-budget test).
+    // And again for the kencode-search staple sentence in Research.
+    // And again for the alignment guardrails (see size-budget test).
+    expect(audit.size.characters).toBeLessThan(13_700);
     expect(audit.size.sections).toBeGreaterThanOrEqual(8);
   });
 
@@ -616,6 +662,53 @@ describe("buildSystemPrompt", () => {
     expect(anthropic).not.toContain("OG Coder by Abu Khaled");
     expect(openai.startsWith("You are OG Coder by Abu Khaled")).toBe(true);
     expect(openai).not.toContain("You are Claude Code");
+  });
+
+  it("is byte-stable across builds in one process (prefix-cache safety)", async () => {
+    // Deterministic arm of bench/baseline/04-prefix-stability.mjs, promoted to
+    // a unit test so a volatile section landing in the cached prefix fails
+    // `pnpm test`, not a manual bench run. The live cache-hit e2e
+    // (core/provider-cache.e2e.test.ts) guards the same property end-to-end.
+    const cwd = await makeProject({
+      "CLAUDE.md": "Project rules win.",
+      "package.json": JSON.stringify({ scripts: { check: "tsc --noEmit" } }),
+    });
+    const args = {
+      skills: [],
+      planMode: false,
+      approvedPlanPath: undefined,
+      toolNames: ["read", "edit", "bash"],
+      activeLanguages: new Set<LanguageId>(["typescript"]),
+    };
+    const a = await buildSystemPrompt(
+      cwd,
+      args.skills,
+      args.planMode,
+      args.approvedPlanPath,
+      args.toolNames,
+      args.activeLanguages,
+    );
+    const b = await buildSystemPrompt(
+      cwd,
+      args.skills,
+      args.planMode,
+      args.approvedPlanPath,
+      args.toolNames,
+      args.activeLanguages,
+    );
+    expect(a).toBe(b);
+    // Same for the Ken advisor prompt — its marker must also partition
+    // volatile bytes out of the cached prefix (ken-prompt.ts pins the marker
+    // as byte-identical to the build prompt's).
+    const kenA = await buildKenSystemPrompt(cwd);
+    const kenB = await buildKenSystemPrompt(cwd);
+    expect(kenA).toBe(kenB);
+    for (const prompt of [a, kenA]) {
+      expect(prompt).toContain("<!-- uncached -->");
+      // All volatile content (currently only the date) sits AFTER the marker.
+      const markerAt = prompt.indexOf("<!-- uncached -->");
+      expect(prompt.slice(markerAt)).toMatch(/Today's date: \d{1,2} \w+ \d{4}/);
+    }
   });
 });
 
@@ -782,5 +875,43 @@ describe("buildSubAgentSystemPrompt", () => {
 
     expect(prompt).toContain("## Delegation");
     expect(prompt).toContain("sees none of this conversation");
+  });
+});
+
+describe("system prompt byte ceiling", () => {
+  it("bounds a hostile AGENTS.md + skill catalog by per-input budgets, not the ceiling", async () => {
+    const cwd = await makeProject({
+      "AGENTS.md": `# Hostile\n\n${"inject ".repeat(20_000)}`, // ~120KB
+    });
+    const skills = Array.from({ length: 80 }, (_, i) => ({
+      name: `skill-${i}`,
+      description: "y".repeat(2_000), // 160KB raw descriptions
+      content: "x",
+      source: "global",
+    }));
+    const prompt = await buildSystemPrompt(cwd, skills);
+    // Per-input budgets do the work: well under the 1MB ceiling regardless.
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(64 * 1024);
+    expect(prompt).toContain("Skipped (context budget)");
+  });
+
+  it("enforces the emergency ceiling when sections overflow it", async () => {
+    const cwd = await makeProject({
+      "AGENTS.md": `${"a".repeat(31 * 1024)}`, // just under the 32KB file budget
+    });
+    const prompt = await buildSystemPrompt(
+      cwd,
+      [],
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      resolveContextLimits({ systemPromptCeilingBytes: 16 * 1024 }),
+    );
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(16 * 1024);
+    expect(prompt).toContain("system prompt exceeded the 16384-byte ceiling");
   });
 });

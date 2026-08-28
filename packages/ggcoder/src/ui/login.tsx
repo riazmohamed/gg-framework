@@ -42,9 +42,9 @@ const PROVIDERS: { label: string; value: Provider; description: string }[] = [
   {
     label: "Gemini",
     value: "gemini",
-    description: "Gemini 3.1 Flash Lite, Gemini 3.5 Flash, Gemini 3.1 Pro (Preview)",
+    description: "Gemini 3.7 Flash, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
   },
-  { label: "xAI (Grok)", value: "xai", description: "Grok 4.5 · OAuth or API key" },
+  { label: "xAI (Grok)", value: "xai", description: "Grok 4.6, 4.5 · OAuth or API key" },
   {
     label: "Moonshot",
     value: "moonshot",
@@ -60,6 +60,11 @@ const PROVIDERS: { label: string; value: Provider; description: string }[] = [
   { label: "DeepSeek", value: "deepseek", description: "DeepSeek V4 Pro, V4 Flash" },
   { label: "Sakana (Fugu)", value: "sakana", description: "Fugu, Fugu Ultra" },
   { label: "OpenRouter", value: "openrouter", description: "Multi-provider gateway" },
+  {
+    label: "Hugging Face",
+    value: "huggingface",
+    description: "Qwen3 Coder 480B, GPT-OSS 120B · HF token",
+  },
 ];
 
 function renderScreen(selectedIndex: number): string {

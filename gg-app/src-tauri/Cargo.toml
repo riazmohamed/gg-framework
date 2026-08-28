@@ -1,6 +1,6 @@
 [package]
 name = "gg-app"
-version = "0.48.2"
+version = "0.53.12"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -35,7 +35,7 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["time"] }
-base64 = "0.22"
+base64 = "0.23"
 uuid = { version = "1", features = ["v4"] }
 
 # Updater + process (relaunch) are desktop-only — the updater plugin doesn't

@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { resolveToolSchema } from "@abukhaled/gg-ai";
 import type { AgentTool } from "@abukhaled/gg-agent";
+import { CONTEXT_LIMITS, type ContextLimits } from "../core/context-limits.js";
 import type { DeferredToolCatalog } from "../core/mcp/deferred-catalog.js";
 
 const ToolSearchParams = z.object({
@@ -32,6 +34,7 @@ export function createToolSearchTool(
   catalog: DeferredToolCatalog,
   onPromote: (tools: AgentTool[]) => void,
   resolveCached?: (toolName: string) => Promise<CachedToolResolution | undefined>,
+  limits: ContextLimits = CONTEXT_LIMITS,
 ): AgentTool<typeof ToolSearchParams> {
   return {
     name: "tool_search",
@@ -49,7 +52,29 @@ export function createToolSearchTool(
           ? "No tools matched and the catalog is empty — every catalog tool is already available."
           : `No tools matched "${query}". Still in the catalog: ${remaining.join(", ")}`;
       }
-      const promoted = catalog.promote(matches.map((t) => t.name));
+      // Schema budget, fail closed: a tool whose serialized input schema exceeds
+      // the budget is NOT promoted — promoting it would bill those bytes on every
+      // subsequent request. The user can raise contextLimits.mcpToolSchemaBytes.
+      const oversized: Array<{ name: string; bytes: number }> = [];
+      const promotable: AgentTool[] = [];
+      for (const tool of matches) {
+        const bytes = Buffer.byteLength(JSON.stringify(resolveToolSchema(tool)), "utf8");
+        if (bytes > limits.mcpToolSchemaBytes) oversized.push({ name: tool.name, bytes });
+        else promotable.push(tool);
+      }
+      if (promotable.length === 0) {
+        const details = oversized
+          .map(
+            (t) =>
+              `- ${t.name}: schema is ${Math.round(t.bytes / 1024)}KB (budget ${Math.round(limits.mcpToolSchemaBytes / 1024)}KB)`,
+          )
+          .join("\n");
+        return (
+          `No tools promoted — every match exceeds the schema byte budget.\n${details}\n` +
+          `Raise the contextLimits.mcpToolSchemaBytes setting if this tool is trusted.`
+        );
+      }
+      const promoted = catalog.promote(promotable.map((t) => t.name));
       onPromote(promoted);
 
       const unavailable = new Map<string, CachedToolResolution>();
@@ -75,7 +100,12 @@ export function createToolSearchTool(
         (t) => `- ${t.name}: ${t.description.split("\n")[0].slice(0, 200)}`,
       );
       const body = `${available.length} tool(s) now available:\n${lines.join("\n")}`;
-      return failures.length > 0 ? `${body}\n\nUnreachable:\n${failures.join("\n")}` : body;
+      const refused =
+        oversized.length > 0
+          ? `\n\nRefused (schema byte budget):\n${oversized.map((t) => `- ${t.name} (${Math.round(t.bytes / 1024)}KB schema)`).join("\n")}\nRaise the contextLimits.mcpToolSchemaBytes setting if a refused tool is trusted.`
+          : "";
+      const unreachable = failures.length > 0 ? `\n\nUnreachable:\n${failures.join("\n")}` : "";
+      return `${body}${refused}${unreachable}`;
     },
   };
 }

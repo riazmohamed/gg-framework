@@ -29,6 +29,7 @@ const PROVIDERS = [
   "xiaomi",
   "deepseek",
   "openrouter",
+  "huggingface",
   "sakana",
   "xai",
 ] as const;
@@ -249,6 +250,24 @@ describe("model registry context windows", () => {
     expect(getSummaryModel("glm", "glm-5.3").id).toBe("glm-5.3");
   });
 
+  it("defaults xAI to Grok 4.6 and keeps 4.5 capped at high", () => {
+    expect(getDefaultModel("xai")).toMatchObject({
+      id: "grok-4.6",
+      name: "Grok 4.6",
+      provider: "xai",
+      contextWindow: 500_000,
+      maxOutputTokens: 131_072,
+      supportsThinking: true,
+      supportsImages: true,
+      supportsVideo: false,
+      maxThinkingLevel: "xhigh",
+    });
+    expect(getDefaultThinkingLevel("grok-4.6")).toBe("xhigh");
+    expect(getModelsForProvider("xai").map((model) => model.id)).toEqual(["grok-4.6", "grok-4.5"]);
+    // 4.5 stays registered as the legacy option without the new xhigh rung.
+    expect(getModel("grok-4.5")?.maxThinkingLevel).toBe("high");
+  });
+
   it("defaults MiniMax to the multimodal M3 with a 1M context window", () => {
     expect(getDefaultModel("minimax")).toMatchObject({
       id: "MiniMax-M3",
@@ -289,13 +308,57 @@ describe("model registry context windows", () => {
       name: "Gemini 3.1 Flash Lite",
       provider: "gemini",
     });
+    // 3.7 Flash joins as the newest flagship flash but stays non-default and
+    // non-first: it rides Code Assist ahead of gemini-cli (issue #28802) and is
+    // account-gated there, while flash-lite works on every account and must
+    // remain what getFastModel picks as the low-tier sibling.
     expect(getModelsForProvider("gemini").map((model) => model.id)).toEqual([
       "gemini-3.1-flash-lite",
+      "gemini-3.7-flash",
       "gemini-3-flash",
       "gemini-3.1-pro-preview",
     ]);
+    expect(getFastModel("gemini", "gemini-3.1-flash-lite").id).toBe("gemini-3.1-flash-lite");
+    expect(getContextWindow("gemini-3.7-flash", { provider: "gemini" })).toBe(1_048_576);
     expect(getContextWindow("gemini-3.1-flash-lite", { provider: "gemini" })).toBe(1_048_576);
     expect(getContextWindow("gemini-3-flash", { provider: "gemini" })).toBe(1_048_576);
+  });
+
+  it("retargets deepseek-v4-pro to the 0813 stable build under the same id", () => {
+    expect(getDefaultModel("deepseek")).toMatchObject({
+      id: "deepseek-v4-pro",
+      contextWindow: 1_048_576,
+      maxOutputTokens: 393_216,
+      supportsImages: false,
+      // ~$0.43/$0.87 per MTok on DeepSeek's API — mid band, not the preview's top.
+      costTier: "medium",
+      maxThinkingLevel: "xhigh",
+    });
+  });
+
+  it("registers Hugging Face router models with Hub repo ids and a cheap sibling", () => {
+    expect(getDefaultModel("huggingface")).toMatchObject({
+      id: "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+      provider: "huggingface",
+      contextWindow: 262_144,
+      maxOutputTokens: 131_072,
+      // The Coder line is non-thinking, so the registry reports it that way
+      // even though the provider transport supports reasoning_effort models.
+      supportsThinking: false,
+      costTier: "medium",
+    });
+    // gpt-oss-120b is the low-tier sibling for summaries and scout sub-agents.
+    expect(getFastModel("huggingface", "Qwen/Qwen3-Coder-480B-A35B-Instruct").id).toBe(
+      "openai/gpt-oss-120b",
+    );
+    expect(getSummaryModel("huggingface", "Qwen/Qwen3-Coder-480B-A35B-Instruct").id).toBe(
+      "openai/gpt-oss-120b",
+    );
+    expect(getModel("openai/gpt-oss-120b")).toMatchObject({
+      supportsThinking: true,
+      maxThinkingLevel: "high",
+      costTier: "low",
+    });
   });
 });
 

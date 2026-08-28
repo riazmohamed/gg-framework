@@ -2153,7 +2153,7 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "anthropic",
         label: "Anthropic",
-        description: "Claude Fable 5, Opus 4.8, Sonnet 5, Haiku 4.5",
+        description: "Claude Fable 5, Opus 5, Sonnet 5, Haiku 4.5",
         methods: &["oauth"],
         oauth_key: None,
         oauth_label: None,
@@ -2177,7 +2177,7 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "gemini",
         label: "Gemini",
-        description: "Gemini 3.1 Flash Lite, Gemini 3.5 Flash, Gemini 3.1 Pro (Preview)",
+        description: "Gemini 3.7 Flash, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
         methods: &["oauth"],
         oauth_key: None,
         oauth_label: None,
@@ -2189,7 +2189,7 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "xai",
         label: "xAI (Grok)",
-        description: "Grok 4.5 · OAuth or API key",
+        description: "Grok 4.6, Grok 4.5 · OAuth or API key",
         methods: &["oauth", "apikey"],
         oauth_key: Some("xai-oauth"),
         oauth_label: Some("Grok OAuth"),
@@ -2197,18 +2197,16 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
             MethodDetail {
                 method: "oauth",
                 label: "Sign in with Grok",
-                billing: "Uses your SuperGrok or X Premium subscription — no per-token API billing.",
-                when: "Preferred. Pick this if you already pay for Grok.",
-                requires: Some(
-                    "An active SuperGrok or X Premium subscription. xAI gates this endpoint by tier, so a valid login can still be refused — keep an API key as backup.",
-                ),
+                billing: "Included with SuperGrok or X Premium.",
+                when: "",
+                requires: None,
             },
             MethodDetail {
                 method: "apikey",
                 label: "xAI API key",
-                billing: "Metered pay-per-token billing on your console.x.ai credits.",
-                when: "Use without a Grok subscription, or as the fallback when OAuth usage runs out.",
-                requires: Some("An API key from console.x.ai."),
+                billing: "Pay-per-token on console.x.ai credits.",
+                when: "",
+                requires: None,
             },
         ],
         api_key_label: Some("xAI"),
@@ -2226,16 +2224,16 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
             MethodDetail {
                 method: "oauth",
                 label: "Sign in with Kimi",
-                billing: "Uses your Kimi For Coding plan — no per-token API billing.",
-                when: "Preferred. Pick this if you have a Kimi coding plan.",
-                requires: Some("An active Kimi For Coding subscription."),
+                billing: "Included with a Kimi For Coding plan.",
+                when: "",
+                requires: None,
             },
             MethodDetail {
                 method: "apikey",
                 label: "Moonshot API key",
-                billing: "Metered pay-per-token billing on your Moonshot platform credits.",
-                when: "Use without a Kimi plan, or as the fallback when plan usage runs out.",
-                requires: Some("An API key from platform.moonshot.ai."),
+                billing: "Pay-per-token on Moonshot credits.",
+                when: "",
+                requires: None,
             },
         ],
         api_key_label: Some("Moonshot"),
@@ -2483,7 +2481,7 @@ fn app_auth_status() -> serde_json::Value {
             // wording in sync with gg-core's DUAL_AUTH_PROVIDERS resolution order.
             if let (Some(oauth_label), Some(key_label)) = (p.oauth_label, p.api_key_label) {
                 obj["priorityNote"] = serde_json::json!(format!(
-                    "With both connected, {oauth_label} is used first. The {key_label} API key takes over automatically while subscription usage is out (or if the OAuth login expires), then {oauth_label} resumes on its own."
+                    "Uses {oauth_label} first; the {key_label} API key takes over when it runs out, then switches back."
                 ));
             }
             if let Some(l) = p.api_key_label {
@@ -2822,6 +2820,105 @@ async fn agent_local_endpoint_remove(
             sidecar_base(port),
             urlencoding(&id)
         ))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: search Hugging Face for GGUF repos (the "Add from Hugging Face" modal).
+#[tauri::command]
+async fn agent_hf_search(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    query: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/hf/search", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "query": query }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if status.is_client_error() || status.is_server_error() {
+        return Err(body["error"]
+            .as_str()
+            .unwrap_or("Hugging Face search failed")
+            .to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: start an `ollama pull` of a Hugging Face repo (progress arrives as
+/// `hf_pull` sidecar events). Returns the pull state immediately.
+#[tauri::command]
+async fn agent_hf_pull(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    repo: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/hf/pull", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "repo": repo }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if status.is_client_error() || status.is_server_error() {
+        return Err(body["error"]
+            .as_str()
+            .unwrap_or("Could not start the download")
+            .to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: current Hugging Face pull state (null when none ever started).
+#[tauri::command]
+async fn agent_hf_pull_status(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}/hf/pull", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: cancel the running Hugging Face pull (if any).
+#[tauri::command]
+async fn agent_hf_pull_cancel(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/hf/pull/cancel", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
@@ -4965,6 +5062,10 @@ pub fn run() {
             agent_local_scan,
             agent_local_endpoint_add,
             agent_local_endpoint_remove,
+            agent_hf_search,
+            agent_hf_pull,
+            agent_hf_pull_status,
+            agent_hf_pull_cancel,
             agent_serve_status,
             agent_serve_start,
             agent_serve_stop,

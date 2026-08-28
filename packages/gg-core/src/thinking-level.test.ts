@@ -57,6 +57,20 @@ describe("thinking-level helpers", () => {
     expect(isThinkingLevelSupported("xai", "grok-4.5", "xhigh")).toBe(false);
   });
 
+  it("cycles xAI Grok 4.6 through low, medium, high, and its new xhigh rung", () => {
+    expect(getSupportedThinkingLevels("xai", "grok-4.6")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
+    expect(getNextThinkingLevel("xai", "grok-4.6", undefined)).toBe("low");
+    expect(getNextThinkingLevel("xai", "grok-4.6", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("xai", "grok-4.6", "xhigh")).toBeUndefined();
+    expect(isThinkingLevelSupported("xai", "grok-4.6", "xhigh")).toBe(true);
+    expect(isThinkingLevelSupported("xai", "grok-4.6", "max")).toBe(false);
+  });
+
   it("cycles Sakana Fugu through high and xhigh", () => {
     expect(getSupportedThinkingLevels("sakana", "fugu")).toEqual(["high", "xhigh"]);
     expect(getSupportedThinkingLevels("sakana", "fugu-ultra")).toEqual(["high", "xhigh"]);

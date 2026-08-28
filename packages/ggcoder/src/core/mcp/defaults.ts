@@ -25,6 +25,21 @@ export function getMCPServers(provider: Provider, apiKey?: string): MCPServerCon
   if (provider === "glm" && apiKey) {
     const zaiAuth = { Authorization: `Bearer ${apiKey}` };
 
+    // Vision (image support via stdio MCP server). Timeout is 180s, not the
+    // 60s the quick HTTP zai calls use: GLM-4.6V analysis of a large screenshot
+    // legitimately runs 20-60s+ (observed 52s successes and 60s-cap kills in
+    // the sidecar logs), and client.ts applies this per tool CALL.
+    servers.push({
+      name: "zai_vision",
+      command: "npx",
+      args: ["-y", "@z_ai/mcp-server"],
+      env: {
+        Z_AI_API_KEY: apiKey,
+        Z_AI_MODE: "ZAI",
+      },
+      timeout: 180_000,
+    });
+
     // Web search
     servers.push({
       name: "zai_web_search",

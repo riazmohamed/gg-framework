@@ -60,6 +60,7 @@ import {
   type PromptSegment,
 } from "./agent";
 import { ActivityBar } from "./ActivityBar";
+import { autosizeComposer } from "./composer-autosize";
 import { KenActivityBar } from "./KenActivityBar";
 import { AutopilotReviewBar } from "./AutopilotReviewBar";
 import { useKenMentor } from "./useKenMentor";
@@ -68,7 +69,7 @@ import { useAgentEvents, HOOK_PRESENTATION, type HookKind } from "./useAgentEven
 import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
 import { SubAgentFeed, type SubAgentLine } from "./SubAgentFeed";
 import { CompactionNotice } from "./CompactionNotice";
-import { ModelSelect } from "./ModelSelect";
+import { ModelSelect, loadModelsInto } from "./ModelSelect";
 import { SlashMenu } from "./SlashMenu";
 import { QueuedBar } from "./QueuedBar";
 import { ScheduleHint } from "./ScheduleHint";
@@ -739,6 +740,9 @@ function App(): React.ReactElement {
   const [hydrated, setHydrated] = useState(false);
 
   const readyRef = useRef(false);
+  // Bumped by every hydrate. Lets work that outlives a hydrate (a project
+  // switch, or re-selecting a session) tell whether its result is still wanted.
+  const hydrateGenerationRef = useRef(0);
   // Mirror of `state` for use inside the memoized event handler (which doesn't
   // re-capture state). Lets turn_end pick the right context-token formula by
   // provider without re-subscribing the SSE listener on every state change.
@@ -1019,28 +1023,11 @@ function App(): React.ReactElement {
     workspaceMode,
   ]);
 
-  // Auto-grow the chat textarea to fit its content, up to a CSS max-height
-  // after which it scrolls.
-  //
-  // Measure with the scrollbar suppressed. `height: auto` collapses the
-  // textarea to its rows=1 intrinsic height, so any wrapped draft overflows
-  // during measurement, and `.input::-webkit-scrollbar` is a classic
-  // (space-consuming) scrollbar in WebKit — verified 8px of content width lost
-  // while it shows. Suppressing it first means every read below sees the width
-  // the text is actually laid out at, including the overflow decision itself.
+  // Auto-grow the chat textarea, keeping the transcript's scroll position
+  // intact across the measurement (see composer-autosize.ts for why both
+  // halves matter).
   const autosizeInput = useCallback(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    el.style.overflowY = "hidden";
-    el.style.height = "auto";
-    const max = parseFloat(getComputedStyle(el).maxHeight) || Infinity;
-    const content = el.scrollHeight;
-    el.style.height = `${Math.min(content, max)}px`;
-    // Only past the cap does the scrollbar earn its width. Below it, keeping
-    // overflow hidden also avoids a phantom grey scrollbar under CSS zoom > 1,
-    // where scrollHeight rounds down to an integer of unzoomed px and leaves
-    // the content a hair taller than the height just set.
-    if (content > max) el.style.overflowY = "auto";
+    autosizeComposer(inputRef.current, scrollRef.current, stickToBottomRef.current);
   }, []);
 
   // useLayoutEffect (not useEffect) so the height is recomputed BEFORE the
@@ -1264,6 +1251,7 @@ function App(): React.ReactElement {
   // models, and commands. Re-invoked after a project switch respawns the
   // sidecar (its port changes, so we re-wait for readiness).
   const hydrate = useCallback(async (): Promise<void> => {
+    const generation = ++hydrateGenerationRef.current;
     readyRef.current = false;
     setHydrated(false);
     setStatus("connecting to agent\u2026");
@@ -1276,9 +1264,15 @@ function App(): React.ReactElement {
         setRunning(st.running);
         setStatus(st.runState === "cancelling" ? "cancelling..." : "ready");
       }
-      const available = await listModels();
-      // null = the fetch failed; keep whatever the picker already had.
-      if (available) setModels(available);
+      // Retries: this is the only unprompted model load, and an empty list
+      // disables the picker for the whole session (see loadModelsWithRetry).
+      // Deliberately NOT awaited — nothing below needs the list, and blocking on
+      // the backoff would hold the transcript behind up to ~4s of retries on
+      // exactly the slow-booting machines the retry exists for. The picker
+      // fills itself in when an answer arrives, unless this hydrate has since
+      // been superseded (project switch) — then the old sidecar's answer is
+      // dropped rather than overwriting the new project's picker.
+      void loadModelsInto(listModels, setModels, () => hydrateGenerationRef.current !== generation);
       const cmds = await listCommands();
       if (cmds.length > 0) setCommands(cmds);
       // Project task list for the Tasks modal + nav button.
@@ -2230,6 +2224,11 @@ function App(): React.ReactElement {
     setState(null);
     setTasks([]);
     setContextTokens(0);
+    // The done line + token tail belong to the run we're navigating away from;
+    // leaving them up makes a brand-new session open on someone else's
+    // "Brewed up a response in 14s · 800 tokens".
+    setTokens(0);
+    setDoneStatus(null);
     setPlanReview(null);
     planTotalRef.current = 0;
     planDoneRef.current = new Set();
@@ -2785,18 +2784,28 @@ function App(): React.ReactElement {
                   const level = state?.thinkingLevel ?? null;
                   const label = level ? `Thinking ${level}` : "Thinking off";
                   const maxPower = level === "xhigh" || level === "max";
+                  // Reasoning level is baked into the request the run is already
+                  // streaming, so a mid-turn cycle changes nothing about it and
+                  // silently disagrees with what the footer shows. Lock it like
+                  // the model pickers, and say why rather than going inert.
+                  const locked = running;
                   return (
                     <>
                       <button
                         className="thinking-toggle"
                         style={{
-                          color: thinkingColor(level),
+                          color: locked ? theme.textDim : thinkingColor(level),
                           fontWeight: level === "high" ? 600 : 400,
                         }}
-                        title="Cycle reasoning level"
+                        title={
+                          locked
+                            ? "Can't change reasoning level while the agent is running — cancel the run or wait for it to finish"
+                            : "Cycle reasoning level"
+                        }
+                        disabled={locked}
                         onClick={() => void cycleThinking()}
                       >
-                        {maxPower ? (
+                        {maxPower && !locked ? (
                           <ShimmerText base={MAX_POWER_COLOR} bright={MAX_POWER_SHIMMER}>
                             {label}
                           </ShimmerText>
@@ -2832,6 +2841,11 @@ function App(): React.ReactElement {
                       currentModel={state?.kenModel ?? state?.model ?? ""}
                       onSelect={(id) => onSelectKenModel(id)}
                       color={theme.ken}
+                      // Ken's pin retargets BOTH his sessions (chat + the
+                      // autopilot reviewer), so it has to stay locked while
+                      // either is mid-turn — same rule the GG picker follows,
+                      // and the sidecar now answers 409 to match.
+                      disabled={running || kenRunning || autopilotReviewing}
                       title={
                         state?.kenModelOverride
                           ? "Ken is pinned to his own model — click to change"

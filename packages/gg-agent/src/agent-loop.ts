@@ -26,6 +26,12 @@ import type {
   StructuredToolResult,
 } from "./types.js";
 import { isLocalBackendUrl } from "./local-backend.js";
+import {
+  clampOutputTokens,
+  outputRouteKey,
+  parseOutputTokenCeiling,
+  rememberOutputCeiling,
+} from "./output-ceiling.js";
 
 const DEFAULT_MAX_TURNS = 300;
 /** Per-tool cancellation ceiling; a tool may raise it via `timeoutMs`. */
@@ -532,6 +538,20 @@ export async function* agentLoop(
     "text above is what was already delivered to the user. Continue exactly " +
     "from where it stopped — do not repeat or restart it.]";
   let maxTokensContinuations = 0;
+  // Non-streaming fallback usage, aggregated per session (see "stream_call").
+  let providerCalls = 0;
+  let nonStreamingCalls = 0;
+  let warnedNonStreaming = false;
+  // A rejected output budget is worth exactly one retry: the ceiling the
+  // provider named is applied to the replay, so a second failure means the
+  // limit was not the problem and retrying again just burns the same tokens.
+  const MAX_OUTPUT_CEILING_RETRIES = 1;
+  let outputCeilingRetries = 0;
+  const ceilingKey = outputRouteKey({
+    provider: options.provider,
+    model: options.model,
+    baseUrl: options.baseUrl,
+  });
   const OVERLOAD_BASE_DELAY_MS = 2_000;
   const OVERLOAD_MAX_DELAY_MS = 30_000;
   const STREAM_FIRST_EVENT_TIMEOUT_MS = 45_000; // 45s to get first event (Opus thinks long)
@@ -810,6 +830,31 @@ export async function* agentLoop(
 
       try {
         diag("stream_call", { nonStreaming: useNonStreamingFallback });
+        providerCalls++;
+        if (useNonStreamingFallback) nonStreamingCalls++;
+        // The fallback is silent by design, so a session can keep dropping into
+        // it without anyone noticing. Each entry costs two stalled attempts
+        // first (STALL_RETRIES_BEFORE_NON_STREAMING), and a non-streamed turn
+        // that fails late is replayed in full instead of resuming from partial
+        // output — those tokens get paid for twice, and nothing renders until
+        // the whole reply lands. Three entries is no longer bad luck.
+        //
+        // Counts entries, not share: the flag is cleared after every actionable
+        // response (see below), so a healthy majority of calls is streaming
+        // even in a session that is falling back constantly.
+        if (!warnedNonStreaming && nonStreamingCalls >= 3) {
+          warnedNonStreaming = true;
+          diag("non_streaming_session", {
+            nonStreamingCalls,
+            providerCalls,
+            provider: options.provider,
+            model: options.model,
+            impact:
+              "streaming is disabled for this session after repeated stalls: failed turns are " +
+              "re-billed in full instead of resuming from partial output, and replies appear only " +
+              "when complete",
+          });
+        }
         streamCallStart = Date.now();
         providerAttemptStartedAt = streamCallStart;
         // Re-resolve auth per turn. A refresh performed by any process sharing
@@ -840,7 +885,9 @@ export async function* agentLoop(
           serverTools: options.serverTools,
           toolChoice: options.toolChoice,
           webSearch: options.webSearch,
-          maxTokens: options.maxTokens,
+          // Clamped to whatever ceiling this route has already rejected us for
+          // (identity when nothing has been learned).
+          maxTokens: clampOutputTokens(ceilingKey, options.maxTokens),
           temperature: options.temperature,
           thinking: options.thinking,
           apiKey: liveApiKey,
@@ -1037,6 +1084,33 @@ export async function* agentLoop(
           });
           throw err;
         }
+        // The provider named an output-token ceiling. Remember it for this
+        // provider+route+model so every later turn is clamped up front, and
+        // replay this turn once against the limit it just told us.
+        const statedCeiling = parseOutputTokenCeiling(err);
+        if (statedCeiling !== null) {
+          rememberOutputCeiling(ceilingKey, statedCeiling);
+          diag("output_ceiling_learned", {
+            ceiling: statedCeiling,
+            requested: options.maxTokens,
+            provider: options.provider,
+            model: options.model,
+          });
+          if (outputCeilingRetries < MAX_OUTPUT_CEILING_RETRIES) {
+            outputCeilingRetries++;
+            yield {
+              type: "retry" as const,
+              reason: "provider_error" as const,
+              attempt: outputCeilingRetries,
+              maxAttempts: MAX_OUTPUT_CEILING_RETRIES,
+              delayMs: 0,
+              silent: true,
+            };
+            turn--; // The rejected request never reached the model.
+            continue;
+          }
+        }
+
         // Context overflow: try a forced compaction before giving up.
         // The pre-turn transformContext check uses estimated tokens, which can
         // underestimate code-heavy content. When the API confirms overflow we
@@ -1939,6 +2013,9 @@ async function* executeToolCallsMixed(
   const eventStream = new EventStream<AgentEvent>();
   const state: ToolEventState = { finalized: false };
   const resultsById = new Map<string, ToolExecutionRecord>();
+  // Calls actually handed to a tool. On abort this is what separates "nothing
+  // ran, retry freely" from "it may have already happened".
+  const dispatchedIds = new Set<string>();
   const abortHandler = () => eventStream.abort(new Error("aborted"));
   options.signal?.addEventListener("abort", abortHandler, { once: true });
 
@@ -1970,12 +2047,14 @@ async function* executeToolCallsMixed(
         if (options.signal?.aborted) break;
         if (phase.sequential) {
           // Single sequential tool
+          dispatchedIds.add(phase.sequential.id);
           const record = await executeSingleToolCall(phase.sequential, options, (event) =>
             pushToolEvent(eventStream, state, event),
           );
           resultsById.set(record.toolCallId, record);
         } else if (phase.parallel.length === 1) {
           // Single parallel tool — no need for Promise.all overhead
+          dispatchedIds.add(phase.parallel[0]!.id);
           const record = await executeSingleToolCall(phase.parallel[0]!, options, (event) =>
             pushToolEvent(eventStream, state, event),
           );
@@ -1984,6 +2063,7 @@ async function* executeToolCallsMixed(
           // Multiple parallel tools — run concurrently
           await Promise.all(
             phase.parallel.map(async (toolCall) => {
+              dispatchedIds.add(toolCall.id);
               const record = await executeSingleToolCall(toolCall, options, (event) =>
                 pushToolEvent(eventStream, state, event),
               );
@@ -2014,7 +2094,7 @@ async function* executeToolCallsMixed(
     state.finalized = true;
   }
 
-  const toolResults = buildToolResults(initialToolResults, toolCalls, resultsById);
+  const toolResults = buildToolResults(initialToolResults, toolCalls, resultsById, dispatchedIds);
   capToolResults(toolResults, options.maxToolResultChars);
   capTurnToolResults(toolResults, options.maxTurnToolResultChars);
   return { toolResults, aborted };
@@ -2028,11 +2108,15 @@ async function* executeToolCallsParallel(
   const eventStream = new EventStream<AgentEvent>();
   const state: ToolEventState = { finalized: false };
   const resultsById = new Map<string, ToolExecutionRecord>();
+  // Calls actually handed to a tool. On abort this is what separates "nothing
+  // ran, retry freely" from "it may have already happened".
+  const dispatchedIds = new Set<string>();
   const abortHandler = () => eventStream.abort(new Error("aborted"));
   options.signal?.addEventListener("abort", abortHandler, { once: true });
 
   Promise.all(
     toolCalls.map(async (toolCall) => {
+      dispatchedIds.add(toolCall.id);
       const record = await executeSingleToolCall(toolCall, options, (event) =>
         pushToolEvent(eventStream, state, event),
       );
@@ -2062,16 +2146,43 @@ async function* executeToolCallsParallel(
     state.finalized = true;
   }
 
-  const toolResults = buildToolResults(initialToolResults, toolCalls, resultsById);
+  const toolResults = buildToolResults(initialToolResults, toolCalls, resultsById, dispatchedIds);
   capToolResults(toolResults, options.maxToolResultChars);
   capTurnToolResults(toolResults, options.maxTurnToolResultChars);
   return { toolResults, aborted };
+}
+
+/**
+ * A tool call that never reached its tool. Nothing ran, so nothing changed.
+ */
+export function cancelledBeforeStartText(name: string): string {
+  return `\`${name}\` was cancelled before it started, so it had no effect. Safe to retry.`;
+}
+
+/**
+ * A tool call that started running and was cut off before reporting back.
+ *
+ * The distinction from {@link cancelledBeforeStartText} is the whole point: a
+ * dispatched `git push`, deploy or MCP call may well have COMPLETED before the
+ * abort landed. Telling the model it was "interrupted" reads as "it did not
+ * happen", so the model repeats the side effect — or reports to the user that
+ * something never ran when it did.
+ */
+export function indeterminateOutcomeText(name: string): string {
+  return (
+    `\`${name}\` started running and was cut off before it reported back, so its ` +
+    `outcome is UNKNOWN — it may have completed. Check the real state (re-read the ` +
+    `file, re-run a status command) before retrying it, and do not tell the user it ` +
+    `did not happen.`
+  );
 }
 
 function buildToolResults(
   initialToolResults: ToolResult[],
   toolCalls: ToolCall[],
   resultsById: Map<string, ToolExecutionRecord>,
+  /** Calls handed to their tool. Absent = we could not tell, so assume dispatched. */
+  dispatchedIds?: ReadonlySet<string>,
 ): ToolResult[] {
   const toolResults = [...initialToolResults];
   for (const toolCall of toolCalls) {
@@ -2084,10 +2195,16 @@ function buildToolResults(
         isError: result.isError || undefined,
       });
     } else {
+      // No record: either the abort landed before this call was dispatched
+      // (nothing ran) or after (effects unknown). Only the dispatch ledger
+      // can tell those apart, and the two demand opposite behaviour.
+      const dispatched = dispatchedIds?.has(toolCall.id) ?? true;
       toolResults.push({
         type: "tool_result",
         toolCallId: toolCall.id,
-        content: "Tool execution was aborted.",
+        content: dispatched
+          ? indeterminateOutcomeText(toolCall.name)
+          : cancelledBeforeStartText(toolCall.name),
         isError: true,
       });
     }
@@ -2292,37 +2409,32 @@ function repairToolPairingAdjacent(messages: Message[]): void {
     if (msg.role !== "assistant") continue;
     if (typeof msg.content === "string" || !Array.isArray(msg.content)) continue;
 
-    const toolCallIds = (msg.content as ContentPart[])
+    const orphanCalls = (msg.content as ContentPart[])
       .filter((p) => p.type === "tool_call")
-      .map((p) => (p as ContentPart & { type: "tool_call"; id: string }).id);
-    if (toolCallIds.length === 0) continue;
+      .map((p) => p as ContentPart & { type: "tool_call"; id: string; name: string });
+    if (orphanCalls.length === 0) continue;
+
+    // A result is missing here after compaction, session restore or abort
+    // recovery — all of which discard whether the tool ever ran. Unknown is the
+    // only honest answer, and it is the safe one: it stops the model repeating
+    // a side effect that may already have landed.
+    const repaired = (call: { id: string; name: string }): ToolResult => ({
+      type: "tool_result",
+      toolCallId: call.id,
+      content: indeterminateOutcomeText(call.name),
+      isError: true,
+    });
 
     const next = messages[i + 1];
     if (next?.role === "tool" && Array.isArray(next.content)) {
       // Tool message exists — check for missing results
       const existingIds = new Set((next.content as ToolResult[]).map((r) => r.toolCallId));
-      const missing = toolCallIds.filter((id) => !existingIds.has(id));
-      if (missing.length > 0) {
-        for (const id of missing) {
-          (next.content as ToolResult[]).push({
-            type: "tool_result",
-            toolCallId: id,
-            content: "Tool execution was interrupted.",
-            isError: true,
-          });
-        }
+      for (const call of orphanCalls) {
+        if (!existingIds.has(call.id)) (next.content as ToolResult[]).push(repaired(call));
       }
     } else {
       // No tool message follows — insert a synthetic one
-      messages.splice(i + 1, 0, {
-        role: "tool" as const,
-        content: toolCallIds.map((id) => ({
-          type: "tool_result" as const,
-          toolCallId: id,
-          content: "Tool execution was interrupted.",
-          isError: true,
-        })),
-      });
+      messages.splice(i + 1, 0, { role: "tool" as const, content: orphanCalls.map(repaired) });
     }
   }
 
