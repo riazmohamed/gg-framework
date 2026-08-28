@@ -48,7 +48,10 @@ export function SlashCommandMenu({ commands, selectedIndex, width }: SlashComman
         const textColor = isSelected ? theme.commandColor : theme.textDim;
 
         return (
-          <Box key={cmd.name} flexDirection="column">
+          // Keyed by position as well as name: a name collision between
+          // sections would otherwise duplicate/omit rows rather than just
+          // looking odd.
+          <Box key={`${actualIndex}-${cmd.name}`} flexDirection="column">
             {shouldRenderSectionHeader && (
               <Text color={theme.textDim}>-- {cmd.sectionTitle} --</Text>
             )}

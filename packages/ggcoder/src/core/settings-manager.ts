@@ -107,6 +107,14 @@ const SettingsSchema = z.object({
    *  - "baseline": 5-min cache TTL, no pre-warm
    *  - "optimized": 1-h cache TTL, cache pre-warming on first prompt (default) */
   speedProfile: z.enum(["baseline", "optimized"]).default("optimized"),
+  /** Maps a GitHub account to the ~/.ssh/config host aliases that authenticate
+   *  as it, so the footer can name the account a repo really pushes as. Only
+   *  needed for aliased SSH remotes: https remotes and plain `github.com`
+   *  already resolve to the gh CLI's active account without any config.
+   *  e.g. { "riaztmc": { "sshHosts": ["github.com-work"] } } */
+  githubIdentities: z
+    .record(z.string(), z.object({ sshHosts: z.array(z.string()).default([]) }))
+    .optional(),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;

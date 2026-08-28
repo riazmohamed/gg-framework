@@ -107,6 +107,8 @@ interface ChatScreenProps {
   contextWindowOptions?: ContextWindowOptions;
   displayedCwd: string;
   gitBranch?: string | null;
+  githubAccount?: string | null;
+  githubAccountMismatch?: boolean;
   planMode: boolean;
   exitPending: boolean;
   footerStatusLayout: FooterStatusLayoutDecision;
@@ -176,6 +178,8 @@ export function ChatScreen({
   contextWindowOptions,
   displayedCwd,
   gitBranch,
+  githubAccount,
+  githubAccountMismatch,
   planMode,
   exitPending,
   footerStatusLayout,
@@ -277,6 +281,8 @@ export function ChatScreen({
           contextWindowOptions={contextWindowOptions}
           displayedCwd={displayedCwd}
           gitBranch={gitBranch}
+          githubAccount={githubAccount}
+          githubAccountMismatch={githubAccountMismatch}
           thinkingLevel={thinkingLevel}
           planMode={planMode}
           exitPending={exitPending}

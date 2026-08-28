@@ -27,6 +27,7 @@ interface UseChatLayoutMeasurementsOptions {
   contextWindowOptions?: ContextWindowOptions;
   displayedCwd: string;
   gitBranch?: string | null;
+  githubAccount?: string | null;
   thinkingLevel?: ThinkingLevel;
   exitPending: boolean;
   taskBarExpanded: boolean;
@@ -66,6 +67,7 @@ export function useChatLayoutMeasurements({
   contextWindowOptions,
   displayedCwd,
   gitBranch,
+  githubAccount,
   thinkingLevel,
   exitPending,
   taskBarExpanded,
@@ -116,6 +118,7 @@ export function useChatLayoutMeasurements({
     contextWindowOptions,
     cwd: displayedCwd,
     gitBranch,
+    githubAccount,
     thinkingLevel,
   });
   const chatControlsLayout = getChatControlsLayoutDecision({

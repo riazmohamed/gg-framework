@@ -13,6 +13,10 @@ interface FooterProps {
   contextWindowOptions?: ContextWindowOptions;
   cwd: string;
   gitBranch?: string | null;
+  /** GitHub account this repo acts as. Rendered next to the branch. */
+  githubAccount?: string | null;
+  /** True when the repo pushes as someone other than the gh active account. */
+  githubAccountMismatch?: boolean;
   /**
    * Active thinking tier, or `undefined` when thinking is off. The footer
    * renders the tier verbatim (`Thinking max`) and color-codes by power.
@@ -166,6 +170,7 @@ export function doesFooterFitOnOneLine({
   contextWindowOptions,
   cwd,
   gitBranch,
+  githubAccount,
   thinkingLevel,
   planMode = false,
   statusBelow,
@@ -177,6 +182,7 @@ export function doesFooterFitOnOneLine({
   contextWindowOptions?: ContextWindowOptions;
   cwd: string;
   gitBranch?: string | null;
+  githubAccount?: string | null;
   thinkingLevel?: ThinkingLevel;
   planMode?: boolean;
   statusBelow?: boolean;
@@ -189,7 +195,12 @@ export function doesFooterFitOnOneLine({
   const modelName = getShortModelName(model);
   const thinkingText = getThinkingFooterLabel(thinkingLevel);
   const planText = planMode ? "Plan on" : "Plan off";
-  const leftLen = displayPath.length + 2 + (gitBranch ? gitBranch.length + 5 : 0);
+  const leftLen =
+    displayPath.length +
+    2 +
+    (gitBranch ? gitBranch.length + 5 : 0) +
+    // " │ @account"
+    (githubAccount ? githubAccount.length + 4 : 0);
   const rightLen = getFooterRightLength({
     barWidth: 8,
     contextPct,
@@ -206,6 +217,8 @@ export function Footer({
   contextWindowOptions,
   cwd,
   gitBranch,
+  githubAccount,
+  githubAccountMismatch,
   thinkingLevel,
   planMode = false,
   exitPending,
@@ -283,6 +296,7 @@ export function Footer({
     contextWindowOptions,
     cwd,
     gitBranch,
+    githubAccount,
     thinkingLevel,
     planMode,
     statusBelow,
@@ -351,13 +365,22 @@ export function Footer({
 
   const showCwd = !hideCwd;
   const showGitBranch = !hideGitBranch && !!gitBranch;
+  const showGitHubAccount = !hideGitBranch && !!githubAccount;
+  // Amber when the repo pushes as an account other than the gh active one —
+  // the case where acting on autopilot commits under the wrong identity.
+  const githubAccountNode = (
+    <Text color={githubAccountMismatch ? theme.warning : theme.textMuted}>
+      {"@"}
+      {githubAccount}
+    </Text>
+  );
   // When statusBelow is set, the status renders on its own line under
   // the right content — it's NOT part of the left-chunk layout.
   const showStatusInLeft = !!statusLabel && !statusBelow;
 
   // First-rendered left chunk: track if we've started the line with the cwd
   // so we know when to insert separators.
-  const leftHasContent = showCwd || showGitBranch || showStatusInLeft;
+  const leftHasContent = showCwd || showGitBranch || showGitHubAccount || showStatusInLeft;
   // Sep helper that only renders if there's already content before it.
   let leftStarted = false;
   const renderLeftSep = (key: string): React.ReactElement | null => {
@@ -390,6 +413,12 @@ export function Footer({
               </Text>
             </>
           )}
+          {showGitHubAccount && (
+            <>
+              {renderLeftSep("sep-gh")}
+              {githubAccountNode}
+            </>
+          )}
           {showStatusInLeft && (
             <>
               {renderLeftSep("sep-status")}
@@ -419,6 +448,12 @@ export function Footer({
                   {"\u2387 "}
                   {gitBranch}
                 </Text>
+              </>
+            )}
+            {showGitHubAccount && (
+              <>
+                {showCwd || showGitBranch ? sep : null}
+                {githubAccountNode}
               </>
             )}
           </Box>
@@ -454,9 +489,15 @@ export function Footer({
               </Text>
             </>
           )}
-          {statusLabel && (
+          {showGitHubAccount && (
             <>
               {showCwd || showGitBranch ? sep : null}
+              {githubAccountNode}
+            </>
+          )}
+          {statusLabel && (
+            <>
+              {showCwd || showGitBranch || showGitHubAccount ? sep : null}
               <Text color={statusColor ?? theme.text} wrap="truncate">
                 {statusLabel}
               </Text>

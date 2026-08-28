@@ -48,6 +48,11 @@ import type { ProcessManager } from "../core/process-manager.js";
 import { useTheme, useSetTheme, type ThemeName } from "./theme/theme.js";
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { getGitBranch } from "../utils/git.js";
+import {
+  getGitHubIdentity,
+  formatGitHubIdentity,
+  type GitHubIdentity,
+} from "../utils/github-identity.js";
 import { getAuthStorageKeys, getModel, getVideoByteLimit } from "../core/model-registry.js";
 import { SessionManager, type TurnMetricPayload } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
@@ -493,6 +498,7 @@ export function App(props: AppProps) {
   // Suppress "done" status when a plan overlay is about to open
   const planOverlayPendingRef = useRef(false);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
+  const [githubIdentity, setGithubIdentity] = useState<GitHubIdentity | null>(null);
   useTerminalTitle({ isRunning: titleRunning, cwd: displayedCwd, gitBranch });
   const [currentModel, setCurrentModel] = useState(props.model);
   const [currentProvider, setCurrentProvider] = useState(props.provider);
@@ -708,6 +714,35 @@ export function App(props: AppProps) {
   useEffect(() => {
     getGitBranch(displayedCwd).then(setGitBranch);
   }, [displayedCwd]);
+
+  // Resolve the GitHub account this repo acts as, re-running on cwd change
+  // like the branch above.
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      let identityMap = {};
+      if (props.settingsFile) {
+        try {
+          const sm = new SettingsManager(props.settingsFile);
+          await sm.load();
+          identityMap = sm.get("githubIdentities") ?? {};
+        } catch {
+          /* unreadable settings — fall back to the unmapped defaults */
+        }
+      }
+      const identity = await getGitHubIdentity(displayedCwd, identityMap);
+      if (!cancelled) setGithubIdentity(identity);
+    };
+    void load();
+    // `gh auth switch` happens in another terminal, so poll rather than
+    // trusting that something in this process moved.
+    const timer = setInterval(() => void load(), 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [displayedCwd, props.settingsFile]);
+  const githubAccount = formatGitHubIdentity(githubIdentity);
 
   // Periodic update check during long sessions
   useEffect(() => {
@@ -2518,12 +2553,20 @@ export function App(props: AppProps) {
       },
       ...orderedPromptCommands,
       ...remainingPromptCommands,
-      ...customCommands.map((cmd) => ({
-        name: cmd.name,
-        aliases: [] as string[],
-        description: cmd.description,
-        sectionTitle: "custom",
-      })),
+      // A custom command whose name collides with a built-in prompt command is
+      // unreachable — routePromptCommandInput resolves built-ins first — so
+      // listing it would offer a row that runs something else entirely.
+      ...customCommands
+        .filter(
+          (cmd) =>
+            !PROMPT_COMMANDS.some((p) => p.name === cmd.name || p.aliases.includes(cmd.name)),
+        )
+        .map((cmd) => ({
+          name: cmd.name,
+          aliases: [] as string[],
+          description: cmd.description,
+          sectionTitle: "custom",
+        })),
       {
         name: "quit",
         aliases: ["q", "exit"],
@@ -2694,6 +2737,7 @@ export function App(props: AppProps) {
     contextWindowOptions,
     displayedCwd,
     gitBranch,
+    githubAccount,
     thinkingLevel,
     exitPending,
     taskBarExpanded,
@@ -3257,6 +3301,8 @@ export function App(props: AppProps) {
           contextWindowOptions={contextWindowOptions}
           displayedCwd={displayedCwd}
           gitBranch={gitBranch}
+          githubAccount={githubAccount}
+          githubAccountMismatch={githubIdentity?.mismatch}
           planMode={planMode}
           exitPending={exitPending}
           footerStatusLayout={footerStatusLayout}

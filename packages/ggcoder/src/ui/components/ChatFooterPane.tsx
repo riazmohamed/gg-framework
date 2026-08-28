@@ -20,6 +20,8 @@ interface ChatFooterPaneProps {
   contextWindowOptions?: ContextWindowOptions;
   displayedCwd: string;
   gitBranch?: string | null;
+  githubAccount?: string | null;
+  githubAccountMismatch?: boolean;
   thinkingLevel?: ThinkingLevel;
   planMode: boolean;
   exitPending: boolean;
@@ -40,6 +42,8 @@ export function ChatFooterPane({
   contextWindowOptions,
   displayedCwd,
   gitBranch,
+  githubAccount,
+  githubAccountMismatch,
   thinkingLevel,
   planMode,
   exitPending,
@@ -74,6 +78,8 @@ export function ChatFooterPane({
       contextWindowOptions={contextWindowOptions}
       cwd={displayedCwd}
       gitBranch={gitBranch}
+      githubAccount={githubAccount}
+      githubAccountMismatch={githubAccountMismatch}
       thinkingLevel={thinkingLevel}
       planMode={planMode}
       exitPending={exitPending}
