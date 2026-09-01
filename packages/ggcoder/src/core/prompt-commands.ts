@@ -107,18 +107,18 @@ Rules:
 - Keep each cell concise but specific enough to be actionable.
 - If no exciting validated features are found, output one row saying no fresh validated features were found.
 
-After the table, ask exactly:
+After the table, ask the user what to do with the \`ask_user\` tool: one \`choice\` question (\`id: "scope"\`, question "What should I do?") with these options, each carrying a one-line hint:
 
-What should I do?
-A) Build all of these features in plan mode
-B) Build only the top priority ones in plan mode
-C) Other
+- Build all of these features in plan mode
+- Build only the top priority ones in plan mode
+
+Leave the free-text escape on so they can pick specific ranks or re-scope. The card is the ONLY ask: do not also list the options as text, and do not end with an asking line. Only if \`ask_user\` is unavailable, ask the same question in prose as a lettered list.
 
 Do not start implementing until the user chooses.
 
-If the user chooses A or B, do not implement directly. First call the enter_plan tool, then research and design an implementation plan for the selected features (all of them for A; the top 3 most exciting — ranks 1-3 — for B). The plan must cover, per feature: the user-facing behavior, the local files/anchors it touches, the implementation approach (compared against real-world examples via kencode search using literal code tokens), and how it will be verified. Write the plan to .gg/plans/<name>.md, then call exit_plan with the plan path so the user can review and approve it. Do not begin implementing until the user approves the plan.
+If they choose all or the top ones, do not implement directly. First call the enter_plan tool, then research and design an implementation plan for the selected features (all of them, or the top 3 most exciting — ranks 1-3). The plan must cover, per feature: the user-facing behavior, the local files/anchors it touches, the implementation approach (compared against real-world examples via kencode search using literal code tokens), and how it will be verified. Write the plan to .gg/plans/<name>.md, then call exit_plan with the plan path so the user can review and approve it. Do not begin implementing until the user approves the plan.
 
-If the user chooses C, ask what they would like — pick specific features by rank, refine or re-scope the list, or skip — and do not implement anything until they say so.`,
+If they answer with anything else, follow what they asked — specific features by rank, a refined or re-scoped list, or skipping — and do not implement anything until they say so.`,
   },
   {
     name: "init",
@@ -240,11 +240,12 @@ description: Run checks, agent code review, commit with AI message, and push
    one-line fix. If none, reply "CLEAR". This is a last check, not a deep audit - be fast.
 
 4. If CLEAR: proceed straight to step 5 and push WITHOUT asking the user anything.
-   If issues >= 80 were reported: STOP, show the issues, and ask exactly:
-   "Want me to fix this first, or commit and push anyway?
-   A) Fix it first, then commit & push
-   B) Commit & push anyway"
-   On A: fix, re-run step 1, then continue (no re-review). On B: continue as-is.
+   If issues >= 80 were reported: STOP, show the issues, and ask with the \`ask_user\`
+   tool — one \`choice\` question (\`id: "land"\`, question "Want me to fix this first, or commit and push anyway?") with:
+   - "Fix it first, then commit & push" (recommended, hint: keeps the branch green)
+   - "Commit & push anyway" (hint: issue stays open in the log)
+   The card is the ONLY ask: show the issues, then stop — do not restate the two options as text or end with an asking line. Only if \`ask_user\` is unavailable, ask the same two options in prose.
+   On fix-first: fix, re-run step 1, then continue (no re-review). Otherwise continue as-is.
 
 5. Stage relevant files with git add (specific files, not -A)
 

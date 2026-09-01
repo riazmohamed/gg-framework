@@ -453,6 +453,44 @@ describe("useAgentEvents", () => {
     ]);
   });
 
+  it("discards every repeated draft but shows the review notice once", () => {
+    // One review injects up to four times (the read-coverage retries and their
+    // escalation). Each injection must kill the draft it interrupts, but the
+    // notice is the same sentence — stacking copies says nothing new.
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Draft two" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Draft three" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "hook", hook: "ideal" })]);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "Reviewed final" }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "ideal" }),
+      expect.objectContaining({ kind: "assistant", text: "Reviewed final" }),
+    ]);
+  });
+
+  it("still shows a second notice when a DIFFERENT hook follows", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "verification" }),
+      expect.objectContaining({ kind: "hook", hook: "ideal" }),
+    ]);
+  });
+
   it("never paints the draft while the Ideal review is armed", () => {
     const { hook, getItems } = setup();
 
@@ -957,5 +995,57 @@ describe("models_change", () => {
     });
 
     expect(getModels()).toEqual([]);
+  });
+
+  describe("ask_user band", () => {
+    const question = {
+      id: "flag",
+      question: "Flip the flag for everyone now?",
+      kind: "confirm",
+      options: [{ label: "Yes" }, { label: "No" }],
+    };
+
+    it("renders a question the agent is parked on", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [question] }));
+      });
+      expect(getItems()).toEqual([
+        expect.objectContaining({ kind: "ask", prompt: { id: "ask-1", questions: [question] } }),
+      ]);
+    });
+
+    it("drops a malformed frame instead of rendering an unanswerable band", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [] }));
+        hook.result.current.handleEvent(ev("ask_user", { questions: [question] }));
+      });
+      expect(getItems()).toEqual([]);
+    });
+
+    // The sidecar releases parked questions only on a real abort, so only a
+    // cancelled run may close a band.
+    it("closes an unanswered band when the run is cancelled", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [question] }));
+        hook.result.current.handleEvent(ev("run_end", { cancelled: true }));
+      });
+      expect(getItems()).toEqual([expect.objectContaining({ kind: "ask", cancelled: true })]);
+    });
+
+    // Autopilot emits a run_end per injected round while the tool call is still
+    // parked; closing there would kill a question the user can still answer and
+    // strand the agent until its ten-minute timeout.
+    it("leaves the band live across a normal run_end", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [question] }));
+        hook.result.current.handleEvent(ev("run_end", {}));
+        hook.result.current.handleEvent(ev("run_end", {}));
+      });
+      expect(getItems()).toEqual([expect.not.objectContaining({ cancelled: true })]);
+    });
   });
 });

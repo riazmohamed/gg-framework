@@ -215,7 +215,7 @@ describe("model registry context windows", () => {
     expect(getDefaultThinkingLevel("claude-opus-5")).toBe("max");
   });
 
-  it("makes GLM-5.3 the sole GLM model, at a max thinking ceiling", () => {
+  it("pairs GLM-5.3 with its Flash sibling, both at a max thinking ceiling", () => {
     expect(getDefaultModel("glm")).toMatchObject({
       id: "glm-5.3",
       name: "GLM-5.3",
@@ -227,7 +227,16 @@ describe("model registry context windows", () => {
       maxThinkingLevel: "max",
     });
     expect(getDefaultThinkingLevel("glm-5.3")).toBe("max");
-    // 5.3 is the only GLM *coding* entry: the older coding ids route to
+    // Flash is natively multimodal, so its attachments stay inline instead of
+    // taking the zai_vision MCP detour that `supportsImages: false` triggers.
+    expect(getModel("glm-5.3-flash")).toMatchObject({
+      name: "GLM-5.3-Flash",
+      contextWindow: 1_000_000,
+      supportsImages: true,
+      costTier: "low",
+      maxThinkingLevel: "max",
+    });
+    // Only the 5.3 pair ships as *coding* entries: the older ids route to
     // strictly worse coding for the same plan quota, and the coding endpoint
     // already answers glm-5.2 requests as glm-5.3. Saved sessions on any of
     // them fall back to the provider default. The 4.6V/5V vision models are
@@ -236,6 +245,7 @@ describe("model registry context windows", () => {
     // head of the vision fallback chain.
     expect(getModelsForProvider("glm").map((model) => model.id)).toEqual([
       "glm-5.3",
+      "glm-5.3-flash",
       "glm-4.6v",
       "glm-5v-turbo",
       "glm-4.6v-flashx",
@@ -244,10 +254,10 @@ describe("model registry context windows", () => {
     for (const retired of ["glm-5.2", "glm-5.1", "glm-4.7", "glm-4.7-flash"]) {
       expect(getModel(retired), `${retired} retired`).toBeUndefined();
     }
-    // No cheap sibling left, so scout/summary routing must keep 5.3 rather
-    // than crash or jump to another provider's login.
-    expect(getFastModel("glm", "glm-5.3").id).toBe("glm-5.3");
-    expect(getSummaryModel("glm", "glm-5.3").id).toBe("glm-5.3");
+    // Flash is the cheap sibling, so scout/summary routing drops to it instead
+    // of paying 5.3 rates for recon and compaction.
+    expect(getFastModel("glm", "glm-5.3").id).toBe("glm-5.3-flash");
+    expect(getSummaryModel("glm", "glm-5.3").id).toBe("glm-5.3-flash");
   });
 
   it("defaults xAI to Grok 4.6 and keeps 4.5 capped at high", () => {

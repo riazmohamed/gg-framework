@@ -1661,6 +1661,14 @@ export class AgentSession {
    */
   private wouldInjectIdealReview(): boolean {
     if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) return false;
+    // Mid-review a stop still injects: the coverage follow-up while files are
+    // unread, or its escalation once the budget is spent. Both make the model
+    // answer again, so the candidate answer is a draft exactly as it is before
+    // the review starts — without arming here it paints and the reviewed answer
+    // lands under it as a duplicate.
+    if (this.idealReviewPhase === "reviewing") {
+      return this.reviewCoverage.evidence().missing.length > 0;
+    }
     if (this.idealReviewPhase !== "idle") return false;
     if (!this.settingsManager.get("idealReviewEnabled")) return false;
     if (evaluateIdealReview({ ...this.hookStats, turns: this.hookStats.turns + 1 }).shouldReview) {
@@ -1767,8 +1775,20 @@ export class AgentSession {
         lspMissing: lspEvidence.missing,
       });
       if (coverage.missing.length > 0) {
+        // Announce like any other pre-final injection: this follow-up makes the
+        // model answer again, so the answer it interrupts is a draft and the
+        // hook event is what tells clients to discard it. Injecting silently is
+        // what let the pre-coverage answer paint above the reviewed one.
+        this.eventBus.emit("hook", {
+          kind: "ideal",
+          coverageExpected: coverage.expected,
+          coverageMissing: coverage.missing,
+        });
         if (this.reviewCoverageInjected < MAX_REVIEW_COVERAGE_INJECTIONS) {
           this.reviewCoverageInjected += 1;
+          // Stays armed (coverage is still outstanding) — this call is here so a
+          // client that missed the earlier edge is armed before the next draft.
+          this.refreshIdealReviewArmed();
           return [
             this.withReviewLspEvidence(buildReviewCoverageMessage(coverage.missing), lspEvidence),
           ];
@@ -1776,6 +1796,9 @@ export class AgentSession {
         // Budget spent: close the gate so the run cannot spin on a file that
         // never becomes readable, and require the gap be reported to the user.
         this.idealReviewPhase = "complete";
+        // The gate is shut, so this is the real disarm: the answer to the
+        // escalation is final and streams live.
+        this.refreshIdealReviewArmed();
         log("INFO", "ideal", "Ideal review coverage escalated after retry budget", {
           injected: String(this.reviewCoverageInjected),
           missing: coverage.missing,
@@ -1803,10 +1826,12 @@ export class AgentSession {
       coverageExpected: coverage.expected,
       coverageMissing: coverage.missing,
     });
-    // Disarm strictly AFTER the hook event. Clients release held text on
+    // Recompute strictly AFTER the hook event: clients release held text on
     // disarm, so the reverse order would paint the draft and then delete it —
-    // the exact flash arming exists to prevent. Leaving `idle` is what lets the
-    // reviewed final answer stream live instead of being held.
+    // the exact flash arming exists to prevent. Arming normally PERSISTS here,
+    // because review starts with every changed file uncovered and a stop while
+    // coverage is outstanding injects again. Disarm lands later, on the read
+    // that closes the last gap (or when the retry budget escalates).
     this.refreshIdealReviewArmed();
     log("INFO", "ideal", "Injecting ideal review before final response", {
       coverageExpected: coverage.expected,

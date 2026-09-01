@@ -13,6 +13,7 @@ import {
   type QueuedMessage,
   type SlashCommand,
 } from "./agent";
+import { isAskUserPrompt } from "./ask-user";
 import { formatTokenCount } from "./ActivityBar";
 import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
@@ -366,8 +367,16 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   }, [setItems]);
 
   const pushItem = useCallback(
-    (item: Item) => {
-      setItems((prev) => [...prev, item]);
+    (item: Item, opts?: { skipIfSameAsLast?: boolean }) => {
+      setItems((prev) => {
+        if (opts?.skipIfSameAsLast) {
+          const last = prev[prev.length - 1];
+          if (last && last.kind === item.kind && last.kind === "hook" && item.kind === "hook") {
+            if (last.hook === item.hook) return prev;
+          }
+        }
+        return [...prev, item];
+      });
     },
     [setItems],
   );
@@ -905,8 +914,22 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           finalizeThinking();
           // The queue drained into this run — un-dim any messages that were
           // waiting, since the agent has now consumed them.
+          //
+          // A question band closes ONLY on a cancelled run, which is the case
+          // the sidecar answers with `asks.cancelAll()`. A plain run_end must
+          // leave it live: autopilot emits one per injected round while the
+          // parked tool call is still waiting, so closing here would kill a
+          // question the user can still answer and strand the agent until it
+          // timed out ten minutes later.
+          const runCancelled = d.cancelled === true;
           setItems((prev) =>
-            prev.map((it) => (it.kind === "user" && it.queued ? { ...it, queued: false } : it)),
+            prev.map((it) => {
+              if (it.kind === "user" && it.queued) return { ...it, queued: false };
+              if (runCancelled && it.kind === "ask" && !it.sent && !it.cancelled) {
+                return { ...it, cancelled: true };
+              }
+              return it;
+            }),
           );
           // Exit the tool panel (mirrors ggcoder).
           setLiveToolFeed([]);
@@ -989,6 +1012,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         case "plan_enter":
           setState((s) => (s ? { ...s, planMode: true } : s));
           pushItem({ kind: "plan", id: nextId(), reason: String(d.reason ?? "") });
+          break;
+        case "ask_user":
+          // The agent's turn is parked on this question until App POSTs the
+          // answers back (or the run ends and `run_end` closes the band). A
+          // malformed frame is dropped rather than rendered as an empty band
+          // the user could never answer.
+          if (isAskUserPrompt(d)) pushItem({ kind: "ask", id: nextId(), prompt: d });
           break;
         case "plan_progress": {
           // The sidecar reads the live approved-plan file, so this snapshot
@@ -1160,7 +1190,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               releaseHeldText();
               endStreamingText();
             }
-            pushItem({ kind: "hook", id: nextId(), hook: kind });
+            // One review can inject several times (the read-coverage retries
+            // and their escalation), and each injection announces itself so the
+            // draft it supersedes is discarded. The DISCARD must happen every
+            // time; the notice is the same sentence, so stacking identical
+            // copies just tells the user the same thing four times.
+            pushItem({ kind: "hook", id: nextId(), hook: kind }, { skipIfSameAsLast: true });
           }
           break;
         }

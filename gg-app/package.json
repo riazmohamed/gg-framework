@@ -1,7 +1,7 @@
 {
   "name": "gg-app",
   "private": true,
-  "version": "0.53.12",
+  "version": "0.55.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -22,8 +22,6 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@fontsource-variable/geist": "^5.2.9",
-    "@fontsource-variable/geist-mono": "^5.2.8",
     "@kenkaiiii/error-mom": "^0.3.3",
     "@mediapipe/tasks-vision": "^0.10.18",
     "@tauri-apps/api": "^2",

@@ -8,10 +8,17 @@ import { openProjectPath, sendPrompt } from "./agent";
 import { codeLanguage, codeNodeText } from "./markdown-prompt";
 import { collapsedCode, shouldCollapseCode, visibleBlockCount } from "./collapse";
 import { marked } from "marked";
+import { rehypeAnimateWords } from "./rehype-animate-words";
 import "highlight.js/styles/github-dark.css";
 
 interface Props {
   children: string;
+  /**
+   * True while this text is actively streaming in: the trailing block wraps
+   * its words in spans that fade in on mount. Off by default, and dropped
+   * again once the stream settles, so finished prose carries no extra DOM.
+   */
+  animate?: boolean;
 }
 
 function isExternalHref(href: string): boolean {
@@ -271,20 +278,25 @@ function isPromptBlockComplete(raw: string): boolean {
   return /`{3,}\s*$/.test(body);
 }
 
+const ANIMATED_PLUGINS = [rehypeHighlight, rehypeAnimateWords];
+const PLUGINS = [rehypeHighlight];
+
 const MemoizedMarkdownBlock = memo(
   function MarkdownBlock({
     content,
     promptReady,
+    animate,
   }: {
     content: string;
     promptReady: boolean;
+    animate: boolean;
   }): React.ReactElement {
     const normalized = content.replace(/\\n/g, "\n").replace(/^\n+|\n+$/g, "");
     return (
       <PromptReadyContext.Provider value={promptReady}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeHighlight]}
+          rehypePlugins={animate ? ANIMATED_PLUGINS : PLUGINS}
           components={{ a: ExternalLink, pre: PreBlock }}
         >
           {normalized}
@@ -292,7 +304,10 @@ const MemoizedMarkdownBlock = memo(
       </PromptReadyContext.Provider>
     );
   },
-  (prev, next) => prev.content === next.content && prev.promptReady === next.promptReady,
+  (prev, next) =>
+    prev.content === next.content &&
+    prev.promptReady === next.promptReady &&
+    prev.animate === next.animate,
 );
 
 /**
@@ -304,7 +319,10 @@ const MemoizedMarkdownBlock = memo(
  * paragraph, only that paragraph re-parses — all earlier blocks (finished
  * code blocks, completed paragraphs) hit memo() and bail out.
  */
-export const Markdown = memo(function Markdown({ children }: Props): React.ReactElement {
+export const Markdown = memo(function Markdown({
+  children,
+  animate = false,
+}: Props): React.ReactElement {
   const blocks = useMemo(() => parseMarkdownIntoBlocks(children), [children]);
   const [rowExpanded, setRowExpanded] = useState(false);
   // Oversized content mounts only its leading blocks. Fenced-code folding above
@@ -324,6 +342,9 @@ export const Markdown = memo(function Markdown({ children }: Props): React.React
           key={index}
           content={block}
           promptReady={isPromptBlockComplete(block)}
+          // Only the trailing block is still growing, so only it needs word
+          // spans; earlier blocks stay memoized and span-free.
+          animate={animate && index === visible.length - 1}
         />
       ))}
       {rowFolded && (

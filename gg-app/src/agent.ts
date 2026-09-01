@@ -853,6 +853,26 @@ export async function mcpElicit(
   await invoke("agent_mcp_elicit", { id, action, content: content ?? null });
 }
 
+export type { AskOption, AskQuestion, AskUserPrompt } from "./ask-user";
+export { isAskUserPrompt } from "./ask-user";
+
+/**
+ * Answer (or dismiss) an `ask_user` question band. `answers` maps question id
+ * to the picked value — or values, for a multi-select.
+ *
+ * The tool call, and therefore the whole turn, is blocked until this lands, so
+ * every dismissal path must call it. The sidecar only auto-cancels after a
+ * multi-minute timeout.
+ */
+export async function answerAskUser(
+  id: string,
+  action: "answer" | "cancel",
+  answers?: Record<string, string | string[]>,
+): Promise<void> {
+  await waitForReady();
+  await invoke("agent_ask_user", { id, action, answers: answers ?? null });
+}
+
 /**
  * Disconnect a provider (clear stored credentials). Handled NATIVELY in Rust
  * (removes the provider from ~/.gg/auth.json, including a dual-auth provider's
