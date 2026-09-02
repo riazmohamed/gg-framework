@@ -11,14 +11,22 @@
 // its own runner, so copied native binaries match the target.
 import { build } from "esbuild";
 import { createRequire } from "node:module";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
-const sidecarEntry = join(here, "error-mom-sidecar.mjs");
-const ggcoderSidecarEntry = join(repoRoot, "packages", "ggcoder", "dist", "app-sidecar.js");
+const sidecarEntry = join(repoRoot, "packages", "ggcoder", "dist", "app-sidecar.js");
 const outDir = join(here, "..", "src-tauri", "sidecar");
 const outFile = join(outDir, "app-sidecar.mjs");
 const nodeModulesOut = join(outDir, "node_modules");
@@ -50,12 +58,6 @@ const EXTERNAL = [
   // Bash launches SRT's physical CLI as a child process for per-session OS
   // sandboxing; keep its platform binaries and CLI files on disk.
   "@anthropic-ai/sandbox-runtime",
-  // Default MCP server: spawned as a stdio child, never imported, so esbuild
-  // won't bundle it. Copy it next to the sidecar so resolveStdioCommand can
-  // resolve its bin and rewrite `npx -y @kenkaiiii/kencode-search` to a direct
-  // `node dist/index.js` spawn. Without this the shipped app silently falls
-  // back to raw npx, paying a ~90 MB `npm exec` wrapper per MCP connection.
-  "@kenkaiiii/kencode-search",
 ];
 
 // require resolver anchored at the ggcoder package, where these deps live.
@@ -106,7 +108,7 @@ function packageRoot(name, fromRequire, fromDir) {
   // `<pkg>/package.json` to a nested stub — e.g. @modelcontextprotocol/sdk
   // resolves it to `dist/cjs/package.json` ({"type":"commonjs"}). Copying that
   // dir shipped a package with no dependencies field, so its dep tree
-  // (zod-to-json-schema, …) was never copied and the bundled kencode-search
+  // (zod-to-json-schema, …) was never copied and a bundled stdio MCP server
   // crashed at require time in the installed app.
   const isRealRoot = (dir) => {
     try {
@@ -145,8 +147,8 @@ function packageRoot(name, fromRequire, fromDir) {
     // The pnpm sibling root is the ENCLOSING `node_modules` dir, which is two
     // levels up for a scoped package (.../node_modules/@scope/name) and one for
     // an unscoped one. Using dirname() alone silently missed every scoped
-    // dependency of a scoped package — e.g. kencode-search's MCP SDK, which
-    // then shipped without its dep tree and crashed the spawned MCP server.
+    // dependency of a scoped package — e.g. an MCP server's SDK, which then
+    // shipped without its dep tree and crashed the spawned MCP server.
     const siblingRoot = enclosingNodeModules(fromDir);
     if (siblingRoot) candidates.push(siblingRoot);
   }
@@ -173,7 +175,7 @@ function copyPackage(name, fromRequire, fromDir, copied) {
   // Resolve pnpm symlinks to the real .pnpm dir. Anchoring the child resolver
   // at the SYMLINK path can't see the package's own deps (pnpm places them as
   // siblings of the REAL location), which silently skipped every transitive
-  // dep of a package found via the symlink — the bundled kencode-search
+  // dep of a package found via the symlink — a bundled MCP server once
   // shipped without the MCP SDK's dependency tree and crashed on spawn.
   const root = realpathSync(linkedRoot);
   copied.add(name);
@@ -267,10 +269,19 @@ function stripSourceMaps() {
  * rather than shipping a package that cannot load.
  */
 function pruneBrowserOnnxPayloads() {
-  const KEEP = ["package.json", "types.d.ts", join("dist", "ort.node.min.js"), join("dist", "ort.node.min.mjs")];
+  const KEEP = [
+    "package.json",
+    "types.d.ts",
+    join("dist", "ort.node.min.js"),
+    join("dist", "ort.node.min.mjs"),
+  ];
   const roots = [];
   walk(nodeModulesOut, (p, entry) => {
-    if (entry.isDirectory() && entry.name === "onnxruntime-web" && existsSync(join(p, "package.json"))) {
+    if (
+      entry.isDirectory() &&
+      entry.name === "onnxruntime-web" &&
+      existsSync(join(p, "package.json"))
+    ) {
       roots.push(p);
     }
   });
@@ -291,9 +302,9 @@ function pruneBrowserOnnxPayloads() {
 }
 
 async function main() {
-  if (!existsSync(ggcoderSidecarEntry)) {
+  if (!existsSync(sidecarEntry)) {
     throw new Error(
-      `sidecar entry missing: ${ggcoderSidecarEntry} (build @abukhaled/ogcoder first)`,
+      `sidecar entry missing: ${sidecarEntry} (build @abukhaled/ogcoder first)`,
     );
   }
   if (!existsSync(bundledSkillsSource)) {

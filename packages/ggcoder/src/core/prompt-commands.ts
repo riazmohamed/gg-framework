@@ -28,15 +28,6 @@ const CLAUDE_MD_RESTART_NOTICE = IS_GG_APP
 const spawnParallel = (count: string | number): string =>
   `in parallel using the subagent tool (call the subagent tool ${count} times in a single response)`;
 
-/**
- * Kencode-search ships behind deferred MCP loading (`deferredMcpTools` defaults
- * to true), so its tools sit in the `tool_search` catalog until promoted. Any
- * command that names an `mcp__kencode-search__*` tool must say how to unlock it,
- * or the call fails on a default install.
- */
-const KENCODE_UNLOCK_NOTE =
-  'If the `mcp__kencode-search__*` tools aren\'t active yet, call `tool_search` (e.g. "search public code") first to unlock them.';
-
 export const PROMPT_COMMANDS: PromptCommand[] = [
   {
     name: "expand",
@@ -87,7 +78,7 @@ For every candidate from the sub-agents, validate it yourself before reporting:
 1. Confirm the external source is relevant to this project and fresh enough (normally within 6 months).
 2. Search this repo with grep/find and language-aware anchors to confirm the feature is not already present under another name.
 3. Check routes, CLI commands, UI surfaces, package exports, config, docs, and examples before calling a feature missing.
-4. Use mcp__kencode-search__searchCode when a code-level look clarifies how peers actually ship the feature. Use literal imports, functions, config keys, CLI flags, route names, or package names — not conceptual phrases. ${KENCODE_UNLOCK_NOTE}
+4. Use the \`steroids\` tool (\`search\`, then \`show\` to read the full file) when a code-level look clarifies how peers actually ship the feature. Use literal imports, functions, config keys, CLI flags, route names, or package names — not conceptual phrases.
 5. Drop anything already present, irrelevant, too vague, too stale, or that is not a real user-facing feature.
 6. Merge duplicates and keep only the most exciting 5–10 features.
 
@@ -116,7 +107,7 @@ Leave the free-text escape on so they can pick specific ranks or re-scope. The c
 
 Do not start implementing until the user chooses.
 
-If they choose all or the top ones, do not implement directly. First call the enter_plan tool, then research and design an implementation plan for the selected features (all of them, or the top 3 most exciting — ranks 1-3). The plan must cover, per feature: the user-facing behavior, the local files/anchors it touches, the implementation approach (compared against real-world examples via kencode search using literal code tokens), and how it will be verified. Write the plan to .gg/plans/<name>.md, then call exit_plan with the plan path so the user can review and approve it. Do not begin implementing until the user approves the plan.
+If they choose all or the top ones, do not implement directly. First call the enter_plan tool, then research and design an implementation plan for the selected features (all of them, or the top 3 most exciting — ranks 1-3). The plan must cover, per feature: the user-facing behavior, the local files/anchors it touches, the implementation approach (compared against real-world examples via the steroids tool using literal code tokens), and how it will be verified. Write the plan to .gg/plans/<name>.md, then call exit_plan with the plan path so the user can review and approve it. Do not begin implementing until the user approves the plan.
 
 If they answer with anything else, follow what they asked — specific features by rank, a refined or re-scoped list, or skipping — and do not implement anything until they say so.`,
   },
@@ -365,11 +356,9 @@ For EVERY file in \`.github/workflows/\`, apply and report one line per change:
     name: "compare",
     aliases: [],
     description: "Compare real-world code",
-    prompt: `Compare the code you just created or modified in this conversation against real-world implementations using the \`mcp__kencode-search__searchCode\` tool. If \`mcp__kencode-search__searchCode\` is not in your tool list, fall back to \`mcp__grep__searchGitHub\` (grep.app GitHub code search) and cite it as the evidence source instead.
+    prompt: `Compare the code you just created or modified in this conversation against real-world implementations using the \`steroids\` tool (\`search\`, then \`show\` to read the full file). If \`steroids\` is not in your tool list, fall back to \`mcp__grep__searchGitHub\` (grep.app GitHub code search) and cite it as the evidence source instead.
 
-${KENCODE_UNLOCK_NOTE}
-
-You already know what you just built. For each file you created or modified, use \`mcp__kencode-search__searchCode\` (or the \`mcp__grep__searchGitHub\` fallback) to search for how real projects implement the same patterns. Look at the specific APIs, hooks, functions, and architecture you used.
+You already know what you just built. For each file you created or modified, use \`steroids\` \`search\` to find how real projects implement the same patterns. Look at the specific APIs, hooks, functions, and architecture you used.
 
 If you find something consistently done differently across real codebases, or something commonly included that you left out, report it:
 
@@ -377,10 +366,10 @@ If you find something consistently done differently across real codebases, or so
 [MISSING/DIVERGENT/INCOMPLETE] file:line - What it is
 Wrote: What was implemented
 Real-world: What real projects do instead/additionally
-Evidence: kencode-search (or grep.app) - pattern seen in X out of Y repos searched
+Evidence: steroids — pattern seen in X of Y repos
 \`\`\`
 
-Style preferences and subjective improvements are not valid findings. Only report things backed by clear search evidence across multiple repos.
+Style preferences and subjective improvements are not valid findings. Only report things backed by clear steroids evidence across multiple repos.
 
 If the code aligns well with real-world patterns, say so. That's a good outcome.`,
   },
@@ -548,6 +537,50 @@ Refuse to proceed (and say why) if any of these hold:
 - \`gh auth status\` shows the target account is not logged in.
 
 When refusing, state which condition tripped and what the user needs to confirm or fix to proceed.`,
+  },
+  {
+    name: "steroids",
+    aliases: [],
+    description: "Index real repos like this project",
+    prompt: `# Steroids: build a code corpus that matches THIS project
+
+Goal: fill the local \`steroids\` corpus with real, current, well-maintained repos that do what this project does, in the same stack, so later work can read proven code instead of guessing.
+
+If the \`steroids\` tool is not available, stop and tell the user to install Agent Steroids first (Home screen, Steroids button). Do not improvise with bash.
+
+## Phase 0: Profile the project
+
+Inspect the local project (manifests, top-level layout, README, main entry points) and write a short private profile:
+
+- What it is and does, and who uses it.
+- Primary language(s) and the frameworks/libraries that define it (not every dependency, the ones that shape the code).
+- Its shape: CLI, web app, desktop app, API, library, game, firmware, pipeline, etc.
+- The 3-5 hardest or most central technical topics (e.g. "Tauri sidecar lifecycle", "streaming LLM tool calls", "trigram search index").
+
+If the user passed arguments to /steroids, treat them as the focus and let them override the profile.
+
+## Phase 1: Discover candidates
+
+Call \`steroids\` \`repos\` once so you know what is already indexed. Then run 3-6 \`steroids\` \`discover\` queries WITHOUT \`add\`, each targeting a different angle from the profile: the framework (\`topic:<framework> language:<lang>\`), the product category (peer projects), and the central technical topics. Queries are GitHub repo searches, so keep each one SHORT: one \`topic:\` plus \`language:\`, or 2-3 keywords. A sentence like "llm streaming tool calls sdk" returns nothing. \`limit\` 10-15 per query. Never pass \`add\`.
+
+Merge the results, drop anything already indexed, and rank by fit with this project first, then stars and recent \`pushed_at\`. Keep at most 20.
+
+## Phase 2: Present and ask
+
+FIRST print ONE markdown table of the ranked candidates: rank, repo, stars, last push, and a one-line "why it fits" tied to the profile. The user decides from this table, so it is never optional and never summarised away. ONLY THEN ask with the \`ask_user\` tool: one \`choice\` question (\`id: "count"\`, question "How many of these should I index?") with these options, each with a one-line hint on disk/time cost:
+
+- All of them
+- Top 10
+- Top 5
+- None
+
+Mark Top 10 as recommended. Leave the free-text escape on so they can name specific ranks. The card is the ONLY ask: do not also list the options as text, and do not end with an asking line. Only if \`ask_user\` is unavailable, ask the same question in prose as a lettered list.
+
+Do not index anything until the user answers.
+
+## Phase 3: Index
+
+Tell the user indexing is starting and can take a few minutes (each repo is a full download). Then index exactly the chosen repos with \`steroids\` \`add\` (\`repos\` = owner/name list, \`tag\` = a short slug for this project, e.g. its directory name), 2-3 repos per call so progress is visible and a cancel loses little. Then confirm with \`steroids\` \`repos\` filtered by that tag and report what was added, what failed, and the new corpus size. Suggest one concrete \`steroids\` \`search\` the user could run next against the new repos.`,
   },
   {
     name: "setup-skills",

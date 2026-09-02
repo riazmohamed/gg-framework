@@ -35,6 +35,7 @@ export const CORE_TOOL_NAMES: readonly string[] = [
   "code_nav",
   "web_search",
   "web_fetch",
+  "steroids",
   "task_output",
   "task_send",
   "task_stop",

@@ -179,6 +179,7 @@ import {
 import { enrichProcessPath } from "./core/shell-path.js";
 import { downscaleForPreview, shrinkToFit, validateVisionImage } from "./utils/image.js";
 import { startServeMode, type ServeController } from "./modes/serve-mode.js";
+import { installSteroids, probeSteroids } from "./core/steroids.js";
 import { loadTelegramConfig, saveTelegramConfig, verifyBotToken } from "./core/telegram-config.js";
 import {
   loadServers,
@@ -201,13 +202,6 @@ import { awardPrompt, awardCommits } from "./core/progress/engine.js";
 import { detectNewCommits, repoKey } from "./core/progress/git-xp.js";
 import { rebuildFromSessions } from "./core/progress/rebuild.js";
 import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
-import {
-  captureSidecarError,
-  flushSidecarErrors,
-  shouldCaptureToolFailure,
-  shouldCaptureUsagePollingError,
-  wrapSidecarHandler,
-} from "./core/sidecar-error-reporter.js";
 
 const AUTOMATION_PROVENANCE: MessageProvenance = {
   source: "runtime",
@@ -377,7 +371,6 @@ async function persistModelSelection(
     await sm.set("defaultProvider", provider as Settings["defaultProvider"]);
     await sm.set("defaultModel", model);
   } catch (err) {
-    captureSidecarError(err, "app-sidecar.settings.persist-model");
     log("WARN", "app-sidecar", "failed to persist model selection", { err: String(err) });
   }
 }
@@ -396,7 +389,6 @@ async function persistThinkingLevel(
     await sm.set("thinkingEnabled", !!level);
     if (level) await sm.set("thinkingLevel", level);
   } catch (err) {
-    captureSidecarError(err, "app-sidecar.settings.persist-thinking");
     log("WARN", "app-sidecar", "failed to persist thinking level", { err: String(err) });
   }
 }
@@ -813,10 +805,6 @@ async function runJsonModeIfRequested(): Promise<boolean> {
     allowedMcpServers,
     promptCacheKey: values["prompt-cache-key"],
   }).catch(async (err: unknown) => {
-    captureSidecarError(err, "app-sidecar.json-mode", {
-      provider: String(values.provider ?? "anthropic"),
-    });
-    await flushSidecarErrors();
     process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
     process.exit(1);
   });
@@ -1054,9 +1042,6 @@ async function main(): Promise<void> {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (shouldCaptureUsagePollingError(error)) {
-        captureSidecarError(error, "app-sidecar.usage.fetch", { provider });
-      }
       let backoffMs: number | undefined;
       if (error instanceof SubscriptionUsageError && error.status === 429) {
         backoffMs = Math.min(
@@ -1144,137 +1129,133 @@ async function main(): Promise<void> {
     }
   }
 
-  const server = http.createServer(
-    wrapSidecarHandler((req: http.IncomingMessage, res: http.ServerResponse) => {
-      const url = req.url ?? "/";
-      const method = req.method ?? "GET";
+  const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
+    const url = req.url ?? "/";
+    const method = req.method ?? "GET";
 
-      // Answer preflights with a bare 204 but grant NO origins — the webview
-      // reaches the daemon through the Rust proxy, never cross-origin, so any
-      // browser page's preflight must fail here.
-      if (method === "OPTIONS") {
-        res.writeHead(204);
-        res.end();
-        return;
-      }
+    // Answer preflights with a bare 204 but grant NO origins — the webview
+    // reaches the daemon through the Rust proxy, never cross-origin, so any
+    // browser page's preflight must fail here.
+    if (method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
 
-      // Host allowlist. The daemon binds 127.0.0.1 only; rejecting any other
-      // Host blocks DNS rebinding, where a web page's request arrives with
-      // the attacker's hostname (browsers cannot spoof Host).
-      const reqHost = req.headers.host ?? "";
-      if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(reqHost)) {
-        daemonJson(res, 403, { error: "forbidden host" });
-        return;
-      }
+    // Host allowlist. The daemon binds 127.0.0.1 only; rejecting any other
+    // Host blocks DNS rebinding, where a web page's request arrives with
+    // the attacker's hostname (browsers cannot spoof Host).
+    const reqHost = req.headers.host ?? "";
+    if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(reqHost)) {
+      daemonJson(res, 403, { error: "forbidden host" });
+      return;
+    }
 
-      if (req.headers["x-gg-token"] !== authToken) {
-        daemonJson(res, 401, { error: "unauthorized" });
-        return;
-      }
+    if (req.headers["x-gg-token"] !== authToken) {
+      daemonJson(res, 401, { error: "unauthorized" });
+      return;
+    }
 
-      // ── Daemon-level routes (session lifecycle) ──────────────────────────
-      // Create a session for a window: { mode?, cwd, sessionPath? } → { sessionId }.
-      if (method === "POST" && url === "/session") {
-        void daemonReadBody(req, res).then(async (raw) => {
-          if (raw === null) return;
-          let body: { mode?: unknown; chatAgent?: unknown; cwd?: unknown; sessionPath?: unknown } =
-            {};
-          try {
-            body = raw ? (JSON.parse(raw) as typeof body) : {};
-          } catch {
-            /* empty/invalid body → defaults below */
-          }
-          const mode: WorkspaceMode = body.mode === "chat" ? "chat" : "code";
-          const chatAgent = parseChatAgentId(body.chatAgent);
-          const sessionCwd =
-            typeof body.cwd === "string" && body.cwd
-              ? body.cwd
-              : (process.env.GG_APP_CWD ?? process.cwd());
-          const sessionPath =
-            typeof body.sessionPath === "string" && body.sessionPath ? body.sessionPath : undefined;
-          const id = randomUUID();
-          try {
-            const ctx = await createSession(
-              {
-                auth,
-                paths,
-                progress,
-                memoryStore,
-                jiwaStore,
-                broadcastAll,
-                oauthInFlightProviders,
-              },
-              { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
-            );
-            sessions.set(id, ctx);
-            log("INFO", "app-sidecar", "session created", {
-              id,
-              mode,
-              chatAgent,
-              cwd: sessionCwd,
-            });
-            daemonJson(res, 200, { sessionId: id });
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            captureSidecarError(err, "app-sidecar.session.create");
-            log("ERROR", "app-sidecar", "session create failed", { message });
-            daemonJson(res, 500, { error: message });
-          }
-        });
-        return;
-      }
-
-      // Dispose a session: DELETE /session/:id.
-      if (method === "DELETE" && url.startsWith("/session/")) {
-        const id = decodeURIComponent(url.slice("/session/".length));
-        const ctx = sessions.get(id);
-        if (ctx) {
-          sessions.delete(id);
-          void ctx.dispose().catch(() => {});
-          log("INFO", "app-sidecar", "session disposed", { id });
+    // ── Daemon-level routes (session lifecycle) ──────────────────────────
+    // Create a session for a window: { mode?, cwd, sessionPath? } → { sessionId }.
+    if (method === "POST" && url === "/session") {
+      void daemonReadBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { mode?: unknown; chatAgent?: unknown; cwd?: unknown; sessionPath?: unknown } =
+          {};
+        try {
+          body = raw ? (JSON.parse(raw) as typeof body) : {};
+        } catch {
+          /* empty/invalid body → defaults below */
         }
-        daemonJson(res, 200, { ok: true });
-        return;
-      }
-
-      // Progress is daemon-level so the Home screen can paint before a project
-      // session exists; per-session callers still work through the same endpoint.
-      if (method === "GET" && url === "/progress") {
-        daemonJson(res, 200, progress.snapshot());
-        return;
-      }
-
-      // Subscription quota is account-wide, not project/session-specific. OAuth
-      // tokens stay in this daemon; only the active provider's normalized snapshot
-      // reaches the webview.
-      if (method === "GET" && (url === "/usage" || url.startsWith("/usage?"))) {
-        void (async () => {
-          const provider = new URL(url, `http://${host}`).searchParams.get("provider");
-          if (provider !== "anthropic" && provider !== "openai" && provider !== "moonshot") {
-            daemonJson(res, 400, { error: "unsupported usage provider" });
-            return;
-          }
-          daemonJson(res, 200, await subscriptionUsage(provider));
-        })().catch((error) => {
-          captureSidecarError(error, "app-sidecar.usage.request");
-          log("ERROR", "app-sidecar", "subscription usage request failed", {
-            message: error instanceof Error ? error.message : String(error),
+        const mode: WorkspaceMode = body.mode === "chat" ? "chat" : "code";
+        const chatAgent = parseChatAgentId(body.chatAgent);
+        const sessionCwd =
+          typeof body.cwd === "string" && body.cwd
+            ? body.cwd
+            : (process.env.GG_APP_CWD ?? process.cwd());
+        const sessionPath =
+          typeof body.sessionPath === "string" && body.sessionPath ? body.sessionPath : undefined;
+        const id = randomUUID();
+        try {
+          const ctx = await createSession(
+            {
+              auth,
+              paths,
+              progress,
+              memoryStore,
+              jiwaStore,
+              broadcastAll,
+              oauthInFlightProviders,
+            },
+            { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
+          );
+          sessions.set(id, ctx);
+          log("INFO", "app-sidecar", "session created", {
+            id,
+            mode,
+            chatAgent,
+            cwd: sessionCwd,
           });
-          daemonJson(res, 500, { error: "Usage is temporarily unavailable." });
-        });
-        return;
-      }
+          daemonJson(res, 200, { sessionId: id });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          log("ERROR", "app-sidecar", "session create failed", { message });
+          daemonJson(res, 500, { error: message });
+        }
+      });
+      return;
+    }
 
-      // ── Per-session delegation ───────────────────────────────────────────
-      const id = sessionIdFromReq(req, url);
-      const ctx = id ? sessions.get(id) : undefined;
-      if (!ctx) {
-        daemonJson(res, 404, { error: "unknown session" });
-        return;
+    // Dispose a session: DELETE /session/:id.
+    if (method === "DELETE" && url.startsWith("/session/")) {
+      const id = decodeURIComponent(url.slice("/session/".length));
+      const ctx = sessions.get(id);
+      if (ctx) {
+        sessions.delete(id);
+        void ctx.dispose().catch(() => {});
+        log("INFO", "app-sidecar", "session disposed", { id });
       }
-      ctx.handle(req, res, url, method);
-    }, "app-sidecar.http"),
-  );
+      daemonJson(res, 200, { ok: true });
+      return;
+    }
+
+    // Progress is daemon-level so the Home screen can paint before a project
+    // session exists; per-session callers still work through the same endpoint.
+    if (method === "GET" && url === "/progress") {
+      daemonJson(res, 200, progress.snapshot());
+      return;
+    }
+
+    // Subscription quota is account-wide, not project/session-specific. OAuth
+    // tokens stay in this daemon; only the active provider's normalized snapshot
+    // reaches the webview.
+    if (method === "GET" && (url === "/usage" || url.startsWith("/usage?"))) {
+      void (async () => {
+        const provider = new URL(url, `http://${host}`).searchParams.get("provider");
+        if (provider !== "anthropic" && provider !== "openai" && provider !== "moonshot") {
+          daemonJson(res, 400, { error: "unsupported usage provider" });
+          return;
+        }
+        daemonJson(res, 200, await subscriptionUsage(provider));
+      })().catch((error) => {
+        log("ERROR", "app-sidecar", "subscription usage request failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+        daemonJson(res, 500, { error: "Usage is temporarily unavailable." });
+      });
+      return;
+    }
+
+    // ── Per-session delegation ───────────────────────────────────────────
+    const id = sessionIdFromReq(req, url);
+    const ctx = id ? sessions.get(id) : undefined;
+    if (!ctx) {
+      daemonJson(res, 404, { error: "unknown session" });
+      return;
+    }
+    ctx.handle(req, res, url, method);
+  });
   server.listen(port, host, () => {
     const addr = server.address() as AddressInfo;
     // The Rust shell reads this line to learn the daemon port (it already
@@ -1340,12 +1321,10 @@ const KEN_ALLOWED_TOOLS = [
   "web_fetch",
   "web_search",
   "screenshot",
+  // Local corpus of real repos: lets Ken verify against code that ships
+  // instead of assuming — core to how he's meant to work. Read-only.
+  "steroids",
 ];
-
-/** MCP servers Ken is allowed to use. kencode-search lets him look into real
- *  public repos / verify against actual code instead of assuming — core to how
- *  he's meant to work. Read-only research; no other MCP server is connected. */
-const KEN_ALLOWED_MCP_SERVERS = ["kencode-search"];
 
 /** Extract the plain text of the most recent assistant message (Ken's reply).
  *  Strips tool-call / image blocks, returning just the prose Ken streamed. */
@@ -1464,7 +1443,6 @@ async function createProgressManager(
       lastSeenNonce = updated.lastEvent?.nonce ?? null;
       broadcastAll(buildSnapshot(updated), originId);
     } catch (err) {
-      captureSidecarError(err, "app-sidecar.progress.award");
       log("DEBUG", "app-sidecar", "progress award failed", {
         message: err instanceof Error ? err.message : String(err),
       });
@@ -1494,7 +1472,6 @@ async function createProgressManager(
     watcher.unref();
     progressWatcher = watcher;
   } catch (err) {
-    captureSidecarError(err, "app-sidecar.progress.watch");
     log("DEBUG", "app-sidecar", "progress watch unavailable", {
       message: err instanceof Error ? err.message : String(err),
     });
@@ -1650,10 +1627,7 @@ async function createSession(
           "Start a new session to reset the context.",
         )
         // /model: handle each phrasing pattern
-        .replaceAll(
-          /switch to claude-fable-5 with \/model/gi,
-          "switch to claude-fable-5 using the model selector",
-        )
+        .replaceAll(/switch to (\S+) with \/model/gi, "switch to $1 using the model selector")
         .replaceAll(/Switch with \/model\./gi, "Switch using the model selector.")
         .replaceAll(
           /try a different model with \/model\./gi,
@@ -1698,11 +1672,6 @@ async function createSession(
     const f = formatError(err);
     const message = f.message ? desktopGuidance(f.message) : undefined;
     const guidance = localNetworkGuidance(f.source) ?? desktopGuidance(f.guidance);
-    captureSidecarError(err, `app-sidecar.${logLabel.replaceAll(" ", "-")}`, {
-      scope: type,
-      ...(f.provider ? { provider: f.provider } : {}),
-      ...(f.statusCode != null ? { status: String(f.statusCode) } : {}),
-    });
     log("ERROR", "app-sidecar", logLabel, {
       headline: f.headline,
       source: f.source,
@@ -1792,7 +1761,6 @@ async function createSession(
         chatAgent = nextAgent;
         broadcast("chat_agent_change", { chatAgent: nextAgent });
         await session.persistAppMarker("agent_handoff", { chatAgent: nextAgent }).catch((error) => {
-          captureSidecarError(error, "app-sidecar.chat-agent.persist-handoff");
           log("WARN", "app-sidecar", "agent handoff marker persist failed", {
             message: error instanceof Error ? error.message : String(error),
           });
@@ -2309,7 +2277,6 @@ async function createSession(
       .catch(() => false)
       .then(() => syncApprovedPlanProgress(generation))
       .catch((error) => {
-        captureSidecarError(error, "app-sidecar.plan.refresh-progress");
         log("WARN", "app-sidecar", "plan progress refresh failed", {
           message: error instanceof Error ? error.message : String(error),
         });
@@ -2371,11 +2338,6 @@ async function createSession(
   session.eventBus.on("tool_call_end", (d) => {
     const name = toolCallNames.get(d.toolCallId) ?? "unknown";
     toolCallNames.delete(d.toolCallId);
-    if (d.isError && shouldCaptureToolFailure(name, d.result)) {
-      // Expected model-correctable validation failures stay in the local log and
-      // conversation. Unexpected failures are reported without private result data.
-      captureSidecarError(new Error(`Tool ${name} failed`), `tool.${name}`, { tool: name });
-    }
     log(d.isError ? "ERROR" : "INFO", "tool", `Tool call ended: ${name}`, {
       id: d.toolCallId,
       durationMs: String(d.durationMs),
@@ -2595,7 +2557,6 @@ async function createSession(
       cwd,
       systemPrompt: await buildKenSystemPrompt(cwd),
       allowedTools: KEN_ALLOWED_TOOLS,
-      allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
       transient: true,
       signal: kenAbort.signal,
       // Ken belongs to THIS window, so its window is where an MCP prompt
@@ -2671,7 +2632,6 @@ async function createSession(
       cwd,
       systemPrompt: await buildKenAutopilotSystemPrompt(cwd),
       allowedTools: KEN_ALLOWED_TOOLS,
-      allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
       transient: true,
       signal: kenAutoAbort.signal,
       // Same as Ken chat: this reviewer belongs to a window, so route prompts
@@ -2794,7 +2754,6 @@ async function createSession(
         } catch (error) {
           // Keep tracking when prompt cleanup fails; hiding the widget here
           // would claim completion while the approved-plan contract remained.
-          captureSidecarError(error, "app-sidecar.plan.cleanup");
           log("WARN", "app-sidecar", "completed plan cleanup failed", {
             message: error instanceof Error ? error.message : String(error),
           });
@@ -3355,7 +3314,6 @@ async function createSession(
         .snapshot()
         .then((snapshot) => json(res, 200, snapshot))
         .catch((error) => {
-          captureSidecarError(error, "app-sidecar.memory.snapshot");
           json(res, 500, { error: error instanceof Error ? error.message : String(error) });
         });
       return;
@@ -3372,7 +3330,6 @@ async function createSession(
         .then(() => memoryStore.snapshot())
         .then((snapshot) => json(res, 200, snapshot))
         .catch((error) => {
-          captureSidecarError(error, "app-sidecar.memory.forget");
           json(res, 500, { error: error instanceof Error ? error.message : String(error) });
         });
       return;
@@ -3383,7 +3340,6 @@ async function createSession(
         .snapshot()
         .then((snapshot) => json(res, 200, snapshot))
         .catch((error) => {
-          captureSidecarError(error, "app-sidecar.jiwa.snapshot");
           json(res, 500, { error: error instanceof Error ? error.message : String(error) });
         });
       return;
@@ -3400,7 +3356,6 @@ async function createSession(
         .then(() => jiwaStore.snapshot())
         .then((snapshot) => json(res, 200, snapshot))
         .catch((error) => {
-          captureSidecarError(error, "app-sidecar.jiwa.forget");
           json(res, 500, { error: error instanceof Error ? error.message : String(error) });
         });
       return;
@@ -3445,7 +3400,6 @@ async function createSession(
       void listInstalledPlugins(paths.extensionsDir)
         .then((plugins) => json(res, 200, { plugins }))
         .catch((error) => {
-          captureSidecarError(error, "app-sidecar.plugins.list");
           json(res, 500, { error: error instanceof Error ? error.message : String(error) });
         });
       return;
@@ -3463,7 +3417,6 @@ async function createSession(
           const plugin = await installPlugin(bundlePath, paths.extensionsDir);
           json(res, 200, { plugin, restartRequired: true });
         } catch (error) {
-          captureSidecarError(error, "app-sidecar.plugins.install");
           json(res, 400, { error: error instanceof Error ? error.message : String(error) });
         }
       });
@@ -3475,7 +3428,6 @@ async function createSession(
       void removePlugin(pluginId, paths.extensionsDir)
         .then(() => json(res, 200, { removed: pluginId, restartRequired: true }))
         .catch((error) => {
-          captureSidecarError(error, "app-sidecar.plugins.remove");
           json(res, 400, { error: error instanceof Error ? error.message : String(error) });
         });
       return;
@@ -3559,7 +3511,6 @@ async function createSession(
           await fs.mkdir(dir, { recursive: true });
           json(res, 200, { path: dir });
         } catch (err) {
-          captureSidecarError(err, "app-sidecar.project.create");
           json(res, 500, { error: err instanceof Error ? err.message : String(err) });
         }
       });
@@ -3594,7 +3545,6 @@ async function createSession(
           await saveAppSettings(settings);
           json(res, 200, { hidden: Array.from(current) });
         } catch (err) {
-          captureSidecarError(err, "app-sidecar.projects.hidden");
           json(res, 500, { error: err instanceof Error ? err.message : String(err) });
         }
       });
@@ -3615,7 +3565,6 @@ async function createSession(
         )
         .then((projects) => json(res, 200, { projects }))
         .catch((err) => {
-          captureSidecarError(err, "app-sidecar.projects.discover");
           log("ERROR", "app-sidecar", "discoverProjects failed", {
             message: err instanceof Error ? err.message : String(err),
           });
@@ -3635,10 +3584,7 @@ async function createSession(
       // agent or request the combined, recency-sorted "all" listing.
       void listSidecarSessions(target, requestedAgent, paths.sessionsDir)
         .then((sessions) => json(res, 200, { sessions }))
-        .catch((error) => {
-          captureSidecarError(error, "app-sidecar.sessions.list");
-          json(res, 200, { sessions: [] });
-        });
+        .catch(() => json(res, 200, { sessions: [] }));
       return;
     }
 
@@ -3647,7 +3593,6 @@ async function createSession(
       void searchProjectFiles(cwd, q)
         .then((files) => json(res, 200, { files }))
         .catch((err) => {
-          captureSidecarError(err, "app-sidecar.files.search");
           log("ERROR", "app-sidecar", "searchProjectFiles failed", {
             message: err instanceof Error ? err.message : String(err),
           });
@@ -4400,7 +4345,6 @@ async function createSession(
           json(res, 200, result);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          captureSidecarError(err, "app-sidecar.prompt-enhancer");
           log("ERROR", "app-sidecar", "enhance failed", { message });
           json(res, 500, { error: message });
         }
@@ -4835,7 +4779,6 @@ async function createSession(
           drained,
         });
       })().catch((error) => {
-        captureSidecarError(error, "app-sidecar.run.cancel");
         broadcast("cancel_failed", { error: "cancel_failed", runState: runLifecycle.state });
         json(res, 500, {
           error: "cancel_failed",
@@ -4864,7 +4807,6 @@ async function createSession(
           json(res, 200, { ok: true });
         })
         .catch((err) => {
-          captureSidecarError(err, "app-sidecar.session.new");
           json(res, 500, { error: err instanceof Error ? err.message : String(err) });
         });
       return;
@@ -4919,7 +4861,6 @@ async function createSession(
           broadcast("plan_progress", planProgressPayload());
           json(res, 200, { ok: true, planTotal });
         } catch (err) {
-          captureSidecarError(err, "app-sidecar.plan.accept");
           json(res, 500, { error: err instanceof Error ? err.message : String(err) });
         }
       });
@@ -5044,7 +4985,6 @@ async function createSession(
             // The OAuth provider's models just became selectable everywhere.
             broadcastAll("models_change", {});
           } catch (err) {
-            captureSidecarError(err, "app-sidecar.auth.oauth", { provider });
             // Deliberately session-scoped: this is the outcome of ONE window's
             // attempt. Another window that never pressed Connect has nothing to
             // show an error about, and its modal correctly still offers login.
@@ -5440,7 +5380,6 @@ async function createSession(
           json(res, 200, { running: true });
         } catch (err) {
           serveController = null;
-          captureSidecarError(err, "app-sidecar.serve.start", { provider: st.provider });
           json(res, 400, { error: err instanceof Error ? err.message : String(err) });
         }
       })();
@@ -5460,6 +5399,25 @@ async function createSession(
       return;
     }
 
+    // ── Agent Steroids (local code corpus) ───────────────────────────────
+    if (method === "GET" && url === "/steroids") {
+      void probeSteroids().then((status) => json(res, 200, status));
+      return;
+    }
+
+    if (method === "POST" && url === "/steroids/install") {
+      void installSteroids()
+        .then((status) => {
+          broadcast("steroids_change", status);
+          log("INFO", "app-sidecar", "steroids installed", { version: status.version });
+          json(res, 200, status);
+        })
+        .catch((err: unknown) => {
+          json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        });
+      return;
+    }
+
     // ── MCP server management (mirrors `ggcoder mcp`) ──────────────────
     // `targetCwd` (project scope) overrides the window cwd so a server can be
     // added/removed for ANY discovered project, not just this window's. Global
@@ -5469,7 +5427,6 @@ async function createSession(
       void buildMcpRows(targetCwd, paths.settingsFile)
         .then((servers) => json(res, 200, { servers }))
         .catch((err) => {
-          captureSidecarError(err, "app-sidecar.mcp.list");
           log("ERROR", "app-sidecar", "buildMcpRows failed", {
             message: err instanceof Error ? err.message : String(err),
           });
@@ -5536,7 +5493,6 @@ async function createSession(
             requiresAuth: probe.requiresAuth,
           });
         } catch (err) {
-          captureSidecarError(err, "app-sidecar.mcp.add", { server: config.name });
           json(res, 500, {
             error: err instanceof Error ? err.message : String(err),
           });
@@ -5630,7 +5586,6 @@ async function createSession(
             broadcast("mcp_auth_error", { name, message: result.error ?? "Login failed." });
           }
         } catch (err) {
-          captureSidecarError(err, "app-sidecar.mcp.login", { server: name });
           broadcast("mcp_auth_error", {
             name,
             message: err instanceof Error ? err.message : String(err),
@@ -5681,8 +5636,6 @@ async function createSession(
 }
 
 main().catch(async (err) => {
-  captureSidecarError(err, "app-sidecar.main", { severity: "fatal" });
-  await flushSidecarErrors();
   const message = err instanceof Error ? err.message : String(err);
   process.stderr.write(`GG_APP_FATAL ${message}\n`);
   process.exit(1);

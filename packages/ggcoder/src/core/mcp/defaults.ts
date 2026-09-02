@@ -2,16 +2,12 @@ import type { Provider } from "@abukhaled/gg-ai";
 import type { MCPServerConfig } from "./types.js";
 import { loadServers } from "./store.js";
 
+/** Servers every provider gets. Real-code research is the native `steroids`
+ *  tool now, so kencode-search is gone; the branch-only grep.app server stays
+ *  as the `/compare` fallback when steroids is not installed. Provider-specific
+ *  servers are added in `getMCPServers`. */
 export const DEFAULT_MCP_SERVERS: MCPServerConfig[] = [
-  // NOTE: kencode-search is an external published package, not part of this repo's
-  // rebrand — keep the @kenkaiiii scope until an @abukhaled fork is published.
-  // It ships as a ggcoder dependency, so `connectServer` rewrites this `npx -y`
-  // form to a direct `node <binScript>` invocation at connect time (see
-  // core/mcp/resolve-stdio.ts) — skipping the ~100 MB npx wrapper process. The
-  // `npx` form is kept here so it still works if the dependency is ever
-  // unavailable (graceful fallback to npx resolution).
-  { name: "kencode-search", command: "npx", args: ["-y", "@kenkaiiii/kencode-search"] },
-  // grep.app public GitHub code search — fallback for kencode-search.
+  // grep.app public GitHub code search — fallback evidence source for /compare.
   { name: "grep", url: "https://mcp.grep.app", timeout: 60_000 },
 ];
 
@@ -71,8 +67,7 @@ export function getMCPServers(provider: Provider, apiKey?: string): MCPServerCon
 /**
  * Full startup set: provider defaults + user-configured servers from
  * ~/.gg/mcp.json and ./.gg/mcp.json. Provider defaults stay authoritative —
- * a user server can only ADD a new name, never override a default like
- * `kencode-search`.
+ * a user server can only ADD a new name, never override a default.
  */
 export async function getAllMcpServers(
   provider: Provider,
