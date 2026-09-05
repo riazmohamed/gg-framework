@@ -1,5 +1,11 @@
 # @kenkaiiii/gg-core
 
+## 5.56.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.56.0
+
 ## 5.55.1
 
 ### Patch Changes

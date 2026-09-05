@@ -1,5 +1,17 @@
 # @kenkaiiii/ggcoder
 
+## 5.56.0
+
+### Minor Changes
+
+- Add opt-in Gemini 3.8 Flash, Gemini 3.5 Flash Lite, and experimental DeepSeek V4 Flash Vision; enable Qwen image/video input, align provider reasoning and output limits, and respect loaded local context and summary output budgets.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.56.0
+- @kenkaiiii/gg-agent@5.56.0
+- @kenkaiiii/gg-core@5.56.0
+
 ## 5.55.1
 
 ### Patch Changes
