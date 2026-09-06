@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.61.0",
+    date: "2026-09-06",
+    items: [
+      "Stop hopping between tabs to see if your build passed. I brought live `CI` counts into your title bar: green clears after `10 seconds`, red stays until you dismiss it, and one click opens `GitHub Actions`.",
+      "Passing tests should count, not cause a scare. I fixed checks that start with `git status` and stopped unfinished verification from masquerading as an app crash. You get `Unverified` when more checking is needed, not a bogus bug report.",
+    ],
+  },
+  {
     version: "0.60.1",
     date: "2026-09-06",
     items: [
