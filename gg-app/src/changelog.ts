@@ -22,6 +22,92 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.61.0",
+    date: "2026-09-06",
+    items: [
+      "Stop hopping between tabs to see if your build passed. I brought live `CI` counts into your title bar: green clears after `10 seconds`, red stays until you dismiss it, and one click opens `GitHub Actions`.",
+      "Passing tests should count, not cause a scare. I fixed checks that start with `git status` and stopped unfinished verification from masquerading as an app crash. You get `Unverified` when more checking is needed, not a bogus bug report.",
+    ],
+  },
+  {
+    version: "0.60.1",
+    date: "2026-09-06",
+    items: [
+      "A green light should mean something. I tightened `Autopilot` so failed or unfinished checks stay `Unverified`, even after you reopen a chat.",
+      "No more vanishing caveats. I kept `Steroids` review warnings in your chat history, so you can see when a review lacked a real-code cross-check.",
+    ],
+  },
+  {
+    version: "0.60.0",
+    date: "2026-09-05",
+    items: [
+      "More models for you to try. I added `Gemini 3.8 Flash`, `Gemini 3.5 Flash Lite`, and experimental `DeepSeek V4 Flash Vision` to the picker. The new Gemini options still depend on Google enabling access for your account, so your working default stays put.",
+      "Show `Qwen3.6-Plus` what you mean. I unlocked image and video input through `OpenRouter`, so you can bring screenshots and clips into the conversation instead of describing everything by hand.",
+      "Your thinking controls now do what they promise. I lined up `DeepSeek` with its real reasoning levels and unlocked `max` for `Fugu Ultra`, so you can choose how hard they work on your problem.",
+      "Long local chats have a better safety net. I made GG Coder respect the memory you actually gave `Ollama` or `LM Studio`, not the model's advertised maximum, so it can summarize before your loaded model runs out of room.",
+    ],
+  },
+  {
+    version: "0.59.1",
+    date: "2026-09-05",
+    items: [
+      "The `Prompt Enhancer` is back on `GPT-6 Astra` and the whole `GPT-5.6` family. OpenAI's newest models refuse to run with thinking fully off, which was bouncing the enhancer and blanking the screen. I gave them a proper reasoning floor, and if anything ever fails again your draft stays put with a clear message instead of a white window.",
+      "`Autopilot` on the new OpenAI models works again too, same fix. And the misleading warning that your ChatGPT account could not use a model is gone: I only show it when OpenAI actually says so.",
+    ],
+  },
+  {
+    version: "0.59.0",
+    date: "2026-09-05",
+    items: [
+      "`GPT-6 Astra` actually runs now. OpenAI quietly gates Astra behind a newer client handshake, so the first build got bounced with a cryptic error. I upgraded the handshake, and Astra answers on your ChatGPT login with the full reasoning dial up to `ultra`. I also retired `GPT-5.5` from the picker so your OpenAI list is just the current lineup.",
+      "Error messages finally talk to you like an app, not a terminal. Every provider hint now tells you to use the model selector or update GG Coder, never to upgrade some CLI you have never seen. The `AI Providers` sign-in page lists the real models for every provider too, Astra and Fable 5.1 included.",
+      "Two chats compacting at the same moment on Windows could trip over each other. I fixed the lock so they take turns cleanly, and a real permission problem now surfaces instead of hanging forever.",
+    ],
+  },
+  {
+    version: "0.58.0",
+    date: "2026-09-05",
+    items: [
+      "`GPT-6 Astra` is here, the day OpenAI shipped it. Pick it from the model selector with your ChatGPT login and you get OpenAI's most capable model yet, with a `1M` token memory and the full reasoning dial from low all the way up to `ultra`, where it proactively splits big jobs across helper agents and runs them in parallel. I wired it into the same caching and streaming path as the 5.6 family, so it feels instant from the first message. Astra is still rolling out on OpenAI's side, so if your account is not in yet, GG Coder tells you plainly and points you at what works today.",
+    ],
+  },
+  {
+    version: "0.57.5",
+    date: "2026-09-04",
+    items: [
+      "Squashed a crash that could take the whole app down. If GG Coder tried to run a command in the background and the program behind it was not installed, the failure escaped and killed everything instead of being reported. Now it just tells you the command could not start and carries on like nothing happened.",
+    ],
+  },
+  {
+    version: "0.57.4",
+    date: "2026-09-04",
+    items: [
+      "No more watching GG Coder nap. When it starts a build, a test run or an install in the background, it used to guess how long that would take and just sleep, sometimes a full `30 seconds` after the job already finished. Now it waits on the real finish line and picks straight back up the moment your command is done, so long jobs feel dramatically snappier and it can no longer talk itself into an idle loop.",
+    ],
+  },
+  {
+    version: "0.57.3",
+    date: "2026-09-03",
+    items: [
+      "Every question GG Coder asks you now fits neatly in its card. Long options used to spill off the right edge of the chat and get cut in half, so you were picking between answers you could not fully read. Now they wrap cleanly, the `Recommended` tag stays pinned where it belongs, and nothing hides past the edge no matter how narrow your window is.",
+      "I refreshed the engine room under the app and made the Windows build tell me the truth when something goes wrong. You get the same GG Coder, on fresher parts, with one more class of startup crash caught before it can ever reach you.",
+    ],
+  },
+  {
+    version: "0.57.2",
+    date: "2026-09-03",
+    items: [
+      "GG Coder now builds from proof, not memory. Before it plans or writes anything nontrivial, it checks `Agent Steroids`, your local library of real, current open-source code, and copies the patterns that actually ship. If your library has no match, it goes and finds the right repos, asks you once, indexes them, and then builds from what it read. I ran it `16` times back to back on `GLM-5.3` to make sure it never skips this step. And if you have not installed Steroids yet, it will tell you exactly where the button is.",
+    ],
+  },
+  {
+    version: "0.57.1",
+    date: "2026-09-03",
+    items: [
+      "Your Mac can breathe again. A user sent me a profile showing GG Coder's graphics process chewing `468%` CPU with `7` windows open, and I found the culprit: the ambient glow behind every window was being re-blurred by hand on every single repaint, cursor blink included. I rebuilt the glow so it costs almost nothing, keeps its soft look, and still shifts colour per window. Same vibe, a fraction of the power.",
+    ],
+  },
+  {
     version: "0.57.0",
     date: "2026-09-02",
     items: [

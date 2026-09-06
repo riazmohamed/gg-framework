@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { openProjectPath, openUrl, type WorkspaceMode } from "./agent";
+import { openProjectPath, openUrl, type WorkspaceMode, type GitHubCI } from "./agent";
+import { CIIndicator } from "./CIIndicator";
 import { projectAccent } from "./projectAccent";
 
 interface WorkspaceHeaderProps {
@@ -12,6 +13,7 @@ interface WorkspaceHeaderProps {
   gitHubPRs?: number | null;
   /** Origin repo's web URL — makes the issue/PR chips clickable. */
   gitHubRepoUrl?: string | null;
+  gitHubCI?: GitHubCI | null;
   /** Extra workspace roots added with /add-dir. */
   additionalRoots?: string[];
   navHidden: boolean;
@@ -55,6 +57,7 @@ export function WorkspaceHeader({
   gitHubIssues = null,
   gitHubPRs = null,
   gitHubRepoUrl = null,
+  gitHubCI = null,
   additionalRoots = [],
   navHidden,
   onToggleNav,
@@ -180,6 +183,7 @@ export function WorkspaceHeader({
                   </button>
                 </>
               )}
+              <CIIndicator ci={gitHubCI} />
             </>
           ) : (
             fallbackTitle

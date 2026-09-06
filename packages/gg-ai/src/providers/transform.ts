@@ -17,6 +17,7 @@ import type {
   ToolResultContent,
 } from "../types.js";
 import { resolveToolSchema, zodToJsonSchema } from "../utils/zod-to-json-schema.js";
+import { makeStrictToolSchema, UnsupportedStrictSchemaError } from "../utils/strict-tool-schema.js";
 import { DEFAULT_REASONING_FIELD } from "./reasoning-field.js";
 
 // ── Shared helpers ─────────────────────────────────────────
@@ -856,9 +857,10 @@ export function toOpenAIMessages(
               // inline base64 via the same non-standard `video_url` part; models
               // without video support never reach here — video is downgraded to
               // text by downgradeUnsupportedVideos before this runs.
-              const videoUrl = part.fileId
-                ? { url: `ms://${part.fileId}`, id: part.fileId }
-                : { url: `data:${part.mediaType};base64,${part.data}` };
+              const videoUrl =
+                options?.provider === "moonshot" && part.fileId
+                  ? { url: `ms://${part.fileId}`, id: part.fileId }
+                  : { url: `data:${part.mediaType};base64,${part.data}` };
               return {
                 type: "video_url",
                 video_url: videoUrl,
@@ -1022,15 +1024,33 @@ export function toOpenAIMessages(
   return out;
 }
 
-export function toOpenAITools(tools: Tool[]): OpenAI.ChatCompletionTool[] {
-  return tools.map((tool) => ({
-    type: "function" as const,
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: resolveToolSchema(tool),
-    },
-  }));
+export function toOpenAITools(
+  tools: Tool[],
+  opts?: { strict?: boolean },
+): OpenAI.ChatCompletionTool[] {
+  return tools.map((tool) => {
+    let parameters = resolveToolSchema(tool);
+    let strict: true | undefined;
+    if (opts?.strict) {
+      // Prefer provider-guaranteed schema-conformant args; fall back per tool
+      // when the schema cannot be expressed in the strict subset.
+      try {
+        parameters = makeStrictToolSchema(parameters);
+        strict = true;
+      } catch (error) {
+        if (!(error instanceof UnsupportedStrictSchemaError)) throw error;
+      }
+    }
+    return {
+      type: "function" as const,
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters,
+        ...(strict ? { strict } : {}),
+      },
+    };
+  });
 }
 
 export function toOpenAIToolChoice(choice: ToolChoice): OpenAI.ChatCompletionToolChoiceOption {

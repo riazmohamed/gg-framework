@@ -9,7 +9,7 @@ import { localOperations, type ToolOperations } from "./operations.js";
 import { getSafeToolEnv } from "./safe-env.js";
 import { resolveShell, type ResolveShellOpts } from "../core/shell.js";
 import { PersistentShell } from "../core/persistent-shell.js";
-import { isReadOnlyCommand } from "./read-only-bash.js";
+import { isReadOnlyCommand, sleepOnlySeconds } from "./read-only-bash.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
 import { isCatastrophicCommand, type WriteGuardSettings } from "../core/workspace-guard.js";
 import { checkCommandPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
@@ -30,6 +30,9 @@ function sandboxAwareEnv(sandboxed: boolean): Record<string, string> {
 
 const DEFAULT_TIMEOUT = 120_000; // 120 seconds
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB — cap buffered output to prevent OOM
+/** A sleep at least this long is a guess at when something finishes, not a
+ *  settle pause before poking a service that is already up. */
+const GUESSED_WAIT_SECONDS = 10;
 
 /**
  * Render command output for the tool result. Over-limit output is compressed
@@ -166,7 +169,9 @@ export function createBashTool(
       "Set persist=true to run in a session shell where cd/env state survives across " +
       "persist:true calls. " +
       "With run_in_background, also set wake (pattern and/or silence_seconds) to be " +
-      "actively notified the moment matching output appears or the task stalls.";
+      "actively notified the moment matching output appears or the task stalls. " +
+      "Never sleep to wait for a background process — task_output with wait_ms returns " +
+      "the instant it exits.";
   return {
     name: "bash",
     description,
@@ -187,6 +192,26 @@ export function createBashTool(
       }
       if (wake?.silence_seconds) {
         wakeRules = { ...wakeRules, silenceMs: wake.silence_seconds * 1000 };
+      }
+      // A long sleep-only foreground call while something runs in the
+      // background is a guessed wait: too short wastes a turn, too long wastes
+      // wall-clock. Redirect rather than run it — descriptions alone do not
+      // reliably beat the habit. Brief sleeps stay allowed, because letting a
+      // just-started dev server settle before curling it is legitimate and no
+      // exit is ever coming for it.
+      const napSeconds = run_in_background ? null : sleepOnlySeconds(command);
+      if (napSeconds !== null && napSeconds >= GUESSED_WAIT_SECONDS) {
+        const running = processManager.list().filter((proc) => proc.exitCode === null);
+        if (running.length > 0) {
+          const ids = running.map((proc) => proc.id).join(", ");
+          return (
+            `Error: refusing to sleep ${napSeconds}s while ${running.length} background ` +
+            `process(es) are running (${ids}). Sleeping guesses at a finish time. Call ` +
+            `task_output with wait_ms instead \u2014 it returns the moment the process exits. ` +
+            `For something that never exits, such as a dev server, run it with a wake ` +
+            `pattern and wait for that line.`
+          );
+        }
       }
       if (isPlanModeActive(planModeRef) && !isReadOnlyCommand(command)) {
         return planModeRestriction("bash");

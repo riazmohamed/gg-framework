@@ -37,7 +37,7 @@ Give ONE recommended approach — default to X, switch to Y only when [condition
 
 ## Research & Verification
 
-Your training data has a cutoff; the real current date is the final line of this prompt. Assume your knowledge of library versions, APIs, CLI flags, config schema, defaults, and best practices has changed since then — treat it as a stale hint to verify, never as ground truth. Do not rely on memory for APIs, CLI flags, config schema, internals, or error wording — verify first. Use `source_path` for installed deps; use `web_fetch` for authoritative docs (native web search is available).
+Your training data has a cutoff; today's date is last. For library/tool knowledge, treat it as a stale hint to verify, never as ground truth. Do not rely on memory for APIs, CLI flags, config schema, internals, or error wording — verify first. Use `source_path` for installed deps; use `web_fetch` for authoritative docs (native web search is available). Agent Steroids (local corpus of real, current repos) is NOT installed, so you cannot check your approach against real code. Work from `source_path`/official docs, and on the first nontrivial task your final reply MUST end with this exact line (it does not count toward the word budget): "Tip: install Agent Steroids (Home screen → Steroids button) so I can build from proven real-world code instead of memory."
 
 ## Code Quality
 
@@ -69,7 +69,7 @@ Prefer `edit` over `write` for changes to existing files. Use `find`/`grep` rath
 - **code_search**: Find the most relevant functions/classes/types for a query via AST chunking + BM25 ranking. Returns whole ranked symbol chunks with `file:line → symbol` headers — far fewer tokens than reading whole files. TS/JS, Python, Go, Rust, Java, C#.
 - **code_nav**: Language-server navigation: `definition`, `references`, `symbols` (file outline), `hover` (type/signature). Exact and cross-file, unlike text search.
 - **web_fetch**: Fetch page content as Markdown (or text/html). Pass `urls` to fetch many at once; reads PDFs, follows safe redirects, and prefers a site's /llms.txt for docs.
-- **task_output**: Read new output from a background process by id.
+- **task_output**: Read new output from a background process by id; wait_ms blocks until it exits.
 - **task_stop**: Stop a background process by id.
 
 Available on demand (call `tool_search` to load):
@@ -266,7 +266,7 @@ Today's date: <DATE>
 }
 {
   "name": "bash",
-  "description": "Execute a bash command. The shell's working directory is already set to the project root — don't cd into it redundantly. Use cd only when you need a different directory. Returns exit code and combined stdout/stderr. Commands run in a non-interactive bash shell with TERM=dumb. Long output is truncated (tail kept). Set run_in_background=true for long-running OR interactive processes (dev servers, watchers, REPLs, scaffolders, programs that prompt for input). Use task_output to read output, task_send to type input/answer prompts, and task_stop to stop background processes. Commit, push, amend, or rewrite git history only when the user explicitly asked. Never background a command with a trailing & or nohup — use run_in_background instead. Kill processes by exact PID, never broad patterns like pkill -f node. Set persist=true to run in a session shell where cd/env state survives across persist:true calls. With run_in_background, also set wake (pattern and/or silence_seconds) to be actively notified the moment matching output appears or the task stalls.",
+  "description": "Execute a bash command. The shell's working directory is already set to the project root — don't cd into it redundantly. Use cd only when you need a different directory. Returns exit code and combined stdout/stderr. Commands run in a non-interactive bash shell with TERM=dumb. Long output is truncated (tail kept). Set run_in_background=true for long-running OR interactive processes (dev servers, watchers, REPLs, scaffolders, programs that prompt for input). Use task_output to read output, task_send to type input/answer prompts, and task_stop to stop background processes. Commit, push, amend, or rewrite git history only when the user explicitly asked. Never background a command with a trailing & or nohup — use run_in_background instead. Kill processes by exact PID, never broad patterns like pkill -f node. Set persist=true to run in a session shell where cd/env state survives across persist:true calls. With run_in_background, also set wake (pattern and/or silence_seconds) to be actively notified the moment matching output appears or the task stalls. Never sleep to wait for a background process — task_output with wait_ms returns the instant it exits.",
   "input_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -520,7 +520,7 @@ Today's date: <DATE>
 }
 {
   "name": "task_output",
-  "description": "Read output from a background process. Returns new output since last read by default. Use from_start=true to read from the beginning. Progress and exit status arrive automatically for background processes — call this when you need the full output, not merely to check whether something finished.",
+  "description": "Read output from a background process. Returns new output since last read by default. Use from_start=true to read from the beginning. Progress and exit status arrive automatically for background processes — call this when you need the full output, not merely to check whether something finished. Set wait_ms to block until the process exits rather than sleeping for a guessed duration (wait_agent is for child agents, not background processes).",
   "input_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -532,6 +532,12 @@ Today's date: <DATE>
       "from_start": {
         "description": "If true, read output from the beginning instead of incrementally",
         "type": "boolean"
+      },
+      "wait_ms": {
+        "description": "Block until the process exits, up to this many ms (max 600000), then read. Returns the moment it finishes — use this instead of sleeping for a guessed duration when you have nothing else to do until it is done.",
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 600000
       }
     },
     "required": [

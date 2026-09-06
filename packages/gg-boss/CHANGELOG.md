@@ -1,5 +1,37 @@
 # @kenkaiiii/gg-boss
 
+## 5.57.0
+
+## 5.56.1
+
+## 5.56.0
+
+## 5.55.1
+
+## 5.55.0
+
+### Minor Changes
+
+- 7ade77f: Fix GPT-6 Astra on the ChatGPT OAuth route. OpenAI gates Astra on the Codex client version (`minimal_client_version: 0.153.0`) and rejected our `0.144.1` header with "requires a newer version of Codex"; we now advertise `0.153.4`, the current openai/codex release. When a future model is gated the same way, the error guidance says plainly that GG Coder needs updating and to switch model meanwhile, instead of echoing OpenAI's "upgrade the app or CLI" as if it were the user's problem.
+
+  Remove GPT-5.5 from the model registry, footers, login hub, README, and CLI defaults (OpenAI now defaults to GPT-5.6 Sol everywhere, matching the registry). Sync the desktop login hub descriptions with the registry for every provider (Claude Fable 5.1, GPT-6 Astra, GLM-5.3-Flash, OpenRouter Qwen3.6-Plus). Drop the last slash-command reference from a generic error hint so guidance reads correctly in the app.
+
+## 5.54.1
+
+## 5.54.0
+
+### Minor Changes
+
+- 7ad7339: Add GPT-6 Astra (`gpt-6-astra`, released 2026-09-03) to the model registry — 1.05M context on the public Responses API, 272K on the ChatGPT OAuth/Codex route, 128k output, text+image input, $10/$50 MTok with cache reads at $1/MTok. It takes the full six-rung Codex effort ladder (low → medium → high → xhigh → max → ultra) and uses the same responses-lite transport and `prompt_cache_options` cache shape as the GPT-5.6 family; at `ultra` it receives the proactive async-subagent orchestration prompt, matching its `multi_agent v2` catalog entry.
+
+  Astra is still rolling out (`visibility: hide` in OpenAI's Codex catalog), so accounts without access get the existing "not in the current Codex catalog" hint, which now names Astra among the alternatives. Through a plain OpenAI API key, OpenAI requires the Responses API for tool calling on Astra, so the Chat Completions path stays text-only — the OAuth Codex route is the supported way to run it as an agent.
+
+## 5.53.3
+
+## 5.53.2
+
+## 5.53.1
+
 ## 5.53.0
 
 ## 5.52.0

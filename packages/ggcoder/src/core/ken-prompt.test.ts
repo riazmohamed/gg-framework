@@ -36,6 +36,14 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     expect(prompt).toContain("Use PROMPT with the concrete next step");
   });
 
+  it("requires comparison evidence without approving indexing or repeating settled reviews", () => {
+    expect(prompt).toContain("compare against Steroids evidence before your verdict");
+    expect(prompt).toContain("use HUMAN with the proposed repos when approval is pending");
+    expect(prompt).toContain("never approve it on the user's behalf");
+    expect(prompt).toContain("accept the disclosed source/docs fallback");
+    expect(prompt).toContain("or repeat a completed comparison on every turn");
+  });
+
   it("trusts only harness-classified passed verification evidence", () => {
     expect(prompt).toContain("trust only PASSED rows");
     expect(prompt).toContain("FAILED or REJECTED rows");
@@ -92,6 +100,13 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     expect(chat).not.toContain("ALL_CLEAR");
   });
 
+  it("limits structured approval warnings to corpus availability, not failed verification", () => {
+    expect(prompt).toContain('{"verdict":"ALL_CLEAR","evidenceLimitation":"corpus_unverified"}');
+    expect(prompt).toContain("Never append prose to ALL_CLEAR");
+    expect(prompt).toContain("never failed or missing verification");
+    expect(prompt).toContain("Those still require PROMPT to fix, or HUMAN");
+  });
+
   it("tells Ken injected transcript lines are his own, not user asks", () => {
     expect(prompt).toContain("Ken autopilot (injected)");
     expect(prompt).toContain("Judge only against the original user request");
@@ -146,6 +161,32 @@ describe("buildKenSystemPrompt — chat mode unaffected", () => {
     expect(prompt).toContain("Send to GG Coder");
     // The verdict contract is autopilot-only.
     expect(prompt).not.toContain("ALL_CLEAR");
+  });
+});
+
+describe("Steroids guidance alignment", () => {
+  it("gives chat Ken and Autopilot the same evidence bar and corpus-gap rules", async () => {
+    for (const prompt of [
+      await buildKenSystemPrompt(TEST_CWD),
+      await buildKenAutopilotSystemPrompt(TEST_CWD),
+    ]) {
+      expect(prompt).toContain(
+        "benchmark substantial implementations against comparable real-world code",
+      );
+      expect(prompt).toContain(
+        "architecture, simplicity, completeness, edge cases, error handling, security, and performance",
+      );
+      expect(prompt).toContain("Reuse samples already examined or supplied in context");
+      expect(prompt).toContain("Empty corpus or no hits: discover suitable repos");
+      expect(prompt).toContain("hand indexing to GG Coder, which must ask_user before add");
+      expect(prompt).toContain(
+        "unavailable, discovery finds nothing suitable, or the user declines",
+      );
+      expect(prompt).toContain("not cross-checked against real-world implementations");
+      expect(prompt).toContain("Do not keep requesting indexing after a decline");
+      expect(prompt).toContain("they do not replace tests or prove correctness");
+      expect(prompt).not.toContain("repo that ships is proof");
+    }
   });
 });
 

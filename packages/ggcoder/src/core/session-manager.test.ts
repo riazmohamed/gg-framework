@@ -12,7 +12,8 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SessionManager,
   KEN_TURN_CUSTOM_KIND,
@@ -200,6 +201,60 @@ describe("SessionManager compaction coordination", () => {
     await Promise.all([first, second]);
 
     expect(order).toEqual(["first:start", "first:end", "second:start", "second:end"]);
+  });
+
+  function errno(code: string): NodeJS.ErrnoException {
+    return Object.assign(new Error(`${code}: mkdir`), { code });
+  }
+
+  it("treats a Windows pending-delete EPERM on an existing lock dir as contention", async () => {
+    const home = await makeTempDir();
+    const manager = new SessionManager(home);
+    const realMkdir = fs.mkdir;
+    let lockAttempts = 0;
+    const spy = vi.spyOn(fs, "mkdir").mockImplementation(async (target, options) => {
+      if (String(target).endsWith(".lock")) {
+        lockAttempts += 1;
+        if (lockAttempts === 1) {
+          // Lock dir is present but mid-delete: mkdir fails EPERM while stat still resolves.
+          await realMkdir(target, { recursive: true });
+          throw errno("EPERM");
+        }
+        // The releasing holder finished its delete before we polled again.
+        await rm(String(target), { recursive: true, force: true });
+      }
+      return realMkdir(target, options);
+    });
+    try {
+      await expect(
+        manager.withCompactionLease("conversation", undefined, async () => "acquired"),
+      ).resolves.toBe("acquired");
+      expect(lockAttempts).toBe(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("rethrows a genuine EACCES when no lock dir exists instead of waiting forever", async () => {
+    const home = await makeTempDir();
+    const manager = new SessionManager(home);
+    const realMkdir = fs.mkdir;
+    let attempts = 0;
+    const spy = vi.spyOn(fs, "mkdir").mockImplementation(async (target, options) => {
+      if (String(target).endsWith(".lock")) {
+        attempts += 1;
+        throw errno("EACCES");
+      }
+      return realMkdir(target, options);
+    });
+    try {
+      await expect(
+        manager.withCompactionLease("conversation", undefined, async () => "never"),
+      ).rejects.toMatchObject({ code: "EACCES" });
+      expect(attempts).toBeLessThanOrEqual(5);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("recovers a dead-owner lease and ignores coordination storage during discovery", async () => {

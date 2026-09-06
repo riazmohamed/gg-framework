@@ -137,6 +137,18 @@ export interface JiwaSnapshot {
   hardLimit: number;
 }
 
+/** Title-bar progress only; never substitutes for the agent's verification gate. */
+export interface GitHubCI {
+  key: string;
+  url: string;
+  total: number;
+  completed: number;
+  failed: number;
+  active: boolean;
+  conclusion: "success" | "failure" | "cancelled" | null;
+  stale?: boolean;
+}
+
 export interface AgentState {
   provider: string;
   model: string;
@@ -167,6 +179,8 @@ export interface AgentState {
   gitHubPRs?: number | null;
   /** Web URL of the project's GitHub origin repo (title-bar chip links). */
   gitHubRepoUrl?: string | null;
+  /** GitHub Actions for the current commit; null when no runs are available. */
+  gitHubCI?: GitHubCI | null;
   /** Extra workspace roots added with /add-dir. Absent on older sidecars. */
   additionalRoots?: string[];
   /** True when the active model can accept native video input. */
@@ -418,7 +432,38 @@ export interface EnhanceResult {
  */
 export async function enhancePrompt(text: string): Promise<EnhanceResult> {
   await waitForReady();
-  return invoke<EnhanceResult>("agent_enhance_prompt", { text });
+  const result = await invoke<unknown>("agent_enhance_prompt", { text });
+  // IPC types are not runtime validation: an error payload or empty rewrite must
+  // reach the caller's catch, never replace the draft or enter the animation.
+  if (
+    !result ||
+    typeof result !== "object" ||
+    "error" in result ||
+    !("enhanced" in result) ||
+    typeof result.enhanced !== "string" ||
+    !result.enhanced.trim() ||
+    !("segments" in result) ||
+    !Array.isArray(result.segments) ||
+    !result.segments.every(isPromptSegment)
+  ) {
+    throw new Error("Invalid prompt enhancement response");
+  }
+  return { enhanced: result.enhanced, segments: result.segments };
+}
+
+function isPromptSegment(value: unknown): value is PromptSegment {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "text" in value &&
+    typeof value.text === "string" &&
+    "kind" in value &&
+    (value.kind === "text" ||
+      (value.kind === "term" &&
+        "original" in value &&
+        typeof value.original === "string" &&
+        (!("note" in value) || value.note === undefined || typeof value.note === "string")))
+  );
 }
 
 export async function openUrl(url: string): Promise<void> {

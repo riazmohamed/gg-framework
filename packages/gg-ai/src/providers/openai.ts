@@ -28,6 +28,7 @@ import {
   toOpenAIToolChoice,
   toOpenAITools,
 } from "./transform.js";
+import { supportsStrictToolSampling } from "../utils/strict-tool-schema.js";
 import { normalizePromptCacheKey } from "./prompt-cache-key.js";
 import { uploadMoonshotVideos } from "./moonshot-video.js";
 import {
@@ -159,6 +160,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const isKimiK27 = options.provider === "moonshot" && options.model.startsWith("kimi-k2.7-code");
   const hasFixedKimiSampling = isKimiK3 || isKimiK27;
   const usesThinkingParam =
+    options.provider === "deepseek" ||
     options.provider === "glm" ||
     (options.provider === "moonshot" && !isKimiK3 && !isKimiK27) ||
     options.provider === "xiaomi";
@@ -199,7 +201,13 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     model: options.model,
     messages,
     stream: useStreaming,
-    ...(options.maxTokens ? { max_completion_tokens: options.maxTokens } : {}),
+    ...(options.maxTokens
+      ? options.provider === "deepseek" ||
+        options.provider === "glm" ||
+        options.provider === "moonshot"
+        ? { max_tokens: options.maxTokens }
+        : { max_completion_tokens: options.maxTokens }
+      : {}),
     ...(effectiveTemp != null && !options.thinking && !hasFixedKimiSampling
       ? { temperature: effectiveTemp }
       : {}),
@@ -208,7 +216,13 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     ...(options.thinking && !usesThinkingParam && !isKimiK3 && !isKimiK27 && !isLocal
       ? { reasoning_effort: toOpenAIReasoningEffort(options.thinking, options.model) }
       : {}),
-    ...(options.tools?.length ? { tools: toOpenAITools(options.tools) } : {}),
+    ...(options.tools?.length
+      ? {
+          tools: toOpenAITools(options.tools, {
+            strict: supportsStrictToolSampling(options.provider),
+          }),
+        }
+      : {}),
     ...(options.toolChoice && options.tools?.length
       ? { tool_choice: toOpenAIToolChoice(options.toolChoice) }
       : {}),
@@ -227,10 +241,14 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     const paramsAny = params as unknown as Record<string, unknown>;
     paramsAny.prompt_cache_key = normalizePromptCacheKey(options.promptCacheKey ?? "ggcoder");
 
-    // GPT-5.6 replaced prompt_cache_retention with prompt_cache_options.
+    // GPT-5.6 replaced prompt_cache_retention with prompt_cache_options, and
+    // GPT-6 keeps it ("GPT-5.6 and later" per the prompt-caching guide).
     // Its only supported TTL is 30m; implicit mode preserves automatic latest-
     // message breakpoints while enabling the newer reliable key+prefix matching.
-    if (options.provider === "openai" && options.model.startsWith("gpt-5.6")) {
+    if (
+      options.provider === "openai" &&
+      (options.model.startsWith("gpt-5.6") || options.model.startsWith("gpt-6"))
+    ) {
       paramsAny.prompt_cache_options = { mode: "implicit", ttl: "30m" };
     } else if (!isKimiK3 && (options.cacheRetention ?? "short") === "long") {
       // K3 caching is automatic and its request schema does not expose a TTL.
@@ -244,6 +262,15 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     (params as unknown as Record<string, unknown>).reasoning_effort = toLocalReasoningEffort(
       options.thinking,
     );
+  }
+
+  // Fugu Ultra v1.1 adds a distinct max tier; plain Fugu still stops at xhigh.
+  if (
+    options.provider === "sakana" &&
+    options.model === "fugu-ultra" &&
+    (options.thinking === "max" || options.thinking === "ultra")
+  ) {
+    (params as unknown as Record<string, unknown>).reasoning_effort = "max";
   }
 
   if (options.provider === "openai" && options.serviceTier) {
@@ -270,7 +297,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     }
   }
 
-  // Inject the custom toggle for K2.6-era Kimi, GLM, and Xiaomi. Public K3 uses
+  // Inject the custom toggle for K2.6-era Kimi, DeepSeek, GLM, and Xiaomi. Public K3 uses
   // reasoning_effort, managed K3 has its endpoint-specific block above, and
   // K2.7 is always-thinking and rejects an explicit disabled toggle.
   if (usesThinkingParam) {
@@ -280,7 +307,16 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       // value 400s listing `none, minimal, low, medium, high, xhigh, max`).
       // The toggle alone silently runs Z.AI's `max` default, which made every
       // rung below the ceiling a lie in the UI.
-      if (options.provider === "glm") {
+      if (options.provider === "deepseek") {
+        // DeepSeek's current ladder is low/high/max. Preserve the intent of
+        // saved xhigh settings, which older catalogs incorrectly called max.
+        (params as unknown as Record<string, unknown>).reasoning_effort =
+          options.thinking === "low"
+            ? "low"
+            : options.thinking === "medium" || options.thinking === "high"
+              ? "high"
+              : "max";
+      } else if (options.provider === "glm") {
         (params as unknown as Record<string, unknown>).reasoning_effort = toGlmReasoningEffort(
           options.thinking,
         );

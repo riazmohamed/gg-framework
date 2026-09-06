@@ -8,12 +8,23 @@ import {
 import type { ThinkingLevel } from "@abukhaled/gg-ai";
 
 describe("thinking-level helpers", () => {
-  it("cycles OpenAI GPT models through supported reasoning efforts", () => {
-    expect(getSupportedThinkingLevels("openai", "gpt-5.5")).toEqual(["medium", "high", "xhigh"]);
-    expect(getNextThinkingLevel("openai", "gpt-5.5", undefined)).toBe("medium");
-    expect(getNextThinkingLevel("openai", "gpt-5.5", "medium")).toBe("high");
-    expect(getNextThinkingLevel("openai", "gpt-5.5", "high")).toBe("xhigh");
-    expect(getNextThinkingLevel("openai", "gpt-5.5", "xhigh")).toBeUndefined();
+  it("cycles GPT-6 Astra through the full six-rung ladder up to ultra", () => {
+    expect(getSupportedThinkingLevels("openai", "gpt-6-astra")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra",
+    ]);
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", undefined)).toBe("low");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "max")).toBe("ultra");
+    expect(getNextThinkingLevel("openai", "gpt-6-astra", "ultra")).toBeUndefined();
+  });
+
+  it("keeps the legacy medium/high ladder for unregistered custom GPT ids", () => {
+    expect(getSupportedThinkingLevels("openai", "gpt-5.2")).toEqual(["medium", "high"]);
+    expect(getNextThinkingLevel("openai", "gpt-5.2", "high")).toBeUndefined();
   });
 
   it("exposes Ultra only for GPT-5.6 models that support proactive delegation", () => {
@@ -84,12 +95,26 @@ describe("thinking-level helpers", () => {
 
   it("cycles Sakana Fugu through high and xhigh", () => {
     expect(getSupportedThinkingLevels("sakana", "fugu")).toEqual(["high", "xhigh"]);
-    expect(getSupportedThinkingLevels("sakana", "fugu-ultra")).toEqual(["high", "xhigh"]);
+    expect(getSupportedThinkingLevels("sakana", "fugu-ultra")).toEqual(["high", "xhigh", "max"]);
+    expect(getNextThinkingLevel("sakana", "fugu-ultra", "xhigh")).toBe("max");
+    expect(getNextThinkingLevel("sakana", "fugu-ultra", "max")).toBeUndefined();
     expect(getNextThinkingLevel("sakana", "fugu", undefined)).toBe("high");
     expect(getNextThinkingLevel("sakana", "fugu", "high")).toBe("xhigh");
     expect(getNextThinkingLevel("sakana", "fugu", "xhigh")).toBeUndefined();
     expect(isThinkingLevelSupported("sakana", "fugu", "medium")).toBe(false);
   });
+
+  it.each(["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"])(
+    "cycles %s through low, high, max and off",
+    (model) => {
+      expect(getSupportedThinkingLevels("deepseek", model)).toEqual(["low", "high", "max"]);
+      expect(getNextThinkingLevel("deepseek", model, undefined)).toBe("low");
+      expect(getNextThinkingLevel("deepseek", model, "low")).toBe("high");
+      expect(getNextThinkingLevel("deepseek", model, "high")).toBe("max");
+      expect(getNextThinkingLevel("deepseek", model, "max")).toBeUndefined();
+      expect(isThinkingLevelSupported("deepseek", model, "xhigh")).toBe(false);
+    },
+  );
 
   it("cycles Kimi K3 through its server-declared low, high, max ladder", () => {
     expect(getSupportedThinkingLevels("moonshot", "kimi-k3")).toEqual(["low", "high", "max"]);

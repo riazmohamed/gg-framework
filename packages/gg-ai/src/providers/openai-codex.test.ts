@@ -505,6 +505,36 @@ describe("streamOpenAICodex", () => {
     });
   });
 
+  it.each([
+    ["gpt-5.5", "none"],
+    ["gpt-5.6-luna", "low"],
+    ["gpt-5.6-sol", "low"],
+    ["gpt-6-astra", "low"],
+    ["gpt-5.6-terra", "low"],
+  ])("uses a supported default effort for %s without explicit thinking", async (model, effort) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createSseResponse([
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 1, output_tokens: 1 } },
+          },
+        ]),
+      ),
+    );
+    const result = streamOpenAICodex({
+      provider: "openai",
+      model,
+      messages: [{ role: "user", content: "Rewrite this prompt" }],
+      apiKey: "test-key",
+      accountId: "acct",
+    });
+    await result;
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0]?.[1]?.body as string);
+    expect(body.reasoning.effort).toBe(effort);
+  });
+
   it("uses the official Codex Responses-Lite identity and request shape for GPT-5.6", async () => {
     vi.stubGlobal(
       "fetch",
@@ -536,8 +566,8 @@ describe("streamOpenAICodex", () => {
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect(init.headers).toMatchObject({
       originator: "codex_cli_rs",
-      version: "0.144.1",
-      "User-Agent": "codex_cli_rs/0.144.1",
+      version: "0.153.4",
+      "User-Agent": "codex_cli_rs/0.153.4",
       "X-OpenAI-Internal-Codex-Responses-Lite": "true",
     });
     expect(body).toMatchObject({
@@ -546,6 +576,34 @@ describe("streamOpenAICodex", () => {
       reasoning: { effort: "low", summary: "auto", context: "all_turns" },
     });
   });
+
+  it.each([
+    [
+      "Unsupported value: 'none' is not supported with the 'gpt-6-astra' model. Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'.",
+      undefined,
+    ],
+    [
+      "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account.",
+      "This model is not available through your ChatGPT account. " +
+        "Switch to a model listed for OpenAI via the model selector, or check your ChatGPT usage limits.",
+    ],
+  ])(
+    "only gives account-access guidance for an actual entitlement error: %s",
+    async (message, hint) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ error: { message } }), { status: 400 })),
+      );
+      const result = streamOpenAICodex({
+        provider: "openai",
+        model: "gpt-6-astra",
+        messages: [{ role: "user", content: "Review this work" }],
+        apiKey: "test-key",
+        accountId: "acct",
+      });
+      await expect(result.response).rejects.toMatchObject({ message, hint, statusCode: 400 });
+    },
+  );
 
   it("surfaces JSON detail fields from Codex HTTP errors", async () => {
     vi.stubGlobal(
@@ -1292,5 +1350,59 @@ describe("streamOpenAICodex", () => {
         ],
       },
     });
+  });
+});
+
+describe("toCodexTools strict sampling", () => {
+  it("marks strictifiable tools strict:true and falls back to strict:null otherwise", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createSseResponse([
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 1, output_tokens: 1 } },
+          },
+        ]),
+      ),
+    );
+    const raw = {
+      type: "object",
+      properties: { mode: { oneOf: [{ type: "string" }, { type: "number" }] } },
+      required: ["mode"],
+    };
+    const result = streamOpenAICodex({
+      provider: "openai",
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "k",
+      accountId: "acct",
+      tools: [
+        {
+          name: "read",
+          description: "read",
+          parameters: z.object({ path: z.string(), offset: z.number().optional() }),
+        },
+        {
+          name: "mcp_tool",
+          description: "mcp",
+          parameters: z.record(z.string(), z.unknown()),
+          rawInputSchema: raw,
+        },
+      ],
+    });
+    for await (const _event of result) {
+      /* consume */
+    }
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0]?.[1]?.body as string) as {
+      tools: Array<Record<string, unknown>>;
+    };
+    expect(body.tools[0]).toMatchObject({ name: "read", strict: true });
+    expect(body.tools[0].parameters).toMatchObject({
+      required: ["path", "offset"],
+      additionalProperties: false,
+    });
+    expect(body.tools[1]).toMatchObject({ name: "mcp_tool", strict: null });
+    expect(body.tools[1].parameters).toEqual(raw);
   });
 });

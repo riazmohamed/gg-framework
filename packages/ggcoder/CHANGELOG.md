@@ -1,5 +1,113 @@
 # @kenkaiiii/ggcoder
 
+## 5.57.0
+
+### Minor Changes
+
+- Add current-commit GitHub Actions progress to the desktop title bar, with live job counts, brief success feedback, and dismissible failures. Recognize successful checks after a git status prelude and show incomplete verification as Unverified instead of an unexpected crash.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.57.0
+- @kenkaiiii/gg-agent@5.57.0
+- @kenkaiiii/gg-core@5.57.0
+
+## 5.56.1
+
+### Patch Changes
+
+- Block completion and Autopilot approval when verification is missing, failed, stale, or running; preserve unresolved checks across resumed sessions, bound post-edit rechecks, and retain structured corpus-review warnings.
+  - @kenkaiiii/gg-ai@5.56.1
+  - @kenkaiiii/gg-agent@5.56.1
+  - @kenkaiiii/gg-core@5.56.1
+
+## 5.56.0
+
+### Minor Changes
+
+- Add opt-in Gemini 3.8 Flash, Gemini 3.5 Flash Lite, and experimental DeepSeek V4 Flash Vision; enable Qwen image/video input, align provider reasoning and output limits, and respect loaded local context and summary output budgets.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.56.0
+- @kenkaiiii/gg-agent@5.56.0
+- @kenkaiiii/gg-core@5.56.0
+
+## 5.55.1
+
+### Patch Changes
+
+- Fix Codex requests for GPT-5.6/GPT-6 models: default reasoning effort to `low` on the Responses-Lite route (these models reject `none`), which unbreaks prompt enhancement and Autopilot; only show the ChatGPT entitlement hint for OpenAI's actual "not supported with a ChatGPT account" error instead of any 400.
+  - @kenkaiiii/gg-ai@5.55.1
+  - @kenkaiiii/gg-agent@5.55.1
+  - @kenkaiiii/gg-core@5.55.1
+
+## 5.55.0
+
+### Minor Changes
+
+- 7ade77f: Fix GPT-6 Astra on the ChatGPT OAuth route. OpenAI gates Astra on the Codex client version (`minimal_client_version: 0.153.0`) and rejected our `0.144.1` header with "requires a newer version of Codex"; we now advertise `0.153.4`, the current openai/codex release. When a future model is gated the same way, the error guidance says plainly that GG Coder needs updating and to switch model meanwhile, instead of echoing OpenAI's "upgrade the app or CLI" as if it were the user's problem.
+
+  Remove GPT-5.5 from the model registry, footers, login hub, README, and CLI defaults (OpenAI now defaults to GPT-5.6 Sol everywhere, matching the registry). Sync the desktop login hub descriptions with the registry for every provider (Claude Fable 5.1, GPT-6 Astra, GLM-5.3-Flash, OpenRouter Qwen3.6-Plus). Drop the last slash-command reference from a generic error hint so guidance reads correctly in the app.
+
+### Patch Changes
+
+- Updated dependencies [7ade77f]
+  - @kenkaiiii/gg-ai@5.55.0
+  - @kenkaiiii/gg-core@5.55.0
+  - @kenkaiiii/gg-agent@5.55.0
+
+## 5.54.1
+
+### Patch Changes
+
+- 5aa507b: Fix a Windows race in the cross-process compaction lock. When one session released the lock while another was acquiring it, Windows reported the mid-delete lock directory as `EPERM` rather than `EEXIST`, and the acquiring side threw instead of waiting. `EPERM`/`EBUSY`/`EACCES` on the lock `mkdir` are now treated as contention and retried on the normal poll, so simultaneous compactions coordinate cleanly on Windows too.
+  - @kenkaiiii/gg-ai@5.54.1
+  - @kenkaiiii/gg-agent@5.54.1
+  - @kenkaiiii/gg-core@5.54.1
+
+## 5.54.0
+
+### Minor Changes
+
+- 7ad7339: Add GPT-6 Astra (`gpt-6-astra`, released 2026-09-03) to the model registry — 1.05M context on the public Responses API, 272K on the ChatGPT OAuth/Codex route, 128k output, text+image input, $10/$50 MTok with cache reads at $1/MTok. It takes the full six-rung Codex effort ladder (low → medium → high → xhigh → max → ultra) and uses the same responses-lite transport and `prompt_cache_options` cache shape as the GPT-5.6 family; at `ultra` it receives the proactive async-subagent orchestration prompt, matching its `multi_agent v2` catalog entry.
+
+  Astra is still rolling out (`visibility: hide` in OpenAI's Codex catalog), so accounts without access get the existing "not in the current Codex catalog" hint, which now names Astra among the alternatives. Through a plain OpenAI API key, OpenAI requires the Responses API for tool calling on Astra, so the Chat Completions path stays text-only — the OAuth Codex route is the supported way to run it as an agent.
+
+### Patch Changes
+
+- Updated dependencies [7ad7339]
+  - @kenkaiiii/gg-ai@5.54.0
+  - @kenkaiiii/gg-core@5.54.0
+  - @kenkaiiii/gg-agent@5.54.0
+
+## 5.53.3
+
+### Patch Changes
+
+- Fix a crash where a background command whose binary cannot be spawned emitted an unhandled `error` event and took the whole CLI down; the failure is now reported as a normal non-zero exit.
+  - @kenkaiiii/gg-ai@5.53.3
+  - @kenkaiiii/gg-agent@5.53.3
+  - @kenkaiiii/gg-core@5.53.3
+
+## 5.53.2
+
+### Patch Changes
+
+- Wait on background processes instead of guessing: `task_output` takes `wait_ms` and returns the moment the process exits, and a long bare `sleep` while something runs in the background is now refused and redirected there.
+  - @kenkaiiii/gg-ai@5.53.2
+  - @kenkaiiii/gg-agent@5.53.2
+  - @kenkaiiii/gg-core@5.53.2
+
+## 5.53.1
+
+### Patch Changes
+
+- Make Agent Steroids the proactive source of truth: the agent now searches the real-code corpus before planning or writing nontrivial code, fills a corpus gap via discover → ask → add (indexing allowed in plan mode), and nudges once to install Steroids when the CLI is missing.
+  - @kenkaiiii/gg-ai@5.53.1
+  - @kenkaiiii/gg-agent@5.53.1
+  - @kenkaiiii/gg-core@5.53.1
+
 ## 5.53.0
 
 ### Minor Changes
