@@ -240,7 +240,7 @@ function classifySegment(segment: string): VerificationCommandClassification {
   return classifyDirect(tokens);
 }
 
-/** Fail-closed semantic classifier: every shell segment must be a bounded check. */
+/** Fail-closed classifier: bounded checks with narrowly allowed non-check preludes. */
 export function classifyVerificationCommand(command: string): VerificationCommandClassification {
   const candidate =
     VERIFIER_WORDS.test(command) || /(?:^|\s)(?:pnpm|npm|yarn|bun)(?:\s|$)/i.test(command);
@@ -267,6 +267,13 @@ export function classifyVerificationCommand(command: string): VerificationComman
       !hasUnsafeShellSyntax(segment)
     )
       return accepted("working-directory prelude");
+    // Status is not evidence itself; a real check must follow through &&.
+    // simplification: only basic status flags; expand with vetted flags, not arbitrary Git commands.
+    if (
+      index < segments.length - 1 &&
+      /^git\s+status(?:\s+(?:--short|-s|--branch|-b|--porcelain(?:=[12])?))*$/.test(segment.trim())
+    )
+      return accepted("git status prelude");
     return classifySegment(segment);
   });
   const firstRejected = results.find((result) => !result.accepted);

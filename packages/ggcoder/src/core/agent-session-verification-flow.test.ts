@@ -9,6 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import type { Message } from "@kenkaiiii/gg-ai";
@@ -245,6 +246,32 @@ describe("verification gate flow", () => {
     await simulateToolCall(internal, "edit", { file_path: "subject.mjs" });
     await simulateToolCall(internal, "task_output", { id: passedId });
     expect(internal.getVerificationProblem()).toContain("Unverified");
+  });
+
+  it("recognizes a real background npm test after a git status prelude", async () => {
+    const { internal } = await makeSession();
+    execFileSync("git", ["init", "--quiet"], { cwd: tmpProject });
+    await fs.writeFile(
+      path.join(tmpProject, "package.json"),
+      JSON.stringify({ scripts: { test: "node --test verification.test.mjs" } }),
+    );
+    await fs.writeFile(
+      path.join(tmpProject, "verification.test.mjs"),
+      "import assert from 'node:assert/strict'; assert.equal(1 + 1, 2);\n",
+    );
+    await simulateToolCall(internal, "edit", { file_path: "verification.test.mjs" });
+    const command = "git status --short && npm run test";
+    const started = await internal.processManager.start(command, tmpProject);
+    await simulateToolCall(
+      internal,
+      "bash",
+      { command, run_in_background: true },
+      `ID: ${started.id}\n`,
+    );
+    expect(internal.getVerificationProblem()).toContain("Unverified");
+    expect(await internal.processManager.waitForExit(started.id, 5000)).toBe("exited");
+    await simulateToolCall(internal, "task_output", { id: started.id });
+    expect(internal.getVerificationProblem()).toBeNull();
   });
 
   it("persists unresolved verification and requires fresh evidence after resuming", async () => {

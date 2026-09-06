@@ -19,6 +19,9 @@ describe("classifyVerificationCommand", () => {
     "node.exe --test verification.test.mjs",
     "python -m unittest",
     "cd packages/app && npm test",
+    "git status --short && npm run test",
+    "git status && npm test",
+    "cd packages/app && git status --porcelain && npm test",
     "pnpm test -- --runInBand",
     "cargo fmt --check && cargo clippy",
     "ruff format --check .",
@@ -66,6 +69,20 @@ describe("classifyVerificationCommand", () => {
       candidate: true,
       reason: expect.stringContaining(reason),
     });
+  });
+
+  it.each([
+    "git status --short && git status",
+    "git status --short && npm test || true",
+    "git status --short; npm test",
+    "git status --short | npm test",
+    "git status --short > status.txt && npm test",
+    "git -c core.fsmonitor=helper status --short && npm test",
+    "git reset --hard && npm test",
+    "git status --help && npm test",
+    "git status --short && echo done",
+  ])("does not let a status prelude bypass verification: %s", (command) => {
+    expect(classifyVerificationCommand(command).accepted).toBe(false);
   });
 
   it("rejects unknown commands without mislabeling ordinary shell work as verification", () => {

@@ -2720,7 +2720,9 @@ async function createSession(
       const cancelled = runLifecycle.isCancellationRequested(generation);
       const verificationProblem = cancelled ? null : session.getVerificationProblem();
       if (runSucceeded && verificationProblem && ownsGeneration) {
-        broadcastError("error", "verification incomplete", new Error(verificationProblem));
+        // Expected control outcome: run_end and the journal already carry Unverified.
+        // Do not format it as a crash or persist a misleading error marker.
+        log("WARN", "app-sidecar", "verification incomplete", { message: verificationProblem });
       }
       if (
         runSucceeded &&
