@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.61.1",
+    date: "2026-09-06",
+    items: [
+      "Your `CI` chip now tells the whole story at a glance. While jobs run it shimmers with quiet suspense, then settles to calm `green` on a pass or honest `red` the moment something breaks. No more guessing.",
+      "Agents on `OpenAI` got sharper hands. I made every tool call ship in a strictly validated shape, so fewer calls bounce back with malformed arguments. That means fewer retries and less waiting for you.",
+    ],
+  },
+  {
     version: "0.61.0",
     date: "2026-09-06",
     items: [
