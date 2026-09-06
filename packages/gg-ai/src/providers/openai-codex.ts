@@ -21,6 +21,7 @@ import {
 import { StreamResult } from "../utils/event-stream.js";
 import { providerDiag } from "../utils/diag.js";
 import { resolveToolSchema } from "../utils/zod-to-json-schema.js";
+import { makeStrictToolSchema, UnsupportedStrictSchemaError } from "../utils/strict-tool-schema.js";
 import { normalizePromptCacheKey } from "./prompt-cache-key.js";
 import {
   downgradeUnsupportedImages,
@@ -767,13 +768,23 @@ function toCodexInput(
 // ── Tool Conversion ────────────────────────────────────────
 
 function toCodexTools(tools: Tool[]): unknown[] {
-  return tools.map((tool) => ({
-    type: "function",
-    name: tool.name,
-    description: tool.description,
-    parameters: resolveToolSchema(tool),
-    strict: null,
-  }));
+  return tools.map((tool) => {
+    let parameters = resolveToolSchema(tool);
+    let strict: true | null = null;
+    try {
+      parameters = makeStrictToolSchema(parameters);
+      strict = true;
+    } catch (error) {
+      if (!(error instanceof UnsupportedStrictSchemaError)) throw error;
+    }
+    return {
+      type: "function",
+      name: tool.name,
+      description: tool.description,
+      parameters,
+      strict,
+    };
+  });
 }
 
 // HTTP error bodies may be JSON, useful plain text, or an HTML edge/proxy page.

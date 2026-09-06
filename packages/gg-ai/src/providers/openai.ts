@@ -28,6 +28,7 @@ import {
   toOpenAIToolChoice,
   toOpenAITools,
 } from "./transform.js";
+import { supportsStrictToolSampling } from "../utils/strict-tool-schema.js";
 import { normalizePromptCacheKey } from "./prompt-cache-key.js";
 import { uploadMoonshotVideos } from "./moonshot-video.js";
 import {
@@ -215,7 +216,13 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     ...(options.thinking && !usesThinkingParam && !isKimiK3 && !isKimiK27 && !isLocal
       ? { reasoning_effort: toOpenAIReasoningEffort(options.thinking, options.model) }
       : {}),
-    ...(options.tools?.length ? { tools: toOpenAITools(options.tools) } : {}),
+    ...(options.tools?.length
+      ? {
+          tools: toOpenAITools(options.tools, {
+            strict: supportsStrictToolSampling(options.provider),
+          }),
+        }
+      : {}),
     ...(options.toolChoice && options.tools?.length
       ? { tool_choice: toOpenAIToolChoice(options.toolChoice) }
       : {}),

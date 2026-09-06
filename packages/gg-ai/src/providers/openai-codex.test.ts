@@ -1352,3 +1352,57 @@ describe("streamOpenAICodex", () => {
     });
   });
 });
+
+describe("toCodexTools strict sampling", () => {
+  it("marks strictifiable tools strict:true and falls back to strict:null otherwise", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createSseResponse([
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 1, output_tokens: 1 } },
+          },
+        ]),
+      ),
+    );
+    const raw = {
+      type: "object",
+      properties: { mode: { oneOf: [{ type: "string" }, { type: "number" }] } },
+      required: ["mode"],
+    };
+    const result = streamOpenAICodex({
+      provider: "openai",
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "k",
+      accountId: "acct",
+      tools: [
+        {
+          name: "read",
+          description: "read",
+          parameters: z.object({ path: z.string(), offset: z.number().optional() }),
+        },
+        {
+          name: "mcp_tool",
+          description: "mcp",
+          parameters: z.record(z.string(), z.unknown()),
+          rawInputSchema: raw,
+        },
+      ],
+    });
+    for await (const _event of result) {
+      /* consume */
+    }
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0]?.[1]?.body as string) as {
+      tools: Array<Record<string, unknown>>;
+    };
+    expect(body.tools[0]).toMatchObject({ name: "read", strict: true });
+    expect(body.tools[0].parameters).toMatchObject({
+      required: ["path", "offset"],
+      additionalProperties: false,
+    });
+    expect(body.tools[1]).toMatchObject({ name: "mcp_tool", strict: null });
+    expect(body.tools[1].parameters).toEqual(raw);
+  });
+});
