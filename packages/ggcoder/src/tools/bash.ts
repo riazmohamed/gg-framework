@@ -150,6 +150,8 @@ export function createBashTool(
     : "Execute a bash command. The shell's working directory is already set to the project root — " +
       "don't cd into it redundantly. Use cd only when you need a different directory. " +
       "Returns exit code and combined stdout/stderr. " +
+      "Pipelines run with pipefail — a piped command reports the failing stage's exit " +
+      "code, so piping tests through tail/head cannot mask a failure. " +
       "Commands run in a non-interactive bash shell with TERM=dumb. " +
       "Long output is truncated (tail kept). " +
       "Set run_in_background=true for long-running OR interactive processes " +
@@ -240,7 +242,7 @@ export function createBashTool(
             const shell = resolveShell("", shellOpts);
             const launch = await prepareLaunch({
               ...shell,
-              args: ["--norc", "--noprofile"],
+              args: ["--norc", "--noprofile", "-o", "pipefail"],
             });
             sessionShell = new PersistentShell(
               cwd,

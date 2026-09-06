@@ -49,7 +49,9 @@ export class PersistentShell {
     // but Git for Windows puts `cmd\` on PATH and `bash.exe` in `bin\` — so a
     // bare `bash` spawn is ENOENT and every persist-mode command failed.
     const resolved = this.launch ?? resolveShell("", this.shellOpts);
-    const args = this.launch ? resolved.args : ["--norc", "--noprofile"];
+    // -o pipefail mirrors the one-shot path: pipelines keep the failing
+    // stage's exit status instead of the trailing limiter's 0.
+    const args = this.launch ? resolved.args : ["--norc", "--noprofile", "-o", "pipefail"];
     const child = spawn(resolved.file, args, {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
