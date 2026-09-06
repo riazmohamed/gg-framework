@@ -1,5 +1,17 @@
 # @kenkaiiii/ggcoder
 
+## 5.57.0
+
+### Minor Changes
+
+- Add current-commit GitHub Actions progress to the desktop title bar, with live job counts, brief success feedback, and dismissible failures. Recognize successful checks after a git status prelude and show incomplete verification as Unverified instead of an unexpected crash.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.57.0
+- @kenkaiiii/gg-agent@5.57.0
+- @kenkaiiii/gg-core@5.57.0
+
 ## 5.56.1
 
 ### Patch Changes
