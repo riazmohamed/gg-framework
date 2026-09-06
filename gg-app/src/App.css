@@ -1428,8 +1428,12 @@ select {
 .chat-head-ci[data-status="passed"] .chat-head-ci-link {
   color: var(--success);
 }
-.chat-head-ci-link:hover {
-  text-decoration: underline;
+/* Hover matches the sibling chips (brighten, no underline) — the status color
+   itself wins on equal specificity, so red stays red and green stays green. */
+/* Chip metrics come from .chat-head-title; the shimmer span must not bold it
+   (.shimmer-text defaults to 600). */
+.chat-head-ci .shimmer-text {
+  font-weight: inherit;
 }
 .chat-head-ci-dismiss {
   display: inline-flex;
@@ -3013,6 +3017,16 @@ select {
 /* Footer shimmer label (plan mode, max-power thinking). */
 .shimmer-text {
   font-weight: 600;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* No sweep, just the resting color — applies to every ShimmerText user
+     (footer labels, "Hook engaged", the CI chip's in-flight state). */
+  .shimmer-text,
+  .command-shimmer {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
 }
 .footer-plan {
   margin-left: 10px;

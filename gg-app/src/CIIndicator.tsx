@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { openUrl, type GitHubCI } from "./agent";
+import { ShimmerText } from "./ShimmerText";
 
 /** Only runs observed in flight get a completion indicator; old history stays hidden. */
 export function CIIndicator({ ci }: { ci?: GitHubCI | null }): React.ReactElement | null {
@@ -53,7 +54,15 @@ export function CIIndicator({ ci }: { ci?: GitHubCI | null }): React.ReactElemen
         aria-label={`${description} Open GitHub Actions`}
         onClick={() => void openUrl(ci.url)}
       >
-        {label}
+        {status === "running" ? (
+          // In-flight runs shimmer (same sweep as "Hook engaged"); a red fail
+          // stops the sweep and a full pass settles to static green.
+          <ShimmerText base="var(--text-muted)" bright="#ffffff">
+            {label}
+          </ShimmerText>
+        ) : (
+          label
+        )}
       </button>
       {!active && failure && (
         <button
