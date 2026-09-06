@@ -2522,6 +2522,7 @@ function App(): React.ReactElement {
         gitHubIssues={state?.gitHubIssues}
         gitHubPRs={state?.gitHubPRs}
         gitHubRepoUrl={state?.gitHubRepoUrl}
+        gitHubCI={state?.gitHubCI}
         additionalRoots={state?.additionalRoots}
         navHidden={navHidden}
         onToggleNav={toggleNav}

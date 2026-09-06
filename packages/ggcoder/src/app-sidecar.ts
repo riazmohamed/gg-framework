@@ -149,6 +149,7 @@ import {
 import { resolveStartOrFallback } from "./core/resolve-start.js";
 import { getGitBranch, getGitDirtyFileCount, isGitRepo } from "./utils/git.js";
 import { getGitHubOpenCounts, getGitHubRepoSlug } from "./utils/github.js";
+import { startGitHubCIPoll, type GitHubCI } from "./utils/github-ci.js";
 import { extractPlanSteps } from "./utils/plan-steps.js";
 import {
   getNextThinkingLevel,
@@ -2166,6 +2167,7 @@ async function createSession(
   const gitHubSlug: string | null = initialGitHubSlug;
   let gitHubIssues: number | null = null;
   let gitHubPRs: number | null = null;
+  let gitHubCI: GitHubCI | null = null;
   function currentContextWindow(): number {
     const st = session.getState();
     return getContextWindow(st.model, { provider: st.provider, accountId: st.accountId });
@@ -2180,6 +2182,7 @@ async function createSession(
     gitHubIssues: number | null;
     gitHubPRs: number | null;
     gitHubRepoUrl: string | null;
+    gitHubCI: GitHubCI | null;
     tasks: ReturnType<typeof session.listBackgroundProcesses>;
     additionalRoots: string[];
   } {
@@ -2190,6 +2193,7 @@ async function createSession(
       gitDirtyFileCount,
       gitHubIssues,
       gitHubPRs,
+      gitHubCI,
       gitHubRepoUrl: gitHubSlug ? `https://github.com/${gitHubSlug}` : null,
       tasks: session.listBackgroundProcesses(),
       // Roots added with /add-dir — the header shows a badge when non-empty.
@@ -2744,6 +2748,7 @@ async function createSession(
       // A run may have opened/closed issues or PRs — refresh fire-and-forget so
       // teardown isn't delayed by the network. Broadcasts itself on change.
       void refreshGitHubCounts();
+      void ciPoll.refresh();
       // Serialize behind any marker/tool-triggered refresh so the terminal
       // progress snapshot uses the live plan file. Once every canonical step
       // is complete, remove the approved plan from future system prompts and
@@ -3284,6 +3289,10 @@ async function createSession(
     gitHubPoll.unref?.();
   };
   scheduleGitHubPoll(2000);
+  const ciPoll = startGitHubCIPoll(cwd, (next) => {
+    gitHubCI = next;
+    broadcast("extras", footerExtras());
+  });
 
   function readBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<string | null> {
     return readCappedBody(req, res);
@@ -5628,6 +5637,7 @@ async function createSession(
     if (gitPoll) clearTimeout(gitPoll);
     gitHubPollStopped = true;
     if (gitHubPoll) clearTimeout(gitHubPoll);
+    ciPoll.stop();
     // Stop the Telegram serve loop + dispose its per-chat sessions.
     if (serveController) await serveController.stop().catch(() => {});
     for (const c of clients) c.res.end();

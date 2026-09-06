@@ -423,6 +423,25 @@ describe("useAgentEvents", () => {
     });
   });
 
+  it("merges CI updates, preserves them in partial frames, and clears them on null", () => {
+    const { hook, getState } = setup();
+    const ci: NonNullable<AgentState["gitHubCI"]> = {
+      key: "repo:sha:1.1",
+      url: "https://github.com/owner/repo/actions/runs/1",
+      active: true,
+      total: 6,
+      completed: 4,
+      failed: 0,
+      conclusion: null,
+    };
+    act(() => hook.result.current.handleEvent(ev("extras", { gitHubCI: ci })));
+    expect(getState()?.gitHubCI).toEqual(ci);
+    act(() => hook.result.current.handleEvent(ev("extras", { gitDirtyFileCount: 1 })));
+    expect(getState()?.gitHubCI).toEqual(ci);
+    act(() => hook.result.current.handleEvent(ev("extras", { gitHubCI: null })));
+    expect(getState()?.gitHubCI).toBeNull();
+  });
+
   it("text_delta streams assistant text into a single item", () => {
     const { hook, getItems } = setup();
     act(() => {

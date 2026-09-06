@@ -1413,6 +1413,46 @@ select {
 .chat-head-github:disabled {
   cursor: default;
 }
+.chat-head-ci {
+  display: inline-flex;
+  align-items: baseline;
+  flex: none;
+}
+.chat-head-ci-link {
+  min-height: 24px;
+  line-height: 1.25;
+}
+.chat-head-ci[data-status="failed"] .chat-head-ci-link {
+  color: var(--error);
+}
+.chat-head-ci[data-status="passed"] .chat-head-ci-link {
+  color: var(--success);
+}
+.chat-head-ci-link:hover {
+  text-decoration: underline;
+}
+.chat-head-ci-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  min-width: 24px;
+  min-height: 24px;
+  line-height: 1.25;
+  color: var(--text-muted);
+}
+.chat-head-ci button:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: -2px;
+}
+@media (max-width: 600px) {
+  /* Live CI takes precedence over static counts/quota so failure controls remain reachable. */
+  .chat-head-strip:has(.chat-head-ci) > .title-usage-meter,
+  .chat-head-title:has(.chat-head-ci) > .chat-head-github,
+  .chat-head-title:has(.chat-head-ci) > .chat-head-sep:has(+ .chat-head-github) {
+    display: none;
+  }
+}
 /* Position pill — "1/4" reading-order indicator for multi-window orientation.
    Shown only when >1 window is open. Dimmed when this window is not focused. */
 .window-index {

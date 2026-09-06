@@ -137,6 +137,18 @@ export interface JiwaSnapshot {
   hardLimit: number;
 }
 
+/** Title-bar progress only; never substitutes for the agent's verification gate. */
+export interface GitHubCI {
+  key: string;
+  url: string;
+  total: number;
+  completed: number;
+  failed: number;
+  active: boolean;
+  conclusion: "success" | "failure" | "cancelled" | null;
+  stale?: boolean;
+}
+
 export interface AgentState {
   provider: string;
   model: string;
@@ -167,6 +179,8 @@ export interface AgentState {
   gitHubPRs?: number | null;
   /** Web URL of the project's GitHub origin repo (title-bar chip links). */
   gitHubRepoUrl?: string | null;
+  /** GitHub Actions for the current commit; null when no runs are available. */
+  gitHubCI?: GitHubCI | null;
   /** Extra workspace roots added with /add-dir. Absent on older sidecars. */
   additionalRoots?: string[];
   /** True when the active model can accept native video input. */
