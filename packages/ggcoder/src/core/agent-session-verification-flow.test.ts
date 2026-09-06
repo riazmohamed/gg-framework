@@ -269,7 +269,11 @@ describe("verification gate flow", () => {
       `ID: ${started.id}\n`,
     );
     expect(internal.getVerificationProblem()).toContain("Unverified");
-    expect(await internal.processManager.waitForExit(started.id, 5000)).toBe("exited");
+    // The npm chain (npm.cmd → node → npm → script) cold-starts far slower on a
+    // loaded Windows CI runner than the 5s cap used for direct `node --test`
+    // runs — waitForExit still returns the instant the process exits, this only
+    // raises the hang ceiling so a slow spawn is not misread as a hang.
+    expect(await internal.processManager.waitForExit(started.id, 30_000)).toBe("exited");
     await simulateToolCall(internal, "task_output", { id: started.id });
     expect(internal.getVerificationProblem()).toBeNull();
   });
