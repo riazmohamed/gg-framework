@@ -241,7 +241,7 @@ export interface AppMarkerPayload extends RecordedPosition {
 export const RUN_STARTED_CUSTOM_KIND = "run_started";
 export const RUN_FINISHED_CUSTOM_KIND = "run_finished";
 
-export type RunOutcome = "completed" | "failed" | "aborted";
+export type RunOutcome = "completed" | "failed" | "aborted" | "unverified";
 
 export interface RunStartedPayload {
   version: 1;

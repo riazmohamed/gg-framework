@@ -90,7 +90,7 @@ function setup(
     setLiveToolFeed,
     setTokens,
     setContextTokens: noop as unknown as AgentEventsDeps["setContextTokens"],
-    setDoneStatus: noop as unknown as AgentEventsDeps["setDoneStatus"],
+    setDoneStatus: vi.fn<AgentEventsDeps["setDoneStatus"]>(),
     setIsThinking: noop as unknown as AgentEventsDeps["setIsThinking"],
     setThinkingStartTs: noop as unknown as AgentEventsDeps["setThinkingStartTs"],
     setThinkingAccumMs: noop as unknown as AgentEventsDeps["setThinkingAccumMs"],
@@ -130,6 +130,17 @@ function setup(
 }
 
 describe("useAgentEvents", () => {
+  it("shows Unverified instead of completion and does not finish an approved plan", () => {
+    const { hook, deps } = setup();
+    act(() => hook.result.current.handleEvent(ev("run_start", {})));
+    deps.planTotalRef.current = 2;
+    deps.planDoneRef.current = new Set([1, 2]);
+    act(() => hook.result.current.handleEvent(ev("run_end", { unverified: true })));
+    expect(deps.setDoneStatus).toHaveBeenLastCalledWith(expect.stringMatching(/^Unverified /));
+    expect(deps.planTotalRef.current).toBe(2);
+    expect(deps.planDoneRef.current).toEqual(new Set([1, 2]));
+  });
+
   beforeEach(() => vi.clearAllMocks());
 
   describe("queued pill lifecycle", () => {
@@ -476,6 +487,37 @@ describe("useAgentEvents", () => {
       expect.objectContaining({ kind: "hook", hook: "ideal" }),
       expect.objectContaining({ kind: "assistant", text: "Reviewed final" }),
     ]);
+  });
+
+  it("distinguishes a post-edit recheck while deduplicating repeated recheck notices", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(
+        ev("hook", { kind: "verification", verificationReason: "recheck" }),
+      );
+      hook.result.current.handleEvent(
+        ev("hook", { kind: "verification", verificationReason: "recheck" }),
+      );
+    });
+    expect(getItems()).toHaveLength(2);
+    expect(getItems()[1]).toMatchObject({ hook: "verification", verificationReason: "recheck" });
+  });
+
+  it("retains an evidence limitation on an approved plan marker", () => {
+    const { hook, getItems } = setup();
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("autopilot_plan_accepted", { reason: "Corpus unavailable." }),
+      ),
+    );
+    expect(getItems()).toContainEqual(
+      expect.objectContaining({
+        kind: "autopilot",
+        phase: "plan_approved",
+        reason: "Corpus unavailable.",
+      }),
+    );
   });
 
   it("still shows a second notice when a DIFFERENT hook follows", () => {

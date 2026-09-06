@@ -270,7 +270,7 @@ export type Item =
     }
   // Agent self-correction hook notice (ideal review / loop-break / re-grounding),
   // rendered like the TUI: a shimmering tone-colored one-liner.
-  | { kind: "hook"; id: number; hook: HookKind }
+  | { kind: "hook"; id: number; hook: HookKind; verificationReason?: "recheck" }
   // Images produced by a tool (screenshot / read of an image file).
   | { kind: "images"; id: number; images: TranscriptImage[]; caption?: string }
   // Image generation in progress — a shimmering square placeholder that gets
@@ -3353,10 +3353,17 @@ const TranscriptRow = memo(function TranscriptRow({
         prompted: item.body?.trim()
           ? `Sending GG Coder back in:\n\n${item.body.trim()}`
           : "Sending GG Coder back in for another pass.",
-        done: allClearCopy(item.copySeed, item.id),
+        done: [allClearCopy(item.copySeed, item.id), item.reason?.trim()]
+          .filter(Boolean)
+          .join("\n\n"),
         human: item.reason?.trim() ? item.reason.trim() : "Need you to weigh in on this one.",
         capped: "Paused autopilot after 3 rounds. Take a look before I keep going.",
-        plan_approved: "Plan looks solid. Approved it — implementation is underway.",
+        plan_approved: [
+          "Plan looks solid. Approved it — implementation is underway.",
+          item.reason?.trim(),
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
       };
       return (
         <div className="assistant-msg ken-msg">
@@ -3393,7 +3400,11 @@ const TranscriptRow = memo(function TranscriptRow({
     case "hook": {
       // Mirrors the TUI IdealHookMessage: assistant-style dot + a shimmering
       // tone-colored one-liner so the self-correction is obvious.
-      const { text, color } = HOOK_PRESENTATION[item.hook];
+      const { text: defaultText, color } = HOOK_PRESENTATION[item.hook];
+      const text =
+        item.verificationReason === "recheck"
+          ? "Hook engaged. Re-checking the changes made after verification."
+          : defaultText;
       return (
         <div className="assistant-msg">
           <span className="assistant-dot" style={{ color }}>

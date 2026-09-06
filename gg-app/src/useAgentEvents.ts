@@ -372,7 +372,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         if (opts?.skipIfSameAsLast) {
           const last = prev[prev.length - 1];
           if (last && last.kind === item.kind && last.kind === "hook" && item.kind === "hook") {
-            if (last.hook === item.hook) return prev;
+            if (last.hook === item.hook && last.verificationReason === item.verificationReason)
+              return prev;
           }
         }
         return [...prev, item];
@@ -960,7 +961,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             setStatus("cancelled");
           } else {
             const elapsedMs = runStartRef.current ? Date.now() - runStartRef.current : 0;
-            const verb = pickDoneVerb(toolsUsedRef.current);
+            const verb = d.unverified === true ? "Unverified" : pickDoneVerb(toolsUsedRef.current);
             const parts = [`${verb} ${formatElapsed(elapsedMs)}`];
             if (tokensRef.current > 0) {
               parts.push(`\u2193 ${formatTokenCount(tokensRef.current)} tokens`);
@@ -972,13 +973,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               Array.from({ length: planTotalRef.current }, (_, i) => i + 1).every((step) =>
                 planDoneRef.current.has(step),
               );
-            if (completedPlan) {
+            if (completedPlan && d.unverified !== true) {
               planTotalRef.current = 0;
               planDoneRef.current = new Set();
               setPlanTotal(0);
               setPlanDone(new Set());
             }
-            playSound("done");
+            if (d.unverified !== true) playSound("done");
             // A run may have created/removed `.gg/commands/*.md` (e.g.
             // /setup-commit writing commit.md). Refresh so the top-right
             // commit button flips /setup-commit → /commit without a restart.
@@ -1075,7 +1076,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           planReviewContentRef.current = null;
           setPlanReview(null);
           endStreamingText();
-          pushItem({ kind: "autopilot", id: nextId(), phase: "plan_approved" });
+          pushItem({
+            kind: "autopilot",
+            id: nextId(),
+            phase: "plan_approved",
+            reason: typeof d.reason === "string" ? d.reason : undefined,
+          });
           break;
         case "autopilot_prompted":
           // Autopilot-only plan revision path: Ken rejected/refined the plan and
@@ -1195,7 +1201,17 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             // draft it supersedes is discarded. The DISCARD must happen every
             // time; the notice is the same sentence, so stacking identical
             // copies just tells the user the same thing four times.
-            pushItem({ kind: "hook", id: nextId(), hook: kind }, { skipIfSameAsLast: true });
+            pushItem(
+              {
+                kind: "hook",
+                id: nextId(),
+                hook: kind,
+                ...(kind === "verification" && d.verificationReason === "recheck"
+                  ? { verificationReason: "recheck" as const }
+                  : {}),
+              },
+              { skipIfSameAsLast: true },
+            );
           }
           break;
         }

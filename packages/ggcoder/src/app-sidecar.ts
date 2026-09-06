@@ -2718,8 +2718,13 @@ async function createSession(
       }
     } finally {
       const cancelled = runLifecycle.isCancellationRequested(generation);
+      const verificationProblem = cancelled ? null : session.getVerificationProblem();
+      if (runSucceeded && verificationProblem && ownsGeneration) {
+        broadcastError("error", "verification incomplete", new Error(verificationProblem));
+      }
       if (
         runSucceeded &&
+        !verificationProblem &&
         !cancelled &&
         cancelGeneration === cancelGenAtStart &&
         countAssistantMessages(session.getMessages()) > assistantsBeforeRun
@@ -2744,6 +2749,7 @@ async function createSession(
       if (
         runSucceeded &&
         !cancelled &&
+        !verificationProblem &&
         approvedPlanPath !== null &&
         (await queueApprovedPlanProgressSync())
       ) {
@@ -2760,7 +2766,11 @@ async function createSession(
         }
       }
       if (ownsGeneration) {
-        finishOwnedGeneration(generation, false, runSucceeded ? "completed" : "failed");
+        finishOwnedGeneration(
+          generation,
+          false,
+          verificationProblem ? "unverified" : runSucceeded ? "completed" : "failed",
+        );
       }
       // A cancelled injected run is still owned by the surrounding autopilot
       // cycle; its outer finalizer emits the one terminal cancelled run_end.
@@ -2768,6 +2778,7 @@ async function createSession(
         if (cancelled) cancelledRunEndGenerations.add(generation);
         broadcast("run_end", {
           ...(cancelled ? { cancelled: true } : {}),
+          ...(verificationProblem ? { unverified: true } : {}),
           runState: runLifecycle.state,
         });
       }
@@ -2874,7 +2885,7 @@ async function createSession(
   // control flow lives in driveAutopilotCycle (core/autopilot-cycle.ts) so
   // every exit path is unit-tested; this only wires the real dependencies.
   async function runAutopilotCycle(originalRequest: string): Promise<void> {
-    if (!autopilot || autopilotCancelled) return;
+    if (!autopilot || autopilotCancelled || session.getVerificationProblem()) return;
     const generation = runLifecycle.begin(abortOwnedWork).generation;
     pendingCancelDrain = null;
     autopilotActive = true;
@@ -2889,6 +2900,7 @@ async function createSession(
         // round available.
         maxRounds: pendingPlanPath !== null ? MAX_AUTOPILOT_ROUNDS + 2 : MAX_AUTOPILOT_ROUNDS,
         isCancelled: () => autopilotCancelled,
+        verificationProblem: () => session.getVerificationProblem(),
         // An injected run entering plan mode WITHOUT submitting (enter_plan,
         // no exit_plan) halts the cycle — Ken never prompts into a read-only
         // plan-mode session. A submitted plan takes the planPending branch.
@@ -2901,7 +2913,7 @@ async function createSession(
         // Auto-accept: the inlined POST /plan/accept body. Returns false when
         // the plan generation moved since the review (user acted) — the cycle
         // exits silently and the user's action stands.
-        acceptPlan: async () => {
+        acceptPlan: async (reason) => {
           if (pendingPlanPath === null || planGeneration !== planGenAtReview) return false;
           const planPath = pendingPlanPath;
           let planTotal: number;
@@ -2916,11 +2928,11 @@ async function createSession(
           clearPendingPlan();
           // Keep the approval marker ahead of the reset, then seed the reset
           // with the sidecar's canonical count from the actual plan file.
-          broadcast("autopilot_plan_accepted", {});
+          broadcast("autopilot_plan_accepted", reason ? { reason } : {});
           broadcast("session_reset", { planTotal });
           broadcast("plan_progress", planProgressPayload());
           // Persisted into the NEW session so a resume shows the marker.
-          void session.persistAutopilotMarker("plan_approved");
+          void session.persistAutopilotMarker("plan_approved", { reason });
           return true;
         },
         runImplement: () => {
@@ -2979,9 +2991,10 @@ async function createSession(
               version: 1,
               phase: "done",
               afterMessageCount: session.getPersistedTranscriptCount(),
+              ...event.data,
             });
             broadcast(event.type, { ...event.data, copySeed: seed });
-            void session.persistAutopilotMarker("done");
+            void session.persistAutopilotMarker("done", event.data);
             return;
           }
           broadcast(event.type, event.data);
@@ -2996,7 +3009,11 @@ async function createSession(
     } finally {
       autopilotActive = false;
       session.setIdealReviewSuppressed(autopilot);
-      finishOwnedGeneration(generation, true);
+      finishOwnedGeneration(
+        generation,
+        true,
+        session.getVerificationProblem() ? "unverified" : "completed",
+      );
       queueMicrotask(() => void runStrandedQueue());
     }
   }
