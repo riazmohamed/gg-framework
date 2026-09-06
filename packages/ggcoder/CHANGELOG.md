@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.56.1
+
+### Patch Changes
+
+- Block completion and Autopilot approval when verification is missing, failed, stale, or running; preserve unresolved checks across resumed sessions, bound post-edit rechecks, and retain structured corpus-review warnings.
+  - @kenkaiiii/gg-ai@5.56.1
+  - @kenkaiiii/gg-agent@5.56.1
+  - @kenkaiiii/gg-core@5.56.1
+
 ## 5.56.0
 
 ### Minor Changes
