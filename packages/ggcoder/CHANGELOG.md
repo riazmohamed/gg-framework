@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.57.1
+
+### Patch Changes
+
+- OpenAI tool calls now use strict (structured outputs) sampling so malformed arguments are guaranteed away at the provider, with a null-argument fallback re-parse for schemas strict mode rewrites.
+  - @kenkaiiii/gg-ai@5.57.1
+  - @kenkaiiii/gg-agent@5.57.1
+  - @kenkaiiii/gg-core@5.57.1
+
 ## 5.57.0
 
 ### Minor Changes
