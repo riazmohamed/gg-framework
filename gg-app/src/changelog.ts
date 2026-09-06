@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.60.1",
+    date: "2026-09-06",
+    items: [
+      "A green light should mean something. I tightened `Autopilot` so failed or unfinished checks stay `Unverified`, even after you reopen a chat.",
+      "No more vanishing caveats. I kept `Steroids` review warnings in your chat history, so you can see when a review lacked a real-code cross-check.",
+    ],
+  },
+  {
     version: "0.60.0",
     date: "2026-09-05",
     items: [
