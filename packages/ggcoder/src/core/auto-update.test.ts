@@ -64,7 +64,7 @@ afterEach(() => {
 });
 
 describe("checkAndAutoUpdate", () => {
-  it("returns null on first run with no state file", () => {
+  it("returns null on first run with no state file", async () => {
     // Mock fetch to return a version (but the background check is async, so
     // on first call it just schedules a check and returns null)
     vi.stubGlobal(
@@ -74,18 +74,18 @@ describe("checkAndAutoUpdate", () => {
       }),
     );
 
-    const result = checkAndAutoUpdate("1.0.0");
+    const result = await checkAndAutoUpdate("1.0.0");
     expect(result).toBeNull();
   });
 
-  it("returns null when already on latest version", () => {
+  it("returns null when already on latest version", async () => {
     writeStateFile({
       lastCheckedAt: Date.now(),
       latestVersion: "1.0.0",
       updatePending: true,
     });
 
-    const result = checkAndAutoUpdate("1.0.0");
+    const result = await checkAndAutoUpdate("1.0.0");
     expect(result).toBeNull();
 
     // Should clear the pending flag
@@ -93,28 +93,28 @@ describe("checkAndAutoUpdate", () => {
     expect(state?.updatePending).toBe(false);
   });
 
-  it("returns null when on a newer version than registry (manual install)", () => {
+  it("returns null when on a newer version than registry (manual install)", async () => {
     writeStateFile({
       lastCheckedAt: Date.now(),
       latestVersion: "1.0.0",
       updatePending: true,
     });
 
-    const result = checkAndAutoUpdate("2.0.0");
+    const result = await checkAndAutoUpdate("2.0.0");
     expect(result).toBeNull();
 
     const state = readStateFile();
     expect(state?.updatePending).toBe(false);
   });
 
-  it("triggers background update when pending update exists", () => {
+  it("triggers background update when pending update exists", async () => {
     writeStateFile({
       lastCheckedAt: Date.now(),
       latestVersion: "2.0.0",
       updatePending: true,
     });
 
-    const result = checkAndAutoUpdate("1.0.0");
+    const result = await checkAndAutoUpdate("1.0.0");
 
     expect(result).toContain("2.0.0");
     expect(result).toContain("Installing in the background");
@@ -138,7 +138,7 @@ describe("checkAndAutoUpdate", () => {
       updatePending: false,
     });
 
-    checkAndAutoUpdate("1.0.0");
+    await checkAndAutoUpdate("1.0.0");
 
     // Give the async check time to complete
     await vi.waitFor(() => {
@@ -153,7 +153,7 @@ describe("checkAndAutoUpdate", () => {
     });
   });
 
-  it("does not schedule check when recently checked", () => {
+  it("does not schedule check when recently checked", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       json: () => Promise.resolve({ version: "5.0.0" }),
     });
@@ -165,7 +165,7 @@ describe("checkAndAutoUpdate", () => {
       updatePending: false,
     });
 
-    checkAndAutoUpdate("1.0.0");
+    await checkAndAutoUpdate("1.0.0");
 
     // fetch should NOT be called since we just checked
     expect(fetchMock).not.toHaveBeenCalled();
@@ -181,11 +181,11 @@ describe("checkAndAutoUpdate", () => {
     });
 
     // Should not throw
-    const result = checkAndAutoUpdate("1.0.0");
+    const result = await checkAndAutoUpdate("1.0.0");
     expect(result).toBeNull();
   });
 
-  it("handles corrupt state file gracefully", () => {
+  it("handles corrupt state file gracefully", async () => {
     fs.writeFileSync(path.join(tmpDir, ".gg", "update-state.json"), "not json{{{");
 
     vi.stubGlobal(
@@ -196,7 +196,7 @@ describe("checkAndAutoUpdate", () => {
     );
 
     // Should not throw — treats corrupt file like no file
-    const result = checkAndAutoUpdate("1.0.0");
+    const result = await checkAndAutoUpdate("1.0.0");
     expect(result).toBeNull();
   });
 });

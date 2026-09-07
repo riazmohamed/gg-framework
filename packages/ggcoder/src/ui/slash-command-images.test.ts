@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import type { ImageAttachment } from "../utils/image.js";
 import { buildUserContentWithAttachments, routePromptCommandInput } from "./prompt-routing.js";
 

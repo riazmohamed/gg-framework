@@ -491,7 +491,7 @@ function renderBanner(context: TerminalHistoryContext): string {
   // Info lines rendered beside the (taller) logo. They're anchored starting at
   // INFO_ANCHOR_ROW so the text column sits vertically centered next to the art.
   const infoLines = [
-    `${color(context.theme.primary, "OG Coder", true)}${dim(context, ` v${context.version} · By `)}${color(context.theme.text, "Abu Khaled", true)}`,
+    `${color(context.theme.primary, "OG Coder", true)}${dim(context, ` v${context.version} · By `)}${color(context.theme.text, "abukhaled", true)}`,
     `${color(context.theme.secondary, modelName)}  ${dim(context, truncatePlain(displayPath, Math.max(10, context.columns - LOGO_WIDTH - GAP.length - stringWidth(modelName) - 2)))}`,
     shortcuts,
   ];

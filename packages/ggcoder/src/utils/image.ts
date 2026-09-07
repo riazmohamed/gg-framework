@@ -187,7 +187,7 @@ export async function compressVideoToFit(
   // audio track gets a fixed slice, the rest goes to video (floored).
   const totalKbps = Math.floor(((targetBytes * 8) / durationSec / 1000) * 0.9);
   const videoKbps = Math.max(COMPRESS_MIN_VIDEO_KBPS, totalKbps - COMPRESS_AUDIO_KBPS);
-  const outPath = path.join(os.tmpdir(), `ogcoder-compressed-${Date.now()}.mp4`);
+  const outPath = path.join(os.tmpdir(), `ggcoder-compressed-${Date.now()}.mp4`);
 
   try {
     await execFileAsync(

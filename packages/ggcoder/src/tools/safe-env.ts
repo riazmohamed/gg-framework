@@ -20,6 +20,18 @@ const ENV_ALLOWLIST = new Set([
   "CLICOLOR_FORCE",
   "NO_COLOR",
   "FORCE_COLOR",
+  // Windows equivalents
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "COMSPEC",
+  "SystemRoot",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "ProgramFiles",
+  "ProgramFiles(x86)",
+  "ProgramData",
+  "GG_GIT_BASH_PATH",
   // Development toolchains
   "NODE_PATH",
   "NVM_DIR",

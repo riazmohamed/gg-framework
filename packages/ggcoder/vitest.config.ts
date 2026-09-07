@@ -2,6 +2,9 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // Pins the platform-conditional status-dot glyph so upstream fixtures pass on
+    // Linux/WSL/Windows — see vitest.setup.ts.
+    setupFiles: ["./vitest.setup.ts"],
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     // Ink suppresses incremental frame writes when `is-in-ci` detects CI
     // (CI=true on GitHub Actions), which empties every rendered frame and

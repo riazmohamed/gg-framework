@@ -166,7 +166,7 @@ function printHelp(): void {
   // Banner — matches the interactive TUI banner layout
   console.log();
   for (const row of renderOgLogoBlock([
-    primary.bold("OG Coder") + dim(` v${CLI_VERSION}`) + dim(" · By ") + bold("Abu Khaled"),
+    primary.bold("OG Coder") + dim(` v${CLI_VERSION}`) + dim(" · By ") + bold("abukhaled"),
     dim("AI coding agent"),
   ])) {
     console.log(row);

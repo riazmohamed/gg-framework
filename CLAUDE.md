@@ -22,6 +22,11 @@ toolchain to build, and is not built or installed here) and
 
 Current published version: **5.58.0** (last app-update sync: 2026-09-07).
 
+Sync history note: the previous `origin/windows` had independently synced upstream to 4.5.0
+(2026-06-04) with 42 fork-only commits on top. The 2026-09-07 sync merged upstream 5.58.0 first,
+then reconciled that remote branch into it — every upstream commit the remote carried was
+already inside 5.58.0, so only the fork-only work was ported.
+
 This is a rebranded fork of upstream `kenkaiiii/gg-framework`. Every workspace package is
 renamed `@kenkaiiii/*` → `@abukhaled/*`, `ggcoder` → `ogcoder` (binary, package name, and
 user-facing strings), and "GG Coder" → "OG Coder" (author: Abu Khaled). Two `@kenkaiiii/*`
@@ -49,6 +54,20 @@ keeps it — a merge from main will silently drop its ~27 files unless they are 
   `utils/session-title.ts`, and the `/teach-me` slash command.
 - **tsup bundling** — `ogcoder` builds to a bundled single file (`pnpm clean && tsup`), not `tsc`.
   Startup on WSL depends on it; `ui/utils/highlight.ts` carries the matching CJS-interop shim.
+
+### Brand
+
+User-visible name is **"OG Coder by abukhaled"** — rendered with the "OG" ASCII logo by the TUI banner in `terminal-history.ts` and by the duplicate help-screen banner in `cli.ts` (printed for `ogcoder --help`). The default agent identity in `system-prompt.ts` (used for non-Anthropic providers — Anthropic OAuth requires the "Claude Code" identity) is **"OG Coder by Abu Khaled"** (title-case attribution) — that form is reserved for prompts the agent reads about itself; everything the human sees uses lowercase "abukhaled".
+
+The literal string `"ggcoder"` is still load-bearing in several internal places and must NOT be rebranded:
+
+- `ErrorSource` discriminator in `packages/gg-ai/src/errors.ts` and the `f.source === "ggcoder"` comparison in `ui/error-item.ts`
+- Default `promptCacheKey` in the OpenAI / OpenAI-Codex providers (stable cache routing)
+- `/tmp/ggcoder-img-*` temp-file naming
+- The `@abukhaled/ggcoder-eyes` package import and the `packages/ggcoder/` directory name
+- `GGCODER_BUG_REPORT_URL` in `ui/error-item.ts` (still points at the upstream issue tracker — no fork-owned tracker has been set up)
+
+When upstream merges reintroduce "GG Coder" / "Ken Kai" / "ggcoder" in user-visible strings, rebrand only those — leave the internal IDs alone.
 
 ## Commands
 
@@ -127,8 +146,98 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 - **Radio**: `core/radio.ts` plays streams via PowerShell on WSL2 rather than `mpv`.
   `core/radio.test.ts` asserts the `mpv` path, so **2 radio tests fail when the suite is run
   under WSL** — expected, and unrelated to any change you just made.
+- **Tasks**: `core/tasks-store.ts` (upstream) owns `~/.gg-tasks/projects/<sha256(cwd)[:16]>/tasks.json`
+  and drives the run-all loop in `App.tsx`. `ui/components/TaskOverlay.tsx` (fork) still carries its
+  own inline read/write of the *same* file — identical path logic, so the data is shared, but the
+  I/O is duplicated. Follow-up: migrate TaskOverlay onto `tasks-store.ts`. Do not reintroduce the
+  old fork `core/task-store.ts` (singular) — upstream absorbed and superseded it.
 - **UI**: Ink 6 + React 19. Slash commands split between UI-handled (`App.tsx`: `/model`, `/compact`, `/clear`, `/tasks`, `/eyes-view`) and registry (`core/slash-commands.ts`: `/help`, `/settings`, `/session`, `/new`, `/router`, `/buddy`, `/teach-me`, `/quit`).
 - **Branding**: the OG mark is defined once per rendering surface and every copy must stay identical — `cli/shared.ts` (`LOGO_LINES`, used by `renderLogoBlock` for login/MCP/serve/agent-home), `ui/components/Banner.tsx` (Ink), `ui/terminal-history.ts`, `ui/login.tsx`, `ui/sessions.ts`, and `cli.ts`. Product name is **OG Coder**, byline **Abu Khaled**. `gg-app/` is inherited upstream surface and is still GG-branded.
+
+### Execution Modes
+
+All modes live in `ggcoder/src/modes/` and are dispatched from `cli.ts`:
+
+- **interactive** (default): Ink/React terminal UI, full session management.
+- **print**: Single-turn, streams output to stdout, no UI.
+- **json**: Non-interactive NDJSON mode — each agent event is a JSON line on stdout. Used internally by the `subagent` tool when spawning child processes.
+- **serve**: Telegram bot integration (`core/telegram.ts`). Maps chat IDs to project directories (`~/.gg/serve.json`). Voice messages transcribed locally via `core/voice-transcriber.ts` (Whisper-based, model downloaded on first use).
+- **agent-home**: Persistent background agent workspace (`~/.gg/agent-home.json`), used for long-running autonomous sessions.
+- **rpc**: JSON-RPC interface for programmatic control.
+- **acp**: Agent Client Protocol agent on stdio (`modes/acp-mode.ts`).
+- **subagent-worker**: child process spawned by the `subagent` tool (`modes/subagent-worker-mode.ts`).
+
+### Plan Mode
+
+The plan mode system lets the agent propose a structured plan before executing. Tools: `enter-plan` (agent enters plan-drafting state, pauses execution) and `exit-plan` (submits the plan for user approval). UI components `PlanApproval`, `PlanBanner`, `PlanOverlay`, and `PlanProgress` render the approval flow. `/plan` and `/plans` slash commands are UI-handled (need `agentLoop.reset()` access).
+
+### Extensibility: Agents, Skills, Custom Commands
+
+All three systems discover markdown files with YAML frontmatter from two locations (merged, project-local wins on conflict):
+- **Global**: `~/.gg/{agents,skills}/`
+- **Project-local**: `{cwd}/.gg/{agents,skills}/`
+
+**Agents** (`core/agents.ts`): Frontmatter keys: `name`, `description`, `tools` (comma-separated). Body is the system prompt. Two built-in agents seeded on first run (won't overwrite edits):
+  - `owl` — read-only codebase explorer (tools: read, grep, find, ls, bash)
+  - `bee` — general task worker (tools: read, write, edit, bash, find, grep, ls)
+
+**Skills** (`core/skills.ts`): Frontmatter: `name`, `description`. Body is injected into context by the `skill` tool when the agent invokes it by name.
+
+**Custom Commands** (`core/custom-commands.ts`): User-defined slash commands loaded alongside built-ins. Frontmatter: `name`, `description`. Body defines behavior.
+
+### Slash Commands
+
+Two kinds — UI-handled take precedence over registry:
+
+1. **UI-handled** — see `handleSubmit` in `ggcoder/src/ui/App.tsx`. These short-circuit before the registry because they need direct React state access (overlays, token counters, `agentLoop.reset()`).
+2. **Registry** — see `createBuiltinCommands()` in `ggcoder/src/core/slash-commands.ts`. Receive a `SlashCommandContext` with methods like `switchModel()`, `compact()`, `newSession()`.
+
+To add a UI command: add a condition in `handleSubmit` before the registry check.
+To add a registry command: add an entry in `createBuiltinCommands()` array. If it needs new capabilities, extend `SlashCommandContext` and wire it in `AgentSession.createSlashCommandContext()`.
+
+## Key Patterns
+
+- **StreamResult/AgentStream**: dual-nature objects — async iterable (`for await`) + thenable (`await`)
+- **EventStream**: push-based async iterable in `@abukhaled/gg-ai/utils/event-stream.ts`
+- **agentLoop**: pure async generator — call LLM, yield deltas, execute tools, loop on tool_use
+- **resolveActiveProvider**: `cli.ts` helper that picks the logged-in provider at startup with fallback
+- **Zod schemas**: tool parameters defined with Zod, converted to JSON Schema at provider boundary
+
+## MCP Servers
+
+`ogcoder mcp` adds and manages Model Context Protocol servers. Configs are stored in the same `{ "mcpServers": { … } }` shape Claude Code uses, so they're portable both directions.
+
+### Scopes & file locations
+
+- **Global** → `~/.gg/mcp.json` — available in all OG Coder sessions.
+- **Project** → `./.gg/mcp.json` — only the current project root.
+- On a name collision, **project wins**. Provider defaults (e.g. `kencode-search`) stay authoritative — a user server can only add a new name, never override a default.
+
+### Commands
+
+```bash
+ogcoder mcp                              # interactive dashboard (🟢/🔴 status, tool counts, scope)
+ogcoder mcp list                         # list servers with live connection status
+ogcoder mcp get <name>                   # show one server's config (secrets masked)
+ogcoder mcp add <args…>                  # add a server (claude-compatible grammar)
+ogcoder mcp remove <name> [--scope s]    # remove a server
+```
+
+The `add` grammar mirrors `claude mcp add` 1:1 — you can paste a `claude mcp add …` (or `ogcoder mcp add …`) line and the prefix is stripped automatically:
+
+```bash
+ogcoder mcp add --transport http notion https://mcp.notion.com/mcp
+ogcoder mcp add --transport sse asana https://mcp.asana.com/sse
+ogcoder mcp add --env AIRTABLE_API_KEY=key airtable -- npx -y airtable-mcp-server
+```
+
+`--scope user` maps to global; `local`/`project` map to project. Code lives in `core/mcp/` (`store.ts` persistence, `parse-add-command.ts` parser, `client.ts` `connectAllDetailed`/`probe`) and `cli/mcp.ts` + `ui/mcp.tsx`.
+
+### Caveats
+
+- **Connection is startup-only.** MCP connects once at launch (`connectInitialMcpTools` in `cli.ts`). Adding a server via `ogcoder mcp` mid-session won't hot-load it — restart ogcoder.
+- **WebSocket transport** is parsed but rejected (no WS client today).
+- **Env var expansion** (`${VAR}`) in `.mcp.json` is NOT expanded in v1 — values pass through literally.
 
 ## Build: tsup vs upstream's tsc
 

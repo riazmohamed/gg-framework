@@ -196,6 +196,7 @@ const STATIC_API_KEY_PROVIDERS = new Set([
   "moonshot",
   "xiaomi",
   "minimax",
+  "ollama",
   "deepseek",
   "openrouter",
   "huggingface",
@@ -773,7 +774,7 @@ async function atomicWriteFile(filePath: string, content: string): Promise<void>
 export class NotLoggedInError extends Error {
   provider: string;
   constructor(provider: string) {
-    super(`Not logged in to ${provider}. Run "ggcoder login" to authenticate.`);
+    super(`Not logged in to ${provider}. Run "ogcoder login" to authenticate.`);
     this.name = "NotLoggedInError";
     this.provider = provider;
   }
