@@ -195,5 +195,10 @@ Gotchas hit on the first Windows build:
 "…\2022\Community" --add Microsoft.VisualStudio.Workload.NativeDesktop --includeRecommended
 --passive --norestart`. `--wait` is a bootstrapper-only flag — `setup.exe` rejects it with
   exit code 87.
+- Always `pnpm install --frozen-lockfile` on Windows. A non-frozen install re-resolves patch
+  versions inside the lockfile ranges (react 19.2.5→19.2.6 and friends), rewrites
+  `pnpm-lock.yaml`, and — under pnpm 12 — drops an `allowBuilds` placeholder into
+  `pnpm-workspace.yaml`. The committed lockfile is authoritative (WSL's pnpm 10 leaves it
+  byte-identical); build artifacts should be produced against it.
 - `installer/out/*.bmp|png` is generated (`pnpm --filter gg-app installer:art`, needs `sharp`)
   and not tracked; NSIS bundling fails without it.
