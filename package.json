@@ -1,5 +1,6 @@
 {
   "name": "gg-framework",
+  "packageManager": "pnpm@10.33.0",
   "private": true,
   "type": "module",
   "scripts": {
