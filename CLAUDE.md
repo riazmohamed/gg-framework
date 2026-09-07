@@ -20,8 +20,11 @@ Also in the workspace: `gg-app/` (Tauri v2 desktop app, from upstream) and
 "Fork build". Windows projects use the app; WSL projects use the `ogcoder` CLI here.
 First fork build landed 2026-09-07: `gg-app.exe` + `GG Coder_0.62.0_x64-setup.exe` (NSIS, 79 MB)
 and `…_x64_en-US.msi` (122 MB) under `gg-app\src-tauri\target\release\bundle\`, unsigned
-(SmartScreen will warn once); Rust shell compile ≈ 5m40s, and `smoke-packaged-windows.mjs
---artifact <msi>` passes. Windows toolchain is complete (MSVC 14.40, SDK 10.0.22621, rustup
+(SmartScreen will warn once); Rust shell compile ≈ 5m40s cold, and `smoke-packaged-windows.mjs
+--artifact <msi>` passes. **Installed** via the NSIS installer (`/S`, per-user, no UAC) to
+`%LOCALAPPDATA%\GG Coder` — not `Programs\` — with a Start Menu shortcut and an HKCU
+uninstall entry; the installed app launches its own `ggnode.exe` + WebView2. Lockfile-exact
+installer hashes: NSIS `bc75e6f9…d0f420d3`, MSI `be22ebc4…d77bf4e1`. Windows toolchain is complete (MSVC 14.40, SDK 10.0.22621, rustup
 stable-msvc, pnpm 10.33 pinned). Helper scripts from that build live in
 `C:\Users\riaza\AppData\Local\Temp\` (`gg-app-stage.cmd`, `gg-app-tauri-build.cmd`,
 `steroids-cargo.ps1`, `gg-reinstall.cmd`) — disposable, not tracked.
