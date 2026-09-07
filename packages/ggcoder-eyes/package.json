@@ -2,7 +2,7 @@
   "name": "@abukhaled/ggcoder-eyes",
   "version": "0.1.2",
   "type": "module",
-  "description": "Project-agnostic perception probes for coding agents — screenshots, logs, APIs, capture sinks",
+  "description": "Project-agnostic perception probes for coding agents \u2014 screenshots, logs, APIs, capture sinks",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -28,7 +28,7 @@
     "shared"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/cli.js || true",
+    "build": "tsc",
     "check": "tsc --noEmit"
   },
   "devDependencies": {
