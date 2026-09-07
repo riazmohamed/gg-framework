@@ -1,33 +1,118 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { stripBom } from "../utils/text.js";
+import { log } from "./logger.js";
+import { BUILTIN_TOOL_NAMES } from "../tools/prompt-hints.js";
+import { BUNDLED_AGENTS } from "./bundled-agents.js";
+
+/**
+ * Which model a sub-agent runs on.
+ *
+ * - `"inherit"` (default) — the parent's model, so a delegated task is not
+ *   silently downgraded.
+ * - `"fast"` — the provider's cheap tier (`getFastModel`), for genuinely
+ *   mechanical recon.
+ * - any other string — an explicit model id.
+ */
+export type AgentModelPreference = "inherit" | "fast" | (string & {});
 
 export interface AgentDefinition {
   name: string;
+  /** Routing signal — written for the dispatcher, not for the child. */
   description: string;
+  /** Tool allow-list. Empty means inherit the full toolset. */
   tools: string[];
+  /** Model policy for children of this agent. Defaults to `"inherit"`. */
+  model?: AgentModelPreference;
+  /** Whether the child's prompt includes project context files. Default `"project"`. */
+  context?: "project" | "none";
   systemPrompt: string;
-  source: "global" | "project";
+  source: "global" | "project" | "bundled";
+}
+
+/**
+ * MCP server names an agent's `tools:` list asks for, derived from any
+ * `mcp__<server>__<tool>` entries.
+ *
+ * A session with an allow-list connects MCP servers ONLY when they're named in
+ * `allowedMcpServers` (see `AgentSession.connectMcpServers`). Without this,
+ * every named agent silently got zero MCP tools, even one that explicitly
+ * listed an `mcp__<server>__*` tool.
+ */
+export function mcpServersForAgent(tools: readonly string[]): string[] {
+  const servers = new Set<string>();
+  for (const tool of tools) {
+    // mcp__<server>__<tool> — server names may themselves contain single
+    // underscores, so split on the double-underscore delimiter only.
+    const match = /^mcp__(.+?)__(.+)$/.exec(tool);
+    if (match) servers.add(match[1]);
+  }
+  return [...servers];
+}
+
+const BUILTIN_TOOL_NAME_SET = new Set(BUILTIN_TOOL_NAMES);
+// mcp__<server>__<tool> — the only non-built-in shape a session can register.
+const MCP_TOOL_PATTERN = /^mcp__(.+?)__(.+)$/;
+
+/**
+ * Report `tools:` entries the session could never register.
+ *
+ * `AgentSession` filters its tool set by name, so an unknown entry is dropped
+ * without a word: the agent just quietly loses a capability (or, if every name
+ * is wrong, runs with nothing). Warn instead — and stay non-fatal, because a
+ * bad agent file must never take down a session.
+ *
+ * @returns the unrecognized names, for tests and callers that want to report.
+ */
+export function validateAgentTools(agent: AgentDefinition, origin: string): string[] {
+  const unknown = agent.tools.filter(
+    (tool) => !BUILTIN_TOOL_NAME_SET.has(tool) && !MCP_TOOL_PATTERN.test(tool),
+  );
+  if (unknown.length > 0) {
+    log("WARN", "agents", "Agent lists unknown tools; they will be ignored", {
+      agent: agent.name,
+      origin,
+      unknown,
+    });
+  }
+  return unknown;
 }
 
 /**
  * Discover agent definitions from global and project-local directories.
  * Agent files are markdown with frontmatter (similar to skills).
+ *
+ * Order: user agents (project, global) first → bundled defaults last.
+ * The subagent lookup uses Array.prototype.find which matches the first hit,
+ * so user agents override bundled when names collide.
  */
 export async function discoverAgents(options: {
-  globalAgentsDir: string;
+  globalAgentsDir?: string;
   projectDir?: string;
 }): Promise<AgentDefinition[]> {
   const agents: AgentDefinition[] = [];
-
-  // Global agents: ~/.gg/agents/*.md
-  const globalAgents = await loadAgentsFromDir(options.globalAgentsDir, "global");
-  agents.push(...globalAgents);
 
   // Project agents: {cwd}/.gg/agents/*.md
   if (options.projectDir) {
     const projectAgentsDir = path.join(options.projectDir, ".gg", "agents");
     const projectAgents = await loadAgentsFromDir(projectAgentsDir, "project");
     agents.push(...projectAgents);
+  }
+
+  // Global agents: ~/.gg/agents/*.md
+  if (options.globalAgentsDir) {
+    const globalAgents = await loadAgentsFromDir(options.globalAgentsDir, "global");
+    agents.push(...globalAgents);
+  }
+
+  // Bundled defaults — shipped with ggcoder, user-defined agents with the same
+  // name take precedence because they come first in the array.
+  const userNames = new Set(agents.map((a) => a.name.toLowerCase()));
+  for (const bundled of BUNDLED_AGENTS) {
+    if (!userNames.has(bundled.name.toLowerCase())) {
+      validateAgentTools(bundled, "bundled");
+      agents.push(bundled);
+    }
   }
 
   return agents;
@@ -54,6 +139,7 @@ async function loadAgentsFromDir(
       if (!agent.name) {
         agent.name = path.basename(file, ".md");
       }
+      validateAgentTools(agent, filePath);
       agents.push(agent);
     } catch {
       // Skip unreadable files
@@ -76,10 +162,14 @@ async function loadAgentsFromDir(
  * You are a scout. Quickly investigate a codebase...
  * ```
  */
-export function parseAgentFile(raw: string, source: "global" | "project"): AgentDefinition {
+export function parseAgentFile(rawInput: string, source: "global" | "project"): AgentDefinition {
+  // A BOM before `---` would otherwise silently kill frontmatter parsing.
+  const raw = stripBom(rawInput);
   let name = "";
   let description = "";
   let tools: string[] = [];
+  let model: AgentModelPreference | undefined;
+  let context: "project" | "none" | undefined;
   let systemPrompt = raw;
 
   if (raw.startsWith("---")) {
@@ -101,10 +191,23 @@ export function parseAgentFile(raw: string, source: "global" | "project"): Agent
             .split(",")
             .map((t) => t.trim())
             .filter(Boolean);
+        } else if (key === "model") {
+          if (value) model = value;
+        } else if (key === "context") {
+          const normalized = value.toLowerCase();
+          if (normalized === "project" || normalized === "none") context = normalized;
         }
+        // Unknown keys are ignored on purpose: agent files stay
+        // forward-compatible with fields a newer ggcoder understands.
       }
     }
   }
 
-  return { name, description, tools, systemPrompt, source };
+  return { name, description, tools, model, context, systemPrompt, source };
 }
+
+// ── Bundled agents ─────────────────────────────────────────
+// Shipped with ggcoder (see ./bundled-agents.ts). Used by the bundled
+// `bulletproof` skill and available to any subagent call. User-defined agents with the same name
+// override these because they come first in `discoverAgents`.
+export { BUNDLED_AGENTS };

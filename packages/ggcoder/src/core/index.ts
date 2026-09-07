@@ -5,9 +5,18 @@ export {
   getModelsForProvider,
   getDefaultModel,
   getContextWindow,
+  usesOpenAICodexTransport,
+  getMaxThinkingLevel,
+  getDefaultThinkingLevel,
+  type ContextWindowOptions,
   type ModelInfo,
 } from "./model-registry.js";
-export { AuthStorage, NotLoggedInError } from "./auth-storage.js";
+export {
+  getNextThinkingLevel,
+  getSupportedThinkingLevels,
+  isThinkingLevelSupported,
+} from "./thinking-level.js";
+export { AuthStorage, NotLoggedInError, readStoredBaseUrlSync } from "./auth-storage.js";
 export { SettingsManager, DEFAULT_SETTINGS, type Settings } from "./settings-manager.js";
 export {
   SessionManager,
@@ -39,4 +48,8 @@ export {
   estimateMessageTokens,
   estimateConversationTokens,
   setEstimatorModel,
+  calibrateEstimator,
+  calibrateEstimatorFromUsage,
+  getCalibratedRatio,
+  measureConversationChars,
 } from "./compaction/token-estimator.js";

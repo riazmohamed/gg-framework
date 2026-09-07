@@ -1,8 +1,8 @@
 {
   "name": "@abukhaled/gg-ai",
-  "version": "4.3.153",
+  "version": "5.58.0",
   "type": "module",
-  "description": "Unified LLM streaming API for Anthropic and OpenAI",
+  "description": "Unified LLM streaming API for Anthropic, OpenAI, and Gemini",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -29,10 +29,12 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.94.0",
+    "@bokuweb/zstd-wasm": "^0.0.27",
     "openai": "^6.34.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/node": "^25.6.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.4"
   },

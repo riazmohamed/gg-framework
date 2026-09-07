@@ -73,23 +73,51 @@ export class StreamResult implements AsyncIterable<StreamEvent> {
   private resolveResponse!: (r: StreamResponse) => void;
   private rejectResponse!: (e: Error) => void;
   private resolveWait: (() => void) | null = null;
+  /**
+   * High-water mark: when the buffer exceeds this many unconsumed events,
+   * the pump pauses until the consumer drains below the low-water mark.
+   * Prevents unbounded memory growth when a consumer is slow.
+   * Only active when someone IS iterating — if nobody iterates (the `then()`
+   * path), backpressure is skipped so the pump can complete and resolve.
+   */
+  private static readonly HIGH_WATER = 5_000;
+  private static readonly LOW_WATER = 1_000;
+  private iterating = false;
+  private paused = false;
+  private resolveDrain: (() => void) | null = null;
 
-  constructor(generator: AsyncGenerator<StreamEvent, StreamResponse>) {
+  constructor(generator: AsyncGenerator<StreamEvent, StreamResponse>, signal?: AbortSignal) {
     this.response = new Promise<StreamResponse>((resolve, reject) => {
       this.resolveResponse = resolve;
       this.rejectResponse = reject;
     });
-    this.pump(generator);
+    this.pump(generator, signal);
   }
 
-  private async pump(generator: AsyncGenerator<StreamEvent, StreamResponse>): Promise<void> {
+  private async pump(
+    generator: AsyncGenerator<StreamEvent, StreamResponse>,
+    signal?: AbortSignal,
+  ): Promise<void> {
     try {
-      let next = await generator.next();
+      let next = await this._nextWithAbort(generator, signal);
       while (!next.done) {
         this.buffer.push(next.value);
         this.resolveWait?.();
         this.resolveWait = null;
-        next = await generator.next();
+
+        // Backpressure: only apply when a consumer IS iterating but falling
+        // behind. If nobody is iterating (the `await stream()` without
+        // `for await` path), skip backpressure so the pump completes and the
+        // response promise resolves.
+        if (this.iterating && this.buffer.length > StreamResult.HIGH_WATER) {
+          this.paused = true;
+          await new Promise<void>((r) => {
+            this.resolveDrain = r;
+          });
+          this.paused = false;
+        }
+
+        next = await this._nextWithAbort(generator, signal);
       }
       this.done = true;
       this.resolveResponse(next.value);
@@ -105,11 +133,47 @@ export class StreamResult implements AsyncIterable<StreamEvent> {
     }
   }
 
+  private async _nextWithAbort(
+    generator: AsyncGenerator<StreamEvent, StreamResponse>,
+    signal?: AbortSignal,
+  ): Promise<IteratorResult<StreamEvent, StreamResponse>> {
+    if (!signal) {
+      return generator.next();
+    }
+    if (signal.aborted) {
+      return Promise.reject(new DOMException("Aborted", "AbortError"));
+    }
+    let onAbort: (() => void) | undefined;
+    const abortPromise = new Promise<IteratorResult<StreamEvent, StreamResponse>>((_, reject) => {
+      onAbort = () => {
+        generator.return?.(undefined as unknown as StreamResponse).catch(() => {});
+        reject(new DOMException("Aborted", "AbortError"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([generator.next(), abortPromise]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
+  }
+
   async *[Symbol.asyncIterator](): AsyncIterator<StreamEvent> {
+    this.iterating = true;
     let index = 0;
     while (true) {
       while (index < this.buffer.length) {
         yield this.buffer[index++]!;
+      }
+      // If the pump is paused waiting for us to drain, signal it.
+      if (this.paused && index > StreamResult.LOW_WATER) {
+        this.resolveDrain?.();
+        this.resolveDrain = null;
+      }
+      // Trim already-yielded events to free memory (they're consumed).
+      if (index > 0 && !this.paused) {
+        this.buffer.splice(0, index);
+        index = 0;
       }
       if (this.error) throw this.error;
       if (this.done) return;
@@ -129,6 +193,13 @@ export class StreamResult implements AsyncIterable<StreamEvent> {
     onfulfilled?: ((value: StreamResponse) => TResult1 | PromiseLike<TResult1>) | null,
     onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
   ): Promise<TResult1 | TResult2> {
+    // Release backpressure: if someone calls then(), they want the response
+    // resolved ASAP. Clear any pending pause so the pump can complete.
+    if (this.paused) {
+      this.paused = false;
+      this.resolveDrain?.();
+      this.resolveDrain = null;
+    }
     return this.response.then(onfulfilled, onrejected);
   }
 }

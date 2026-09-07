@@ -76,6 +76,17 @@ function formatArgs(name: string, args: Record<string, unknown>): string {
       return ` ${chalk.dim(String(args.pattern ?? ""))}`;
     case "ls":
       return args.path ? ` ${chalk.dim(String(args.path))}` : "";
+    case "source_path":
+      return args.package ? ` ${chalk.dim(String(args.package))}` : "";
+    case "task_output":
+    case "task_stop":
+      return args.id ? ` ${chalk.dim(String(args.id))}` : "";
+    case "web_fetch":
+      return args.url ? ` ${chalk.dim(String(args.url))}` : "";
+    case "web_search":
+      return args.query ? ` ${chalk.dim(String(args.query))}` : "";
+    case "skill":
+      return args.skill ? ` ${chalk.dim(String(args.skill))}` : "";
     default:
       return "";
   }
@@ -115,6 +126,32 @@ function summarizeResult(name: string, result: string, isError: boolean): string
     case "ls": {
       const lineCount = result.split("\n").length;
       return `${lineCount} entries`;
+    }
+    case "source_path": {
+      const match = result.match(/^Source path:\s*(.+)$/m);
+      if (!match) return "resolved";
+      const parts = match[1].split("/").filter(Boolean);
+      return parts.length <= 2 ? match[1] : `…/${parts.slice(-2).join("/")}`;
+    }
+    case "task_output": {
+      const lines = result.split("\n").filter((line) => line.length > 0);
+      return lines[0] ?? "no output";
+    }
+    case "task_stop":
+    case "skill":
+      return result.split("\n")[0] || "done";
+    case "web_fetch": {
+      if (result.startsWith("Error")) return result.split("\n")[0];
+      const urlSections = (result.match(/^## https?:\/\//gm) ?? []).length;
+      if (urlSections > 1) return `${urlSections} urls`;
+      if (result.startsWith("[PDF")) return result.split("\n")[0].replace(/[[\]]/g, "");
+      if (result.startsWith("[llms.txt")) return "llms.txt";
+      const lines = result.split("\n").filter((line) => line.length > 0);
+      return `${lines.length} lines`;
+    }
+    case "web_search": {
+      const count = (result.match(/^\d+\./gm) ?? []).length;
+      return `${count} results`;
     }
     default:
       return "done";

@@ -120,8 +120,8 @@ export function trimFlushedItems<T extends FlushableItem>(items: T[]): T[] {
  * All previous items are guaranteed complete — tool calls from this turn
  * finished before `turn_end` fired, and `onTurnText` fires inside `turn_end`.
  *
- * Returns the items to flush to history. The caller should then set liveItems
- * to contain only the new text item.
+ * Returns the items to flush to history. Callers should keep the live area
+ * bounded and avoid re-rendering finalized long text through Ink.
  */
 export function flushOnTurnText<T extends FlushableItem>(liveItems: T[]): T[] {
   return liveItems;
@@ -173,7 +173,59 @@ export function flushOverflow<T extends FlushableItem>(
     return { flushed: [], remaining: liveItems };
   }
 
-  return { flushed: liveItems.slice(0, splitAt), remaining: liveItems.slice(splitAt) };
+  const candidates = liveItems.slice(0, splitAt);
+  return { flushed: candidates, remaining: liveItems.slice(splitAt) };
+}
+
+/**
+ * When a turn finalizes, decide how many leading items must be flushed to
+ * scrollback immediately because the pinned frame is too tall for the live
+ * area. Finalized items lose the streaming-time table/code-block clamp, so a
+ * too-tall pinned frame exceeds the terminal and Ink can only paint its
+ * bottom rows — the top of the response (e.g. a table's header) is never
+ * painted anywhere until the next turn's flush finally writes it to
+ * scrollback.
+ *
+ * The budget is CUMULATIVE: a turn segmented on [DONE:N] markers pins several
+ * assistant items whose individual heights fit while their sum overflows.
+ * Walking from the end, keep the largest suffix that fits within
+ * `liveAreaRows` and flush the leading complement — a contiguous prefix, so
+ * transcript order is preserved. An item taller than the whole budget flushes
+ * itself and everything before it. Returns 0 when everything fits or the
+ * live area hasn't been measured yet.
+ */
+export function countOversizedFlushItems(
+  items: readonly { kind: string; text?: string }[],
+  estimateRows: (text: string) => number,
+  liveAreaRows: number,
+): number {
+  if (liveAreaRows <= 0) return 0;
+  let rows = 0;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item === undefined) continue;
+    // Non-assistant rows (step_done, etc.) are single-line; assistant items
+    // are estimated from their text. +1 approximates the transcript margin
+    // between items — over-counting just flushes marginally earlier.
+    const itemRows =
+      item.kind === "assistant" && typeof item.text === "string" ? estimateRows(item.text) : 1;
+    rows += itemRows + (i < items.length - 1 ? 1 : 0);
+    if (rows > liveAreaRows) return i + 1;
+  }
+  return 0;
+}
+
+export function splitOversizedPinnedItems<T extends { kind: string; text?: string }>(
+  items: readonly T[],
+  estimateRows: (text: string) => number,
+  liveAreaRows: number,
+): { flushed: T[]; remaining: T[] } {
+  const count = countOversizedFlushItems(items, estimateRows, liveAreaRows);
+  if (count <= 0) return { flushed: [], remaining: [...items] };
+  return {
+    flushed: [...items.slice(0, count)],
+    remaining: [...items.slice(count)],
+  };
 }
 
 /**
@@ -206,5 +258,8 @@ export function flushOnTurnEnd<T extends FlushableItem>(
     return { flushed: [], remaining: liveItems };
   }
 
-  return { flushed: liveItems, remaining: [] };
+  return {
+    flushed: liveItems,
+    remaining: [],
+  };
 }

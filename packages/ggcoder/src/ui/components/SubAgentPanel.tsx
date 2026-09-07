@@ -2,7 +2,7 @@ import React from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { SPINNER_FRAMES, SPINNER_INTERVAL } from "../spinner-frames.js";
-import { useAnimationTick, useAnimationActive, deriveFrame } from "./AnimationContext.js";
+import { useFocusedAnimation, deriveFrame } from "./AnimationContext.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { ToolUseLoader } from "./ToolUseLoader.js";
 
@@ -12,7 +12,12 @@ export interface SubAgentInfo {
   agentName: string;
   status: "running" | "done" | "error" | "aborted";
   toolUseCount: number;
-  tokenUsage: { input: number; output: number };
+  tokenUsage: {
+    input: number;
+    output: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
   currentActivity?: string;
   result?: string;
   durationMs?: number;
@@ -21,6 +26,7 @@ export interface SubAgentInfo {
 interface SubAgentPanelProps {
   agents: SubAgentInfo[];
   aborted?: boolean;
+  marginTop?: number;
 }
 
 function formatTokens(n: number): string {
@@ -39,6 +45,7 @@ function formatDuration(ms: number): string {
 
 // Tree-drawing prefix widths (visual characters):
 // "├─ " or "└─ " = 3 chars;  "│  " or "   " = 3 chars;  "⎿ " = 2 chars
+const RESPONSE_LEFT_PADDING = 1;
 const BRANCH_WIDTH = 3; // "├─ " / "└─ "
 const DETAIL_PREFIX_WIDTH = 5; // continuation (3) + "⎿ " (2)
 
@@ -58,9 +65,8 @@ const AgentRow = React.memo(
     const isRunning = agent.status === "running" && !aborted;
 
     // Derive spinner frame from global animation tick
-    useAnimationActive();
-    const tick = useAnimationTick();
-    const frame = deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length);
+    const { active: animationActive, tick } = useFocusedAnimation(isRunning);
+    const frame = animationActive ? deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length) : 0;
 
     const branch = isLast ? "└─" : "├─";
     const continuation = isLast ? "   " : "│  ";
@@ -71,7 +77,9 @@ const AgentRow = React.memo(
     const firstLine = agent.task.split("\n")[0].replace(/\*\*/g, "");
     const taskDisplay = firstLine.length > 60 ? firstLine.slice(0, 57) + "…" : firstLine;
 
-    const totalTokens = agent.tokenUsage.input + agent.tokenUsage.output;
+    const freshInput = agent.tokenUsage.input + (agent.tokenUsage.cacheWrite ?? 0);
+    const totalTokens = freshInput + agent.tokenUsage.output;
+    const cachedTokens = agent.tokenUsage.cacheRead ?? 0;
 
     // Width budgets for content (excluding prefix columns)
     const taskContentWidth = Math.max(10, columns - BRANCH_WIDTH);
@@ -91,6 +99,7 @@ const AgentRow = React.memo(
       detail = (
         <Text color={theme.textDim} wrap="wrap">
           {formatTokens(totalTokens)} tokens
+          {cachedTokens > 0 ? ` · ${formatTokens(cachedTokens)} cached` : ""}
           {agent.durationMs != null ? ` · ${formatDuration(agent.durationMs)}` : ""}
         </Text>
       );
@@ -150,7 +159,7 @@ const AgentRow = React.memo(
   },
 );
 
-export function SubAgentPanel({ agents, aborted = false }: SubAgentPanelProps) {
+export function SubAgentPanel({ agents, aborted = false, marginTop = 0 }: SubAgentPanelProps) {
   const { columns } = useTerminalSize();
 
   if (agents.length === 0) return null;
@@ -160,7 +169,7 @@ export function SubAgentPanel({ agents, aborted = false }: SubAgentPanelProps) {
 
   // ToolUseLoader minWidth={2} = 2 chars
   const HEADER_PREFIX = 2;
-  const contentColumns = Math.max(10, columns - HEADER_PREFIX);
+  const contentColumns = Math.max(10, columns - RESPONSE_LEFT_PADDING - HEADER_PREFIX);
 
   const headerText = aborted
     ? `${agents.length} agent${agents.length !== 1 ? "s" : ""} interrupted`
@@ -171,7 +180,7 @@ export function SubAgentPanel({ agents, aborted = false }: SubAgentPanelProps) {
   const dotStatus = aborted ? "error" : allDone ? "done" : "running";
 
   return (
-    <Box marginTop={1} flexDirection="row">
+    <Box paddingLeft={RESPONSE_LEFT_PADDING} marginTop={marginTop} flexDirection="row">
       <ToolUseLoader status={dotStatus} />
       <Box flexDirection="column" flexGrow={1} width={contentColumns}>
         <Text bold wrap="wrap">

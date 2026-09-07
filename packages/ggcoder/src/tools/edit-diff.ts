@@ -1,17 +1,288 @@
 import { diffLines } from "diff";
 
 /**
- * Normalize text for fuzzy matching:
- * - Strip trailing whitespace per line
- * - Replace smart quotes with straight quotes
- * - Replace unicode dashes with hyphens
+ * Normalize text for fuzzy matching. Layered so each transform handles a
+ * different class of model/copy-paste drift:
+ * - NFKC: the agnostic layer — folds compatibility variants generically
+ *   (fullwidth/halfwidth forms, ligatures like ﬁ→fi, compatibility ideographs,
+ *   and most exotic spaces such as NBSP/ideographic → ASCII) without enumerating
+ *   codepoints. Matches the proven approach in the sibling edit tool.
+ * - Strip zero-width / format chars NFKC leaves behind (ZWSP/ZWJ/ZWNJ/WJ/BOM).
+ * - Map the few unicode spaces NFKC doesn't fold → regular space.
+ * - Strip trailing whitespace per line.
+ * - Smart quotes and dashes: Unicode keeps these semantically distinct (no NFKC
+ *   decomposition), so they must be enumerated — these are the only inherently
+ *   non-agnostic substitutions.
+ *
+ * Only affects MATCHING (locating old_text); the bytes written are the model's
+ * new_text verbatim, so normalization can never corrupt the file.
  */
 function normalizeForFuzzyMatch(text: string): string {
   return text
+    .normalize("NFKC")
+    .replace(/\u200B|\u200C|\u200D|\u2060|\uFEFF/g, "") // zero-width space/joiner/non-joiner, word-joiner, BOM
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, " ") // unicode spaces -> space
     .replace(/[^\S\n]+$/gm, "") // trailing whitespace per line
-    .replace(/[\u2018\u2019]/g, "'") // smart single quotes
-    .replace(/[\u201C\u201D]/g, '"') // smart double quotes
-    .replace(/[\u2013\u2014]/g, "-"); // en/em dashes
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'") // smart single quotes
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"') // smart double quotes
+    .replace(/[\u2010-\u2015\u2212]/g, "-"); // hyphen, dashes, horizontal bar, minus
+}
+
+/**
+ * Aider's `match_but_for_leading_whitespace`: returns the uniform leading
+ * whitespace prefix that — if prepended to every non-blank line of `partLines`
+ * — would make them equal to `wholeLines`. Returns null when:
+ *   - line counts differ
+ *   - any line's non-whitespace content doesn't match
+ *   - the leading whitespace delta isn't uniform across all non-blank lines
+ *
+ * This is the precision check that anchors `applyMissingLeadingWhitespace`.
+ */
+function matchButForLeadingWhitespace(wholeLines: string[], partLines: string[]): string | null {
+  if (wholeLines.length !== partLines.length) return null;
+
+  // Compare line CONTENT through the fuzzy normalizer (quotes, dashes, unicode
+  // spaces, trailing whitespace) so indentation drift combined with any of those
+  // — a very common pairing — still matches. Leading-whitespace deltas are
+  // computed from the raw lines below so the file's real indentation is what
+  // gets re-applied to new_text.
+  for (let i = 0; i < wholeLines.length; i++) {
+    if (
+      normalizeForFuzzyMatch(wholeLines[i]).trimStart() !==
+      normalizeForFuzzyMatch(partLines[i]).trimStart()
+    ) {
+      return null;
+    }
+  }
+
+  const prefixes = new Set<string>();
+  for (let i = 0; i < wholeLines.length; i++) {
+    if (wholeLines[i].trim() === "") continue;
+    const wholeLead = wholeLines[i].length - wholeLines[i].trimStart().length;
+    const partLead = partLines[i].length - partLines[i].trimStart().length;
+    if (wholeLead < partLead) return null;
+    prefixes.add(wholeLines[i].slice(0, wholeLead - partLead));
+  }
+
+  if (prefixes.size !== 1) return null;
+  return [...prefixes][0];
+}
+
+/**
+ * Aider's `replace_part_with_missing_leading_whitespace` (~10k stars between
+ * aider/devon/codemcp/qwen-coder use this exact pattern). Models very often
+ * mess up leading whitespace — uniformly across both old_text and new_text.
+ * Strategy:
+ *   1. Outdent old/new uniformly by the smallest leading-whitespace count
+ *      across all non-blank lines (handles "model included some but not all").
+ *   2. Scan the file for a window where every line matches when stripped AND
+ *      the file's actual leading prefix is uniform across non-blank lines.
+ *   3. Re-apply that uniform file-prefix to every non-blank line of new_text
+ *      before substituting.
+ *
+ * Returns the rewritten file content on success, null when no unique match.
+ */
+export function applyMissingLeadingWhitespace(
+  working: string,
+  old: string,
+  next: string,
+): string | null {
+  const workingLines = working.split("\n");
+  let oldLines = old.split("\n");
+  let newLines = next.split("\n");
+
+  if (oldLines.length === 0) return null;
+
+  // Outdent both uniformly by the min leading-whitespace count across all
+  // non-blank lines in either old or new. Handles the common case where the
+  // model wrote SOME indentation but less than the file's actual amount.
+  const nonBlank = [...oldLines, ...newLines].filter((l) => l.trim() !== "");
+  if (nonBlank.length > 0) {
+    const minLead = Math.min(...nonBlank.map((l) => l.length - l.trimStart().length));
+    if (minLead > 0) {
+      oldLines = oldLines.map((l) => (l.trim() !== "" ? l.slice(minLead) : l));
+      newLines = newLines.map((l) => (l.trim() !== "" ? l.slice(minLead) : l));
+    }
+  }
+
+  const numOld = oldLines.length;
+  let matchIdx = -1;
+  let matchPrefix: string | null = null;
+  let matchCount = 0;
+
+  for (let i = 0; i + numOld <= workingLines.length; i++) {
+    const window = workingLines.slice(i, i + numOld);
+    const prefix = matchButForLeadingWhitespace(window, oldLines);
+    if (prefix !== null) {
+      matchCount++;
+      if (matchIdx === -1) {
+        matchIdx = i;
+        matchPrefix = prefix;
+      }
+      // Two matches → ambiguous; let the caller fall through to the not_found
+      // path so the model adds context. (Same safety bar as our other matchers.)
+      if (matchCount > 1) return null;
+    }
+  }
+
+  if (matchIdx === -1 || matchPrefix === null) return null;
+
+  const newWithPrefix = newLines.map((l) => (l.trim() !== "" ? matchPrefix + l : l));
+  const result = [
+    ...workingLines.slice(0, matchIdx),
+    ...newWithPrefix,
+    ...workingLines.slice(matchIdx + numOld),
+  ];
+  return result.join("\n");
+}
+
+/**
+ * Aider-style `...` elision matching: when `old_text` contains lines that are
+ * just `...`, treat them as "skip whatever's here" placeholders. The model
+ * writes:
+ *
+ *   old:  function foo() {
+ *           ...
+ *           return bar;
+ *         }
+ *   new:  function foo() {
+ *           ...
+ *           return baz;
+ *         }
+ *
+ * We split both `old` and `next` on the `...` lines, then anchor the bookend
+ * pieces in `working` (greedy, in order). The elided middle from `working` is
+ * preserved verbatim and stitched in between the new bookends. Returns the
+ * rewritten buffer on success, null when:
+ *   - `old` has no `...` lines (caller should try other strategies)
+ *   - piece counts differ between `old` and `next` (ambiguous elision)
+ *   - any piece is empty (means dots at start/end or adjacent — too risky)
+ *   - any old piece doesn't appear in `working` after the previous one
+ *
+ * Greedy first-match-then-forward. We DO NOT support `replace_all` with
+ * elision — `...` is intrinsically a single edit.
+ */
+export function applyDotdotdots(working: string, old: string, next: string): string | null {
+  const dotLineRe = /^[ \t]*\.\.\.[ \t]*$/m;
+  if (!dotLineRe.test(old)) return null;
+
+  // Split consumes the dot line including its trailing newline (if present),
+  // so the next piece starts cleanly at its first real character.
+  const splitRe = /^[ \t]*\.\.\.[ \t]*\r?\n?/m;
+  const oldPieces = old.split(splitRe);
+  const newPieces = next.split(splitRe);
+
+  if (oldPieces.length !== newPieces.length) return null;
+  if (oldPieces.length < 2) return null;
+  if (oldPieces.some((p) => p === "") || newPieces.some((p) => p === "")) return null;
+
+  let cursor = 0;
+  const positions: { start: number; end: number }[] = [];
+  const matchedOldPieces: string[] = [];
+  const resolvedNewPieces: string[] = [];
+  for (let i = 0; i < oldPieces.length; i++) {
+    const piece = oldPieces[i];
+    const idx = working.indexOf(piece, cursor);
+    if (idx !== -1) {
+      positions.push({ start: idx, end: idx + piece.length });
+      matchedOldPieces.push(piece);
+      resolvedNewPieces.push(newPieces[i]);
+      cursor = idx + piece.length;
+      continue;
+    }
+
+    const scoped = working.slice(cursor);
+    const flexed = applyMissingLeadingWhitespace(scoped, piece, newPieces[i]);
+    if (flexed === null) return null;
+
+    const before = scoped.length;
+    const prefixLength = commonPrefixLength(scoped, flexed);
+    const suffixLength = commonSuffixLength(scoped.slice(prefixLength), flexed.slice(prefixLength));
+    const start = cursor + prefixLength;
+    const end = cursor + before - suffixLength;
+    positions.push({ start, end });
+    matchedOldPieces.push(working.slice(start, end));
+    resolvedNewPieces.push(flexed.slice(prefixLength, flexed.length - suffixLength));
+    cursor = end;
+  }
+
+  let result = working.slice(0, positions[0].start);
+  for (let i = 0; i < matchedOldPieces.length; i++) {
+    result += resolvedNewPieces[i];
+    if (i < matchedOldPieces.length - 1) {
+      // The elided middle from the original file is preserved verbatim —
+      // that's the whole point of the `...` placeholder.
+      result += working.slice(positions[i].end, positions[i + 1].start);
+    }
+  }
+  result += working.slice(positions[positions.length - 1].end);
+  return result;
+}
+
+function commonPrefixLength(a: string, b: string): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
+}
+
+function commonSuffixLength(a: string, b: string): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[a.length - 1 - i] === b[b.length - 1 - i]) i++;
+  return i;
+}
+
+/**
+ * Models often add spurious leading blank line(s) to `old_text` (e.g. when
+ * copying a code block out of fenced markdown). Aider noticed this back at
+ * its issue #25. Strips ALL consecutive leading blank/whitespace-only lines so
+ * the caller can retry the match — one strip wasn't enough when a model prepends
+ * several blank lines combined with other drift. Returns null when there is no
+ * leading blank line, so callers can cheaply skip the retry.
+ */
+export function stripLeadingBlankLine(text: string): string | null {
+  if (!text) return null;
+  let result = text;
+  let stripped = false;
+  while (true) {
+    const newlineIdx = result.indexOf("\n");
+    if (newlineIdx === -1) break;
+    if (result.slice(0, newlineIdx).trim() !== "") break;
+    result = result.slice(newlineIdx + 1);
+    stripped = true;
+  }
+  return stripped ? result : null;
+}
+
+/**
+ * Symmetric to `stripLeadingBlankLine`: strips ALL trailing blank/whitespace-only
+ * lines. Models commonly append a stray newline or blank line to `old_text`
+ * (e.g. a trailing newline left in when copying a block). Returns null when
+ * there is no trailing blank line.
+ */
+export function stripTrailingBlankLine(text: string): string | null {
+  if (!text) return null;
+  let result = text;
+  let stripped = false;
+  while (true) {
+    const newlineIdx = result.lastIndexOf("\n");
+    if (newlineIdx === -1) break;
+    if (result.slice(newlineIdx + 1).trim() !== "") break;
+    result = result.slice(0, newlineIdx);
+    stripped = true;
+  }
+  return stripped ? result : null;
+}
+
+/**
+ * Strip spurious blank lines from BOTH edges of `old_text`. Returns null when
+ * neither edge had a blank line (so callers can cheaply skip the retry).
+ */
+export function stripBlankEdges(text: string): string | null {
+  const lead = stripLeadingBlankLine(text);
+  const afterLead = lead ?? text;
+  const trail = stripTrailingBlankLine(afterLead);
+  if (lead === null && trail === null) return null;
+  return trail ?? afterLead;
 }
 
 /**
@@ -27,35 +298,38 @@ export function fuzzyFindText(
     return { found: true, index: exactIndex, matchLength: oldText.length, usedFuzzy: false };
   }
 
-  // Fuzzy match: normalize both sides
-  const normalizedContent = normalizeForFuzzyMatch(content);
-  const normalizedOld = normalizeForFuzzyMatch(oldText);
+  // Fuzzy match line-by-line so stripped trailing whitespace in earlier lines
+  // cannot shift offsets and make us replace the wrong byte range.
+  //
+  // Performance: use a lazy normalization cache — each content line is
+  // normalized on first access and cached, so lines before the match are
+  // normalized exactly once (not once per window), and lines after the
+  // match are never touched.  This gives O(n+m) worst-case (no match)
+  // while avoiding wasted work when the match is found early.
+  const oldLines = oldText.split("\n");
+  const contentLines = content.split("\n");
+  const normalizedOldJoined = oldLines.map(normalizeForFuzzyMatch).join("\n");
+  const normalizedCache: string[] = new Array(contentLines.length);
 
-  const fuzzyIndex = normalizedContent.indexOf(normalizedOld);
-  if (fuzzyIndex !== -1) {
-    // Map back to original content: find the actual length in original
-    // Since normalization only changes per-character substitutions and trailing whitespace,
-    // we need to find the original range.
-    // Strategy: match line by line to find the original span.
-    const normalizedBefore = normalizedContent.slice(0, fuzzyIndex);
-    const linesBefore = normalizedBefore.split("\n").length - 1;
-    const normalizedMatch = normalizedContent.slice(fuzzyIndex, fuzzyIndex + normalizedOld.length);
-    const matchLineCount = normalizedMatch.split("\n").length;
+  for (let startLine = 0; startLine + oldLines.length <= contentLines.length; startLine++) {
+    // Build the normalized candidate window using the lazy cache
+    let normalizedCandidate = "";
+    for (let j = startLine; j < startLine + oldLines.length; j++) {
+      normalizedCandidate += normalizedCache[j] ??= normalizeForFuzzyMatch(contentLines[j]!);
+      if (j < startLine + oldLines.length - 1) normalizedCandidate += "\n";
+    }
+    if (normalizedCandidate !== normalizedOldJoined) continue;
 
-    const contentLines = content.split("\n");
-    const matchLines = contentLines.slice(linesBefore, linesBefore + matchLineCount);
-    const originalMatch = matchLines.join("\n");
-
-    // Find actual index of the first match line start
     let actualIndex = 0;
-    for (let i = 0; i < linesBefore; i++) {
-      actualIndex += contentLines[i].length + 1; // +1 for \n
+    for (let i = 0; i < startLine; i++) {
+      actualIndex += contentLines[i]!.length + 1; // +1 for \n
     }
 
+    const candidateLines = contentLines.slice(startLine, startLine + oldLines.length);
     return {
       found: true,
       index: actualIndex,
-      matchLength: originalMatch.length,
+      matchLength: candidateLines.join("\n").length,
       usedFuzzy: true,
     };
   }
@@ -76,13 +350,31 @@ export function countOccurrences(content: string, oldText: string): number {
   }
   if (count > 0) return count;
 
-  // Fuzzy count
-  const normalizedContent = normalizeForFuzzyMatch(content);
+  // Fuzzy count. For single-line needles, retain substring semantics; for
+  // multi-line needles, use line windows so trailing-whitespace normalization
+  // cannot create misleading shifted overlaps.
   const normalizedOld = normalizeForFuzzyMatch(oldText);
-  pos = 0;
-  while ((pos = normalizedContent.indexOf(normalizedOld, pos)) !== -1) {
-    count++;
-    pos += normalizedOld.length;
+  if (!oldText.includes("\n")) {
+    const normalizedContent = normalizeForFuzzyMatch(content);
+    pos = 0;
+    while ((pos = normalizedContent.indexOf(normalizedOld, pos)) !== -1) {
+      count++;
+      pos += normalizedOld.length;
+    }
+    return count;
+  }
+
+  const oldLines = oldText.split("\n");
+  const contentLines = content.split("\n");
+  // Lazy normalization cache (same optimization as fuzzyFindText).
+  const normalizedCache: string[] = new Array(contentLines.length);
+  for (let startLine = 0; startLine + oldLines.length <= contentLines.length; startLine++) {
+    let normalizedCandidate = "";
+    for (let j = startLine; j < startLine + oldLines.length; j++) {
+      normalizedCandidate += normalizedCache[j] ??= normalizeForFuzzyMatch(contentLines[j]!);
+      if (j < startLine + oldLines.length - 1) normalizedCandidate += "\n";
+    }
+    if (normalizedCandidate === normalizedOld) count++;
   }
   return count;
 }
@@ -103,12 +395,20 @@ function tokenize(line: string): string[] {
  * expected location(s) — multiple results help disambiguate when several
  * regions look similar (e.g. repeated function bodies).
  */
+export interface ClosestSnippet {
+  snippet: string;
+  // 1-based line number of the strongest candidate — used by callers to build
+  // a targeted re-read suggestion (`read offset=X limit=Y`) so the model
+  // doesn't have to slurp the whole file just to recover from one bad edit.
+  topLine: number;
+}
+
 export function findClosestSnippet(
   content: string,
   oldText: string,
   contextLines = 3,
   maxResults = 3,
-): string | null {
+): ClosestSnippet | null {
   const oldFirstLine = oldText.split("\n").find((l) => l.trim().length > 0);
   if (!oldFirstLine) return null;
   const oldTokens = new Set(tokenize(oldFirstLine));
@@ -128,6 +428,7 @@ export function findClosestSnippet(
 
   candidates.sort((a, b) => b.score - a.score || a.line - b.line);
   const bestScore = candidates[0].score;
+  const topLine = candidates[0].line + 1;
   // Drop candidates that are dramatically weaker than the best match —
   // keeps the snippet focused instead of dumping the whole file.
   const minScore = Math.max(1, Math.ceil(bestScore / 3));
@@ -145,7 +446,49 @@ export function findClosestSnippet(
       .join("\n");
   };
 
-  return top.map((c) => renderRange(c.line)).join("\n---\n");
+  return { snippet: top.map((c) => renderRange(c.line)).join("\n---\n"), topLine };
+}
+
+/**
+ * Locate every occurrence of `text` in `content` and return the 1-indexed line
+ * number plus a trimmed preview of that line. Tries exact first, then the same
+ * fuzzy normalization as `countOccurrences` so the line numbers match what the
+ * caller saw in `countOccurrences`. Capped at `max` so error messages stay
+ * compact when a token like `}` matches dozens of times.
+ */
+export function findOccurrenceLines(
+  content: string,
+  text: string,
+  max = 6,
+): { line: number; preview: string }[] {
+  const collectOffsets = (haystack: string, needle: string): number[] => {
+    if (!needle) return [];
+    const offsets: number[] = [];
+    let pos = 0;
+    while ((pos = haystack.indexOf(needle, pos)) !== -1) {
+      offsets.push(pos);
+      pos += needle.length;
+    }
+    return offsets;
+  };
+
+  let source = content;
+  let offsets = collectOffsets(content, text);
+  if (offsets.length === 0) {
+    source = normalizeForFuzzyMatch(content);
+    offsets = collectOffsets(source, normalizeForFuzzyMatch(text));
+  }
+
+  const out: { line: number; preview: string }[] = [];
+  for (const offset of offsets.slice(0, max)) {
+    const before = source.slice(0, offset);
+    const line = before.split("\n").length;
+    const lineStart = before.lastIndexOf("\n") + 1;
+    const nextNewline = source.indexOf("\n", lineStart);
+    const lineText = source.slice(lineStart, nextNewline === -1 ? undefined : nextNewline);
+    out.push({ line, preview: lineText.trim() });
+  }
+  return out;
 }
 
 /**

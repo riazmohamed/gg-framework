@@ -1,13 +1,40 @@
-import type { StreamOptions } from "./types.js";
-import { GGAIError, ProviderError } from "./errors.js";
+import type { Message, StreamOptions } from "./types.js";
+import { GGAIError, ProviderError, VideoUnsupportedError } from "./errors.js";
 import type { StreamResult } from "./utils/event-stream.js";
 import { streamAnthropic } from "./providers/anthropic.js";
 import { streamOpenAI } from "./providers/openai.js";
 import { streamOpenAICodex } from "./providers/openai-codex.js";
+import { streamGemini } from "./providers/gemini.js";
 import { providerRegistry } from "./provider-registry.js";
+import { clampProviderContextImages } from "./providers/transform.js";
+import { sanitizeMessagesForWire } from "./utils/well-formed.js";
 
 /** Z.AI coding API endpoint — the primary endpoint for all GLM models. */
 const GLM_CODING_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
+
+/**
+ * User-Agent the Kimi For Coding endpoint requires to recognize ggcoder as a
+ * coding agent. The endpoint gates solely on this header; the version is
+ * overridable via KIMI_CODE_VERSION for forward compatibility.
+ */
+const KIMI_CODE_USER_AGENT = `kimi-code-cli/${process.env.KIMI_CODE_VERSION ?? "1.0.11"}`;
+
+/**
+ * Grok CLI chat proxy — the endpoint a Grok subscription OAuth token is valid
+ * against (gg-core's `grokCliBaseUrl()` persists it on the credential). Matched
+ * by host so an env override of that base URL still gets the identity headers.
+ */
+const GROK_CLI_PROXY_HOST = "cli-chat-proxy.grok.com";
+
+/**
+ * Client identity the Grok CLI chat proxy requires. It hard-gates on this: with
+ * no version it answers "Your Grok CLI version (none) is outdated. Please update
+ * to version 0.1.202 or later", so the value must look like a real Grok CLI build
+ * (they ship 0.1.x/0.2.x) rather than a placeholder. Overridable via
+ * GROK_CLI_VERSION. Keep in sync with gg-core's `grokCliHeaders()`, the
+ * login-side source of truth.
+ */
+const GROK_CLI_VERSION = process.env.GROK_CLI_VERSION ?? "0.2.101";
 
 // ── Register built-in providers ────────────────────────────
 
@@ -44,6 +71,10 @@ providerRegistry.register("openai", {
   },
 });
 
+providerRegistry.register("gemini", {
+  stream: (options) => streamGemini(options),
+});
+
 providerRegistry.register("glm", {
   stream: (options) => {
     if (options.baseUrl) return streamOpenAI(options);
@@ -58,20 +89,19 @@ providerRegistry.register("glm", {
 });
 
 providerRegistry.register("moonshot", {
-  stream: (options) =>
-    streamOpenAI({
-      ...options,
-      baseUrl: options.baseUrl ?? "https://api.moonshot.ai/v1",
-    }),
-});
-
-providerRegistry.register("ollama", {
-  stream: (options) =>
-    streamOpenAI({
-      ...options,
-      apiKey: options.apiKey ?? "ollama",
-      baseUrl: options.baseUrl ?? "http://localhost:11434/v1",
-    }),
+  stream: (options) => {
+    const baseUrl = options.baseUrl ?? "https://api.moonshot.ai/v1";
+    // The Kimi For Coding (OAuth) endpoint at api.kimi.com gates access to
+    // recognized coding agents and 403s any request whose `User-Agent` isn't a
+    // known client (verified empirically: User-Agent alone is the gate). Inject
+    // it centrally here so EVERY stream — agent loop, compaction, title-gen,
+    // sub-agents — passes, instead of relying on each call site to thread
+    // headers. Caller-provided headers still win on collision.
+    const defaultHeaders = baseUrl.includes("api.kimi.com")
+      ? { "User-Agent": KIMI_CODE_USER_AGENT, ...options.defaultHeaders }
+      : options.defaultHeaders;
+    return streamOpenAI({ ...options, baseUrl, defaultHeaders });
+  },
 });
 
 providerRegistry.register("deepseek", {
@@ -88,6 +118,59 @@ providerRegistry.register("openrouter", {
       ...options,
       baseUrl: options.baseUrl ?? "https://openrouter.ai/api/v1",
     }),
+});
+
+providerRegistry.register("huggingface", {
+  // Hugging Face Inference Providers router — one HF token (hf.co/settings/tokens,
+  // "Make calls to Inference Providers" permission) routes to whichever hosted
+  // backend serves each open model. Chat Completions-compatible; model ids are
+  // Hub repo paths ("Qwen/Qwen3-Coder-480B-A35B-Instruct"), optionally with an
+  // ":auto"/":fastest"/":cheapest" provider-selection suffix. Billing follows
+  // each backend's per-token rates on the HF account (small free tier).
+  stream: (options) =>
+    streamOpenAI({
+      ...options,
+      baseUrl: options.baseUrl ?? "https://router.huggingface.co/v1",
+    }),
+});
+
+providerRegistry.register("sakana", {
+  // Sakana Fugu is a multi-agent system exposed as a standard LLM through the
+  // OpenAI-compatible Sakana API. We ride the Chat Completions transport (the
+  // Responses API is also offered). Fugu models only accept "high"/"xhigh"
+  // reasoning effort — clamped centrally in toOpenAIReasoningEffort.
+  stream: (options) =>
+    streamOpenAI({
+      ...options,
+      baseUrl: options.baseUrl ?? "https://api.sakana.ai/v1",
+    }),
+});
+
+providerRegistry.register("xai", {
+  // xAI's public API (console.x.ai key) is OpenAI-compatible — ride the Chat
+  // Completions transport like Moonshot/DeepSeek. Grok reasoning models take
+  // top-level `reasoning_effort` (low/medium/high), which the shared thinking
+  // path already sends.
+  //
+  // Subscription OAuth (SuperGrok / X Premium) routes to the Grok CLI chat proxy
+  // instead, which speaks the same Chat Completions wire but gates on Grok-CLI
+  // client identity. Inject those headers centrally here — exactly as the Kimi
+  // endpoint above — so EVERY stream (agent loop, compaction, title-gen,
+  // sub-agents) is accepted rather than depending on each call site to thread
+  // headers. Caller-provided headers still win on collision.
+  stream: (options) => {
+    const baseUrl = options.baseUrl ?? "https://api.x.ai/v1";
+    const defaultHeaders = baseUrl.includes(GROK_CLI_PROXY_HOST)
+      ? {
+          "X-XAI-Token-Auth": "xai-grok-cli",
+          "x-grok-client-version": GROK_CLI_VERSION,
+          "x-grok-client-identifier": "ggcoder",
+          "x-grok-model-override": options.model,
+          ...options.defaultHeaders,
+        }
+      : options.defaultHeaders;
+    return streamOpenAI({ ...options, baseUrl, defaultHeaders });
+  },
 });
 
 providerRegistry.register("minimax", {
@@ -126,6 +209,38 @@ providerRegistry.register("minimax", {
     }),
 });
 
+/**
+ * Local model ids are namespaced by endpoint (`local/<endpointId>/<rawId>`) so
+ * the same model name served by two machines stays distinct in the registry.
+ * The server only knows the raw id, so strip the routing prefix here — at the
+ * one place that talks to the wire. Counterpart to gg-core's
+ * `formatLocalModelId`/`parseLocalModelId`.
+ */
+export function localWireModelId(id: string): string {
+  const match = /^local\/[^/]+\/(.+)$/.exec(id);
+  return match?.[1] ?? id;
+}
+
+providerRegistry.register("local", {
+  // Locally hosted OpenAI-compatible servers (Ollama, LM Studio, llama.cpp,
+  // vLLM). There is no default endpoint: the baseUrl comes from the endpoint
+  // credential the discovery layer wrote, so a missing one is a wiring bug, not
+  // something to paper over with a guess at someone else's port.
+  stream: (options) => {
+    if (!options.baseUrl) {
+      throw new GGAIError(
+        "Local provider requires a baseUrl (e.g. http://127.0.0.1:11434/v1). " +
+          "No local endpoint was resolved for this model — re-scan for local models.",
+      );
+    }
+    return streamOpenAI({
+      ...options,
+      model: localWireModelId(options.model),
+      webSearch: false,
+    });
+  },
+});
+
 // ── Public API ─────────────────────────────────────────────
 
 /**
@@ -139,7 +254,7 @@ providerRegistry.register("minimax", {
  *
  * ```ts
  * // Stream events
- * for await (const event of stream({ provider: "anthropic", model: "claude-sonnet-4-6", messages })) {
+ * for await (const event of stream({ provider: "anthropic", model: "claude-sonnet-5", messages })) {
  *   if (event.type === "text_delta") process.stdout.write(event.text);
  * }
  *
@@ -154,5 +269,49 @@ export function stream(options: StreamOptions): StreamResult {
       `Unknown provider: "${options.provider}". Registered: ${providerRegistry.list().join(", ")}`,
     );
   }
-  return entry.stream(options);
+  // Fail fast with a clean capability error when video is in the request but the
+  // model can't watch it (e.g. a video read under Kimi/Gemini left in history,
+  // then the user switched to a text-only model). Without this, the provider
+  // rejects the video block with an opaque "invalid tag 'video'" API error.
+  if (options.supportsVideo !== true && messagesContainVideo(options.messages)) {
+    throw new VideoUnsupportedError();
+  }
+  const wireMessages = stripMessageProvenance(options.messages);
+  // Unpaired surrogates (split emoji in tool args, char-indexed truncation, odd
+  // shell bytes) make the JSON body unparseable for every provider — and stay in
+  // history, so retries and model switches fail identically. Scrub them here,
+  // the one place all providers pass through.
+  const messages = clampProviderContextImages(
+    sanitizeMessagesForWire(wireMessages),
+    options.provider,
+    options.supportsImages,
+  );
+  return entry.stream(messages === options.messages ? options : { ...options, messages });
+}
+
+/** Clone provenance-bearing messages and remove internal metadata at the provider boundary. */
+function stripMessageProvenance(messages: Message[]): Message[] {
+  let stripped: Message[] | undefined;
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]!;
+    if (!message.provenance) continue;
+    stripped ??= messages.slice();
+    const { provenance: _provenance, ...wireMessage } = message;
+    stripped[index] = wireMessage as Message;
+  }
+  return stripped ?? messages;
+}
+
+/** True if any message carries a video block, in user content or a tool result. */
+function messagesContainVideo(messages: Message[]): boolean {
+  for (const msg of messages) {
+    if (typeof msg.content === "string" || !Array.isArray(msg.content)) continue;
+    for (const part of msg.content) {
+      if (part.type === "video") return true;
+      if (part.type === "tool_result" && Array.isArray(part.content)) {
+        if (part.content.some((block) => block.type === "video")) return true;
+      }
+    }
+  }
+  return false;
 }

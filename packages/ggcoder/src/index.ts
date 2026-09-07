@@ -8,6 +8,7 @@ export {
   createFindTool,
   createGrepTool,
   createLsTool,
+  createSourcePathTool,
 } from "./tools/index.js";
 
 // System prompt
@@ -36,6 +37,12 @@ export {
   getModelsForProvider,
   getDefaultModel,
   getContextWindow,
+  usesOpenAICodexTransport,
+  getMaxThinkingLevel,
+  getDefaultThinkingLevel,
+  getNextThinkingLevel,
+  getSupportedThinkingLevels,
+  isThinkingLevelSupported,
   shouldCompact,
   compact,
   discoverSkills,
@@ -52,6 +59,15 @@ export { renderApp } from "./ui/render.js";
 // Config
 export { APP_NAME, VERSION, getAppPaths, ensureAppDirs } from "./config.js";
 
+// Project discovery (shared with gg-boss + gg-app sidecar)
+export {
+  discoverProjects,
+  listRecentSessions,
+  type DiscoveredProject,
+  type ProjectSource,
+  type RecentSession,
+} from "./core/project-discovery.js";
+
 // Types
 export type {
   CliConfig,
@@ -65,6 +81,7 @@ export type {
   AgentSessionOptions,
   AgentSessionState,
   BusEventMap,
+  ContextWindowOptions,
   ModelInfo,
   Settings,
   SlashCommand,

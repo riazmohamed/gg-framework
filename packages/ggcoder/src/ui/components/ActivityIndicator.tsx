@@ -1,51 +1,96 @@
-import React, { useMemo, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import type { ActivityPhase, RetryInfo } from "../hooks/useAgentLoop.js";
 
-import { SPINNER_FRAMES, SPINNER_INTERVAL, REDUCED_MOTION_DOT } from "../spinner-frames.js";
-import { PLANNING_PHRASES, selectPhrases, shuffleArray } from "../activity-phrases.js";
+import { REDUCED_MOTION_DOT } from "../spinner-frames.js";
 import {
-  useAnimationTick,
-  useAnimationActive,
+  useFocusedAnimation,
   deriveFrame,
   useReducedMotion,
+  useTerminalFocus,
 } from "./AnimationContext.js";
 
-// ── Color pulse cycle ─────────────────────────────────────
+// ── Gemini spinner style ──────────────────────────────────
 
-const PULSE_COLORS = [
-  "#60a5fa", // blue
-  "#818cf8", // indigo
-  "#a78bfa", // violet
-  "#818cf8", // indigo (back)
-  "#60a5fa", // blue (back)
-  "#38bdf8", // sky
-  "#60a5fa", // blue (back)
-];
+const GEMINI_DOTS_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const GEMINI_DOTS_INTERVAL = 80;
+const GEMINI_COLOR_CYCLE_DURATION_MS = 4000;
+const GEMINI_COLOR_CYCLE = [
+  "#D7AFFF", // AccentPurple
+  "#87AFFF", // AccentBlue
+  "#87D7D7", // AccentCyan
+  "#D7FFD7", // AccentGreen
+  "#FFFFAF", // AccentYellow
+  "#FF87AF", // AccentRed
+] as const;
 
-const PLAN_PULSE_COLORS = [
-  "#f59e0b", // amber
-  "#fbbf24", // amber light
-  "#f59e0b", // amber
-  "#d97706", // amber dark
-  "#f59e0b", // amber
-  "#fbbf24", // amber light
-  "#d97706", // amber dark
-];
-const PULSE_INTERVAL = 400;
+function interpolateHexChannel(start: number, end: number, amount: number): number {
+  return Math.round(start + (end - start) * amount);
+}
 
-// ── Ellipsis animation ────────────────────────────────────
+function parseHexColor(color: string): [number, number, number] {
+  return [
+    parseInt(color.slice(1, 3), 16),
+    parseInt(color.slice(3, 5), 16),
+    parseInt(color.slice(5, 7), 16),
+  ];
+}
 
-const ELLIPSIS_FRAMES = ["", ".", "..", "..."];
-const ELLIPSIS_INTERVAL = 500;
+function toHexChannel(value: number): string {
+  return value.toString(16).padStart(2, "0");
+}
 
-// ── Phrase rotation ───────────────────────────────────────
+function getGeminiSpinnerColor(elapsedMs: number): string {
+  const progress =
+    ((elapsedMs % GEMINI_COLOR_CYCLE_DURATION_MS) + GEMINI_COLOR_CYCLE_DURATION_MS) %
+    GEMINI_COLOR_CYCLE_DURATION_MS;
+  const scaled = (progress / GEMINI_COLOR_CYCLE_DURATION_MS) * GEMINI_COLOR_CYCLE.length;
+  const startIndex = Math.floor(scaled) % GEMINI_COLOR_CYCLE.length;
+  const endIndex = (startIndex + 1) % GEMINI_COLOR_CYCLE.length;
+  const amount = scaled - Math.floor(scaled);
+  const start = parseHexColor(GEMINI_COLOR_CYCLE[startIndex]);
+  const end = parseHexColor(GEMINI_COLOR_CYCLE[endIndex]);
+  return `#${toHexChannel(interpolateHexChannel(start[0], end[0], amount))}${toHexChannel(
+    interpolateHexChannel(start[1], end[1], amount),
+  )}${toHexChannel(interpolateHexChannel(start[2], end[2], amount))}`;
+}
 
-const WAITING_PHRASE_INTERVAL = 3000;
-const OTHER_PHRASE_INTERVAL = 4000;
+// ── Low-churn liveness ────────────────────────────────────
 
+const LOW_CHURN_INTERVAL = 80;
+const LOW_CHURN_COLOR_INTERVAL = 2000;
 // ── Formatting helpers ────────────────────────────────────
+
+type ActivityAccentColors = {
+  duration: string;
+  tokens: string;
+  thinking: string;
+};
+
+export function getActivityAccentColors(themeName: string): ActivityAccentColors {
+  if (themeName.includes("ansi")) {
+    return {
+      duration: "#aaaaaa",
+      tokens: "#ff55ff",
+      thinking: "#55ffff",
+    };
+  }
+
+  if (themeName.startsWith("light")) {
+    return {
+      duration: "#6b7280",
+      tokens: "#7c3aed",
+      thinking: "#0891b2",
+    };
+  }
+
+  return {
+    duration: "#9ca3af",
+    tokens: "#a78bfa",
+    thinking: "#67e8f9",
+  };
+}
 
 function formatElapsed(ms: number): string {
   const totalSec = Math.round(ms / 1000);
@@ -63,49 +108,139 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-function buildMetaSuffix(
+type ActivityMetaParts = {
+  duration: string;
+  tokens: string;
+  thinking: string;
+};
+
+export function buildMetaParts(
   elapsedMs: number,
   thinkingMs: number,
   isThinking: boolean,
   tokenEstimate: number,
-): string {
-  const parts: string[] = [];
-  parts.push(formatElapsed(elapsedMs));
+): { prefix: string; thinking: string } {
+  const meta = buildStructuredMetaParts(elapsedMs, thinkingMs, isThinking, tokenEstimate);
+  const prefix = [meta.duration, meta.tokens].filter(Boolean).join(" · ");
 
-  if (tokenEstimate > 0) parts.push(`↓ ${formatTokenCount(tokenEstimate)} tokens`);
+  return { prefix, thinking: meta.thinking };
+}
 
-  if (isThinking) {
-    // Live label — always show while thinking, add duration once >= 1s
-    parts.push(thinkingMs >= 1000 ? `thinking for ${formatElapsed(thinkingMs)}` : "thinking");
-  } else if (thinkingMs >= 1000) {
-    // Frozen — past tense with duration
-    parts.push(`thought for ${formatElapsed(thinkingMs)}`);
-  }
+function buildStructuredMetaParts(
+  elapsedMs: number,
+  thinkingMs: number,
+  isThinking: boolean,
+  tokenEstimate: number,
+): ActivityMetaParts {
+  const tokens = tokenEstimate > 0 ? `↓ ${formatTokenCount(tokenEstimate)} tokens` : "";
+  const thinking = isThinking
+    ? thinkingMs >= 1000
+      ? `thinking for ${formatElapsed(thinkingMs)}`
+      : "thinking"
+    : thinkingMs >= 1000
+      ? `thought for ${formatElapsed(thinkingMs)}`
+      : "";
 
-  return parts.join(" · ");
+  return {
+    duration: formatElapsed(elapsedMs),
+    tokens,
+    thinking,
+  };
 }
 
 // ── Shimmer effect ────────────────────────────────────────
 
 const SHIMMER_WIDTH = 3;
-const SHIMMER_INTERVAL = 100;
 
-const ShimmerText: React.FC<{ text: string; color: string; shimmerPos: number }> = ({
-  text,
-  color,
-  shimmerPos,
-}) => (
+export function getThinkingShimmerColor(themeName: string): string {
+  if (themeName.includes("ansi")) return "#55ff55";
+  if (themeName.startsWith("light")) return "#15803d";
+  return "#22c55e";
+}
+
+/**
+ * Dedicated hue for the "Working..." label shimmer. Deliberately distinct from
+ * the spinner cycle (cool purples/blues), the token accent (violet), the
+ * thinking shimmer (green), and the duration (gray) so the sweep reads as its
+ * own signal — a warm amber/coral.
+ */
+export function getWorkingShimmerColor(themeName: string): string {
+  if (themeName.includes("ansi")) return "#ffaf00";
+  if (themeName.startsWith("light")) return "#c2410c";
+  return "#fb923c";
+}
+
+const ShimmerText: React.FC<{
+  text: string;
+  color: string;
+  shimmerPos: number;
+  /** Optional color for the bright sweep band; falls back to `color` + no dim. */
+  brightColor?: string;
+  italic?: boolean;
+}> = ({ text, color, shimmerPos, brightColor, italic }) => (
   <Text>
     {text.split("").map((char, i) => {
       const isBright = Math.abs(i - shimmerPos) <= SHIMMER_WIDTH;
       return (
-        <Text bold={isBright} color={color} dimColor={!isBright} key={i}>
+        <Text
+          color={isBright && brightColor ? brightColor : color}
+          dimColor={!isBright}
+          italic={italic}
+          key={i}
+        >
           {char}
         </Text>
       );
     })}
   </Text>
 );
+
+function useLowChurnFrame(enabled: boolean): number {
+  const [frame, setFrame] = useState(0);
+
+  useEffect(() => {
+    if (!enabled) return undefined;
+
+    const timer = setInterval(() => {
+      setFrame((current) => current + 1);
+    }, LOW_CHURN_INTERVAL);
+
+    return () => clearInterval(timer);
+  }, [enabled]);
+
+  return enabled ? frame : 0;
+}
+
+function ActivityMetaText({
+  colors,
+  isThinking,
+  meta,
+  mutedColor,
+}: {
+  colors: ActivityAccentColors;
+  isThinking: boolean;
+  meta: ActivityMetaParts;
+  mutedColor: string;
+}) {
+  if (!meta.duration && !meta.tokens && !meta.thinking) return null;
+
+  const hasTokenSeparator = !!meta.duration && !!meta.tokens;
+  const hasThinkingSeparator = !!meta.thinking && (!!meta.duration || !!meta.tokens);
+
+  return (
+    <Text>
+      <Text color={mutedColor}>{"  ("}</Text>
+      {meta.duration && <Text color={colors.duration}>{meta.duration}</Text>}
+      {hasTokenSeparator && <Text color={mutedColor}>{" · "}</Text>}
+      {meta.tokens && <Text color={colors.tokens}>{meta.tokens}</Text>}
+      {hasThinkingSeparator && <Text color={mutedColor}>{" · "}</Text>}
+      {meta.thinking && (
+        <Text color={isThinking ? colors.thinking : mutedColor}>{meta.thinking}</Text>
+      )}
+      <Text color={mutedColor}>{")"}</Text>
+    </Text>
+  );
+}
 
 // ── Component ─────────────────────────────────────────────
 
@@ -116,6 +251,7 @@ interface ActivityIndicatorProps {
   runStartRef?: React.RefObject<number>;
   thinkingMs: number;
   isThinking: boolean;
+  thinkingEnabled?: boolean;
   tokenEstimate: number;
   /** Raw character count ref for smooth token animation (read every tick). */
   charCountRef?: React.RefObject<number>;
@@ -123,7 +259,6 @@ interface ActivityIndicatorProps {
   realTokensAccumRef?: React.RefObject<number>;
   userMessage?: string;
   activeToolNames?: string[];
-  planMode?: boolean;
   retryInfo?: RetryInfo | null;
   planDone?: number;
   planTotal?: number;
@@ -140,14 +275,19 @@ interface ActivityIndicatorProps {
    * spinner reads as Boss, not Coder.
    */
   pulseColors?: readonly string[];
+  /** Disable decorative per-tick animation so terminal scrollback remains usable. */
+  staticDisplay?: boolean;
 }
 
 const RETRY_REASON_LABELS: Record<RetryInfo["reason"], string> = {
   overloaded: "Provider overloaded",
   rate_limit: "Rate limited",
+  provider_error: "Provider server error",
   empty_response: "Empty response",
   stream_stall: "Provider stream stalled",
   overflow_compact: "Context overflow — compacting",
+  tool_argument_glitch: "Provider dropped tool call args — auto-continuing",
+  runaway_toolcall: "Provider tool call stream glitched — retrying",
 };
 
 export function ActivityIndicator({
@@ -159,28 +299,32 @@ export function ActivityIndicator({
   tokenEstimate,
   charCountRef: charCountRefProp,
   realTokensAccumRef: realTokensAccumRefProp,
-  userMessage = "",
-  activeToolNames = [],
-  planMode,
   retryInfo,
   planDone = 0,
   planTotal = 0,
-  phrases: phrasesByPhase,
   pulseColors: pulseColorsOverride,
+  staticDisplay = false,
 }: ActivityIndicatorProps) {
   const theme = useTheme();
   const reducedMotion = useReducedMotion();
+  const thinkingShimmerColor = getThinkingShimmerColor(theme.name);
+  const workingShimmerColor = getWorkingShimmerColor(theme.name);
+  const accentColors = getActivityAccentColors(theme.name);
 
-  // Smooth elapsed time: compute from runStartRef on each animation tick
-  // instead of using the 1000ms state update (which looks jerky).
+  // Full animation uses the shared 100ms clock. Static display deliberately
+  // avoids that clock and uses a tiny 1s heartbeat instead.
+  const canAnimate = phase !== "idle" && !reducedMotion;
+  const { active: fullAnimationActive, tick } = useFocusedAnimation(canAnimate && !staticDisplay);
+  const focused = useTerminalFocus(canAnimate && staticDisplay);
+  const lowChurnActive = canAnimate && staticDisplay && focused;
+  const lowChurnFrame = useLowChurnFrame(lowChurnActive);
+
+  // Smooth elapsed time only in full-animation mode. Low-churn mode uses the
+  // existing 1s timer from useAgentLoop so the status line repaints slowly.
   const elapsedMs =
-    runStartRef?.current && phase !== "idle" ? Date.now() - runStartRef.current : elapsedMsProp;
-
-  // Use the global animation tick instead of a local timer.
-  // This eliminates a duplicate 100ms setInterval that was causing
-  // independent re-renders on top of the global AnimationProvider tick.
-  useAnimationActive();
-  const tick = useAnimationTick();
+    runStartRef?.current && phase !== "idle" && fullAnimationActive
+      ? Date.now() - runStartRef.current
+      : elapsedMsProp;
 
   // ── Smooth token counter animation ─────────────────────
   // Smooths the TOTAL token estimate (real + estimated) so it never
@@ -195,7 +339,7 @@ export function ActivityIndicator({
   const realTokens = realTokensAccumRefProp?.current ?? 0;
   const targetTokens = charCountRefProp ? realTokens + Math.ceil(currentChars / 4) : tokenEstimate;
 
-  if (reducedMotion || !charCountRefProp) {
+  if (!fullAnimationActive || !charCountRefProp) {
     displayedTokensRef.current = targetTokens;
   } else {
     const gap = targetTokens - displayedTokensRef.current;
@@ -221,51 +365,62 @@ export function ActivityIndicator({
 
   const smoothTokenEstimate = displayedTokensRef.current;
 
-  // Derive all animation frames from the single tick counter
-  const spinnerFrame = reducedMotion
-    ? 0
-    : deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length);
-  const pulseColors = planMode ? PLAN_PULSE_COLORS : (pulseColorsOverride ?? PULSE_COLORS);
-  const colorFrame = deriveFrame(tick, PULSE_INTERVAL, pulseColors.length);
-  const ellipsisFrame = deriveFrame(tick, ELLIPSIS_INTERVAL, ELLIPSIS_FRAMES.length);
-
-  // Phrase rotation — pick phrases based on phase + user message + active tools, shuffle, rotate
-  const toolNamesKey = activeToolNames.sort().join(",");
-  const overridePhrases = phrasesByPhase?.[phase];
-  const phrases = useMemo(
-    () =>
-      shuffleArray(
-        overridePhrases && overridePhrases.length > 0
-          ? overridePhrases
-          : planMode && phase === "waiting"
-            ? PLANNING_PHRASES
-            : selectPhrases(phase, userMessage, activeToolNames),
-      ),
-    [phase, userMessage, toolNamesKey, planMode, overridePhrases], // activeToolNames captured via stable string key
+  // Derive all animation frames from the single tick counter.
+  const pulseColors =
+    pulseColorsOverride && pulseColorsOverride.length > 0 ? pulseColorsOverride : null;
+  const colorFrame =
+    pulseColors && lowChurnActive
+      ? Math.floor((lowChurnFrame * LOW_CHURN_INTERVAL) / LOW_CHURN_COLOR_INTERVAL) %
+        pulseColors.length
+      : 0;
+  const geminiElapsedMs = fullAnimationActive
+    ? tick * 30
+    : lowChurnActive
+      ? lowChurnFrame * LOW_CHURN_INTERVAL
+      : 0;
+  const spinnerColor = pulseColors
+    ? (pulseColors[colorFrame] ?? pulseColors[0] ?? theme.spinnerColor)
+    : getGeminiSpinnerColor(geminiElapsedMs);
+  const geminiSpinnerFrame = fullAnimationActive
+    ? deriveFrame(tick, GEMINI_DOTS_INTERVAL, GEMINI_DOTS_FRAMES.length)
+    : lowChurnActive
+      ? lowChurnFrame % GEMINI_DOTS_FRAMES.length
+      : 0;
+  const structuredMeta = buildStructuredMetaParts(
+    elapsedMs,
+    thinkingMs,
+    isThinking,
+    smoothTokenEstimate,
   );
-  const phraseInterval = phase === "waiting" ? WAITING_PHRASE_INTERVAL : OTHER_PHRASE_INTERVAL;
-  const phraseIndex = Math.floor((tick * SHIMMER_INTERVAL) / phraseInterval) % phrases.length;
+  const legacyMeta = buildMetaParts(elapsedMs, thinkingMs, isThinking, smoothTokenEstimate);
+  const thinkingShimmerCycle = Math.max(1, legacyMeta.thinking.length + SHIMMER_WIDTH * 2);
+  const thinkingShimmerPos = fullAnimationActive
+    ? (tick % thinkingShimmerCycle) - SHIMMER_WIDTH
+    : -SHIMMER_WIDTH;
 
-  const spinnerColor = pulseColors[colorFrame];
-  const phrase = phrases[phraseIndex] ?? phrases[0];
-  const ellipsis = ELLIPSIS_FRAMES[ellipsisFrame];
+  // ── "Working..." label shimmer ─────────────────────────
+  // A slow sweep of brightness across the label, riding whichever animation
+  // clock is live: the 100ms tick in full mode, or the 80ms low-churn frame
+  // in the (static) status-row mode. Falls back to plain text when idle,
+  // unfocused, or reduced-motion so scrollback stays stable.
+  const WORKING_LABEL = "Working...";
+  const workingShimmerFrame = fullAnimationActive ? tick : lowChurnActive ? lowChurnFrame : null;
+  const workingShimmerCycle = WORKING_LABEL.length + SHIMMER_WIDTH * 2;
+  const workingShimmerPos =
+    workingShimmerFrame !== null
+      ? (workingShimmerFrame % workingShimmerCycle) - SHIMMER_WIDTH
+      : null;
 
-  // Shimmer — derive position from tick, wrapping across phrase length
-  const shimmerCycle = phrase.length + SHIMMER_WIDTH * 2;
-  const shimmerPos = (tick % shimmerCycle) - SHIMMER_WIDTH;
-
-  // Pad ellipsis to prevent text from shifting
-  const paddedEllipsis = ellipsis + " ".repeat(3 - ellipsis.length);
-
-  const meta = buildMetaSuffix(elapsedMs, thinkingMs, isThinking, smoothTokenEstimate);
-
-  // ── Plan progress bar ──────────────────────────────────
-  const planBar = useMemo(() => {
-    if (planTotal <= 0) return null;
-    const barWidth = Math.min(planTotal, 20);
-    const filledWidth = Math.round((planDone / planTotal) * barWidth);
-    return "\u2588".repeat(filledWidth) + "\u2591".repeat(barWidth - filledWidth);
-  }, [planDone, planTotal]);
+  // ── Plan progress label ────────────────────────────────
+  // "Plan Steps" gets the same green shimmer treatment as the thinking label,
+  // riding whichever animation clock is live. Falls back to a static sweep
+  // position when idle/unfocused/reduced-motion so scrollback stays stable.
+  const PLAN_LABEL = "Plan Steps";
+  const planShimmerCycle = PLAN_LABEL.length + SHIMMER_WIDTH * 2;
+  const planShimmerPos =
+    workingShimmerFrame !== null
+      ? (workingShimmerFrame % planShimmerCycle) - SHIMMER_WIDTH
+      : -SHIMMER_WIDTH;
 
   // ── Retry display ──────────────────────────────────────
   if (phase === "retrying" && retryInfo) {
@@ -275,46 +430,72 @@ export function ActivityIndicator({
       retryInfo.delayMs > 0 ? ` waiting ${Math.round(retryInfo.delayMs / 1000)}s` : "";
     return (
       <Box>
-        <Text color={retryColor} bold>
-          {reducedMotion ? REDUCED_MOTION_DOT : SPINNER_FRAMES[spinnerFrame]}{" "}
+        <Text color={retryColor}>
+          {reducedMotion ? REDUCED_MOTION_DOT : GEMINI_DOTS_FRAMES[geminiSpinnerFrame]}{" "}
         </Text>
         <Text color={retryColor}>
           {retryLabel} — retrying ({retryInfo.attempt}/{retryInfo.maxAttempts})
         </Text>
-        <Text color={theme.textDim}>
-          {delaySec}
-          {"  ("}
-          {formatElapsed(elapsedMs)}
-          {")"}
-        </Text>
+        <Text color={theme.textDim}>{delaySec}</Text>
+        <ActivityMetaText
+          colors={accentColors}
+          isThinking={isThinking}
+          meta={{ duration: formatElapsed(elapsedMs), tokens: "", thinking: "" }}
+          mutedColor={theme.textDim}
+        />
       </Box>
     );
   }
 
   return (
     <Box>
-      <Text color={spinnerColor} bold>
-        {reducedMotion ? REDUCED_MOTION_DOT : SPINNER_FRAMES[spinnerFrame]}{" "}
+      <Text color={spinnerColor}>
+        {reducedMotion ? REDUCED_MOTION_DOT : GEMINI_DOTS_FRAMES[geminiSpinnerFrame]}{" "}
       </Text>
-      {reducedMotion ? (
-        <Text dimColor color={spinnerColor}>
-          {phrase}
+      {workingShimmerPos !== null ? (
+        <ShimmerText
+          text={WORKING_LABEL}
+          color={theme.text}
+          brightColor={workingShimmerColor}
+          shimmerPos={workingShimmerPos}
+          italic
+        />
+      ) : (
+        <Text color={theme.text} italic wrap="truncate-end">
+          {WORKING_LABEL}
+        </Text>
+      )}
+      {fullAnimationActive && isThinking && legacyMeta.thinking ? (
+        <Text>
+          <Text color={theme.textDim}>{"  ("}</Text>
+          {legacyMeta.prefix && <Text color={theme.textDim}>{legacyMeta.prefix}</Text>}
+          {legacyMeta.prefix && legacyMeta.thinking ? (
+            <Text color={theme.textDim}>{" · "}</Text>
+          ) : null}
+          <ShimmerText
+            text={legacyMeta.thinking}
+            color={thinkingShimmerColor}
+            shimmerPos={thinkingShimmerPos}
+          />
+          <Text color={theme.textDim}>{")"}</Text>
         </Text>
       ) : (
-        <ShimmerText text={phrase} color={spinnerColor} shimmerPos={shimmerPos} />
+        <ActivityMetaText
+          colors={accentColors}
+          isThinking={isThinking}
+          meta={structuredMeta}
+          mutedColor={theme.textDim}
+        />
       )}
-      <Text color={theme.textDim}>{reducedMotion ? "..." : paddedEllipsis}</Text>
-      {meta && (
-        <Text color={theme.textDim}>
-          {"  ("}
-          {meta}
-          {")"}
-        </Text>
-      )}
-      {planBar && (
+      {planTotal > 0 && (
         <Text>
           {"  "}
-          <Text color={planDone === planTotal ? theme.success : theme.planPrimary}>{planBar}</Text>
+          <ShimmerText
+            text={PLAN_LABEL}
+            color={thinkingShimmerColor}
+            brightColor={thinkingShimmerColor}
+            shimmerPos={planShimmerPos}
+          />
           <Text color={theme.textDim}>
             {" "}
             {planDone}/{planTotal}

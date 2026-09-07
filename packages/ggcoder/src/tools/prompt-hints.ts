@@ -1,30 +1,144 @@
 /**
- * One-line prompt hints for each tool. These are shown in the system prompt's
- * Tools section to orient the model. Full parameter docs live on each tool's
- * JSON schema description (sent separately via the tool definition), so these
- * hints stay short and focus on non-obvious usage.
+ * One-line prompt hints for each tool, shown in the system prompt's Tools
+ * section. Full parameter docs live on each tool's JSON schema description
+ * (sent separately via the tool definition), so these hints stay short.
+ *
+ * Hints exist ONLY for tools whose correct usage is NOT obvious from their
+ * schema description alone. The core file/nav/exec tools (read/write/edit/
+ * bash/find/grep/ls) deliberately have NO hint: an ablation (experiments/
+ * prompt-bench, Opus n=12) showed dropping their hints did not change tool
+ * selection — the schema description already carries when/how to use them.
+ * Cross-tool preferences for those tools live in TOOL_STEERING instead.
  */
 export const TOOL_PROMPT_HINTS: Record<string, string> = {
-  read: "Read file contents. Use offset/limit for large files.",
-  write: "Create or fully rewrite a file. Must read first if it exists. Prefer edit for changes.",
-  edit: "Surgical edits via { old_text, new_text } pairs. Copy `old_text` verbatim from the read — no paraphrasing, no `...`. Each must match exactly once. Must read first.",
-  bash: "Run shell commands. CWD is the project root. Set run_in_background=true for long processes.",
-  find: "Find files/dirs by name pattern. Faster than bash find, respects .gitignore.",
-  grep: "Regex search across files. Use for usages, definitions, imports.",
-  ls: "List directory contents.",
-  web_fetch: "Fetch a URL (docs, endpoints, external resources).",
-  web_search: "Search the web. Use before web_fetch to find pages.",
-  task_output: "Read new output from a background process by id.",
+  code_nav:
+    "Language-server navigation: `definition`, `references`, `symbols` (file outline), `hover` " +
+    "(type/signature). Exact and cross-file, unlike text search.",
+  code_search:
+    "Find the most relevant functions/classes/types for a query via AST chunking + BM25 " +
+    "ranking. Returns whole ranked symbol chunks with `file:line → symbol` headers — far fewer " +
+    "tokens than reading whole files. TS/JS, Python, Go, Rust, Java, C#.",
+  source_path:
+    "Resolve installed package/repo source via opensrc. Inspect the returned path with read/grep/find/ls before assuming a dependency API.",
+  web_search:
+    "Search the web. Use before web_fetch to find pages; supports include/exclude_domains and a time_range recency filter.",
+  web_fetch:
+    "Fetch page content as Markdown (or text/html). Pass `urls` to fetch many at once; reads PDFs, follows safe redirects, and prefers a site's /llms.txt for docs.",
+  task_output: "Read new output from a background process by id; wait_ms blocks until it exits.",
   task_stop: "Stop a background process by id.",
+  screenshot:
+    "Capture a headless-browser PNG of a URL or dev server to visually verify rendered UI; supports waits, click/type actions and viewport size.",
+  send_message: "Queue steering into a running child agent without starting another turn.",
+  followup_task: "Start another turn in an idle child agent, preserving its context.",
+  wait_agent:
+    "Block until named child agents finish and return their snapshots; child agents " +
+    "only (background: task_output wait_ms).",
+  list_agents: "List child agent IDs, states, turns and token totals.",
+  interrupt_agent: "Interrupt a child agent's current turn, keeping its context for a follow-up.",
   tasks:
-    "Manage the Ctrl+T task pane (add/list/done/remove). Only when the user explicitly asks. Do NOT auto-run.",
+    "Manage the project task list. Never proactively — only on explicit request, or at a slash-command's task-handoff step.",
+  ask_user:
+    "Any question ending a reply — blocker or optional next step — goes here as clickable " +
+    "options, never prose. Plain words; mark your pick `recommended`. A click sends only that " +
+    "option, so each must be a complete instruction, not one asking them to specify.",
+  enter_plan:
+    "Enter read-only plan mode for complex/risky tasks before implementation; draft a plan under .gg/plans/.",
+  exit_plan: "Submit a .gg/plans/ markdown plan for user approval and leave plan mode.",
   subagent: "Delegate focused, isolated subtasks (research, parallel exploration).",
   skill: "Invoke a named skill for specialized instructions.",
-  mcp__grep__searchGitHub:
-    "Search real-world code in 1M+ GitHub repos. Single literal pattern per call. Sequential only (rate-limited).",
-  enter_plan: "Enter plan mode for read-only research + planning on complex multi-file tasks.",
-  exit_plan: "Submit your plan for user review and exit plan mode.",
+  tool_search:
+    "Load any tool listed as available on demand, plus the extended catalog of " +
+    "integrations (MCP servers) — e.g. 'take a screenshot', 'search public GitHub code'. " +
+    "Matches become callable on your next step. Check the catalog BEFORE concluding you " +
+    "lack a capability.",
+  generate_image:
+    "Generate or edit images via OpenAI's gpt-image-2. Only when the user explicitly asks — never proactively. Pass `image` to edit an existing file.",
+  steroids:
+    "Local corpus of real, current open-source repos. `search` (regex, NOT semantic) for how projects do X, `define` for where a symbol lives, `show` to read the file. Topic not covered = corpus gap: run `discover`, don't retry variants.",
 };
+
+/**
+ * Cross-tool selection guidance that no single tool's own schema description
+ * can state (it's relational). Each clause only renders when its tools are
+ * actually active, so the line never references an unavailable tool. Proven
+ * equivalent to the full per-tool hint list in the prompt-bench ablation
+ * while costing ~95% fewer words.
+ */
+export const TOOL_STEERING_CLAUSES: ReadonlyArray<{
+  needs: readonly string[];
+  text: string;
+}> = [
+  {
+    needs: ["edit", "write"],
+    text: "Prefer `edit` over `write` for changes to existing files.",
+  },
+  {
+    needs: ["bash", "find", "grep"],
+    text: "Use `find`/`grep` rather than `bash` to locate files and search content.",
+  },
+  {
+    needs: ["code_search", "grep", "read"],
+    text: "Prefer `code_search` for “where/how is X implemented”; use `grep` for exact strings or unindexed file types.",
+  },
+  {
+    needs: ["code_nav", "grep"],
+    text: "For “who calls this” / “where is this defined”, use `code_nav` — it resolves symbols exactly, across files; `grep` only matches text and misses renames, re-exports and shadowing.",
+  },
+  {
+    needs: ["read", "grep", "ls", "find"],
+    text: "Batch independent read-only calls (read, grep, ls, find) into one turn — they run in parallel, so it's faster than one per turn; only serialize a call that depends on a previous result.",
+  },
+];
+
+/** Build the steering line from whichever clauses apply to the active tools. */
+export function buildToolSteering(activeTools: readonly string[]): string {
+  const active = new Set(activeTools);
+  return TOOL_STEERING_CLAUSES.filter((c) => c.needs.every((n) => active.has(n)))
+    .map((c) => c.text)
+    .join(" ");
+}
+
+/**
+ * Every tool name `createTools()` can register, including the conditional ones
+ * (web_search on non-Anthropic providers, generate_image with OpenAI auth,
+ * plan tools, the subagent cluster) and `tool_search`, which MCP deferred
+ * loading adds. Used to validate an agent definition's `tools:` frontmatter —
+ * an unknown name is silently dropped by the session allow-list, so a typo
+ * would otherwise cost the agent a capability with no signal at all.
+ */
+export const BUILTIN_TOOL_NAMES: readonly string[] = [
+  "ask_user",
+  "bash",
+  "code_nav",
+  "code_search",
+  "edit",
+  "enter_plan",
+  "exit_plan",
+  "find",
+  "followup_task",
+  "generate_image",
+  "grep",
+  "interrupt_agent",
+  "list_agents",
+  "ls",
+  "read",
+  "screenshot",
+  "send_message",
+  "skill",
+  "source_path",
+  "spawn_agent",
+  "steroids",
+  "subagent",
+  "task_output",
+  "task_send",
+  "task_stop",
+  "tasks",
+  "tool_search",
+  "wait_agent",
+  "web_fetch",
+  "web_search",
+  "write",
+];
 
 /** Tools always rendered when no explicit tool list is provided. */
 export const DEFAULT_TOOL_NAMES: readonly string[] = [
@@ -34,14 +148,17 @@ export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "bash",
   "find",
   "grep",
+  "code_nav",
+  "code_search",
   "ls",
+  "source_path",
   "web_fetch",
   "task_output",
   "task_stop",
-  "tasks",
-  "subagent",
-  "skill",
-  "mcp__grep__searchGitHub",
   "enter_plan",
   "exit_plan",
+  "subagent",
+  "skill",
+  "generate_image",
+  "steroids",
 ];

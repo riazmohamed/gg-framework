@@ -3,9 +3,12 @@ import {
   pruneHistory,
   flushOnTurnText,
   flushOnTurnEnd,
+  countOversizedFlushItems,
+  splitOversizedPinnedItems,
   MAX_HISTORY_ITEMS,
   type FlushableItem,
 } from "./live-item-flush.js";
+import { estimateRenderedRows } from "./utils/assistant-stream-split.js";
 
 // ── Test helpers ──────────────────────────────────────────
 
@@ -128,6 +131,100 @@ describe("flushOnTurnText", () => {
     const items = [errorItem(), assistantItem()];
     const flushed = flushOnTurnText(items);
     expect(flushed).toHaveLength(2);
+  });
+});
+
+// ── countOversizedFlushItems ──────────────────────────────
+
+describe("countOversizedFlushItems", () => {
+  const LIVE_ROWS = 20;
+  const COLUMNS = 80;
+  const estimate = (text: string) => estimateRenderedRows(text, COLUMNS);
+
+  const shortText = { kind: "assistant", text: "A short answer.", id: "short" };
+  const stepDone = { kind: "step_done", id: "step" };
+  // A markdown table tall enough to exceed the live area: header + separator
+  // + 30 rows, double-counted by the table heuristic.
+  const tallTable = {
+    kind: "assistant",
+    text: [
+      "| Feature | Detail |",
+      "| --- | --- |",
+      ...Array.from({ length: 30 }, (_, i) => `| Row ${i} | some detail text |`),
+    ].join("\n"),
+    id: "table",
+  };
+
+  it("returns 0 when every assistant item fits the live area", () => {
+    expect(countOversizedFlushItems([shortText, stepDone], estimate, LIVE_ROWS)).toBe(0);
+  });
+
+  it("flushes through the oversized assistant item (the table-cut-off bug)", () => {
+    expect(countOversizedFlushItems([tallTable], estimate, LIVE_ROWS)).toBe(1);
+  });
+
+  it("flushes earlier siblings too, preserving transcript order", () => {
+    // [short, step_done, tallTable, short] — flushing only the table would
+    // print it to scrollback BEFORE the pinned earlier items get flushed on
+    // the next turn, corrupting order. Cut must include everything up to and
+    // including the last oversized item.
+    const items = [shortText, stepDone, tallTable, { ...shortText, id: "tail" }];
+    expect(countOversizedFlushItems(items, estimate, LIVE_ROWS)).toBe(3);
+  });
+
+  it("ignores non-assistant items even with long text", () => {
+    const longError = { kind: "error", text: "x".repeat(10_000), id: "err" };
+    expect(countOversizedFlushItems([longError], estimate, LIVE_ROWS)).toBe(0);
+  });
+
+  it("returns 0 when the live area has not been measured yet", () => {
+    expect(countOversizedFlushItems([tallTable], estimate, 0)).toBe(0);
+  });
+
+  it("returns 0 for an empty item list", () => {
+    expect(countOversizedFlushItems([], estimate, LIVE_ROWS)).toBe(0);
+  });
+
+  it("flushes a tall plain-text response too (no table required)", () => {
+    const tallText = {
+      kind: "assistant",
+      text: Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n"),
+      id: "tall-text",
+    };
+    expect(countOversizedFlushItems([tallText], estimate, LIVE_ROWS)).toBe(1);
+  });
+
+  it("CUMULATIVE: several medium items that fit individually but overflow together", () => {
+    // [DONE:N] segmentation pins multiple assistant items per turn. Three
+    // 10-row items each fit a 20-row live area alone, but the pinned set is
+    // ~32 rows — same top-rows-never-painted bug as a single tall table.
+    const medium = (id: string) => ({
+      kind: "assistant",
+      text: Array.from({ length: 10 }, (_, i) => `para line ${i}`).join("\n"),
+      id,
+    });
+    const items = [medium("a"), { kind: "step_done", id: "s" }, medium("b"), medium("c")];
+    // Suffix that fits: [medium c] (10+0) + [medium b] (10+1) = 21 > 20, so
+    // only "c" survives — flush the first three.
+    expect(countOversizedFlushItems(items, estimate, LIVE_ROWS)).toBe(3);
+  });
+
+  it("CUMULATIVE: keeps the whole set when the sum fits the budget", () => {
+    const small = (id: string) => ({ kind: "assistant", text: "one line", id });
+    const items = [small("a"), { kind: "step_done", id: "s" }, small("b")];
+    expect(countOversizedFlushItems(items, estimate, LIVE_ROWS)).toBe(0);
+  });
+
+  it("splits an oversized prefix so only the fitting suffix stays live", () => {
+    const tallText = {
+      kind: "assistant",
+      text: Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n"),
+      id: "tall-text",
+    };
+    const tail = { ...shortText, id: "tail" };
+    const split = splitOversizedPinnedItems([tallText, tail], estimate, LIVE_ROWS);
+    expect(split.flushed.map((item) => item.id)).toEqual(["tall-text"]);
+    expect(split.remaining.map((item) => item.id)).toEqual(["tail"]);
   });
 });
 
@@ -363,5 +460,60 @@ describe("flush integration scenarios", () => {
     const { liveItems } = simulateRun(turns);
     // The whole point: liveItems MUST be bounded
     expect(liveItems.length).toBeLessThanOrEqual(1);
+  });
+
+  it("SCROLL REPRO HARNESS: large queued input and live tool output stay bounded", () => {
+    // Deterministic headless stand-in for the reported TUI scroll bug: the user
+    // pastes a very large next prompt while the current run is still producing
+    // live tool/result rows. No OAuth/API/Ink render is needed; we assert the
+    // pure state invariant that protects terminal scrollback from live-area
+    // growth. The queued prompt is deliberately huge to catch accidental logic
+    // that would keep queued input in the live region before it starts.
+    const queuedPrompt = Array.from(
+      { length: 600 },
+      (_, i) => `queued follow-up line ${i}: ${"x".repeat(80)}`,
+    ).join("\n");
+    expect(queuedPrompt.length).toBeGreaterThan(50_000);
+
+    let liveItems: FlushableItem[] = [assistantItem()];
+    let history: FlushableItem[] = [];
+    let maxLiveItems = liveItems.length;
+
+    const queueFlush = (items: FlushableItem[]) => {
+      history = pruneHistory([...history, ...items]);
+    };
+    const partitionCompleted = (items: FlushableItem[]) => {
+      const firstActiveIdx = items.findIndex((item) => item.kind === "tool_start");
+      if (firstActiveIdx === -1) return { flushed: items, remaining: [] };
+      if (firstActiveIdx === 0) return { flushed: [], remaining: items };
+      return { flushed: items.slice(0, firstActiveIdx), remaining: items.slice(firstActiveIdx) };
+    };
+
+    for (let i = 0; i < 75; i++) {
+      // onToolStart flushes completed assistant/tool output before adding the
+      // running tool row, so old live output moves to Static/history.
+      const beforeStart = partitionCompleted(liveItems);
+      if (beforeStart.flushed.length > 0) queueFlush(beforeStart.flushed);
+      liveItems = [...beforeStart.remaining, toolStart(`tool-${i}`)];
+      maxLiveItems = Math.max(maxLiveItems, liveItems.length);
+
+      // onToolEnd replaces the active row with completed output, then
+      // partitionCompleted flushes it. This simulates queued/live work without
+      // ever placing the queued prompt itself into liveItems.
+      liveItems = liveItems.map((item) =>
+        item.kind === "tool_start" ? ({ kind: "tool_done", id: item.id } as FlushableItem) : item,
+      );
+      const afterEnd = partitionCompleted(liveItems);
+      if (afterEnd.flushed.length > 0) queueFlush(afterEnd.flushed);
+      liveItems = afterEnd.remaining;
+      maxLiveItems = Math.max(maxLiveItems, liveItems.length);
+    }
+
+    // While a message is queued, App shows only a tiny queue indicator; the
+    // queued text starts rendering as a user item only when onQueuedStart fires.
+    expect(queuedPrompt).not.toEqual("");
+    expect(maxLiveItems).toBeLessThanOrEqual(1);
+    expect(liveItems).toEqual([]);
+    expect(history).toHaveLength(76); // initial assistant + 75 completed tool rows
   });
 });

@@ -20,18 +20,21 @@ import {
   formatWelcome,
 } from "./utils/format.js";
 import { AuthStorage } from "./core/auth-storage.js";
-import { ensureAppDirs } from "./config.js";
+import { kimiCodingHeaders, isKimiCodingEndpoint } from "./core/oauth/kimi.js";
+import { ensureAppDirs, loadSavedSettings } from "./config.js";
 import { discoverSkills } from "./core/skills.js";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import { getContextWindow } from "./core/model-registry.js";
+import { resolveCompactionPolicy } from "./core/compaction/policy.js";
 
 export async function runInteractive(config: CliConfig): Promise<void> {
   const { provider, model, cwd } = config;
 
   // Load auth & ensure dirs
   const paths = await ensureAppDirs();
+  const savedSettings = loadSavedSettings(paths.settingsFile);
 
   // Ensure project-local .gg directories exist
   const localGGDir = path.join(cwd, ".gg");
@@ -39,19 +42,35 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   await fs.mkdir(path.join(localGGDir, "commands"), { recursive: true });
   await fs.mkdir(path.join(localGGDir, "agents"), { recursive: true });
 
-  // Discover skills & build system prompt
+  const authStorage = new AuthStorage(paths.authFile);
+  await authStorage.load();
+
+  // Discover skills and create tools before building the prompt so tool names are accurate.
   const skills = await discoverSkills({
     globalSkillsDir: paths.skillsDir,
     projectDir: cwd,
   });
+  const { tools, processManager, lspManager } = await createTools(cwd, {
+    skills,
+    provider,
+    model,
+    authStorage,
+  });
   const systemPrompt =
-    config.systemPrompt ?? (await buildSystemPrompt(cwd, skills, false, undefined, provider));
-
-  // Create tools
-  const { tools, processManager } = createTools(cwd, { skills });
-  process.on("exit", () => processManager.shutdownAll());
-  const authStorage = new AuthStorage(paths.authFile);
-  await authStorage.load();
+    config.systemPrompt ??
+    (await buildSystemPrompt(
+      cwd,
+      skills,
+      false,
+      undefined,
+      tools.map((tool) => tool.name),
+      undefined,
+      provider,
+    ));
+  process.on("exit", () => {
+    processManager.shutdownAll();
+    lspManager?.shutdownAll();
+  });
 
   // Initialize messages and session
   const messages: Message[] = [];
@@ -89,18 +108,37 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   // Auto-compact on load if the restored session exceeds the context window.
   // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
   if (messages.length > 1) {
-    const contextWindow = getContextWindow(model);
-    if (shouldCompact(messages, contextWindow, 0.8)) {
+    const creds = await authStorage.resolveCredentials(provider);
+    const contextWindow = getContextWindow(model, { provider, accountId: creds.accountId });
+    const policy = resolveCompactionPolicy({
+      provider,
+      model,
+      contextWindow,
+      threshold: savedSettings.compactThreshold,
+      accountId: creds.accountId,
+    });
+    if (savedSettings.autoCompact && shouldCompact(messages, contextWindow, policy.threshold)) {
       stdout.write("Compacting restored session...\n");
-      const creds = await authStorage.resolveCredentials(provider);
-      const compacted = await compact(messages, {
-        provider,
-        model,
-        apiKey: creds.accessToken,
-        contextWindow,
-      });
-      messages.length = 0;
-      messages.push(...compacted.messages);
+      const compactionAbort = new AbortController();
+      const onSigint = () => compactionAbort.abort();
+      process.once("SIGINT", onSigint);
+      try {
+        const compacted = await compact(messages, {
+          provider,
+          model,
+          apiKey: creds.accessToken,
+          accountId: creds.accountId,
+          projectId: creds.projectId,
+          baseUrl: config.baseUrl ?? creds.baseUrl,
+          contextWindow,
+          targetTokens: policy.targetTokens,
+          signal: compactionAbort.signal,
+        });
+        messages.length = 0;
+        messages.push(...compacted.messages);
+      } finally {
+        process.off("SIGINT", onSigint);
+      }
     }
   }
 
@@ -127,7 +165,11 @@ export async function runInteractive(config: CliConfig): Promise<void> {
     if (!input) continue;
 
     // Push user message
-    const userMessage: Message = { role: "user", content: input };
+    const userMessage: Message = {
+      role: "user",
+      content: input,
+      provenance: { source: "human", kind: "prompt", visibility: "transcript" },
+    };
     messages.push(userMessage);
     await persistMessage(session, userMessage);
 
@@ -136,8 +178,20 @@ export async function runInteractive(config: CliConfig): Promise<void> {
 
     // Create abort controller for this run
     const ac = new AbortController();
+    let sigintCount = 0;
+    let sigintTimer: ReturnType<typeof setTimeout> | null = null;
     const onSigint = () => {
-      ac.abort();
+      sigintCount++;
+      if (sigintTimer) clearTimeout(sigintTimer);
+      sigintTimer = setTimeout(() => {
+        sigintCount = 0;
+      }, 2000);
+      if (sigintCount === 1) {
+        ac.abort();
+      } else {
+        // Second Ctrl+C: force exit immediately (130 = 128 + SIGINT)
+        process.exit(130);
+      }
     };
     process.on("SIGINT", onSigint);
 
@@ -151,9 +205,14 @@ export async function runInteractive(config: CliConfig): Promise<void> {
         tools,
         maxTokens: 16384,
         apiKey: creds.accessToken,
-        baseUrl: config.baseUrl,
+        baseUrl: config.baseUrl ?? creds.baseUrl,
         signal: ac.signal,
         accountId: creds.accountId,
+        projectId: creds.projectId,
+        defaultHeaders:
+          provider === "moonshot" && isKimiCodingEndpoint(config.baseUrl ?? creds.baseUrl)
+            ? kimiCodingHeaders()
+            : undefined,
         // clearToolUses disabled — causes model to output unsolicited context summaries
       });
 
@@ -172,6 +231,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
       }
     } finally {
       process.removeListener("SIGINT", onSigint);
+      if (sigintTimer) clearTimeout(sigintTimer);
     }
 
     // Persist new messages added by agentLoop

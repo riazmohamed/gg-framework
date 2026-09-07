@@ -1,0 +1,7 @@
+// Moved to @abukhaled/gg-core. This shim re-exports it so existing relative
+// imports (`./thinking-level.js`) keep resolving unchanged.
+export {
+  getSupportedThinkingLevels,
+  isThinkingLevelSupported,
+  getNextThinkingLevel,
+} from "@abukhaled/gg-core";

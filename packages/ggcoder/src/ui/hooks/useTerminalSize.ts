@@ -24,7 +24,26 @@ const TerminalSizeContext = createContext<TerminalSizeValue | null>(null);
  * or App.tsx) to avoid the MaxListenersExceededWarning that occurs when
  * every component independently listens for resize events.
  */
-export function TerminalSizeProvider({ children }: { children: React.ReactNode }) {
+export function TerminalSizeProvider({
+  children,
+  isAgentRunning,
+  fullscreen = false,
+}: React.PropsWithChildren<{
+  /**
+   * Optional getter — when it returns true, the resize debounce skips its
+   * resizeKey bump while the agent is running. The deferred resetUI() in
+   * App.tsx cleans up reflow drift the moment the agent goes idle, so the
+   * visual cost of skipping here is minimal.
+   */
+  isAgentRunning?: () => boolean;
+  /**
+   * Fullscreen alt-screen mode. Ink owns the whole screen and repaints the
+   * full-height frame in place, so on resize we only re-measure dimensions —
+   * no manual screen clear (which would flash) and no resizeKey bump (the
+   * full-height layout reflows on the dimension change alone).
+   */
+  fullscreen?: boolean;
+}>) {
   const { stdout } = useStdout();
   const [size, setSize] = useState({
     columns: Math.max(MIN_COLUMNS, stdout?.columns ?? 80),
@@ -32,6 +51,8 @@ export function TerminalSizeProvider({ children }: { children: React.ReactNode }
   });
   const [resizeKey, setResizeKey] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isAgentRunningRef = useRef(isAgentRunning);
+  isAgentRunningRef.current = isAgentRunning;
 
   const onResize = useCallback(() => {
     if (!stdout) return;
@@ -44,21 +65,38 @@ export function TerminalSizeProvider({ children }: { children: React.ReactNode }
     // we update once after the user finishes dragging.
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      // Clear visible screen + scrollback to remove deformed ghost renders
-      // left behind by Ink re-rendering at different terminal widths during
-      // a resize drag.
-      stdout.write(
-        "\x1b[2J" + // clear visible screen
-          "\x1b[3J" + // clear scrollback buffer
-          "\x1b[H", // cursor home
-      );
+      const running = isAgentRunningRef.current?.() ?? false;
+      if (running) {
+        // Update dimensions only — skip the resizeKey bump. render.ts flags
+        // pendingResetUI; App.tsx fires a clean resetUI() the moment the agent
+        // goes idle, fixing any reflow drift then.
+        setSize({
+          columns: Math.max(MIN_COLUMNS, stdout.columns ?? 80),
+          rows: Math.max(MIN_ROWS, stdout.rows ?? 24),
+        });
+        return;
+      }
+      if (fullscreen) {
+        // Alt screen: re-measure only. The full-height frame reflows to the new
+        // dimensions on this state change; Ink repaints it in place with no
+        // native scrollback to disturb, so there's nothing to clear.
+        setSize({
+          columns: Math.max(MIN_COLUMNS, stdout.columns ?? 80),
+          rows: Math.max(MIN_ROWS, stdout.rows ?? 24),
+        });
+        return;
+      }
+      // Clear visible screen only. Completed chat rows are real terminal
+      // scrollback now; preserve them while dropping malformed live frames left
+      // behind by resize reflow.
+      stdout.write("\x1b[2J\x1b[H");
       setSize({
         columns: Math.max(MIN_COLUMNS, stdout.columns ?? 80),
         rows: Math.max(MIN_ROWS, stdout.rows ?? 24),
       });
       setResizeKey((k) => k + 1);
     }, 300);
-  }, [stdout]);
+  }, [stdout, fullscreen]);
 
   useEffect(() => {
     if (!stdout) return;
@@ -82,9 +120,8 @@ export function TerminalSizeProvider({ children }: { children: React.ReactNode }
  * trigger React re-renders on every resize event while Ink's internal
  * line-tracking still assumes the old width, causing ghost/duplicate renders.
  *
- * `resizeKey` can be used as a React `key` to force a full remount — this
- * is the only reliable way to make Ink re-render <Static> content that was
- * already printed to scrollback and got corrupted by terminal text reflow.
+ * `resizeKey` can be used as a React `key` to force live-area remounts after
+ * terminal dimensions settle.
  */
 export function useTerminalSize() {
   const ctx = useContext(TerminalSizeContext);

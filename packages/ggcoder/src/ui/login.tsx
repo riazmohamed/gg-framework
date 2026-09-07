@@ -1,12 +1,16 @@
 import chalk from "chalk";
 import type { Provider } from "@abukhaled/gg-ai";
+import { AUTH_PROVIDERS } from "../core/auth-providers.js";
 import { XIAOMI_REGION_IDS, XIAOMI_REGIONS, type XiaomiRegion } from "../core/xiaomi-regions.js";
 
+// OG Coder mark — fork-specific logo (block chars, "OG" not "GG").
 const LOGO_LINES = [
   " \u2584\u2580\u2580\u2584 \u2584\u2580\u2580\u2580",
   " \u2588  \u2588 \u2588 \u2580\u2588",
   " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
 ];
+const GAP = "   ";
+
 // Defaults — ggcoder branding. ggeditor passes its own palette.
 const DEFAULT_GRADIENT = [
   "#60a5fa",
@@ -24,7 +28,6 @@ const DEFAULT_GRADIENT = [
 ];
 const DEFAULT_PRIMARY = "#60a5fa";
 const DEFAULT_ACCENT = "#a78bfa";
-const GAP = "   ";
 const TEXT = "#e2e8f0";
 const TEXT_DIM = "#64748b";
 
@@ -34,17 +37,12 @@ let _gradient: string[] = DEFAULT_GRADIENT;
 let _primary = DEFAULT_PRIMARY;
 let _accent = DEFAULT_ACCENT;
 
-const PROVIDERS: { label: string; value: Provider; description: string }[] = [
-  { label: "Anthropic", value: "anthropic", description: "Claude Opus 4.7, Sonnet 4.6, Haiku 4.5" },
-  { label: "OpenAI", value: "openai", description: "GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex" },
-  { label: "Moonshot", value: "moonshot", description: "Kimi K2.6" },
-  { label: "Z.AI (GLM)", value: "glm", description: "GLM-5.1, GLM-4.7, GLM-4.7 Flash" },
-  { label: "MiniMax", value: "minimax", description: "MiniMax M2.7, M2.7 Highspeed" },
-  { label: "Xiaomi (MiMo)", value: "xiaomi", description: "MiMo V2 Pro / Omni / Flash" },
-  { label: "DeepSeek", value: "deepseek", description: "DeepSeek V4 Pro, V4 Flash" },
-  { label: "Ollama", value: "ollama", description: "Local models" },
-  { label: "OpenRouter", value: "openrouter", description: "Qwen3.6-Plus, multi-provider gateway" },
-];
+// Rows come straight from AUTH_PROVIDERS so the login screen can never list a
+// model the registry no longer serves — that table is the single source of
+// truth for provider label, model line-up and auth methods.
+const PROVIDERS: { label: string; value: Provider; description: string }[] = AUTH_PROVIDERS.map(
+  (p) => ({ label: p.label, value: p.value as Provider, description: p.description }),
+);
 
 function gradientLine(text: string): string {
   let result = "";
@@ -64,16 +62,19 @@ function gradientLine(text: string): string {
 function renderScreen(selectedIndex: number): string {
   const lines: string[] = [];
 
-  lines.push(
-    gradientLine(LOGO_LINES[0]!) +
-      GAP +
-      chalk.hex(_primary).bold("OG Coder") +
+  const titleLines = [
+    chalk.hex(_primary).bold(_brand) +
       (_version ? chalk.hex(TEXT_DIM)(` v${_version}`) : "") +
-      chalk.hex(TEXT_DIM)(" · By ") +
+      chalk.hex(TEXT_DIM)(" \u00b7 By ") +
       chalk.hex(TEXT).bold("Abu Khaled"),
-  );
-  lines.push(gradientLine(LOGO_LINES[1]!) + GAP + chalk.hex(_accent)("Login"));
-  lines.push(gradientLine(LOGO_LINES[2]!) + GAP + chalk.hex(TEXT_DIM)("Select a provider"));
+    chalk.hex(_accent)("Login"),
+    chalk.hex(TEXT_DIM)("Select a provider"),
+  ];
+  for (let i = 0; i < LOGO_LINES.length; i++) {
+    const title = titleLines[i];
+    const logo = gradientLine(LOGO_LINES[i]!);
+    lines.push(title === undefined ? logo : `${logo}${GAP}${title}`);
+  }
   lines.push("");
 
   for (let i = 0; i < PROVIDERS.length; i++) {

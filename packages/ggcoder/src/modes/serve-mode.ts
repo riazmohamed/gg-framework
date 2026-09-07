@@ -8,11 +8,14 @@ import { transcribeVoice, isModelLoaded, setProgressCallback } from "../core/voi
 import chalk from "chalk";
 import { formatUserError } from "../utils/error-handler.js";
 import { log, closeLogger } from "../core/logger.js";
+import { installTerminationHandlers } from "../core/shutdown.js";
 import { getAppPaths } from "../config.js";
 import { MODELS, getContextWindow } from "../core/model-registry.js";
 import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
 import { loadCustomCommands } from "../core/custom-commands.js";
+import { renderLogoBlock } from "../cli/shared.js";
+import { verifyBotToken } from "../core/telegram-config.js";
 
 export interface ServeModeOptions {
   provider: Provider;
@@ -24,6 +27,18 @@ export interface ServeModeOptions {
     botToken: string;
     userId: number;
   };
+  /**
+   * Embedded mode (desktop app): skip the terminal banner/console output and
+   * don't register process signal handlers — the host process owns those. The
+   * bot polls in the background and the caller stops it via the returned
+   * controller. Defaults to false (the CLI's blocking, banner-printing flow).
+   */
+  embedded?: boolean;
+}
+
+/** Handle for an embedded serve session: stop polling + dispose all sessions. */
+export interface ServeController {
+  stop: () => Promise<void>;
 }
 
 // ── Serve Config ───────────────────────────────────────────
@@ -100,13 +115,22 @@ interface ChatState {
 }
 
 /**
- * Serve mode: run ogcoder controlled via Telegram.
+ * Serve mode: run ggcoder controlled via Telegram.
  *
  * - DMs to bot → default project (CWD where serve was started)
  * - Groups → linked projects via /link <path>
  * - Each chat gets its own AgentSession, tools, context
  */
-export async function runServeMode(options: ServeModeOptions): Promise<void> {
+/**
+ * Build a serve session: wire the Telegram bot to per-chat AgentSessions and
+ * start long-polling in the background. Returns a controller to stop it.
+ *
+ * Shared by the CLI (`ggcoder serve`, via {@link runServeMode}) and the desktop
+ * app sidecar. In `embedded` mode it stays silent and leaves process-signal
+ * handling to the host.
+ */
+export async function startServeMode(options: ServeModeOptions): Promise<ServeController> {
+  const embedded = options.embedded ?? false;
   const bot = new TelegramBot({
     botToken: options.telegram.botToken,
     allowedUserId: options.telegram.userId,
@@ -247,8 +271,12 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
       const turns = totalTurns === 1 ? "1 turn" : `${totalTurns} turns`;
 
       // Context usage percentage
-      const modelId = session.getState().model;
-      const contextWindow = getContextWindow(modelId);
+      const sessionState = session.getState();
+      const modelId = sessionState.model;
+      const contextWindow = getContextWindow(modelId, {
+        provider: sessionState.provider,
+        accountId: sessionState.accountId,
+      });
       const contextTokens = estimateConversationTokens(session.getMessages());
       const contextPctRaw = (contextTokens / contextWindow) * 100;
       const contextStr =
@@ -299,7 +327,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     const currentModel = state?.session.getState().model ?? options.model;
     const modelInfo = MODELS.find((m) => m.id === currentModel);
 
-    let text = `*OG Coder* — remote coding agent\n\n`;
+    let text = `*ggcoder* — remote coding agent\n\n`;
     text += `Project: \`${path.basename(projectPath)}\`\n`;
     text += `Model: *${modelInfo?.name ?? currentModel}*\n\n`;
 
@@ -365,7 +393,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     const groupName = chatTitle ?? "this group";
     await bot.send(
       chatId,
-      `*OG Coder* joined *${groupName}*\n\n` +
+      `*ggcoder* joined *${groupName}*\n\n` +
         `Send /link to connect to a project\n` +
         `Send /help for all commands`,
     );
@@ -455,7 +483,10 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
 
       const sessionState = state.session.getState();
       const modelInfo = MODELS.find((m) => m.id === sessionState.model);
-      const contextWindow = getContextWindow(sessionState.model);
+      const contextWindow = getContextWindow(sessionState.model, {
+        provider: sessionState.provider,
+        accountId: sessionState.accountId,
+      });
       const contextTokens = estimateConversationTokens(state.session.getMessages());
       const statusPctRaw = (contextTokens / contextWindow) * 100;
       const statusContextStr =
@@ -605,7 +636,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
       return;
     }
 
-    // ── Forward to ogcoder slash commands ──
+    // ── Forward to ggcoder slash commands ──
 
     if (!TELEGRAM_COMMANDS.has(cmd)) {
       const projectPath = resolveProjectPath(chatId);
@@ -614,7 +645,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
       if (state.isProcessing) {
         await bot.send(
           chatId,
-          "OG Coder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
+          "ggcoder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
         );
         return;
       }
@@ -650,7 +681,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     if (state?.isProcessing) {
       await bot.send(
         chatId,
-        "OG Coder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
+        "ggcoder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
       );
       return;
     }
@@ -705,7 +736,7 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     if (state.isProcessing) {
       await bot.send(
         chatId,
-        "OG Coder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
+        "ggcoder is still processing. Wait for the current task to finish, or send /cancel to interrupt.",
       );
       return;
     }
@@ -731,7 +762,25 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
 
   // ── Initialize and start ─────────────────────────────
 
-  try {
+  /** Stop polling and dispose every per-chat session (idempotent enough). */
+  async function stop(): Promise<void> {
+    bot.stop();
+    for (const state of chatStates.values()) {
+      stopTyping(state);
+      await state.session.dispose().catch(() => {});
+    }
+  }
+
+  // Verify the bot token up front so an invalid token surfaces to the caller
+  // (the embedded app shows it as a start error) instead of failing silently
+  // inside the background polling loop.
+  const me = await verifyBotToken(options.telegram.botToken);
+  if (!me.ok) {
+    await stop();
+    throw new Error("Invalid bot token — Telegram rejected it.");
+  }
+
+  if (!embedded) {
     // Clear terminal
     process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
 
@@ -742,50 +791,18 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     const displayPath =
       home && options.cwd.startsWith(home) ? "~" + options.cwd.slice(home.length) : options.cwd;
 
-    // GG logo with gradient (matches Banner.tsx)
-    const LOGO = [
-      " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
-      " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
-      " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
-    ];
-    const GRADIENT = [
-      "#60a5fa",
-      "#6da1f9",
-      "#7a9df7",
-      "#8799f5",
-      "#9495f3",
-      "#a18ff1",
-      "#a78bfa",
-      "#a18ff1",
-      "#9495f3",
-      "#8799f5",
-      "#7a9df7",
-      "#6da1f9",
-    ];
-
-    function gradientText(text: string): string {
-      let colorIdx = 0;
-      return text
-        .split("")
-        .map((ch) => {
-          if (ch === " ") return ch;
-          const color = GRADIENT[colorIdx++ % GRADIENT.length]!;
-          return chalk.hex(color)(ch);
-        })
-        .join("");
-    }
-
-    const GAP = "   ";
+    // GG logo with gradient (matches the interactive TUI banner)
     console.log();
-    console.log(
-      `  ${gradientText(LOGO[0]!)}${GAP}` +
-        chalk.hex("#60a5fa").bold("OG Coder") +
+    for (const row of renderLogoBlock([
+      chalk.hex("#60a5fa").bold("OG Coder") +
         chalk.hex("#6b7280")(` v${options.version}`) +
         chalk.hex("#6b7280")(" · By ") +
         chalk.white.bold("Abu Khaled"),
-    );
-    console.log(`  ${gradientText(LOGO[1]!)}${GAP}` + chalk.hex("#a78bfa")(modelName));
-    console.log(`  ${gradientText(LOGO[2]!)}${GAP}` + chalk.hex("#6b7280")(displayPath));
+      chalk.hex("#a78bfa")(modelName),
+      chalk.hex("#6b7280")(displayPath),
+    ])) {
+      console.log(row);
+    }
     console.log();
     console.log(
       chalk.hex("#6b7280")("  Mode      ") +
@@ -809,30 +826,51 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
         chalk.hex("#6b7280")("switch model"),
     );
     console.log();
+  }
 
-    // Handle graceful shutdown
-    const shutdown = async () => {
-      console.log("\nShutting down...");
-      bot.stop();
-      for (const state of chatStates.values()) {
-        stopTyping(state);
-        await state.session.dispose();
-      }
-      closeLogger();
-      process.exit(0);
-    };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
+  // Launch long-polling in the background. Errors (network blips) are logged;
+  // the loop self-recovers. The caller controls lifetime via the returned stop.
+  void bot.start().catch((err) => {
+    log(
+      "ERROR",
+      "serve",
+      `Bot polling stopped: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
 
-    await bot.start();
+  return { stop };
+}
+
+/**
+ * CLI serve flow (`ggcoder serve`): prints the banner, starts the bot, wires
+ * SIGINT/SIGTERM/SIGHUP to a deadline-bounded shutdown, then blocks until the
+ * process exits.
+ */
+export async function runServeMode(options: ServeModeOptions): Promise<void> {
+  let controller: ServeController;
+  try {
+    controller = await startServeMode({ ...options, embedded: false });
   } catch (err) {
     console.error(`Failed to start: ${formatUserError(err)}`);
-    for (const state of chatStates.values()) {
-      await state.session.dispose();
-    }
     closeLogger();
     process.exit(1);
   }
+
+  // A closed terminal delivers one SIGHUP and never a second key press, so the
+  // bot has to stop polling on the first signal — an orphaned poller keeps
+  // spending API calls with nobody attached. The deadline covers a Telegram
+  // long-poll or MCP server that refuses to close.
+  installTerminationHandlers({
+    scope: "serve",
+    onShutdownStart: () => console.log("\nShutting down..."),
+    teardown: async () => {
+      await controller.stop();
+      closeLogger();
+    },
+  });
+
+  // Block forever — the bot polls in the background; shutdown exits the process.
+  await new Promise<never>(() => {});
 }
 
 // ── Helpers ───────────────────────────────────────────────

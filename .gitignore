@@ -1,5 +1,9 @@
 node_modules/
 dist/
+out/
+release/
+coverage/
+.eslintcache
 *.tgz
 
 # Auth & secrets
@@ -7,10 +11,18 @@ dist/
 .env.*
 ~/.gg/
 .gg/
+!/.gg/
+/.gg/*
+!/.gg/commands/
+/.gg/commands/*
+!/.gg/commands/release.md
 
 # Scratch / ad-hoc test files
 test_*.mjs
 test_*.js
+test_*.js.map
+test_*.d.ts
+test_*.d.ts.map
 
 # OS
 .DS_Store
@@ -20,8 +32,65 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Local tool locks
+.claude/*.lock
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Rust / Swift build outputs
+target/
+.build/
+
 # npm
 .npmrc
 
-# gg-editor: generated from src/skills/*.md by scripts/build-skills.mjs (runs in build/check/test)
-packages/gg-editor/src/skills.ts
+# Goal audit generated evidence
+.goal-artifacts/
+.goal-evidence/
+artifacts/
+packages/ggcoder/.goal-evidence/
+packages/ggcoder/ideal-sim/
+
+# prompt-bench scratch sandboxes
+experiments/prompt-bench/.bench-sandbox-*
+
+# Local agent config, benchmarks and one-off tooling. These are personal working
+# directories, not shipped source, EXCEPT the CI size/startup gates below: no
+# package build or npm script reads them, so a fresh clone is unaffected by
+# their absence.
+/.gg/
+/.claude/
+# bench/ stays personal except the committed CI gates and their baseline.
+/bench/*
+!/bench/size-gate.mjs
+!/bench/startup-gate.mjs
+!/bench/baseline/
+/bench/baseline/*
+!/bench/baseline/sizes.json
+/benchmarks/
+/experiments/bench-mark/
+/experiments/lean-code-bench/
+/scripts/
+CLAUDE.md
+packages/*/.bench-*.mjs
+
+# Local research/strategy notes
+/*-vs-*.md
+/*-report.md
+/fixes.md
+/*coding-agent*.md
+
+# Challenge feature: design sandbox and dev-only preview harness.
+#
+# Neither ships. `mockups/` is the standalone HTML/CSS/JS sandbox the fight's
+# visual language was designed in; `dev/` is a browser harness that mounts the
+# real ActivityBar so the offer can be eyeballed without the Tauri runtime.
+# Vite builds a single entry (index.html), so a production build never sees
+# them — a clean build emits dist/index.html and nothing else. Ignored so
+# `git add -A` cannot sweep 216KB of scratch into a release.
+/gg-app/mockups/
+/gg-app/dev/

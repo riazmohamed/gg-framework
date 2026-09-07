@@ -1,6 +1,7 @@
 import React, { memo } from "react";
 import { Text, Box } from "ink";
-import { useTheme } from "../theme/theme.js";
+import { useTheme, type Theme } from "../theme/theme.js";
+import { steroidsQuery } from "../tool-group-summary.js";
 import { Spinner } from "./Spinner.js";
 import { ToolUseLoader } from "./ToolUseLoader.js";
 import { MessageResponse } from "./MessageResponse.js";
@@ -9,8 +10,10 @@ import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { computeWordDiff, type WordSegment } from "../utils/word-diff.js";
 import { DiffFrame } from "./DiffFrame.js";
 import { NoSelect } from "./NoSelect.js";
+import { toolAccentColor, toolNameColor } from "../transcript/tool-presentation.js";
 
 const MAX_OUTPUT_LINES = 4; // max lines shown per tool result
+const RESPONSE_LEFT_PADDING = 1;
 
 // ToolUseLoader minWidth={2} = 2 chars
 const HEADER_PREFIX = 2;
@@ -21,6 +24,26 @@ const BODY_PREFIX = 6;
 function truncateLine(line: string, cols: number, reservedChars = 6): string {
   const max = cols - reservedChars;
   return line.length > max ? line.slice(0, max) + "…" : line;
+}
+
+/**
+ * Head + tail truncation. Keeps the first ~60% and last ~40% of `maxLines`
+ * so the important bottom of a tool's output (the failure, the exit line) is
+ * never hidden by head-only slicing. Returns the displayed slice, how many
+ * lines were dropped, and the index at which the hidden marker should appear.
+ */
+function sliceHeadTail(
+  lines: string[],
+  maxLines: number,
+): { lines: string[]; hiddenCount: number; splitAt: number } {
+  if (lines.length <= maxLines) {
+    return { lines, hiddenCount: 0, splitAt: lines.length };
+  }
+  const head = Math.max(1, Math.ceil(maxLines * 0.6));
+  const tail = maxLines - head;
+  const display =
+    tail > 0 ? [...lines.slice(0, head), ...lines.slice(-tail)] : lines.slice(0, head);
+  return { lines: display, hiddenCount: lines.length - maxLines, splitAt: head };
 }
 
 /**
@@ -51,7 +74,10 @@ interface ToolRunningProps {
   args: Record<string, unknown>;
   /** Live progress output (e.g., bash streaming stdout). */
   progressOutput?: string;
+  /** Animate the running indicator until this timestamp, then settle static. */
+  animateUntil?: number;
   formatters?: ToolExecutionFormatters;
+  marginTop?: number;
 }
 
 interface ToolDoneProps {
@@ -62,12 +88,14 @@ interface ToolDoneProps {
   isError: boolean;
   details?: unknown;
   formatters?: ToolExecutionFormatters;
+  marginTop?: number;
 }
 
 type ToolExecutionProps = ToolRunningProps | ToolDoneProps;
 
 /** Tools that use compact one-line summaries instead of showing output. */
-const COMPACT_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const COMPACT_TOOLS = new Set(["read", "grep", "find", "ls", "source_path"]);
+const STATE_TOOLS = new Set(["tasks", "goals"]);
 
 /** Tools rendered with the server-tool style (spinner + summary, no output). */
 const SERVER_STYLE_TOOLS = new Set(["web_search"]);
@@ -75,6 +103,8 @@ const SERVER_STYLE_TOOLS = new Set(["web_search"]);
 export function ToolExecution(props: ToolExecutionProps) {
   const theme = useTheme();
   const { columns } = useTerminalSize();
+  const staticDisplay = props.status === "running" ? false : true;
+  const marginTop = props.marginTop ?? 0;
 
   if (props.status === "running") {
     // Server-style tools (web_search) — blinking dot + spinner "Searching..."
@@ -87,9 +117,11 @@ export function ToolExecution(props: ToolExecutionProps) {
       );
       const headerContentWidth = Math.max(10, columns - HEADER_PREFIX);
       return (
-        <Box flexDirection="column" marginTop={1}>
+        <Box flexDirection="column" paddingLeft={RESPONSE_LEFT_PADDING} marginTop={marginTop}>
           <Box flexDirection="row">
-            <ToolUseLoader status="running" />
+            <Box width={HEADER_PREFIX} flexShrink={0}>
+              <Spinner staticDisplay={staticDisplay} />
+            </Box>
             <Box flexGrow={1} width={headerContentWidth}>
               <Text wrap="wrap">
                 <Text bold color={theme.toolName}>
@@ -107,8 +139,10 @@ export function ToolExecution(props: ToolExecutionProps) {
               </Text>
             </Box>
           </Box>
-          <MessageResponse>
-            <Spinner label="Searching..." />
+          <MessageResponse accentColor={toolAccentColor(theme, props.name)}>
+            <Text color={theme.textDim} wrap="wrap">
+              Searching...
+            </Text>
           </MessageResponse>
         </Box>
       );
@@ -117,16 +151,32 @@ export function ToolExecution(props: ToolExecutionProps) {
     if (COMPACT_TOOLS.has(props.name)) {
       const summary = getCompactRunningLabel(props.name, props.args);
       return (
-        <Box marginTop={1} flexDirection="row">
-          <ToolUseLoader status="running" />
-          <Text color={theme.toolName} bold>
+        <Box paddingLeft={RESPONSE_LEFT_PADDING} marginTop={marginTop} flexDirection="row">
+          <Box width={HEADER_PREFIX} flexShrink={0}>
+            <Spinner staticDisplay={staticDisplay} />
+          </Box>
+          <Text color={toolNameColor(theme, props.name)} bold>
             {summary}
           </Text>
-          <Text color={theme.textDim}>{" (ctrl+o to expand)"}</Text>
         </Box>
       );
     }
-    // Non-compact tools keep the sparkle spinner with a blinking dot prefix
+    if (STATE_TOOLS.has(props.name)) {
+      const { label, detail } = getToolHeaderParts(props.name, props.args);
+      return (
+        <Box paddingLeft={RESPONSE_LEFT_PADDING} marginTop={marginTop} flexDirection="row">
+          <Box width={HEADER_PREFIX} flexShrink={0}>
+            <Spinner staticDisplay={staticDisplay} />
+          </Box>
+          <Text color={toolNameColor(theme, props.name)} bold>
+            {label}
+          </Text>
+          {detail ? <Text color={theme.textDim}> {detail}</Text> : null}
+        </Box>
+      );
+    }
+
+    // Non-compact tools keep the same status-dot header spacing as completed rows.
     const { label, detail } = getToolHeaderParts(props.name, props.args);
 
     // Bash progress streaming — show last 3 lines of live output
@@ -134,12 +184,16 @@ export function ToolExecution(props: ToolExecutionProps) {
       const progLines = props.progressOutput.split("\n").filter(Boolean);
       const tail = progLines.slice(-3);
       return (
-        <Box marginTop={1} flexDirection="column">
+        <Box paddingLeft={RESPONSE_LEFT_PADDING} flexDirection="column">
           <Box flexDirection="row">
-            <ToolUseLoader status="running" />
-            <Spinner label={detail ? `${label}(${detail})` : label} />
+            <Box width={HEADER_PREFIX} flexShrink={0}>
+              <Spinner staticDisplay={staticDisplay} />
+            </Box>
+            <Text color={theme.toolName} bold wrap="wrap">
+              {detail ? `${label}(${detail})` : label}
+            </Text>
           </Box>
-          <MessageResponse>
+          <MessageResponse accentColor={toolAccentColor(theme, props.name)}>
             <Box flexDirection="column">
               {tail.map((line, i) => (
                 <Text key={i} color={theme.textDim} wrap="truncate">
@@ -153,9 +207,13 @@ export function ToolExecution(props: ToolExecutionProps) {
     }
 
     return (
-      <Box marginTop={1} flexDirection="row">
-        <ToolUseLoader status="running" />
-        <Spinner label={detail ? `${label}(${detail})` : label} />
+      <Box paddingLeft={RESPONSE_LEFT_PADDING} marginTop={marginTop} flexDirection="row">
+        <Box width={HEADER_PREFIX} flexShrink={0}>
+          <Spinner staticDisplay={staticDisplay} />
+        </Box>
+        <Text color={toolNameColor(theme, props.name)} bold wrap="wrap">
+          {detail ? `${label}(${detail})` : label}
+        </Text>
       </Box>
     );
   }
@@ -177,12 +235,12 @@ export function ToolExecution(props: ToolExecutionProps) {
       ? result.split("\n")[0]
       : `${searchCount} result${searchCount !== 1 ? "s" : ""}`;
     return (
-      <Box flexDirection="column" marginTop={1}>
+      <Box flexDirection="column" paddingLeft={RESPONSE_LEFT_PADDING} marginTop={marginTop}>
         <Box flexDirection="row">
           <ToolUseLoader status={isError ? "error" : "done"} />
           <Box flexGrow={1} width={headerContentWidth}>
             <Text wrap="wrap">
-              <Text bold color={isError ? theme.toolError : theme.toolName}>
+              <Text bold color={isError ? theme.error : toolNameColor(theme, name)}>
                 {label}
               </Text>
               {detail && (
@@ -197,7 +255,7 @@ export function ToolExecution(props: ToolExecutionProps) {
             </Text>
           </Box>
         </Box>
-        <MessageResponse>
+        <MessageResponse accentColor={isError ? theme.error : toolAccentColor(theme, name)}>
           <Text color={theme.textDim} wrap="wrap">
             {summaryText}
           </Text>
@@ -210,11 +268,30 @@ export function ToolExecution(props: ToolExecutionProps) {
   if (COMPACT_TOOLS.has(name) && !isError) {
     const summary = getCompactDoneLabel(name, args, result);
     return (
-      <Box marginTop={1} flexDirection="row">
+      <Box paddingLeft={RESPONSE_LEFT_PADDING} marginTop={marginTop} flexDirection="row">
         <ToolUseLoader status="done" />
         <Box flexGrow={1} width={headerContentWidth}>
-          <Text bold color={theme.toolName} wrap="wrap">
+          <Text bold color={toolNameColor(theme, name)} wrap="wrap">
             {summary}
+          </Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (STATE_TOOLS.has(name)) {
+    const { label, detail } = getToolHeaderParts(name, args);
+    const inline = getInlineSummary(name, result, isError);
+    return (
+      <Box paddingLeft={RESPONSE_LEFT_PADDING} marginTop={marginTop} flexDirection="row">
+        <ToolUseLoader status={isError ? "error" : "done"} />
+        <Box flexGrow={1} width={headerContentWidth}>
+          <Text wrap="wrap">
+            <Text bold color={isError ? theme.error : toolNameColor(theme, name)}>
+              {label}
+            </Text>
+            {detail ? <Text color={theme.textDim}> {detail}</Text> : null}
+            {inline ? <Text color={theme.textDim}> · {inline}</Text> : null}
           </Text>
         </Box>
       </Box>
@@ -233,10 +310,13 @@ export function ToolExecution(props: ToolExecutionProps) {
     props.formatters,
   );
   const body = isDiff
-    ? buildDiffBody(diffText!, args, columns)
-    : buildResultBody(name, result, isError, columns);
+    ? buildDiffBody(diffText!, args, columns, theme)
+    : buildResultBody(name, result, isError, columns, theme);
 
-  const headerColor = isError ? theme.toolError : theme.toolName;
+  const headerColor = isError ? theme.error : toolNameColor(theme, name);
+
+  // At-a-glance status/size chip derived from data already present.
+  const headerChip = buildHeaderChip(name, result, diffText, theme);
 
   // Compact display — no body to show, but show inline summary
   if (!body) {
@@ -244,9 +324,10 @@ export function ToolExecution(props: ToolExecutionProps) {
       props.formatters?.formatInline?.(name, result, isError) ??
       getInlineSummary(name, result, isError);
     const inlineText = typeof inline === "string" ? inline : inline?.text;
-    const inlineColor = inline && typeof inline === "object" ? inline.color : theme.textDim;
+    const inlineColor =
+      inline && typeof inline === "object" ? inline.color : toolAccentColor(theme, name);
     return (
-      <Box marginTop={1} flexDirection="row">
+      <Box paddingLeft={RESPONSE_LEFT_PADDING} marginTop={marginTop} flexDirection="row">
         <ToolUseLoader status={isError ? "error" : "done"} />
         <Box flexGrow={1} width={headerContentWidth}>
           <Text wrap="wrap">
@@ -267,11 +348,17 @@ export function ToolExecution(props: ToolExecutionProps) {
     );
   }
 
-  const { lines, totalLines } = body;
+  const { lines, totalLines, splitAt } = body;
   const hiddenCount = totalLines - lines.length;
+  // Where to insert the hidden marker. When splitAt is undefined or equals the
+  // displayed line count, nothing is hidden mid-block (e.g. diff bodies).
+  const markerAt = splitAt ?? lines.length;
+  const showHiddenMarker = hiddenCount > 0 && markerAt < lines.length;
+  const headLines = showHiddenMarker ? lines.slice(0, markerAt) : lines;
+  const tailLines = showHiddenMarker ? lines.slice(markerAt) : [];
 
   return (
-    <Box flexDirection="column" marginTop={1}>
+    <Box flexDirection="column" paddingLeft={RESPONSE_LEFT_PADDING} marginTop={marginTop}>
       {/* Header: status dot + wrapping content */}
       <Box flexDirection="row">
         <ToolUseLoader status={isError ? "error" : "done"} />
@@ -287,22 +374,35 @@ export function ToolExecution(props: ToolExecutionProps) {
                 {")"}
               </Text>
             )}
+            {headerChip}
           </Text>
         </Box>
       </Box>
       {/* Body with ⎿ bracket via MessageResponse */}
-      <MessageResponse>
+      <MessageResponse accentColor={isError ? theme.error : toolAccentColor(theme, name)}>
         <Box flexDirection="column">
-          {lines.map((line, i) => (
+          {headLines.map((line, i) => (
             <Box key={i} flexGrow={1} width={bodyContentWidth}>
               {line}
             </Box>
           ))}
-          {hiddenCount > 0 && (
+          {showHiddenMarker && (
+            <Text key="hidden-marker" color={theme.textDim} wrap="wrap">
+              {"⋯ "}
+              {hiddenCount}
+              {" lines hidden ⋯"}
+            </Text>
+          )}
+          {tailLines.map((line, i) => (
+            <Box key={markerAt + i} flexGrow={1} width={bodyContentWidth}>
+              {line}
+            </Box>
+          ))}
+          {hiddenCount > 0 && !showHiddenMarker && (
             <Text color={theme.textDim} wrap="wrap">
               {"… +"}
               {hiddenCount}
-              {" lines (ctrl+o to expand)"}
+              {" lines"}
             </Text>
           )}
         </Box>
@@ -323,6 +423,11 @@ function getCompactRunningLabel(name: string, _args: Record<string, unknown>): s
       return "Finding files…";
     case "ls":
       return "Listing…";
+    case "source_path": {
+      const packageName = String(_args.package ?? "");
+      const suffix = packageName ? ` for ${packageName}` : "";
+      return `Resolving source${suffix}…`;
+    }
     default:
       return `${name}…`;
   }
@@ -349,6 +454,12 @@ function getCompactDoneLabel(name: string, args: Record<string, unknown>, result
       const lines = result.split("\n").filter((l) => l.length > 0);
       return `Listed ${lines.length} item${lines.length !== 1 ? "s" : ""}`;
     }
+    case "source_path": {
+      const packageName = String(args.package ?? "source");
+      const sourcePath = extractSourcePath(result);
+      const shortSourcePath = sourcePath ? shortenPath(sourcePath) : "source path";
+      return `Resolved ${packageName} → ${shortSourcePath}`;
+    }
     default:
       return name;
   }
@@ -361,6 +472,10 @@ function shortenPath(filePath: string): string {
   const parts = filePath.split("/");
   if (parts.length <= 3) return filePath;
   return "…/" + parts.slice(-2).join("/");
+}
+
+function extractSourcePath(result: string): string | undefined {
+  return result.match(/^Source path:\s*(.+)$/m)?.[1]?.trim();
 }
 
 function getToolHeaderParts(
@@ -401,10 +516,19 @@ function getToolHeaderParts(
       const skillName = String(args.skill ?? "");
       return { label: displayName, detail: skillName };
     }
+    case "task_output":
+      return { label: displayName, detail: String(args.id ?? "") };
+    case "task_stop":
+      return { label: displayName, detail: String(args.id ?? "") };
     case "web_search": {
       const query = String(args.query ?? "");
       const trunc = query.length > 60 ? query.slice(0, 57) + "…" : query;
       return { label: "Web Search", detail: trunc };
+    }
+    case "source_path": {
+      const packageName = String(args.package ?? "");
+      const trunc = packageName.length > 60 ? packageName.slice(0, 57) + "…" : packageName;
+      return { label: displayName, detail: trunc };
     }
     case "web_fetch": {
       const url = String(args.url ?? "");
@@ -415,7 +539,12 @@ function getToolHeaderParts(
       const action = String(args.action ?? "");
       return { label: displayName, detail: action };
     }
+    case "goals": {
+      const action = String(args.action ?? "");
+      return { label: displayName, detail: action };
+    }
     default: {
+      if (name === "steroids") return { label: displayName, detail: steroidsQuery(args) };
       if (name.startsWith("mcp__")) {
         // Pick the most meaningful arg as the detail (skip long blobs)
         const detail = getMCPDetailArg(args);
@@ -426,9 +555,14 @@ function getToolHeaderParts(
   }
 }
 
+/** MCP tools and the native steroids corpus share the raw-lines result view. */
+function isExternalCodeTool(name: string): boolean {
+  return name === "steroids" || name.startsWith("mcp__");
+}
+
 function toolDisplayName(name: string): string {
   if (name.startsWith("mcp__")) {
-    // mcp__grep__searchGitHub → "searchGitHub"
+    // mcp__some-server__searchCode → "searchCode"
     // mcp__zai_vision__analyze_image → "analyze_image"
     const parts = name.split("__");
     const toolFn = parts[2] ?? parts[1] ?? "mcp";
@@ -455,6 +589,14 @@ function toolDisplayName(name: string): string {
       return "Skill";
     case "web_fetch":
       return "Fetch";
+    case "web_search":
+      return "Web Search";
+    case "task_output":
+      return "Task Output";
+    case "task_stop":
+      return "Task Stop";
+    case "source_path":
+      return "Source";
     case "tasks":
       return "Task";
     default:
@@ -562,6 +704,12 @@ function getInlineSummary(name: string, result: string, isError: boolean): strin
       if (result.startsWith("Error")) return result.split("\n")[0];
       return `${lines.length} line${lines.length !== 1 ? "s" : ""}`;
     }
+    case "source_path": {
+      const sourcePath = extractSourcePath(result);
+      return sourcePath ? shortenPath(sourcePath) : "resolved";
+    }
+    case "task_stop":
+      return result.split("\n")[0] || "stopped";
     case "tasks": {
       // Extract just the task text from results like 'Task added: "Fix bug" (id: abc…)'
       const quoted = result.match(/"([^"]+)"/);
@@ -571,8 +719,17 @@ function getInlineSummary(name: string, result: string, isError: boolean): strin
       }
       return result.split("\n")[0];
     }
+    case "goals": {
+      const quoted = result.match(/"([^"]+)"/);
+      if (quoted) {
+        const text = quoted[1];
+        return text.length > 50 ? text.slice(0, 47) + "…" : text;
+      }
+      const firstLine = result.split("\n")[0] ?? "";
+      return firstLine.length > 60 ? firstLine.slice(0, 57) + "…" : firstLine;
+    }
     default: {
-      if (name.startsWith("mcp__")) {
+      if (isExternalCodeTool(name)) {
         const lines = result.split("\n").filter((l) => l.length > 0);
         if (lines.length === 0) return "no results";
         // Show first meaningful line as summary for compact display
@@ -584,11 +741,54 @@ function getInlineSummary(name: string, result: string, isError: boolean): strin
   }
 }
 
+// ── Header status chips ────────────────────────────────────
+
+/**
+ * Small inline header chip with at-a-glance status/size info, derived from
+ * strings already present (no new plumbing):
+ *   - bash → exit-code chip (`✓ 0` / `✗ N`)
+ *   - edit → diff-stat chip (`+a −r`)
+ * Returns `null` when no chip applies (absent/non-numeric data).
+ */
+function buildHeaderChip(
+  name: string,
+  result: string,
+  diffText: string | undefined,
+  theme: Theme,
+): React.ReactNode {
+  if (name === "bash") {
+    const exitMatch = result.split("\n")[0]?.match(/^Exit code: (.+)/);
+    if (!exitMatch) return null;
+    const code = exitMatch[1].trim();
+    const ok = code === "0";
+    return (
+      <Text color={ok ? theme.success : theme.error}>
+        {"  "}
+        {ok ? "✓ 0" : `✗ ${code}`}
+      </Text>
+    );
+  }
+  if (name === "edit" && diffText) {
+    const added = (diffText.match(/^\+[^+]/gm) ?? []).length;
+    const removed = (diffText.match(/^-[^-]/gm) ?? []).length;
+    if (added === 0 && removed === 0) return null;
+    return (
+      <Text>
+        {added > 0 && <Text color={theme.success}>{`  +${added}`}</Text>}
+        {removed > 0 && <Text color={theme.error}>{`  −${removed}`}</Text>}
+      </Text>
+    );
+  }
+  return null;
+}
+
 // ── Body builders ──────────────────────────────────────────
 
 interface BodyContent {
   lines: React.ReactNode[];
   totalLines: number;
+  /** Index within `lines` at which to insert the "N lines hidden" marker. */
+  splitAt?: number;
 }
 
 interface NumberedDiffLine {
@@ -630,8 +830,9 @@ function parseDiffWithLineNumbers(result: string): NumberedDiffLine[] {
 
 function buildDiffBody(
   result: string,
-  args?: Record<string, unknown>,
-  _columns?: number,
+  args: Record<string, unknown> | undefined,
+  _columns: number | undefined,
+  theme: Theme,
 ): BodyContent {
   const added = (result.match(/^\+[^+]/gm) ?? []).length;
   const removed = (result.match(/^-[^-]/gm) ?? []).length;
@@ -686,7 +887,7 @@ function buildDiffBody(
 
   return {
     lines: [
-      <Text key="summary" color="#9ca3af">
+      <Text key="summary" color={theme.textMuted}>
         {summaryText}
       </Text>,
       diffFrame,
@@ -700,17 +901,19 @@ function buildResultBody(
   result: string,
   isError: boolean,
   columns: number,
+  theme: Theme,
 ): BodyContent | null {
   if (isError) {
     const lines = result.split("\n");
-    const display = lines.slice(0, MAX_OUTPUT_LINES);
+    const { lines: display, splitAt } = sliceHeadTail(lines, MAX_OUTPUT_LINES);
     return {
       lines: display.map((l, i) => (
-        <Text key={i} color="#f87171" wrap="wrap">
+        <Text key={i} color={theme.error} wrap="wrap">
           {truncateLine(l, columns)}
         </Text>
       )),
       totalLines: lines.length,
+      splitAt,
     };
   }
 
@@ -722,14 +925,15 @@ function buildResultBody(
       const exitCode = exitMatch ? exitMatch[1].trim() : "0";
       const outputLines = allLines.slice(1).filter((l) => l.length > 0);
       if (outputLines.length === 0) return null;
-      const display = outputLines.slice(0, MAX_OUTPUT_LINES);
+      const { lines: display, splitAt } = sliceHeadTail(outputLines, MAX_OUTPUT_LINES);
       return {
         lines: display.map((l, i) => (
-          <Text key={i} color={exitCode !== "0" ? "#fbbf24" : "#9ca3af"} wrap="wrap">
+          <Text key={i} color={exitCode !== "0" ? theme.warning : theme.textMuted} wrap="wrap">
             {truncateLine(l, columns)}
           </Text>
         )),
         totalLines: outputLines.length,
+        splitAt,
       };
     }
     case "read":
@@ -739,41 +943,45 @@ function buildResultBody(
     case "grep": {
       const lines = result.split("\n").filter((l) => l.length > 0);
       if (lines.length === 0 || result === "No matches found.") return null;
-      const display = lines.slice(0, MAX_OUTPUT_LINES);
+      const { lines: display, splitAt } = sliceHeadTail(lines, MAX_OUTPUT_LINES);
       return {
         lines: display.map((l, i) => <GrepLine key={i} line={l} />),
         totalLines: lines.length,
+        splitAt,
       };
     }
     case "find": {
       const lines = result.split("\n").filter((l) => l.length > 0);
       if (lines.length === 0) return null;
-      const display = lines.slice(0, MAX_OUTPUT_LINES);
+      const { lines: display, splitAt } = sliceHeadTail(lines, MAX_OUTPUT_LINES);
       return {
         lines: display.map((l, i) => <FindLine key={i} line={l} />),
         totalLines: lines.length,
+        splitAt,
       };
     }
     case "ls": {
       const lines = result.split("\n").filter((l) => l.length > 0);
       if (lines.length === 0) return null;
-      const display = lines.slice(0, MAX_OUTPUT_LINES);
+      const { lines: display, splitAt } = sliceHeadTail(lines, MAX_OUTPUT_LINES);
       return {
         lines: display.map((l, i) => <LsLine key={i} line={l} />),
         totalLines: lines.length,
+        splitAt,
       };
     }
     case "subagent": {
       const lines = result.split("\n").filter((l) => l.length > 0);
       if (lines.length === 0) return null;
-      const display = lines.slice(0, MAX_OUTPUT_LINES);
+      const { lines: display, splitAt } = sliceHeadTail(lines, MAX_OUTPUT_LINES);
       return {
         lines: display.map((l, i) => (
-          <Text key={i} color="#9ca3af" wrap="wrap">
+          <Text key={i} color={theme.textMuted} wrap="wrap">
             {truncateLine(l, columns)}
           </Text>
         )),
         totalLines: lines.length,
+        splitAt,
       };
     }
     case "skill":
@@ -782,7 +990,7 @@ function buildResultBody(
       if (result.startsWith("Error")) {
         return {
           lines: [
-            <Text key={0} color="#f87171">
+            <Text key={0} color={theme.error}>
               {result.split("\n")[0]}
             </Text>,
           ],
@@ -791,26 +999,45 @@ function buildResultBody(
       }
       return null; // compact display with inline summary
     }
+    case "source_path":
+      return null; // compact display with resolved source path inline
+    case "task_output": {
+      const lines = result.split("\n").filter((l) => l.length > 0);
+      if (lines.length === 0) return null;
+      const { lines: display, splitAt } = sliceHeadTail(lines, MAX_OUTPUT_LINES);
+      return {
+        lines: display.map((line, i) => (
+          <Text key={i} color={i === 0 ? theme.primary : theme.textMuted} wrap="wrap">
+            {truncateLine(line, columns)}
+          </Text>
+        )),
+        totalLines: lines.length,
+        splitAt,
+      };
+    }
+    case "task_stop":
+      return null; // compact display with inline summary
     case "tasks": {
       const lines = result.split("\n").filter((l) => l.length > 0);
       // Single-line results (add, done, remove) → compact inline display
       if (lines.length <= 1) return null;
       // Multi-line = list action → show styled task list
-      const display = lines.slice(0, MAX_OUTPUT_LINES);
+      const { lines: display, splitAt } = sliceHeadTail(lines, MAX_OUTPUT_LINES);
       return {
         lines: display.map((l, i) => <TaskLine key={i} line={l} />),
         totalLines: lines.length,
+        splitAt,
       };
     }
     default: {
-      if (name.startsWith("mcp__")) {
+      if (isExternalCodeTool(name)) {
         const lines = result.split("\n").filter((l) => l.length > 0);
         if (lines.length === 0) return null;
-        const maxLines = 4;
-        const display = lines.slice(0, maxLines);
+        const { lines: display, splitAt } = sliceHeadTail(lines, MAX_OUTPUT_LINES);
         return {
           lines: display.map((l, i) => <MCPResultLine key={i} line={l} />),
           totalLines: lines.length,
+          splitAt,
         };
       }
       return null;
@@ -827,20 +1054,22 @@ const DiffLine = memo(function DiffLine({
   line: NumberedDiffLine;
   padWidth: number;
 }) {
+  const theme = useTheme();
   const lineNo = String(line.lineNo).padStart(padWidth, " ");
   const marker = line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
 
   if (line.type === "add") {
-    const bgColor = "#16a34a";
-    const wordHighlight = "#bbf7d0";
+    const bgColor = theme.diffAddedBackground;
+    const wordHighlight = theme.diffAddedBackgroundWord;
+    const onBackground = theme.diffAddedBackgroundText;
     return (
       <Box flexDirection="row">
         <NoSelect fromLeftEdge>
-          <Text backgroundColor={bgColor} color="#ffffff" dimColor>
+          <Text backgroundColor={bgColor} color={onBackground} dimColor>
             {lineNo} {marker}{" "}
           </Text>
         </NoSelect>
-        <Text backgroundColor={bgColor} color="#ffffff">
+        <Text backgroundColor={bgColor} color={onBackground}>
           {line.wordSegments
             ? line.wordSegments.map((seg, i) =>
                 seg.type === "added" ? (
@@ -857,16 +1086,17 @@ const DiffLine = memo(function DiffLine({
     );
   }
   if (line.type === "remove") {
-    const bgColor = "#dc2626";
-    const wordHighlight = "#fecaca";
+    const bgColor = theme.diffRemovedBackground;
+    const wordHighlight = theme.diffRemovedBackgroundWord;
+    const onBackground = theme.diffRemovedBackgroundText;
     return (
       <Box flexDirection="row">
         <NoSelect fromLeftEdge>
-          <Text backgroundColor={bgColor} color="#ffffff" dimColor>
+          <Text backgroundColor={bgColor} color={onBackground} dimColor>
             {lineNo} {marker}{" "}
           </Text>
         </NoSelect>
-        <Text backgroundColor={bgColor} color="#ffffff">
+        <Text backgroundColor={bgColor} color={onBackground}>
           {line.wordSegments
             ? line.wordSegments.map((seg, i) =>
                 seg.type === "removed" ? (
@@ -885,7 +1115,7 @@ const DiffLine = memo(function DiffLine({
   return (
     <Box flexDirection="row">
       <NoSelect fromLeftEdge>
-        <Text color="#6b7280">
+        <Text color={theme.textDim}>
           {lineNo} {marker}{" "}
         </Text>
       </NoSelect>
@@ -897,12 +1127,13 @@ const DiffLine = memo(function DiffLine({
 // ── Grep result line ───────────────────────────────────────
 
 const GrepLine = memo(function GrepLine({ line }: { line: string }) {
+  const theme = useTheme();
   // Format: filepath:lineNo:content
   const firstColon = line.indexOf(":");
-  if (firstColon === -1) return <Text color="#9ca3af">{line}</Text>;
+  if (firstColon === -1) return <Text color={theme.textMuted}>{line}</Text>;
 
   const secondColon = line.indexOf(":", firstColon + 1);
-  if (secondColon === -1) return <Text color="#9ca3af">{line}</Text>;
+  if (secondColon === -1) return <Text color={theme.textMuted}>{line}</Text>;
 
   const file = line.slice(0, firstColon);
   const lineNo = line.slice(firstColon + 1, secondColon);
@@ -914,11 +1145,11 @@ const GrepLine = memo(function GrepLine({ line }: { line: string }) {
 
   return (
     <Text>
-      <Text color="#60a5fa">{file}</Text>
-      <Text color="#6b7280">:</Text>
-      <Text color="#fbbf24">{lineNo}</Text>
-      <Text color="#6b7280">:</Text>
-      <Text color="#9ca3af">{content}</Text>
+      <Text color={theme.primary}>{file}</Text>
+      <Text color={theme.textDim}>:</Text>
+      <Text color={theme.warning}>{lineNo}</Text>
+      <Text color={theme.textDim}>:</Text>
+      <Text color={theme.textMuted}>{content}</Text>
     </Text>
   );
 });
@@ -926,19 +1157,20 @@ const GrepLine = memo(function GrepLine({ line }: { line: string }) {
 // ── Find result line ───────────────────────────────────────
 
 const FindLine = memo(function FindLine({ line }: { line: string }) {
+  const theme = useTheme();
   const trimmed = line.trim();
   if (trimmed.endsWith("/")) {
-    return <Text color="#60a5fa">{trimmed}</Text>;
+    return <Text color={theme.primary}>{trimmed}</Text>;
   }
   // Highlight the filename, dim the path
   const lastSlash = trimmed.lastIndexOf("/");
   if (lastSlash === -1) {
-    return <Text color="#e5e7eb">{trimmed}</Text>;
+    return <Text color={theme.text}>{trimmed}</Text>;
   }
   return (
     <Text>
-      <Text color="#6b7280">{trimmed.slice(0, lastSlash + 1)}</Text>
-      <Text color="#e5e7eb">{trimmed.slice(lastSlash + 1)}</Text>
+      <Text color={theme.textDim}>{trimmed.slice(0, lastSlash + 1)}</Text>
+      <Text color={theme.text}>{trimmed.slice(lastSlash + 1)}</Text>
     </Text>
   );
 });
@@ -946,27 +1178,28 @@ const FindLine = memo(function FindLine({ line }: { line: string }) {
 // ── Ls result line ─────────────────────────────────────────
 
 const LsLine = memo(function LsLine({ line }: { line: string }) {
+  const theme = useTheme();
   // Format: "d  -        dirname/" or "f  1.2K     filename"
   const parts = line.match(/^([dfl])\s+(\S+)\s+(.+)$/);
-  if (!parts) return <Text color="#9ca3af">{line}</Text>;
+  if (!parts) return <Text color={theme.textMuted}>{line}</Text>;
 
   const [, type, size, name] = parts;
 
   if (type === "d") {
     return (
       <Text>
-        <Text color="#60a5fa" bold>
+        <Text color={theme.primary} bold>
           {name}
         </Text>
-        <Text color="#6b7280"> {size === "-" ? "" : size}</Text>
+        <Text color={theme.textDim}> {size === "-" ? "" : size}</Text>
       </Text>
     );
   }
   // File or symlink
   return (
     <Text>
-      <Text color="#e5e7eb">{name}</Text>
-      <Text color="#6b7280"> {size}</Text>
+      <Text color={theme.text}>{name}</Text>
+      <Text color={theme.textDim}> {size}</Text>
     </Text>
   );
 });
@@ -974,9 +1207,10 @@ const LsLine = memo(function LsLine({ line }: { line: string }) {
 // ── Task result line ────────────────────────────────────
 
 const TaskLine = memo(function TaskLine({ line }: { line: string }) {
+  const theme = useTheme();
   // Format: "[✓] Task text  (id: abcd1234, done)" or "[ ] Task text  (id: ..., pending)"
   const match = line.match(/^\[(.)\]\s+(.+?)\s{2}\(id:\s*(\w+),\s*(\S+)\)$/);
-  if (!match) return <Text color="#9ca3af">{line}</Text>;
+  if (!match) return <Text color={theme.textMuted}>{line}</Text>;
 
   const [, check, text, id] = match;
   const isDone = check === "✓";
@@ -984,9 +1218,11 @@ const TaskLine = memo(function TaskLine({ line }: { line: string }) {
 
   return (
     <Text>
-      <Text color={isDone ? "#4ade80" : isActive ? "#fbbf24" : "#6b7280"}>[{check}]</Text>
-      <Text color={isDone ? "#4ade80" : isActive ? "#fbbf24" : "#e5e7eb"}> {text}</Text>
-      <Text color="#6b7280"> {id}</Text>
+      <Text color={isDone ? theme.success : isActive ? theme.warning : theme.textDim}>
+        [{check}]
+      </Text>
+      <Text color={isDone ? theme.success : isActive ? theme.warning : theme.text}> {text}</Text>
+      <Text color={theme.textDim}> {id}</Text>
     </Text>
   );
 });
@@ -1000,27 +1236,28 @@ function truncLine(s: string, max = MAX_MCP_LINE_LENGTH): string {
 }
 
 const MCPResultLine = memo(function MCPResultLine({ line }: { line: string }) {
+  const theme = useTheme();
   // Key-value pattern: "Repository: value" or "Path: value" or "Title: value"
   const kvMatch = line.match(/^([A-Z][A-Za-z_ ]+):\s+(.+)$/);
   if (kvMatch) {
     return (
       <Text>
-        <Text color="#6b7280">{kvMatch[1]}: </Text>
-        <Text color="#60a5fa">{truncLine(kvMatch[2])}</Text>
+        <Text color={theme.textDim}>{kvMatch[1]}: </Text>
+        <Text color={theme.primary}>{truncLine(kvMatch[2])}</Text>
       </Text>
     );
   }
   // URL on its own line
   if (line.match(/^https?:\/\//)) {
-    return <Text color="#60a5fa">{truncLine(line)}</Text>;
+    return <Text color={theme.primary}>{truncLine(line)}</Text>;
   }
   // Numbered list item: "1. Title" or "- Item"
   const listMatch = line.match(/^(\d+\.\s+|- )(.+)$/);
   if (listMatch) {
     return (
       <Text>
-        <Text color="#6b7280">{listMatch[1]}</Text>
-        <Text color="#e5e7eb">{truncLine(listMatch[2])}</Text>
+        <Text color={theme.textDim}>{listMatch[1]}</Text>
+        <Text color={theme.text}>{truncLine(listMatch[2])}</Text>
       </Text>
     );
   }
@@ -1029,9 +1266,9 @@ const MCPResultLine = memo(function MCPResultLine({ line }: { line: string }) {
   if (dashMatch) {
     return (
       <Text>
-        <Text color="#60a5fa">{truncLine(dashMatch[1], 50)}</Text>
-        <Text color="#6b7280"> — </Text>
-        <Text color="#9ca3af">{truncLine(dashMatch[2], 60)}</Text>
+        <Text color={theme.primary}>{truncLine(dashMatch[1], 50)}</Text>
+        <Text color={theme.textDim}> — </Text>
+        <Text color={theme.textMuted}>{truncLine(dashMatch[2], 60)}</Text>
       </Text>
     );
   }
@@ -1040,14 +1277,14 @@ const MCPResultLine = memo(function MCPResultLine({ line }: { line: string }) {
   if (colonMatch) {
     return (
       <Text>
-        <Text color="#60a5fa">{colonMatch[1]}</Text>
-        <Text color="#6b7280">:</Text>
-        <Text color="#fbbf24">{colonMatch[2]}</Text>
-        <Text color="#6b7280">:</Text>
-        <Text color="#9ca3af">{truncLine(colonMatch[3], 80)}</Text>
+        <Text color={theme.primary}>{colonMatch[1]}</Text>
+        <Text color={theme.textDim}>:</Text>
+        <Text color={theme.warning}>{colonMatch[2]}</Text>
+        <Text color={theme.textDim}>:</Text>
+        <Text color={theme.textMuted}>{truncLine(colonMatch[3], 80)}</Text>
       </Text>
     );
   }
   // Fallback: truncate long plain text
-  return <Text color="#9ca3af">{truncLine(line)}</Text>;
+  return <Text color={theme.textMuted}>{truncLine(line)}</Text>;
 });

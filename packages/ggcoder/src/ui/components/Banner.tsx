@@ -10,7 +10,6 @@ interface BannerProps {
   model: string;
   provider: Provider;
   cwd: string;
-  taskCount?: number;
 }
 
 const LOGO_LINES = [
@@ -19,23 +18,41 @@ const LOGO_LINES = [
   " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
 ];
 
-// Extended gradient with reverse path for smooth animation loop
-const GRADIENT = [
-  "#60a5fa",
-  "#6da1f9",
-  "#7a9df7",
-  "#8799f5",
-  "#9495f3",
-  "#a18ff1",
-  "#a78bfa",
-  "#a18ff1",
-  "#9495f3",
-  "#8799f5",
-  "#7a9df7",
-  "#6da1f9",
-];
+// Gradient steps across the logo: primary -> secondary -> primary, giving a
+// smooth ping-pong. Derived from the active theme's tokens rather than a fixed
+// palette, so light, ansi and daltonized themes all get a readable ramp.
+const GRADIENT_STEPS = 7;
 
-export function Banner({ version, model, cwd, taskCount }: BannerProps) {
+function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+}
+
+function lerpColor(a: string, b: string, t: number): string {
+  const [r1, g1, b1] = hexToRgb(a);
+  const [r2, g2, b2] = hexToRgb(b);
+  const mix = (x: number, y: number): number => Math.round(x + (y - x) * t);
+  return `#${((1 << 24) | (mix(r1, r2) << 16) | (mix(g1, g2) << 8) | mix(b1, b2)).toString(16).slice(1)}`;
+}
+
+/** Ping-pong ramp from `from` to `to` and back, `2 * (steps - 1)` entries. */
+function buildGradient(from: string, to: string): string[] {
+  const oneWay: string[] = [];
+  for (let i = 0; i < GRADIENT_STEPS; i++) {
+    oneWay.push(lerpColor(from, to, i / (GRADIENT_STEPS - 1)));
+  }
+  return [...oneWay, ...oneWay.slice(1, -1).reverse()];
+}
+
+// One-space left pad to match the terminal-history banner (RESPONSE_LEFT_PADDING).
+const LEFT_PAD = " ";
+const GAP = "   ";
+// The OG Coder mark is 9 visible chars wide; below this width the info column
+// would collide with the art, so we stack it underneath instead.
+const LOGO_WIDTH = 9;
+const SIDE_BY_SIDE_MIN = LOGO_WIDTH + GAP.length + 62;
+
+export function Banner({ version, model, cwd }: BannerProps) {
   const theme = useTheme();
   const { columns } = useTerminalSize();
   const modelInfo = getModel(model);
@@ -44,20 +61,52 @@ export function Banner({ version, model, cwd, taskCount }: BannerProps) {
   const home = process.env.HOME ?? "";
   const displayPath = home && cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd;
 
+  // Static gradient — no animation needed since the banner is rendered once
+  // into Ink's Static area. Animating here would waste CPU and could cause
+  // visual duplicates on terminal resize.
   const shift = 0;
 
-  // Always use stacked layout: logo on top, info below.
-  // Side-by-side layout breaks in split-pane terminals (e.g. Warp) where
-  // stdout.columns reports full terminal width, not individual pane width,
-  // causing rows to wrap and destroying the logo's vertical alignment.
-  return (
-    <Box flexDirection="column" marginTop={1} marginBottom={1} width={columns}>
-      <Box flexDirection="column">
-        <GradientText text={LOGO_LINES[0]} shift={shift} />
-        <GradientText text={LOGO_LINES[1]} shift={shift} />
-        <GradientText text={LOGO_LINES[2]} shift={shift} />
+  const logo = (
+    <Box flexDirection="column" flexShrink={0}>
+      {LOGO_LINES.map((line, i) => (
+        <Box key={i}>
+          <Text>{LEFT_PAD}</Text>
+          <GradientText text={line} shift={shift} />
+        </Box>
+      ))}
+    </Box>
+  );
+
+  // Narrow (stacked) info — mirrors terminal-history.ts: brand line omits
+  // "· By Abu Khaled", path is truncated to the full terminal width.
+  const stackedInfo = (
+    <Box flexDirection="column">
+      <Box>
+        <Text>{LEFT_PAD}</Text>
+        <Text color={theme.primary} bold>
+          OG Coder
+        </Text>
+        <Text color={theme.textDim}> v{version}</Text>
       </Box>
-      <Box marginTop={1}>
+      <Box>
+        <Text>{LEFT_PAD}</Text>
+        <Text color={theme.secondary}>{modelName}</Text>
+        <Text color={theme.textDim}>{"  "}</Text>
+        <Text color={theme.textDim} wrap="truncate">
+          {displayPath}
+        </Text>
+      </Box>
+      <Box>
+        <Text>{LEFT_PAD}</Text>
+        <ShortcutHints />
+      </Box>
+    </Box>
+  );
+
+  // Side-by-side info — includes "· By Abu Khaled".
+  const sideInfo = (
+    <Box flexDirection="column">
+      <Box>
         <Text color={theme.primary} bold>
           OG Coder
         </Text>
@@ -66,35 +115,60 @@ export function Banner({ version, model, cwd, taskCount }: BannerProps) {
         <Text color={theme.text} bold>
           Abu Khaled
         </Text>
-        <Text color={theme.textDim}>{"  "}</Text>
-        <Text color={theme.secondary}>{modelName}</Text>
       </Box>
       <Box>
+        <Text color={theme.secondary}>{modelName}</Text>
+        <Text color={theme.textDim}>{"  "}</Text>
         <Text color={theme.textDim} wrap="truncate">
           {displayPath}
         </Text>
       </Box>
-      <Box>
-        <Text color={theme.primary}>^T</Text>
-        <Text color={theme.textDim}> tasks</Text>
-        {taskCount !== undefined && taskCount > 0 && (
-          <Text color={theme.secondary}> ({taskCount})</Text>
-        )}
-        <Text color={theme.textDim}>{"  "}</Text>
-        <Text color={theme.primary}>^S</Text>
-        <Text color={theme.textDim}> skills</Text>
-        <Text color={theme.textDim}>{"  "}</Text>
-        <Text color={theme.primary}>^P</Text>
-        <Text color={theme.textDim}> plan mode</Text>
-        <Text color={theme.textDim}>{"  "}</Text>
-        <Text color={theme.primary}>⇧Tab</Text>
-        <Text color={theme.textDim}> thinking</Text>
+      <ShortcutHints />
+    </Box>
+  );
+
+  // At narrow widths, stack the info block under the logo.
+  if (columns < SIDE_BY_SIDE_MIN) {
+    return (
+      <Box flexDirection="column" marginTop={1} marginBottom={1} width={columns}>
+        {logo}
+        <Box marginTop={1}>{stackedInfo}</Box>
+      </Box>
+    );
+  }
+
+  // Side-by-side: logo on the left, info column vertically centered beside it.
+  return (
+    <Box flexDirection="row" marginTop={1} marginBottom={1} width={columns}>
+      {logo}
+      <Text>{GAP}</Text>
+      <Box flexDirection="column" justifyContent="center">
+        {sideInfo}
       </Box>
     </Box>
   );
 }
 
+function ShortcutHints() {
+  const theme = useTheme();
+
+  return (
+    <Box>
+      <Text color={theme.primary}>Ctrl+T</Text>
+      <Text color={theme.textDim}> tasks</Text>
+      <Text color={theme.textDim}> · </Text>
+      <Text color={theme.primary}>Ctrl+S</Text>
+      <Text color={theme.textDim}> skills</Text>
+      <Text color={theme.textDim}> · </Text>
+      <Text color={theme.primary}>Shift+Tab</Text>
+      <Text color={theme.textDim}> toggle thinking</Text>
+    </Box>
+  );
+}
+
 function GradientText({ text, shift = 0 }: { text: string; shift?: number }) {
+  const theme = useTheme();
+  const gradient = React.useMemo(() => buildGradient(theme.primary, theme.secondary), [theme]);
   const chars: React.ReactNode[] = [];
   let colorIdx = 0;
   for (let i = 0; i < text.length; i++) {
@@ -102,7 +176,7 @@ function GradientText({ text, shift = 0 }: { text: string; shift?: number }) {
     if (ch === " ") {
       chars.push(ch);
     } else {
-      const color = GRADIENT[(colorIdx + shift) % GRADIENT.length];
+      const color = gradient[(colorIdx + shift) % gradient.length];
       chars.push(
         <Text key={i} color={color}>
           {ch}

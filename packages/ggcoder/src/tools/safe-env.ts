@@ -1,0 +1,81 @@
+/** Environment variables safe to inherit. Everything else is stripped to prevent leaking secrets to LLM/tool output. */
+const ENV_ALLOWLIST = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TMPDIR",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_RUNTIME_DIR",
+  "EDITOR",
+  "VISUAL",
+  "PAGER",
+  "CLICOLOR",
+  "CLICOLOR_FORCE",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  // Development toolchains
+  "NODE_PATH",
+  "NVM_DIR",
+  "NPM_CONFIG_PREFIX",
+  "PNPM_HOME",
+  "GOPATH",
+  "GOROOT",
+  "CARGO_HOME",
+  "RUSTUP_HOME",
+  "PYENV_ROOT",
+  "VIRTUAL_ENV",
+  "CONDA_DEFAULT_ENV",
+  "CONDA_PREFIX",
+  "JAVA_HOME",
+  "ANDROID_HOME",
+  "ANDROID_SDK_ROOT",
+  "RUBY_VERSION",
+  "GEM_HOME",
+  "RBENV_ROOT",
+  // Windows essentials. Without these, child processes (cmd.exe, Git Bash,
+  // node, npm, MCP stdio servers) misbehave or fail to spawn: SystemRoot +
+  // PATHEXT are required by the Windows loader/resolver, ComSpec is the
+  // cmd.exe path, and the USERPROFILE/APPDATA/TEMP family is where toolchains
+  // read and write. Stripping them was a silent cause of broken shell calls.
+  "SystemRoot",
+  "SystemDrive",
+  "windir",
+  "PATHEXT",
+  "ComSpec",
+  "COMSPEC",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "PROGRAMDATA",
+  "ProgramData",
+  "ProgramFiles",
+  "ProgramFiles(x86)",
+  "ProgramW6432",
+  "TEMP",
+  "TMP",
+  "NUMBER_OF_PROCESSORS",
+  "PROCESSOR_ARCHITECTURE",
+  // Git Bash override for the agent shell (see core/shell.ts). GG_GIT_BASH_PATH
+  // is the legacy fork spelling, still honoured so existing Windows setups keep
+  // working.
+  "GG_BASH",
+  "GG_GIT_BASH_PATH",
+]);
+
+export function getSafeToolEnv(sourceEnv: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const env: Record<string, string> = { TERM: "dumb", GG_CODER: "true" };
+  for (const key of ENV_ALLOWLIST) {
+    const value = sourceEnv[key];
+    if (value) env[key] = value;
+  }
+  return env;
+}

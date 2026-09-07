@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { Tool } from "../types.js";
 
 /**
  * Converts a Zod schema to a JSON Schema object suitable for provider tool
@@ -37,10 +38,31 @@ import { z } from "zod";
 
 type JsonSchema = Record<string, unknown>;
 
+/**
+ * Memoize the Zod → JSON Schema conversion. Tool schemas are immutable within
+ * a session, but `toAnthropicTools` / `toOpenAITools` call this on every turn.
+ * For ~15-20 tools with complex nested schemas, `z.toJSONSchema` can take
+ * 5-20ms total per turn — pure wasted CPU on an unchanged schema.
+ * Keyed by the Zod schema object identity (WeakMap so schemas can GC).
+ */
+const schemaCache = new WeakMap<z.ZodType, JsonSchema>();
+
 export function zodToJsonSchema(schema: z.ZodType): JsonSchema {
+  const cached = schemaCache.get(schema);
+  if (cached) return cached;
   const jsonSchema = z.toJSONSchema(schema) as JsonSchema;
   const { $schema: _schema, ...rest } = jsonSchema;
-  return normalizeRootForAnthropic(rest);
+  const normalized = normalizeRootForAnthropic(rest);
+  schemaCache.set(schema, normalized);
+  return normalized;
+}
+
+/**
+ * Resolve a tool's JSON Schema for provider tool definitions: prefer the
+ * tool's pre-built `rawInputSchema`, otherwise convert its Zod `parameters`.
+ */
+export function resolveToolSchema(tool: Tool): JsonSchema {
+  return tool.rawInputSchema ?? zodToJsonSchema(tool.parameters);
 }
 
 /**

@@ -1,40 +1,130 @@
-import { describe, it, expect } from "vitest";
-import { stream } from "./stream.js";
-import { ProviderError } from "./errors.js";
+import { describe, expect, it } from "vitest";
+import { localWireModelId, stream } from "./stream.js";
+import { GGAIError, ProviderError } from "./errors.js";
+import { providerRegistry } from "./provider-registry.js";
+import type { StreamOptions } from "./types.js";
 
-describe("stream() — xiaomi provider", () => {
-  it("throws ProviderError when baseUrl is missing", () => {
-    expect(() =>
-      stream({
-        provider: "xiaomi",
-        model: "mimo-v2-pro",
-        apiKey: "tp-fake-key",
-        messages: [{ role: "user", content: "hi" }],
-      }),
-    ).toThrow(ProviderError);
+describe("localWireModelId", () => {
+  it("strips the endpoint routing prefix so the server sees its own id", () => {
+    expect(localWireModelId("local/ollama/qwen3-coder:30b")).toBe("qwen3-coder:30b");
+    // Raw ids can contain slashes (vLLM serves HF repo ids).
+    expect(localWireModelId("local/vllm/Qwen/Qwen3-32B")).toBe("Qwen/Qwen3-32B");
   });
 
-  it("mentions re-login guidance in the error message", () => {
+  it("leaves non-local ids untouched", () => {
+    expect(localWireModelId("claude-sonnet-5")).toBe("claude-sonnet-5");
+    expect(localWireModelId("qwen/qwen3.6-plus")).toBe("qwen/qwen3.6-plus");
+  });
+});
+
+describe("local provider", () => {
+  it("refuses to stream without an endpoint instead of guessing a port", () => {
     expect(() =>
       stream({
-        provider: "xiaomi",
-        model: "mimo-v2-pro",
-        apiKey: "tp-fake-key",
+        provider: "local",
+        model: "local/ollama/qwen3-coder:30b",
         messages: [{ role: "user", content: "hi" }],
+        apiKey: "local",
       }),
-    ).toThrow(/region|login|baseUrl/i);
+    ).toThrow(GGAIError);
+  });
+});
+
+describe("xiaomi provider", () => {
+  const baseOptions = {
+    provider: "xiaomi" as const,
+    model: "mimo-v2-pro",
+    apiKey: "tp-fake-key",
+    messages: [{ role: "user" as const, content: "hi" }],
+  };
+
+  it("throws ProviderError when baseUrl is missing", () => {
+    // Xiaomi keys are region-scoped: a key minted for `ams` 401s on `sgp`, so
+    // guessing a region silently would surface as an opaque auth failure.
+    expect(() => stream({ ...baseOptions })).toThrow(ProviderError);
+    expect(() => stream({ ...baseOptions })).toThrow(/region|login|baseUrl/i);
   });
 
   it("does not throw when baseUrl is explicitly provided", () => {
     // Should construct a StreamResult without hitting the network (lazy generator).
     expect(() =>
-      stream({
-        provider: "xiaomi",
-        model: "mimo-v2-pro",
-        apiKey: "tp-fake-key",
-        baseUrl: "https://token-plan-ams.xiaomimimo.com/v1",
-        messages: [{ role: "user", content: "hi" }],
-      }),
+      stream({ ...baseOptions, baseUrl: "https://token-plan-ams.xiaomimimo.com/v1" }),
     ).not.toThrow();
+  });
+});
+
+describe("provider wire boundary", () => {
+  it("strips provenance without cloning unrelated messages", () => {
+    let captured: StreamOptions | undefined;
+    const sentinel = new Error("captured");
+    providerRegistry.register("wire-capture", {
+      stream: (options) => {
+        captured = options;
+        throw sentinel;
+      },
+    });
+
+    const plain = { role: "system" as const, content: "system" };
+    const tagged = {
+      role: "user" as const,
+      content: "hello",
+      provenance: {
+        source: "human" as const,
+        kind: "prompt" as const,
+        visibility: "transcript" as const,
+      },
+    };
+
+    try {
+      expect(() =>
+        stream({
+          provider: "wire-capture" as StreamOptions["provider"],
+          model: "test",
+          messages: [plain, tagged],
+        }),
+      ).toThrow(sentinel);
+      expect(captured?.messages[0]).toBe(plain);
+      expect(captured?.messages[1]).toEqual({ role: "user", content: "hello" });
+      expect(captured?.messages[1]).not.toHaveProperty("provenance");
+      expect(tagged.provenance.source).toBe("human");
+    } finally {
+      providerRegistry.unregister("wire-capture");
+    }
+  });
+
+  it("scrubs lone surrogates so the provider body stays valid JSON", () => {
+    let captured: StreamOptions | undefined;
+    const sentinel = new Error("captured");
+    providerRegistry.register("wire-capture", {
+      stream: (options) => {
+        captured = options;
+        throw sentinel;
+      },
+    });
+
+    try {
+      expect(() =>
+        stream({
+          provider: "wire-capture" as StreamOptions["provider"],
+          model: "test",
+          messages: [
+            { role: "user", content: "read a file \uD83D" },
+            {
+              role: "tool",
+              content: [{ type: "tool_result", toolCallId: "1", content: "\uDE00 output" }],
+            },
+          ],
+        }),
+      ).toThrow(sentinel);
+      // Assert on the raw strings: well-formed `JSON.stringify` escapes a lone
+      // surrogate to ASCII `\ud83d`, so checking the serialized body would pass
+      // even if the scrub never ran.
+      const user = captured?.messages[0];
+      const tool = captured?.messages[1] as { content: { content: string }[] } | undefined;
+      expect(user?.content).toBe("read a file \uFFFD");
+      expect(tool?.content[0]?.content).toBe("\uFFFD output");
+    } finally {
+      providerRegistry.unregister("wire-capture");
+    }
   });
 });

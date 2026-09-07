@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import type { RouterMode } from "./model-router.js";
+import { isGgApp } from "./runtime-mode.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -25,6 +26,14 @@ export interface SlashCommandContext {
   setRouterMode: (mode: RouterMode) => void;
   /** Get router status info (current model, vision model, executor model). */
   getRouterInfo: () => string;
+  /** Add another workspace root (tools + write guard + system prompt). */
+  addDirectory: (dir: string) => Promise<{ ok: true; root: string } | { ok: false; error: string }>;
+  /** Remove an exact workspace root previously added this session. */
+  removeDirectory: (
+    dir: string,
+  ) => Promise<{ ok: true; root: string } | { ok: false; error: string }>;
+  /** Extra workspace roots added this session. */
+  getAdditionalRoots: () => string[];
 }
 
 export interface SlashCommand {
@@ -99,7 +108,7 @@ export function createBuiltinCommands(): SlashCommand[] {
   return [
     {
       name: "model",
-      aliases: ["m"],
+      aliases: ["m", "models"],
       description: "Switch model or list available models",
       usage: "/model [provider:model]",
       async execute(args, ctx) {
@@ -158,13 +167,9 @@ export function createBuiltinCommands(): SlashCommand[] {
     {
       name: "session",
       aliases: ["s"],
-      description: "List sessions or create new",
-      usage: "/session [list|new]",
-      async execute(args, ctx) {
-        if (args === "new" || args === "n") {
-          await ctx.newSession();
-          return "New session created.";
-        }
+      description: "List sessions (use /new for a new session)",
+      usage: "/session",
+      async execute(_args, ctx) {
         return ctx.listSessions();
       },
     },
@@ -231,6 +236,52 @@ export function createBuiltinCommands(): SlashCommand[] {
         return !current
           ? "Buddy enabled! Your companion will appear near the prompt."
           : "Buddy disabled.";
+      },
+    },
+    {
+      name: "add-dir",
+      aliases: ["adddir"],
+      description: "Add another project folder to this workspace",
+      usage: "/add-dir [path] — no path lists the current roots",
+      async execute(args, ctx) {
+        const roots = ctx.getAdditionalRoots();
+        if (!args) {
+          return roots.length === 0
+            ? "No additional roots. Use /add-dir <path> to add one."
+            : `Additional roots:\n${roots.map((r) => `  ${r}`).join("\n")}`;
+        }
+        const result = await ctx.addDirectory(args);
+        return result.ok ? `Added workspace root: ${result.root}` : result.error;
+      },
+    },
+    {
+      name: "remove-dir",
+      aliases: ["removedir"],
+      description: "Remove an added project folder from this workspace",
+      usage: "/remove-dir [path] — no path lists roots available to remove",
+      async execute(args, ctx) {
+        const roots = ctx.getAdditionalRoots();
+        if (!args) {
+          return roots.length === 0
+            ? "No additional roots to remove."
+            : `Choose a root to remove:\n${roots.map((r) => `  ${r}`).join("\n")}`;
+        }
+        const result = await ctx.removeDirectory(args);
+        return result.ok ? `Removed workspace root: ${result.root}` : result.error;
+      },
+    },
+    {
+      name: "rewind",
+      aliases: [],
+      description: "Restore files/conversation to an earlier checkpoint",
+      usage: "/rewind — pick a checkpoint, then code / conversation / both",
+      execute() {
+        // The real implementation lives in App.tsx (it needs React state to
+        // drive the picker) and intercepts before the registry, so this only
+        // runs where no picker exists — today that's the gg-app sidecar.
+        return isGgApp()
+          ? "/rewind is only available in the ggcoder terminal app — the desktop app has no checkpoint picker yet."
+          : "Checkpoint picker unavailable in this context.";
       },
     },
     {

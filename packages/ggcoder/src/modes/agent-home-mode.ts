@@ -7,11 +7,13 @@ import { isAbortError } from "@abukhaled/gg-agent";
 import chalk from "chalk";
 import { formatUserError } from "../utils/error-handler.js";
 import { log, closeLogger } from "../core/logger.js";
+import { installTerminationHandlers } from "../core/shutdown.js";
 import { getAppPaths } from "../config.js";
 import { MODELS, getContextWindow } from "../core/model-registry.js";
 import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
 import { loadCustomCommands } from "../core/custom-commands.js";
+import { renderLogoBlock } from "../cli/shared.js";
 
 export const AGENT_HOME_RELAY_URL = "wss://agent-home-relay.buzzbeamaustralia.workers.dev/ws";
 
@@ -332,7 +334,10 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
 
         const sessionState = state.session.getState();
         const modelInfo = MODELS.find((m) => m.id === sessionState.model);
-        const contextWindow = getContextWindow(sessionState.model);
+        const contextWindow = getContextWindow(sessionState.model, {
+          provider: sessionState.provider,
+          accountId: sessionState.accountId,
+        });
         const contextTokens = estimateConversationTokens(state.session.getMessages());
         const pctRaw = (contextTokens / contextWindow) * 100;
         const contextStr = pctRaw > 0 && pctRaw < 1 ? "<1" : String(Math.round(pctRaw));
@@ -555,8 +560,12 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
 
       const finalText = state.textBuffer.trim() || "Done.";
 
-      const modelId = state.session.getState().model;
-      const contextWindow = getContextWindow(modelId);
+      const sessionState = state.session.getState();
+      const modelId = sessionState.model;
+      const contextWindow = getContextWindow(modelId, {
+        provider: sessionState.provider,
+        accountId: sessionState.accountId,
+      });
       const contextTokens = estimateConversationTokens(state.session.getMessages());
       const contextPctRaw = (contextTokens / contextWindow) * 100;
       const contextStr =
@@ -616,49 +625,17 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
     const displayPath =
       home && options.cwd.startsWith(home) ? "~" + options.cwd.slice(home.length) : options.cwd;
 
-    const LOGO = [
-      " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
-      " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
-      " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
-    ];
-    const GRADIENT = [
-      "#60a5fa",
-      "#6da1f9",
-      "#7a9df7",
-      "#8799f5",
-      "#9495f3",
-      "#a18ff1",
-      "#a78bfa",
-      "#a18ff1",
-      "#9495f3",
-      "#8799f5",
-      "#7a9df7",
-      "#6da1f9",
-    ];
-
-    function gradientText(text: string): string {
-      let colorIdx = 0;
-      return text
-        .split("")
-        .map((ch) => {
-          if (ch === " ") return ch;
-          const color = GRADIENT[colorIdx++ % GRADIENT.length]!;
-          return chalk.hex(color)(ch);
-        })
-        .join("");
-    }
-
-    const GAP = "   ";
     console.log();
-    console.log(
-      `  ${gradientText(LOGO[0]!)}${GAP}` +
-        chalk.hex("#60a5fa").bold("GG Coder") +
+    for (const row of renderLogoBlock([
+      chalk.hex("#60a5fa").bold("OG Coder") +
         chalk.hex("#6b7280")(` v${options.version}`) +
         chalk.hex("#6b7280")(" \u00b7 By ") +
-        chalk.white.bold("Ken Kai"),
-    );
-    console.log(`  ${gradientText(LOGO[1]!)}${GAP}` + chalk.hex("#a78bfa")(modelName));
-    console.log(`  ${gradientText(LOGO[2]!)}${GAP}` + chalk.hex("#6b7280")(displayPath));
+        chalk.white.bold("Abu Khaled"),
+      chalk.hex("#a78bfa")(modelName),
+      chalk.hex("#6b7280")(displayPath),
+    ])) {
+      console.log(row);
+    }
     console.log();
     console.log(
       chalk.hex("#6b7280")("  Mode      ") +
@@ -670,17 +647,20 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
     console.log(chalk.hex("#6b7280")("  Connecting to relay..."));
     console.log();
 
-    const shutdown = async () => {
-      console.log("\nShutting down...");
-      client.disconnect();
-      for (const state of sessionStates.values()) {
-        await state.session.dispose();
-      }
-      closeLogger();
-      process.exit(0);
-    };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
+    // Sessions dispose MCP/LSP/extension resources that can hang; without a
+    // deadline one wedged server keeps this process attached to the relay after
+    // the user quit. SIGHUP is the terminal-close case, which arrives once.
+    installTerminationHandlers({
+      scope: "agent-home",
+      onShutdownStart: () => console.log("\nShutting down..."),
+      teardown: async () => {
+        client.disconnect();
+        for (const state of sessionStates.values()) {
+          await state.session.dispose();
+        }
+        closeLogger();
+      },
+    });
 
     client.connect();
   } catch (err) {

@@ -6,32 +6,39 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+# Cancel the superseded run when a branch gets rapid successive pushes/PR
+# updates. Keyed on head_ref for PRs, run_id (never collides) for main pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 # Cross-platform smoke matrix. Every push to main and every PR runs build +
 # typecheck + test + bin-smoke on macOS, Linux, and Windows so we catch
 # platform-specific regressions before they hit npm.
 #
-# We deliberately keep the gg-editor + gg-pixel packages out of the matrix
-# for now — they have heavier native deps (sharp, transformers) that slow CI
-# without buying us much for the framework's release-critical packages
-# (gg-ai, gg-agent, ggcoder, gg-boss).
+# The framework release spine is gg-ai, gg-agent, gg-core, and ggcoder.
 
 jobs:
   test:
     name: ${{ matrix.os }} · node ${{ matrix.node }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         node: [22.x]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
@@ -39,27 +46,151 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # `shell: bash` on EVERY multi-line step is load-bearing, not cosmetic.
+      # On Windows the default shell is PowerShell, which does not abort a
+      # multi-line script when an intermediate command exits non-zero — only the
+      # LAST line decides the step's outcome. So `ggcoder test` failing was
+      # silently swallowed by `gg-boss test` succeeding right after it, and the
+      # Windows leg reported SUCCESS while 72 ggcoder tests were failing. Every
+      # Windows bug this suite was supposed to catch shipped through that gap.
+      # bash's `-e` (set by the runner) makes each line fail the step.
       - name: Build framework packages
+        shell: bash
         run: |
-          pnpm --filter @kenkaiiii/gg-ai build
-          pnpm --filter @kenkaiiii/gg-agent build
-          pnpm --filter @kenkaiiii/ggcoder build
-          pnpm --filter @kenkaiiii/gg-boss build
+          pnpm --filter @abukhaled/gg-ai build
+          pnpm --filter @abukhaled/gg-agent build
+          pnpm --filter @abukhaled/gg-core build
+          pnpm --filter @abukhaled/ogcoder build
+
+      # Deterministic perf budgets (fx-pattern ratchet): bundle size + CLI
+      # startup. Baseline lives in bench/baseline/sizes.json; intentional
+      # growth re-baselines via `node bench/size-gate.mjs --update`.
+      - name: Size + startup gates
+        shell: bash
+        run: |
+          # --only: a positional arg is ignored by the script, which then checks
+          # every artifact — including the sidecar this job never builds (that
+          # one is gated in the `app` job, which bundles it).
+          node bench/size-gate.mjs --only dist:ggcoder
+          node bench/startup-gate.mjs
 
       - name: Typecheck
+        shell: bash
         run: |
-          pnpm --filter @kenkaiiii/gg-ai check
-          pnpm --filter @kenkaiiii/gg-agent check
-          pnpm --filter @kenkaiiii/ggcoder check
-          pnpm --filter @kenkaiiii/gg-boss check
+          pnpm --filter @abukhaled/gg-ai check
+          pnpm --filter @abukhaled/gg-agent check
+          pnpm --filter @abukhaled/gg-core check
+          pnpm --filter @abukhaled/ogcoder check
 
       - name: Test framework packages
-        run: |
-          pnpm --filter @kenkaiiii/gg-ai test
-          pnpm --filter @kenkaiiii/gg-agent test
-          pnpm --filter @kenkaiiii/ggcoder test
-          pnpm --filter @kenkaiiii/gg-boss test
-
-      - name: ggboss CLI smoke (extra belt-and-braces)
-        run: node packages/gg-boss/dist/cli.js --help
         shell: bash
+        run: |
+          pnpm --filter @abukhaled/gg-ai test
+          pnpm --filter @abukhaled/gg-agent test
+          pnpm --filter @abukhaled/gg-core test
+
+      # Blocking on every OS, Windows included. This started as a 72-failure
+      # Windows backlog that had been invisible because the default PowerShell
+      # shell swallowed it (see above); it is now zero, so the leg is a real
+      # gate again. Do NOT reintroduce continue-on-error to get a red build
+      # green — a non-blocking Windows leg is how the original bugs shipped.
+      - name: Test ggcoder
+        shell: bash
+        run: pnpm --filter @abukhaled/ogcoder test
+
+  # Distribution-critical cross-OS job: stages the per-platform Node runtime,
+  # bundles the sidecar, boots it with the bundled runtime (smoke), and runs the
+  # Rust unit tests that gate path/window-chrome resolution. The full
+  # `tauri build` lives in release.yml; this keeps CI fast while still
+  # exercising the per-OS spawn path that breaks installed bundles.
+  app:
+    name: app · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # 30 not 15: the Windows leg compiles the Tauri tree and builds/launches
+    # an MSI (~12 min warm; the Rust compile is much slower cold-cache).
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.x
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Both `cargo test` and the Windows packaged build compile the same large
+      # Tauri dependency tree; without a cache the packaged smoke would rebuild
+      # it from scratch on every run.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gg-app/src-tauri
+
+      - name: Linux system deps (tauri)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf libayatana-appindicator3-dev
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # shell: bash for the same reason as the `test` job — on Windows a
+      # PowerShell multi-line step only reports the LAST line's exit code, so a
+      # failing build here would pass silently.
+      - name: Build framework packages
+        shell: bash
+        run: |
+          pnpm --filter @abukhaled/gg-ai build
+          pnpm --filter @abukhaled/gg-agent build
+          pnpm --filter @abukhaled/gg-core build
+          pnpm --filter @abukhaled/ogcoder build
+
+      - name: Stage node runtime + bundle sidecar
+        run: |
+          pnpm --filter gg-app stage:node
+          pnpm --filter gg-app bundle:sidecar
+        shell: bash
+
+      - name: Sidecar smoke (bundled runtime + bundle, per-OS)
+        run: node gg-app/scripts/smoke-sidecar.mjs
+        shell: bash
+
+      # OS-independent slice of the sidecar bundle (app-sidecar.mjs + skills;
+      # node_modules carries platform-conditional binaries so one baseline
+      # cannot hold across the matrix).
+      - name: Sidecar size gate
+        run: node bench/size-gate.mjs --only sidecar
+        shell: bash
+
+      - name: Frontend platform-class test
+        run: pnpm --filter gg-app test
+
+      - name: Rust unit tests (path + window-chrome resolution)
+        working-directory: gg-app/src-tauri
+        run: cargo test
+
+      # Windows-only, and the ONLY job that exercises real installer output.
+      # `smoke-sidecar` above proves the bundled runtime loads, but it launches
+      # the sidecar directly — it cannot catch what actually breaks for a
+      # Windows user who installed the app: the shell failing to find
+      # `ggnode.exe` beside the exe, the sidecar resource missing from the MSI,
+      # or the app starting with no visible window. This builds an MSI,
+      # administratively extracts it (installs nothing), launches it with a
+      # throwaway user profile, and requires a visible window plus a packaged
+      # ggnode child running the packaged bundle.
+      #
+      # Only the Windows matrix leg pays the release-build cost; the macOS and
+      # Linux legs run in parallel and stay fast.
+      - name: Packaged app smoke (MSI build + launch)
+        if: runner.os == 'Windows'
+        working-directory: gg-app
+        run: pnpm smoke:packaged

@@ -182,7 +182,9 @@ export function createVisionRouter(ctx: VisionRouterContext = {}) {
       if (override) return override;
     }
 
-    if (hasDocuments && !currentModelInfo?.supportsDocuments) {
+    // gg-core's ModelInfo has no `supportsDocuments`: documents (PDFs) ride the
+    // same multimodal path as images, so image support is the capability gate.
+    if (hasDocuments && !currentModelInfo?.supportsImages) {
       const override = findMediaOverride("document", currentProvider as Provider, ctx);
       if (override) return override;
     }

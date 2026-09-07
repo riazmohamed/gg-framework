@@ -96,6 +96,15 @@ export const GENERAL_PHRASES = [
   "Confabulating",
 ];
 
+export const WAITING_PHRASES = [
+  "Waiting",
+  "Connecting",
+  "Starting",
+  "Warming up",
+  "Contacting model",
+  "Awaiting response",
+];
+
 export const THINKING_PHRASES = [
   "Cogitating",
   "Ruminating",
@@ -134,11 +143,13 @@ export const TOOL_PHRASES: Record<string, string[]> = {
   grep: ["Rummaging", "Sifting", "Bloodhounding"],
   find: ["Dowsing", "Spelunking", "Sniffing"],
   ls: ["Cataloguing", "Inventorying", "Surveying"],
+  source_path: ["Provenancing", "Sourcing", "Unearthing"],
   subagent: ["Cloning", "Spawning", "Mitosing"],
-  "web-fetch": ["Pilfering", "Scrounging", "Plundering"],
+  web_fetch: ["Pilfering", "Scrounging", "Plundering"],
+  web_search: ["Scouting", "Reconnoitering", "Prospecting"],
   tasks: ["Wrangling", "Herding", "Corralling"],
-  "task-output": ["Eavesdropping", "Intercepting"],
-  "task-stop": ["Guillotining", "Tranquilizing"],
+  task_output: ["Eavesdropping", "Intercepting"],
+  task_stop: ["Guillotining", "Tranquilizing"],
 };
 
 function selectToolPhrases(activeToolNames: string[]): string[] {
@@ -156,6 +167,7 @@ export function selectPhrases(
   phase: ActivityPhase,
   userMessage: string,
   activeToolNames: string[],
+  thinkingEnabled = true,
 ): string[] {
   switch (phase) {
     case "thinking":
@@ -165,6 +177,8 @@ export function selectPhrases(
     case "tools":
       return selectToolPhrases(activeToolNames);
     default: {
+      if (!thinkingEnabled) return WAITING_PHRASES;
+
       // waiting / idle — use contextual phrases based on user message
       for (const set of CONTEXTUAL_PHRASES) {
         if (set.keywords.test(userMessage)) {

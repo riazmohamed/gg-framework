@@ -6,13 +6,17 @@ import { BLACK_CIRCLE } from "../constants/figures.js";
 
 interface Props {
   status: "running" | "done" | "error" | "queued";
+  /** Disable blinking so terminal scrollback remains usable during long runs. */
+  staticDisplay?: boolean;
+  /** Override the status-derived marker color when the marker should match adjacent text. */
+  color?: string;
 }
 
 /**
  * Status dot indicator for tool executions.
  *
  * Matches claude-code's ToolUseLoader:
- * - running: blinking dot (dimColor, primary)
+ * - running: blinking dot (dimColor, primary), or solid when staticDisplay is true
  * - done:    solid green dot
  * - error:   solid red dot
  * - queued:  solid dim dot
@@ -20,9 +24,13 @@ interface Props {
  * All running instances blink in sync via the shared animation clock.
  * Fixed `minWidth={2}` ensures alignment when the dot blinks off.
  */
-export function ToolUseLoader({ status }: Props): React.ReactNode {
+export function ToolUseLoader({
+  status,
+  staticDisplay = false,
+  color: colorOverride,
+}: Props): React.ReactNode {
   const theme = useTheme();
-  const isVisible = useBlink(status === "running");
+  const isVisible = useBlink(status === "running" && !staticDisplay);
 
   let color: string;
   let dimColor = false;
@@ -46,7 +54,7 @@ export function ToolUseLoader({ status }: Props): React.ReactNode {
 
   return (
     <Box minWidth={2} flexShrink={0}>
-      <Text color={color} dimColor={dimColor}>
+      <Text color={colorOverride ?? color} dimColor={colorOverride ? false : dimColor}>
         {isVisible ? BLACK_CIRCLE : " "}{" "}
       </Text>
     </Box>

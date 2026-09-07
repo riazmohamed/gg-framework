@@ -26,6 +26,8 @@ export function formatUserError(err: unknown): string {
   if (
     statusCode === 401 ||
     lowerMsg.includes("unauthorized") ||
+    lowerMsg.includes("token refresh failed") ||
+    lowerMsg.includes("invalid_grant") ||
     /invalid.*key/.test(lowerMsg) ||
     /invalid.*token/.test(lowerMsg)
   ) {

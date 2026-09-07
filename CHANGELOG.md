@@ -4,7 +4,7 @@
 
 ### Rebrand: @kenkaiiii → @abukhaled
 
-Full rebrand of the project from `@kenkaiiii/gg-coder` / "GG Coder" / "Ken Kai" to `@abukhaled/og-coder` / "OG Coder" / "Abu Khaled".
+Full rebrand of the project from `@abukhaled/ogcoder` / "GG Coder" / "Ken Kai" to `@abukhaled/og-coder` / "OG Coder" / "Abu Khaled".
 
 #### Naming & References
 - Renamed npm scope from `@kenkaiiii` to `@abukhaled` across all packages

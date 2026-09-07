@@ -1,14 +1,27 @@
 import React, { memo, useMemo } from "react";
-import { Text, Box } from "ink";
-import { useTheme } from "../theme/theme.js";
-import { StreamingMarkdown } from "./Markdown.js";
-import { ThinkingBlock } from "./ThinkingBlock.js";
-import { useTerminalSize } from "../hooks/useTerminalSize.js";
+import { Box } from "ink";
 import { stripDoneMarkers } from "../../utils/plan-steps.js";
-import { BLACK_CIRCLE } from "../constants/figures.js";
+import { AssistantMessage } from "./AssistantMessage.js";
 
-// BLACK_CIRCLE + " " = 2 chars
-const PREFIX_WIDTH = 2;
+interface StreamingTextPreview {
+  text: string;
+  isTruncated: boolean;
+}
+
+function estimateWrappedLineCount(text: string, width: number): number {
+  return text
+    .split("\n")
+    .reduce((count, line) => count + Math.max(1, Math.ceil(line.length / width)), 0);
+}
+
+export function getStreamingTextPreview(text: string, width: number): StreamingTextPreview {
+  const safeWidth = Math.max(10, width);
+  if (estimateWrappedLineCount(text, safeWidth) <= 12) {
+    return { text, isTruncated: false };
+  }
+
+  return { text: "", isTruncated: true };
+}
 
 interface StreamingAreaProps {
   isRunning: boolean;
@@ -16,52 +29,48 @@ interface StreamingAreaProps {
   streamingThinking: string;
   showThinking?: boolean;
   thinkingMs?: number;
-  planMode?: boolean;
+  reserveSpacing?: boolean;
+  renderMarkdown?: boolean;
+  availableTerminalHeight?: number;
+  assistantMarginTop?: number;
+  continuation?: boolean;
 }
 
 export const StreamingArea = memo(function StreamingArea({
   isRunning,
   streamingText,
   streamingThinking,
-  showThinking = true,
+  showThinking = false,
   thinkingMs,
-  planMode,
+  reserveSpacing = false,
+  renderMarkdown = true,
+  availableTerminalHeight,
+  assistantMarginTop = 0,
+  continuation = false,
 }: StreamingAreaProps) {
-  const theme = useTheme();
-  const { columns } = useTerminalSize();
-  const contentWidth = Math.max(10, columns - PREFIX_WIDTH);
   const displayText = useMemo(
     () => (streamingText ? stripDoneMarkers(streamingText) : ""),
     [streamingText],
   );
-
-  // Return null when there is nothing to display.  Previously this kept an
-  // empty <Box marginTop={1}> alive while isRunning was true, adding phantom
-  // height to Ink's live area.  When isRunning later flipped to false in a
-  // separate render batch, the live area shrank and Ink's cursor math
-  // miscalculated the rewrite offset — clipping the bottom of the content.
-  // Trim because a streaming turn whose entire content is "[DONE:N]" gets
-  // reduced to a single space by stripDoneMarkers — don't render a lone "⏺".
   const trimmedDisplay = displayText.trim();
   const hasThinking = showThinking && !!streamingThinking;
-  if (!trimmedDisplay && !hasThinking) return null;
+
+  if (!trimmedDisplay && !hasThinking) {
+    return reserveSpacing ? <Box height={1} /> : null;
+  }
   if (!isRunning && !trimmedDisplay) return null;
 
   return (
-    <Box flexDirection="column" marginTop={1}>
-      {hasThinking && <ThinkingBlock text={streamingThinking} streaming durationMs={thinkingMs} />}
-
-      {trimmedDisplay && (
-        <Box flexDirection="row">
-          <Box width={PREFIX_WIDTH} flexShrink={0}>
-            <Text color={planMode ? theme.planPrimary : theme.primary}>{BLACK_CIRCLE + " "}</Text>
-          </Box>
-          <Box flexDirection="column" flexGrow={1} width={contentWidth}>
-            {/* Stable/unstable split: only re-parses the tail block. */}
-            <StreamingMarkdown width={contentWidth}>{trimmedDisplay}</StreamingMarkdown>
-          </Box>
-        </Box>
-      )}
-    </Box>
+    <AssistantMessage
+      text={trimmedDisplay}
+      thinking={streamingThinking}
+      thinkingMs={thinkingMs}
+      showThinking={showThinking}
+      streaming
+      renderMarkdown={renderMarkdown}
+      availableTerminalHeight={availableTerminalHeight}
+      marginTop={assistantMarginTop}
+      continuation={continuation}
+    />
   );
 });

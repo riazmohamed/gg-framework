@@ -38,6 +38,12 @@ describe("createWriteTool", () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
+  it("opts into sequential agent-loop execution", () => {
+    const tool = createWriteTool(tmpDir);
+
+    expect(tool.executionMode).toBe("sequential");
+  });
+
   it("writes file and returns line count with absolute path", async () => {
     const tool = createWriteTool(tmpDir);
     const content = "line1\nline2\nline3\n";
@@ -150,35 +156,6 @@ describe("createWriteTool", () => {
     expect(result).toContain("Wrote 1 lines");
   });
 
-  it("restricts writes to .gg/plans/ in plan mode", async () => {
-    const planModeRef = { current: true };
-    const tool = createWriteTool(tmpDir, undefined, undefined, planModeRef);
-
-    const raw = await tool.execute(
-      { file_path: "src/main.ts", content: "code" },
-      { signal: new AbortController().signal, toolCallId: "test-7" },
-    );
-
-    const result = resultToString(raw);
-    expect(result).toContain("Error: write is restricted in plan mode");
-  });
-
-  it("allows writing to .gg/plans/ in plan mode", async () => {
-    const planModeRef = { current: true };
-    const tool = createWriteTool(tmpDir, undefined, undefined, planModeRef);
-
-    const raw = await tool.execute(
-      { file_path: ".gg/plans/plan.md", content: "# My Plan\n" },
-      { signal: new AbortController().signal, toolCallId: "test-8" },
-    );
-
-    const result = resultToString(raw);
-    expect(result).toContain("Wrote");
-
-    const written = await fs.readFile(path.join(tmpDir, ".gg/plans/plan.md"), "utf-8");
-    expect(written).toBe("# My Plan\n");
-  });
-
   it("writes empty content", async () => {
     const tool = createWriteTool(tmpDir);
     const raw = await tool.execute(
@@ -188,5 +165,138 @@ describe("createWriteTool", () => {
 
     const result = resultToString(raw);
     expect(result).toBe(`Wrote 1 lines to ${path.join(tmpDir, "empty.txt")}`);
+  });
+
+  it("calls mutation callback after successful writes", async () => {
+    const mutated: string[] = [];
+    const tool = createWriteTool(tmpDir, undefined, undefined, undefined, (filePath) => {
+      mutated.push(filePath);
+    });
+
+    await tool.execute(
+      { file_path: "mutated.txt", content: "changed" },
+      { signal: new AbortController().signal, toolCallId: "test-mutated" },
+    );
+
+    expect(mutated).toEqual([path.join(tmpDir, "mutated.txt")]);
+  });
+
+  it("does not call mutation callback when write validation fails", async () => {
+    const readFiles: ReadTracker = new Map();
+    const mutated: string[] = [];
+    const filePath = path.join(tmpDir, "existing.txt");
+    await fs.writeFile(filePath, "original");
+    const tool = createWriteTool(tmpDir, readFiles, undefined, undefined, (mutatedPath) => {
+      mutated.push(mutatedPath);
+    });
+
+    await expect(
+      tool.execute(
+        { file_path: "existing.txt", content: "new" },
+        { signal: new AbortController().signal, toolCallId: "test-mutated-fail" },
+      ),
+    ).rejects.toThrow("File must be read first");
+
+    expect(mutated).toEqual([]);
+  });
+
+  describe("LSP diagnostics", () => {
+    it("appends a non-empty diagnostics string to the result", async () => {
+      const seen: Array<{ filePath: string; content: string }> = [];
+      const tool = createWriteTool(
+        tmpDir,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        async (filePath, content) => {
+          seen.push({ filePath, content });
+          return "\n\nDiagnostics in diag.ts (informational — may resolve after related edits):\nL1:1 boom (typescript)";
+        },
+      );
+
+      const raw = await tool.execute(
+        { file_path: "diag.ts", content: "const x = 1;\n" },
+        { signal: new AbortController().signal, toolCallId: "test-diag-1" },
+      );
+
+      const result = resultToString(raw);
+      expect(result).toContain(`Wrote 2 lines to ${path.join(tmpDir, "diag.ts")}`);
+      expect(result).toContain("L1:1 boom (typescript)");
+      expect(seen).toEqual([{ filePath: path.join(tmpDir, "diag.ts"), content: "const x = 1;\n" }]);
+    });
+
+    it("leaves the result unchanged when the provider returns empty", async () => {
+      const tool = createWriteTool(
+        tmpDir,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        async () => "",
+      );
+
+      const raw = await tool.execute(
+        { file_path: "clean.ts", content: "ok\n" },
+        { signal: new AbortController().signal, toolCallId: "test-diag-2" },
+      );
+
+      expect(resultToString(raw)).toBe(`Wrote 2 lines to ${path.join(tmpDir, "clean.ts")}`);
+    });
+
+    it("leaves the result unchanged when the provider throws", async () => {
+      const tool = createWriteTool(
+        tmpDir,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        async () => {
+          throw new Error("lsp exploded");
+        },
+      );
+
+      const raw = await tool.execute(
+        { file_path: "throws.ts", content: "ok\n" },
+        { signal: new AbortController().signal, toolCallId: "test-diag-3" },
+      );
+
+      expect(resultToString(raw)).toBe(`Wrote 2 lines to ${path.join(tmpDir, "throws.ts")}`);
+      const written = await fs.readFile(path.join(tmpDir, "throws.ts"), "utf-8");
+      expect(written).toBe("ok\n");
+    });
+
+    it("is identical to today when no provider is passed", async () => {
+      const tool = createWriteTool(tmpDir);
+
+      const raw = await tool.execute(
+        { file_path: "plain.ts", content: "ok\n" },
+        { signal: new AbortController().signal, toolCallId: "test-diag-4" },
+      );
+
+      expect(resultToString(raw)).toBe(`Wrote 2 lines to ${path.join(tmpDir, "plain.ts")}`);
+    });
+  });
+
+  describe("workspace write guard", () => {
+    it("blocks writes outside the workspace and does not create the file", async () => {
+      const tool = createWriteTool(tmpDir);
+      const outside = path.join(os.homedir(), "Documents", "gg-guard-test-outside.txt");
+
+      const raw = await tool.execute(
+        { file_path: outside, content: "nope\n" },
+        { signal: new AbortController().signal, toolCallId: "guard-1" },
+      );
+
+      expect(resultToString(raw)).toContain("outside the workspace");
+      expect(resultToString(raw)).toContain("allowOutsideWorkspaceWrites");
+      await expect(fs.stat(outside)).rejects.toThrow();
+    });
+
+    // The allowOutsideWorkspaceWrites escape hatch is covered by
+    // core/workspace-guard.test.ts — the tool just forwards the settings.
   });
 });

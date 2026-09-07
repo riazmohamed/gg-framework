@@ -2,7 +2,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
-import type SharpNamespace from "sharp";
+import { promisify } from "node:util";
+import type sharp from "sharp";
+import type { FormatEnum } from "sharp";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Lazy `sharp` resolver — sharp is a hefty native module (libvips). Loading
@@ -16,7 +20,7 @@ import type SharpNamespace from "sharp";
  * Cached after first call so repeated image operations don't re-hit the
  * dynamic import resolver.
  */
-type SharpFn = typeof SharpNamespace;
+type SharpFn = typeof sharp;
 let sharpFn: SharpFn | null = null;
 async function loadSharp(): Promise<SharpFn> {
   if (sharpFn) return sharpFn;
@@ -29,16 +33,220 @@ async function loadSharp(): Promise<SharpFn> {
   return sharpFn;
 }
 
-/** Anthropic's 5 MB limit applies to the base64 string, not the decoded binary.
- *  Raw buffer limit = floor(5 MB × 3/4) so the base64 stays under 5 MB. */
+/**
+ * Anthropic's 5 MB image cap applies to the BASE64 STRING, not the decoded
+ * binary. Base64 inflates by 4/3, so a 5 MB buffer encodes to ~6.7 MB and is
+ * rejected. Bound the raw buffer at floor(5 MB x 3/4) so the encoded payload
+ * stays under the real limit.
+ */
 const MAX_IMAGE_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4);
-/** Anthropic's hard per-dimension cap for many-image requests. Exceeding this
- *  in either dimension causes a 400 even if the byte size is fine. */
-const MAX_IMAGE_DIMENSION = 2000;
+/** Max width (px) for inline terminal-graphics previews so scrollback stays small. */
+const PREVIEW_MAX_WIDTH = 480;
+/**
+ * Visual token budget — vision encoders tile an image into fixed-size patches
+ * and charge per patch, so pixels beyond the budget are re-scaled away by the
+ * provider *after* we paid to upload them. Bounding here instead means fewer
+ * bytes on the wire and fewer image tokens billed, with no loss of detail the
+ * model would have seen anyway.
+ *
+ * `VISUAL_PATCH_PX` is the encoder's patch edge; `VISUAL_MAX_PATCHES` the patch
+ * budget; `VISUAL_MAX_EDGE` the hard per-side cap (a 3000x400 panorama is well
+ * inside the patch budget but still gets downscaled on the long edge).
+ */
+const VISUAL_PATCH_PX = 28;
+const VISUAL_MAX_PATCHES = 1568;
+const VISUAL_MAX_EDGE = 1568;
+
+/**
+ * Does a `width x height` image fit the visual token budget — both per-side
+ * cap and total patch count?
+ *
+ * Patch count is measured as continuous area (`w*h / patch^2`) rather than
+ * `ceil(w/patch) * ceil(h/patch)`: the encoder resizes to a patch-aligned grid
+ * before tiling, so area is what actually determines the token cost.
+ */
+export function fitsVisualBudget(width: number, height: number): boolean {
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return false;
+  if (width <= 0 || height <= 0) return true;
+  if (width > VISUAL_MAX_EDGE || height > VISUAL_MAX_EDGE) return false;
+  return (width * height) / (VISUAL_PATCH_PX * VISUAL_PATCH_PX) <= VISUAL_MAX_PATCHES;
+}
+
+/**
+ * Largest aspect-preserving size that still satisfies {@link fitsVisualBudget}.
+ * Returns the input untouched when it already fits (so ordinary screenshots are
+ * never re-encoded).
+ *
+ * Binary-searches the long edge because the short edge is rounded to whole
+ * pixels — the closed-form area scale can overshoot the budget by a patch or
+ * two once that rounding is applied.
+ */
+export function boundedSize(width: number, height: number): { width: number; height: number } {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) {
+    return { width, height };
+  }
+  if (fitsVisualBudget(width, height)) return { width, height };
+
+  const landscape = width >= height;
+  const longEdge = landscape ? width : height;
+  const shortEdge = landscape ? height : width;
+  const ratio = shortEdge / longEdge;
+  const project = (edge: number): { width: number; height: number } => {
+    const long = Math.max(1, Math.round(edge));
+    const short = Math.max(1, Math.round(long * ratio));
+    return landscape ? { width: long, height: short } : { width: short, height: long };
+  };
+
+  let lo = 1;
+  let hi = Math.floor(Math.min(longEdge, VISUAL_MAX_EDGE));
+  let best = project(1);
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const candidate = project(mid);
+    if (fitsVisualBudget(candidate.width, candidate.height)) {
+      best = candidate;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
 
 export const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+export const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".webm", ".avi", ".mkv"]);
 const TEXT_EXTENSIONS = new Set([".md", ".txt"]);
-const ATTACHABLE_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, ...TEXT_EXTENSIONS]);
+const ATTACHABLE_EXTENSIONS = new Set([
+  ...IMAGE_EXTENSIONS,
+  ...VIDEO_EXTENSIONS,
+  ...TEXT_EXTENSIONS,
+]);
+
+/** Max video size loaded into base64 at attach time (50 MB). Video is routed by
+ *  file path, so the bytes are only kept as a fallback for path-less clipboard
+ *  clips; larger clips keep `data` empty and rely on the path. Per-model upload
+ *  caps live in the model registry (`maxVideoBytes`) and drive compression. */
+export const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
+
+// ── Video compression (fit oversized clips under a per-model cap) ─────────
+
+/** Compression target — 90 MB leaves headroom under the 100 MB upload cap for
+ *  container overhead and bitrate overshoot. */
+const COMPRESS_TARGET_BYTES = 90 * 1024 * 1024;
+const COMPRESS_MAX_WIDTH = 1280; // cap long edge; preserves aspect (height auto)
+const COMPRESS_FPS = 5; // plenty for content understanding; shrinks size hard
+const COMPRESS_AUDIO_KBPS = 64; // keep speech intelligible
+const COMPRESS_MIN_VIDEO_KBPS = 100; // floor so very long clips stay decodable
+
+export type VideoCompressionResult =
+  | { ok: true; path: string; originalBytes: number; compressedBytes: number }
+  | { ok: false; reason: string };
+
+function isMissingBinary(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException)?.code === "ENOENT";
+}
+
+/**
+ * Transcode an oversized video down to fit under {@link COMPRESS_TARGET_BYTES}
+ * using ffmpeg: downscale to {@link COMPRESS_MAX_WIDTH}px wide, drop to
+ * {@link COMPRESS_FPS} fps, and target a bitrate computed from the clip's
+ * duration. Video understanding samples frames, so aggressive downsampling
+ * keeps the content analyzable while shrinking multi-GB clips to <100 MB.
+ *
+ * Writes to a temp file and returns its path; the caller owns deleting it.
+ * Best-effort: returns `{ ok: false, reason }` if ffmpeg/ffprobe are missing,
+ * the probe fails, or the result still exceeds the target.
+ */
+export async function compressVideoToFit(
+  inputPath: string,
+  targetBytes: number = COMPRESS_TARGET_BYTES,
+  signal?: AbortSignal,
+): Promise<VideoCompressionResult> {
+  // Probe duration to compute a size-targeted bitrate.
+  let durationSec: number;
+  try {
+    const { stdout } = await execFileAsync(
+      "ffprobe",
+      ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", inputPath],
+      { signal },
+    );
+    durationSec = Number.parseFloat(stdout.trim());
+  } catch (err) {
+    return {
+      ok: false,
+      reason: isMissingBinary(err)
+        ? "ffmpeg/ffprobe is not installed"
+        : `could not probe video: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (!Number.isFinite(durationSec) || durationSec <= 0) {
+    return { ok: false, reason: "could not determine video duration" };
+  }
+
+  // total kbps budget = target bits / duration, with 90% safety margin; the
+  // audio track gets a fixed slice, the rest goes to video (floored).
+  const totalKbps = Math.floor(((targetBytes * 8) / durationSec / 1000) * 0.9);
+  const videoKbps = Math.max(COMPRESS_MIN_VIDEO_KBPS, totalKbps - COMPRESS_AUDIO_KBPS);
+  const outPath = path.join(os.tmpdir(), `ogcoder-compressed-${Date.now()}.mp4`);
+
+  try {
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-y",
+        "-nostats",
+        "-loglevel",
+        "error",
+        "-i",
+        inputPath,
+        "-vf",
+        `scale='min(${COMPRESS_MAX_WIDTH},iw)':-2,fps=${COMPRESS_FPS}`,
+        "-c:v",
+        "libx264",
+        "-b:v",
+        `${videoKbps}k`,
+        "-maxrate",
+        `${Math.floor(videoKbps * 1.5)}k`,
+        "-bufsize",
+        `${videoKbps}k`,
+        "-preset",
+        "veryfast",
+        "-c:a",
+        "aac",
+        "-b:a",
+        `${COMPRESS_AUDIO_KBPS}k`,
+        outPath,
+      ],
+      { signal, maxBuffer: 16 * 1024 * 1024 },
+    );
+  } catch (err) {
+    await fs.unlink(outPath).catch(() => {});
+    return {
+      ok: false,
+      reason: isMissingBinary(err)
+        ? "ffmpeg is not installed"
+        : `ffmpeg compression failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  let compressedBytes: number;
+  let originalBytes: number;
+  try {
+    compressedBytes = (await fs.stat(outPath)).size;
+    originalBytes = (await fs.stat(inputPath)).size;
+  } catch {
+    await fs.unlink(outPath).catch(() => {});
+    return { ok: false, reason: "compression produced no usable output" };
+  }
+  if (compressedBytes > targetBytes) {
+    await fs.unlink(outPath).catch(() => {});
+    return {
+      ok: false,
+      reason: `compressed video is still ${(compressedBytes / (1024 * 1024)).toFixed(0)} MB`,
+    };
+  }
+  return { ok: true, path: outPath, originalBytes, compressedBytes };
+}
 
 export const IMAGE_MEDIA_TYPES: Record<string, string> = {
   ".png": "image/png",
@@ -49,21 +257,35 @@ export const IMAGE_MEDIA_TYPES: Record<string, string> = {
   ".bmp": "image/bmp",
 };
 
+export const VIDEO_MEDIA_TYPES: Record<string, string> = {
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  ".webm": "video/webm",
+  ".avi": "video/x-msvideo",
+  ".mkv": "video/x-matroska",
+};
+
 // Backwards-compat alias for internal use below
 const MEDIA_TYPES = IMAGE_MEDIA_TYPES;
 
 export interface ImageAttachment {
-  kind: "image" | "text";
+  kind: "image" | "video" | "text";
   fileName: string;
   filePath: string;
   mediaType: string;
-  data: string; // base64 for images, raw text for text files
+  data: string; // base64 for images/video, raw text for text files
 }
 
 /** Check if a file path points to an image based on extension. */
 export function isImagePath(filePath: string): boolean {
   const ext = path.extname(filePath).toLowerCase();
   return IMAGE_EXTENSIONS.has(ext);
+}
+
+/** Check if a file path points to a video based on extension. */
+export function isVideoPath(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return VIDEO_EXTENSIONS.has(ext);
 }
 
 /** Check if a file path points to an attachable file (image or text). */
@@ -150,6 +372,10 @@ export async function extractImagePaths(
   return { imagePaths, cleanText: cleanParts.join(" ") };
 }
 
+/** Alias of {@link extractImagePaths} that also picks up video paths (video
+ *  extensions are part of ATTACHABLE_EXTENSIONS). Name reflects the widened scope. */
+export const extractMediaPaths = extractImagePaths;
+
 async function fileExists(filePath: string): Promise<boolean> {
   try {
     const stat = await fs.stat(filePath);
@@ -168,10 +394,50 @@ const SHARP_FORMAT_TO_MEDIA: Record<string, string> = {
   webp: "image/webp",
 };
 
+/** Media types the Anthropic + OpenAI vision APIs actually accept as image
+ *  blocks. Anything else (.ico, .bmp, .svg, .tiff, …) must NOT be sent as an
+ *  image or the provider rejects the whole request. */
+const VISION_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
 /**
- * Downscale an image buffer so it fits within both MAX_IMAGE_DIMENSION per side
- * (Anthropic's hard pixel cap for many-image requests) and MAX_IMAGE_BYTES.
- * Preserves format (PNG→PNG, JPEG→JPEG, etc.) and aspect ratio.
+ * Validate that a base64-decoded buffer is a REAL, fully-decodable image in a
+ * format the vision APIs accept. Returns the corrected media type on success,
+ * or `null` when the data is corrupt or an unsupported format.
+ *
+ * Why this exists: an image content block with corrupt or unsupported bytes
+ * (e.g. a malformed `.ico`, or a `.png` with a bad IDAT/CRC) makes the provider
+ * reject the ENTIRE turn with "The image data you provided does not represent a
+ * valid image" — the agent never gets to respond. Callers use the `null` return
+ * to downgrade such an attachment to a plain file note (saved to disk, inspected
+ * with tools) so the request still succeeds and the model can diagnose the file.
+ *
+ * The header sniff alone is insufficient (a corrupt PNG still has PNG magic), so
+ * this forces a full pixel decode — resized small to bound memory — which makes
+ * libvips surface mid-stream corruption here instead of at the provider.
+ */
+export async function validateVisionImage(buffer: Buffer): Promise<string | null> {
+  try {
+    const sharp = await loadSharp();
+    const meta = await sharp(buffer).metadata();
+    const mediaType = meta.format ? SHARP_FORMAT_TO_MEDIA[meta.format] : undefined;
+    if (!mediaType || !VISION_MEDIA_TYPES.has(mediaType)) return null;
+    // Force a full decode (failOn: "error") so a corrupt payload the header check
+    // misses is caught here. Resize small so a huge image doesn't balloon memory.
+    await sharp(buffer, { failOn: "error" })
+      .resize(256, 256, { fit: "inside", withoutEnlargement: true })
+      .raw()
+      .toBuffer();
+    return mediaType;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Downscale an image buffer so it fits within both the visual token budget
+ * ({@link boundedSize}) and MAX_IMAGE_BYTES. Preserves format (PNG→PNG,
+ * JPEG→JPEG, etc.) and aspect ratio — a lossless PNG screenshot of UI stays a
+ * lossless PNG with its alpha channel intact.
  */
 export async function shrinkToFit(
   buffer: Buffer,
@@ -181,7 +447,8 @@ export async function shrinkToFit(
   const meta = await sharp(buffer).metadata();
   const origW = meta.width ?? 4096;
   const origH = meta.height ?? 4096;
-  const exceedsDim = origW > MAX_IMAGE_DIMENSION || origH > MAX_IMAGE_DIMENSION;
+  const bounded = boundedSize(origW, origH);
+  const exceedsDim = bounded.width !== origW || bounded.height !== origH;
 
   // Trust the buffer over the caller-supplied mediaType: if a file was named
   // foo.png but is actually a JPEG, sharp tells the truth and Anthropic
@@ -197,7 +464,7 @@ export async function shrinkToFit(
   }
 
   // Determine output format from mediaType
-  const formatMap: Record<string, keyof SharpNamespace.FormatEnum> = {
+  const formatMap: Record<string, keyof FormatEnum> = {
     "image/png": "png",
     "image/jpeg": "jpeg",
     "image/gif": "gif",
@@ -207,14 +474,13 @@ export async function shrinkToFit(
   let outFormat = formatMap[mediaType] ?? "png";
   let outMediaType = mediaType === "image/bmp" ? "image/png" : mediaType;
 
-  // Compute the initial target dimensions: fit within MAX_IMAGE_DIMENSION,
-  // preserving aspect ratio. Sharp's fit: "inside" does the same math but we
-  // want explicit width/height so we can shrink them further in the byte loop.
-  const scale = exceedsDim ? Math.min(MAX_IMAGE_DIMENSION / origW, MAX_IMAGE_DIMENSION / origH) : 1;
-  let width = Math.max(1, Math.round(origW * scale));
-  let height = Math.max(1, Math.round(origH * scale));
+  // Initial target dimensions come from the visual token budget. Explicit
+  // width/height (rather than leaning on sharp's fit: "inside") so the byte
+  // loop below can shrink them further.
+  let width = bounded.width;
+  let height = bounded.height;
 
-  // Encode at the dimension-capped size first — often this is already under
+  // Encode at the budget-capped size first — often this is already under
   // MAX_IMAGE_BYTES and we're done.
   {
     const first = await sharp(buffer)
@@ -260,6 +526,28 @@ export async function shrinkToFit(
 }
 
 /**
+ * Downscale an image buffer for an inline terminal preview, capping its width
+ * at PREVIEW_MAX_WIDTH so previews stay small in scrollback. The full-resolution
+ * copy is kept separately for the model. Preserves format and aspect ratio.
+ *
+ * On any sharp failure the original buffer is returned unchanged — a preview is
+ * cosmetic and must never break the turn.
+ */
+export async function downscaleForPreview(buffer: Buffer): Promise<Buffer> {
+  try {
+    const sharp = await loadSharp();
+    const meta = await sharp(buffer).metadata();
+    const width = meta.width ?? 0;
+    if (width > 0 && width <= PREVIEW_MAX_WIDTH) return buffer;
+    return await sharp(buffer)
+      .resize(PREVIEW_MAX_WIDTH, undefined, { fit: "inside", withoutEnlargement: true })
+      .toBuffer();
+  } catch {
+    return buffer;
+  }
+}
+
+/**
  * Read a file and return an attachment (base64 for images, raw text for text files).
  *
  * Image decode / shrink failures degrade to a text placeholder instead of throwing,
@@ -269,6 +557,31 @@ export async function shrinkToFit(
 export async function readImageFile(filePath: string): Promise<ImageAttachment> {
   const ext = path.extname(filePath).toLowerCase();
   const fileName = path.basename(filePath);
+
+  if (VIDEO_EXTENSIONS.has(ext)) {
+    try {
+      const mediaType = VIDEO_MEDIA_TYPES[ext] ?? "video/mp4";
+      const stat = await fs.stat(filePath);
+      // Always classify as `video` so it routes through the video path (and the
+      // UI shows it as a video, not a generic file). Providers that deliver
+      // video via an upload/read-tool reference it by `filePath` at any size.
+      // Only providers that inline base64 need the bytes in-memory, and only up
+      // to MAX_VIDEO_BYTES — so for larger clips we keep `data` empty and let
+      // the path-based routes handle it.
+      const data =
+        stat.size <= MAX_VIDEO_BYTES ? (await fs.readFile(filePath)).toString("base64") : "";
+      return { kind: "video", fileName, filePath, mediaType, data };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return {
+        kind: "text",
+        fileName,
+        filePath,
+        mediaType: "text/plain",
+        data: `[video ${fileName} could not be loaded: ${reason}]`,
+      };
+    }
+  }
 
   if (TEXT_EXTENSIONS.has(ext)) {
     try {
@@ -289,12 +602,28 @@ export async function readImageFile(filePath: string): Promise<ImageAttachment> 
   try {
     const mediaType = MEDIA_TYPES[ext] ?? "image/png";
     const rawBuffer = await fs.readFile(filePath);
-    const { buffer, mediaType: finalMediaType } = await shrinkToFit(rawBuffer, mediaType);
+    const { buffer } = await shrinkToFit(rawBuffer, mediaType);
+    // Final guard: confirm the (possibly shrunk) buffer is a real, fully-decodable
+    // image in a vision-supported format. shrinkToFit short-circuits without a
+    // full decode when the image is already within size limits, so a corrupt or
+    // unsupported file (e.g. a malformed .ico) could slip through and make the
+    // provider reject the whole turn. On failure, degrade to a text placeholder
+    // the model can still read as <file> context — never break the turn.
+    const validatedType = await validateVisionImage(buffer);
+    if (!validatedType) {
+      return {
+        kind: "text",
+        fileName,
+        filePath,
+        mediaType: "text/plain",
+        data: `[image ${fileName} is not a valid/supported image (corrupt or unsupported format); saved at ${filePath} — inspect it with your tools if needed]`,
+      };
+    }
     return {
       kind: "image",
       fileName,
       filePath,
-      mediaType: finalMediaType,
+      mediaType: validatedType,
       data: buffer.toString("base64"),
     };
   } catch (err) {
@@ -308,6 +637,10 @@ export async function readImageFile(filePath: string): Promise<ImageAttachment> 
     };
   }
 }
+
+/** Alias of {@link readImageFile} that also handles video files. Name reflects
+ *  the widened scope. */
+export const readMediaFile = readImageFile;
 
 /**
  * Try to read image data from the system clipboard (macOS only).

@@ -24,6 +24,12 @@
   "diffRemovedWord": "#ff5555",
   "diffAddedWordDimmed": "#55ff55",
   "diffRemovedWordDimmed": "#ff5555",
+  "diffAddedBackground": "#005500",
+  "diffAddedBackgroundText": "#ffffff",
+  "diffAddedBackgroundWord": "#55ff55",
+  "diffRemovedBackground": "#550000",
+  "diffRemovedBackgroundText": "#ffffff",
+  "diffRemovedBackgroundWord": "#ff5555",
   "spinnerColor": "#55ffff",
   "claude": "#ff5555",
   "claudeShimmer": "#ff5555",
@@ -44,5 +50,6 @@
   "subagent5": "#ff55ff",
   "subagent6": "#ff5555",
   "subagent7": "#ff55ff",
-  "subagent8": "#55ffff"
+  "subagent8": "#55ffff",
+  "language": "#00aaaa"
 }

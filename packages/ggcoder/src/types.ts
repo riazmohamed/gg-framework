@@ -39,6 +39,15 @@ export interface SessionInfo {
   id: string;
   path: string;
   timestamp: string;
+  /** Timestamp of the most recent message (falls back to creation timestamp). */
+  lastActivity: string;
   cwd: string;
   messageCount: number;
+  /**
+   * First user-authored prompt, for use as a human title. Filled during the
+   * single pass the listing already makes over each file, so a caller that
+   * needs titles does not have to reopen them all. Undefined when the session
+   * has no user prompt of its own.
+   */
+  preview?: string;
 }

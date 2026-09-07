@@ -1,5 +1,13 @@
 import os from "node:os";
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 
 /**
  * Global animation tick context.
@@ -14,24 +22,44 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
  * when no spinners or animations are visible.
  */
 
-const TICK_INTERVAL = 100; // ms — fast enough for the spinner (100ms frames)
+const TICK_INTERVAL = 100; // ms — base clock; consumers can derive slower frames.
+const ENABLE_FOCUS_REPORTING = "\x1b[?1004h";
+const DISABLE_FOCUS_REPORTING = "\x1b[?1004l";
 
-const AnimationContext = createContext(0);
-const AnimationControlContext = createContext<{
+interface AnimationStore {
   register: () => () => void;
-}>({ register: () => () => {} });
+  subscribe: (listener: () => void) => () => void;
+  getSnapshot: () => number;
+  isFocused: () => boolean;
+}
+
+const noopStore: AnimationStore = {
+  register: () => () => {},
+  subscribe: () => () => {},
+  getSnapshot: () => 0,
+  isFocused: () => true,
+};
+
+const AnimationStoreContext = createContext<AnimationStore>(noopStore);
 
 export function AnimationProvider({ children }: { children: React.ReactNode }) {
-  const [tick, setTick] = useState(0);
+  const tickRef = useRef(0);
   const subscriberCountRef = useRef(0);
+  const focusedRef = useRef(true);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const listenersRef = useRef(new Set<() => void>());
+
+  const notify = useCallback(() => {
+    tickRef.current += 1;
+    for (const listener of listenersRef.current) {
+      listener();
+    }
+  }, []);
 
   const startTimer = useCallback(() => {
     if (timerRef.current) return;
-    timerRef.current = setInterval(() => {
-      setTick((t) => t + 1);
-    }, TICK_INTERVAL);
-  }, []);
+    timerRef.current = setInterval(notify, TICK_INTERVAL);
+  }, [notify]);
 
   const stopTimer = useCallback(() => {
     if (timerRef.current) {
@@ -44,6 +72,46 @@ export function AnimationProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     return () => stopTimer();
   }, [stopTimer]);
+
+  useEffect(() => {
+    if (!process.stdin.isTTY) return undefined;
+
+    const setFocused = (focused: boolean): void => {
+      if (focusedRef.current === focused) return;
+      focusedRef.current = focused;
+      for (const listener of listenersRef.current) {
+        listener();
+      }
+    };
+
+    const onData = (chunk: Buffer | string): void => {
+      const data = chunk.toString("utf8");
+      const lastFocusIn = data.lastIndexOf("\x1b[I");
+      const lastFocusOut = data.lastIndexOf("\x1b[O");
+
+      if (lastFocusIn > lastFocusOut) setFocused(true);
+      else if (lastFocusOut > lastFocusIn) setFocused(false);
+    };
+
+    process.stdin.on("data", onData);
+
+    let enableTimer: ReturnType<typeof setTimeout> | null = null;
+    const enableWhenRaw = (): void => {
+      if (process.stdin.isRaw === false) {
+        enableTimer = setTimeout(enableWhenRaw, 10);
+        return;
+      }
+      process.stdout.write(ENABLE_FOCUS_REPORTING);
+    };
+    enableTimer = setTimeout(enableWhenRaw, 0);
+
+    return () => {
+      if (enableTimer) clearTimeout(enableTimer);
+      process.stdin.off("data", onData);
+      process.stdout.write(DISABLE_FOCUS_REPORTING);
+      focusedRef.current = true;
+    };
+  }, []);
 
   const register = useCallback(() => {
     subscriberCountRef.current++;
@@ -58,18 +126,44 @@ export function AnimationProvider({ children }: { children: React.ReactNode }) {
     };
   }, [startTimer, stopTimer]);
 
-  const control = React.useMemo(() => ({ register }), [register]);
+  const subscribe = useCallback((listener: () => void) => {
+    listenersRef.current.add(listener);
+    return () => {
+      listenersRef.current.delete(listener);
+    };
+  }, []);
 
-  return (
-    <AnimationControlContext value={control}>
-      <AnimationContext value={tick}>{children}</AnimationContext>
-    </AnimationControlContext>
+  const getSnapshot = useCallback(() => tickRef.current, []);
+  const isFocused = useCallback(() => focusedRef.current, []);
+
+  const store = useMemo<AnimationStore>(
+    () => ({ register, subscribe, getSnapshot, isFocused }),
+    [getSnapshot, isFocused, register, subscribe],
   );
+
+  return <AnimationStoreContext value={store}>{children}</AnimationStoreContext>;
 }
 
 /** Returns the current global animation tick counter. */
-export function useAnimationTick(): number {
-  return useContext(AnimationContext);
+export function useAnimationTick(enabled = true): number {
+  const store = useContext(AnimationStoreContext);
+  const subscribe = useCallback(
+    (listener: () => void) => (enabled ? store.subscribe(listener) : () => {}),
+    [enabled, store],
+  );
+  const getSnapshot = useCallback(() => (enabled ? store.getSnapshot() : 0), [enabled, store]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/** Returns whether the terminal currently has focus when focus reporting is supported. */
+export function useTerminalFocus(enabled = true): boolean {
+  const store = useContext(AnimationStoreContext);
+  const subscribe = useCallback(
+    (listener: () => void) => (enabled ? store.subscribe(listener) : () => {}),
+    [enabled, store],
+  );
+  const getSnapshot = useCallback(() => !enabled || store.isFocused(), [enabled, store]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 /**
@@ -81,13 +175,22 @@ export function useAnimationTick(): number {
  * counter still updates via its own 1s interval, but the 100ms animation
  * tick that causes scroll-jumping is suppressed.
  */
-export function useAnimationActive(): void {
-  const { register } = useContext(AnimationControlContext);
+export function useAnimationActive(enabled = true): void {
+  const { register } = useContext(AnimationStoreContext);
+  // Reduced motion (auto-enabled on Windows/WSL) suppresses the 100ms tick
+  // entirely — otherwise Ink's live-area re-renders force the viewport to
+  // scroll back to the cursor.
   const skip = useReducedMotion();
   useEffect(() => {
-    if (skip) return;
+    if (!enabled || skip) return undefined;
     return register();
-  }, [register, skip]);
+  }, [enabled, register, skip]);
+}
+
+export function useFocusedAnimation(enabled = true): { active: boolean; tick: number } {
+  useAnimationActive(enabled);
+  const tick = useAnimationTick(enabled);
+  return { active: enabled, tick };
 }
 
 /** Derive a frame index from the global tick for a given interval and frame count. */

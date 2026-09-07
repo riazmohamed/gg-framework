@@ -1,20 +1,26 @@
 import React from "react";
 import { Text, Box } from "ink";
+import type { ThinkingLevel } from "@abukhaled/gg-ai";
 import { useTheme } from "../theme/theme.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
-import { getContextWindow } from "../../core/model-registry.js";
+import { getContextWindow, type ContextWindowOptions } from "../../core/model-registry.js";
 import { PARTIAL_BLOCKS, LIGHT_SHADE } from "../constants/figures.js";
+import { useFocusedAnimation, useReducedMotion } from "./AnimationContext.js";
 
 interface FooterProps {
   model: string;
   tokensIn: number;
+  contextWindowOptions?: ContextWindowOptions;
   cwd: string;
   gitBranch?: string | null;
-  thinkingEnabled?: boolean;
+  /**
+   * Active thinking tier, or `undefined` when thinking is off. The footer
+   * renders the tier verbatim (`Thinking max`) and color-codes by power.
+   * `xhigh` and `max` additionally shimmer to signal high-power modes.
+   */
+  thinkingLevel?: ThinkingLevel;
   planMode?: boolean;
   exitPending?: boolean;
-  /** Hide the plan-mode toggle entirely (for products that don't have plan mode). */
-  hidePlan?: boolean;
   /** Optional left-side status string (e.g. "Connected · DaVinci Resolve"). */
   statusLabel?: string;
   /** Color for the status label. */
@@ -30,28 +36,34 @@ interface FooterProps {
    * a dedicated row.
    */
   statusBelow?: boolean;
+  /** False when raw markdown mode is active. */
+  renderMarkdown?: boolean;
 }
 
 // Model ID → short display name
 const MODEL_SHORT_NAMES: Record<string, string> = {
-  "claude-opus-4-7": "Opus",
-  "claude-sonnet-4-6": "Sonnet",
+  "claude-fable-5-1": "Fable",
+  "claude-mythos-5": "Mythos",
+  "claude-opus-5": "Opus",
+  "claude-sonnet-5": "Sonnet",
   "claude-haiku-4-5": "Haiku",
   "claude-haiku-4-5-20251001": "Haiku",
-  "gpt-5.5": "GPT-5.5",
-  "gpt-5.5-pro": "GPT-5.5 Pro",
-  "gpt-5.4": "GPT-5.4",
-  "gpt-5.4-mini": "GPT-5.4 Mini",
-  "gpt-5.3-codex": "GPT-5.3 Codex",
-  "codex-mini-latest": "Codex Mini",
+  "gpt-6-astra": "GPT-6 Astra",
+  "gpt-5.6-sol": "GPT-5.6 Sol",
+  "gpt-5.6-terra": "GPT-5.6 Terra",
+  "gpt-5.6-luna": "GPT-5.6 Luna",
 };
 
 function getShortModelName(model: string): string {
   return MODEL_SHORT_NAMES[model] ?? model;
 }
 
-function getContextPercent(model: string, tokensIn: number): number {
-  const limit = getContextWindow(model);
+export function getFooterContextPercent(
+  model: string,
+  tokensIn: number,
+  options?: ContextWindowOptions,
+): number {
+  const limit = getContextWindow(model, options);
   if (!limit || tokensIn === 0) return 0;
   return Math.round((tokensIn / limit) * 100);
 }
@@ -62,20 +74,147 @@ function getContextColor(pct: number, theme: ReturnType<typeof useTheme>): strin
   return theme.success;
 }
 
+// ── Thinking-level visual treatment ─────────────────────────
+//
+// Higher tier = warmer / more saturated color. `xhigh` and `max` add a moving
+// shimmer so high-power modes read as visibly "on full power" at a glance.
+
+const MAX_COLOR = "#db2777"; // hot pink — the visible "max power" tone
+const MAX_SHIMMER_COLOR = "#f472b6"; // brighter pink that rides the shimmer
+const PLAN_COLOR = "#a78bfa";
+const PLAN_SHIMMER_COLOR = "#ddd6fe";
+const SHIMMER_WIDTH = 2;
+
+function getThinkingColor(
+  level: ThinkingLevel | undefined,
+  theme: ReturnType<typeof useTheme>,
+): string {
+  if (!level) return theme.textDim;
+  if (level === "low") return theme.textMuted;
+  if (level === "medium") return theme.accent;
+  if (level === "high") return theme.warning;
+  return MAX_COLOR; // xhigh / max
+}
+
+/**
+ * Per-char shimmer for active footer labels. A bright spot rides across
+ * the text; chars within `SHIMMER_WIDTH` of the spot render bright/bold, the
+ * rest stay in the base color. Subscribes to the global animation tick so
+ * the timer only runs while an active label is visible.
+ */
+const ShimmerLabel: React.FC<{
+  text: string;
+  color: string;
+  shimmerColor: string;
+  active?: boolean;
+}> = ({ text, color, shimmerColor, active = true }) => {
+  const { active: animationActive, tick } = useFocusedAnimation(active);
+  const cycle = text.length + SHIMMER_WIDTH * 2;
+  const pos = animationActive ? (tick % cycle) - SHIMMER_WIDTH : -SHIMMER_WIDTH;
+  return (
+    <Text>
+      {text.split("").map((ch, i) => {
+        const isBright = Math.abs(i - pos) <= SHIMMER_WIDTH;
+        return (
+          <Text key={i} color={isBright ? shimmerColor : color} bold={isBright}>
+            {ch}
+          </Text>
+        );
+      })}
+    </Text>
+  );
+};
+
+export function getThinkingFooterLabel(thinkingLevel: ThinkingLevel | undefined): string {
+  return thinkingLevel ? `Thinking ${thinkingLevel}` : "Thinking off";
+}
+
+export function getFooterRightLength({
+  barWidth,
+  contextPct,
+  modelName,
+  planText = "Plan off",
+  thinkingText,
+  renderMarkdown = true,
+}: {
+  barWidth: number;
+  contextPct: number;
+  modelName: string;
+  planText?: string;
+  thinkingText: string;
+  renderMarkdown?: boolean;
+}): number {
+  return (
+    barWidth +
+    1 +
+    String(contextPct).length +
+    1 +
+    3 +
+    modelName.length +
+    3 +
+    planText.length +
+    (renderMarkdown ? 0 : 3 + "raw markdown".length) +
+    3 +
+    thinkingText.length
+  );
+}
+
+export function doesFooterFitOnOneLine({
+  columns,
+  model,
+  tokensIn,
+  contextWindowOptions,
+  cwd,
+  gitBranch,
+  thinkingLevel,
+  planMode = false,
+  statusBelow,
+  renderMarkdown: _renderMarkdown = true,
+}: {
+  columns: number;
+  model: string;
+  tokensIn: number;
+  contextWindowOptions?: ContextWindowOptions;
+  cwd: string;
+  gitBranch?: string | null;
+  thinkingLevel?: ThinkingLevel;
+  planMode?: boolean;
+  statusBelow?: boolean;
+  renderMarkdown?: boolean;
+}): boolean {
+  if (statusBelow) return false;
+  const parts = cwd.split("/").filter(Boolean);
+  const displayPath = parts.length > 0 ? parts[parts.length - 1] : cwd;
+  const contextPct = getFooterContextPercent(model, tokensIn, contextWindowOptions);
+  const modelName = getShortModelName(model);
+  const thinkingText = getThinkingFooterLabel(thinkingLevel);
+  const planText = planMode ? "Plan on" : "Plan off";
+  const leftLen = displayPath.length + 2 + (gitBranch ? gitBranch.length + 5 : 0);
+  const rightLen = getFooterRightLength({
+    barWidth: 8,
+    contextPct,
+    modelName,
+    planText,
+    thinkingText,
+  });
+  return leftLen + rightLen <= columns - 2;
+}
+
 export function Footer({
   model,
   tokensIn,
+  contextWindowOptions,
   cwd,
   gitBranch,
-  thinkingEnabled,
-  planMode,
+  thinkingLevel,
+  planMode = false,
   exitPending,
-  hidePlan,
   statusLabel,
   statusColor,
   hideCwd,
   hideGitBranch,
   statusBelow,
+  renderMarkdown = true,
 }: FooterProps) {
   const theme = useTheme();
   const { columns } = useTerminalSize();
@@ -84,7 +223,7 @@ export function Footer({
   const parts = cwd.split("/").filter(Boolean);
   const displayPath = parts.length > 0 ? parts[parts.length - 1] : cwd;
 
-  const contextPct = getContextPercent(model, tokensIn);
+  const contextPct = getFooterContextPercent(model, tokensIn, contextWindowOptions);
   const contextColor = getContextColor(contextPct, theme);
   const sep = <Text color={theme.border}>{" \u2502 "}</Text>;
 
@@ -118,25 +257,37 @@ export function Footer({
     }
   }
 
-  // Plan/Thinking labels
+  // Thinking labels. Show the actual thinking tier when on (`Thinking xhigh`) so users see what they're
+  // paying for. Off is the only state that stays generic.
+  const thinkingText = getThinkingFooterLabel(thinkingLevel);
   const planText = planMode ? "Plan on" : "Plan off";
-  const thinkingText = thinkingEnabled ? "Thinking on" : "Thinking off";
-  const showPlan = !hidePlan;
+  const thinkingColor = getThinkingColor(thinkingLevel, theme);
+  const reducedMotion = useReducedMotion();
+  const shimmerMaxPower = (thinkingLevel === "xhigh" || thinkingLevel === "max") && !reducedMotion;
+  const shimmerPlan = planMode && !reducedMotion;
 
   // Calculate whether everything fits on one line
-  const leftLen = displayPath.length + 2 + (gitBranch ? gitBranch.length + 5 : 0);
-  const rightLen =
-    barWidth +
-    1 +
-    String(contextPct).length +
-    1 +
-    3 +
-    modelName.length +
-    (showPlan ? 3 + planText.length : 0) +
-    3 +
-    thinkingText.length;
+  const rightLen = getFooterRightLength({
+    barWidth,
+    contextPct,
+    modelName,
+    planText,
+    thinkingText,
+    renderMarkdown,
+  });
   const availableWidth = columns - 2;
-  const fitsOnOneLine = leftLen + rightLen <= availableWidth;
+  const fitsOnOneLine = doesFooterFitOnOneLine({
+    columns,
+    model,
+    tokensIn,
+    contextWindowOptions,
+    cwd,
+    gitBranch,
+    thinkingLevel,
+    planMode,
+    statusBelow,
+    renderMarkdown,
+  });
 
   const maxPath = fitsOnOneLine ? availableWidth - rightLen - 2 : availableWidth;
   const truncPath =
@@ -153,14 +304,40 @@ export function Footer({
       <Text color={theme.primary} bold>
         {modelName}
       </Text>
-      {showPlan ? (
+      {sep}
+      {shimmerPlan ? (
+        <ShimmerLabel
+          text={planText}
+          color={PLAN_COLOR}
+          shimmerColor={PLAN_SHIMMER_COLOR}
+          active={!exitPending}
+        />
+      ) : (
+        <Text color={planMode ? PLAN_COLOR : theme.textDim} bold={planMode}>
+          {planText}
+        </Text>
+      )}
+      {!renderMarkdown && (
         <>
           {sep}
-          <Text color={planMode ? theme.planPrimary : theme.textDim}>{planText}</Text>
+          <Text color={theme.warning} bold>
+            raw markdown
+          </Text>
         </>
-      ) : null}
+      )}
       {sep}
-      <Text color={thinkingEnabled ? theme.accent : theme.textDim}>{thinkingText}</Text>
+      {shimmerMaxPower ? (
+        <ShimmerLabel
+          text={thinkingText}
+          color={MAX_COLOR}
+          shimmerColor={MAX_SHIMMER_COLOR}
+          active={!exitPending}
+        />
+      ) : (
+        <Text color={thinkingColor} bold={thinkingLevel === "high"}>
+          {thinkingText}
+        </Text>
+      )}
     </>
   );
 

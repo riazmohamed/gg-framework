@@ -49,7 +49,7 @@ function ensureGitignore() {
   if (missing.length) {
     const suffix =
       (existing.endsWith("\n") || !existing ? "" : "\n") +
-      "\n# ggcoder-eyes\n" +
+      "\n# ogcoder eyes\n" +
       missing.join("\n") +
       "\n";
     writeFileSync(gi, existing + suffix);
@@ -116,7 +116,7 @@ function doDetect() {
 function doInstall(args: string[]) {
   const cap = args[0];
   if (!cap) {
-    console.error("usage: ggcoder-eyes install <capability> [--impl <name>] [--as <script-name>]");
+    console.error("usage: ogcoder eyes install <capability> [--impl <name>] [--as <script-name>]");
     process.exit(1);
   }
   let impl: string | undefined;
@@ -249,7 +249,7 @@ function doVerify(args: string[]) {
 function doList() {
   const m = readManifest();
   if (!m.probes.length) {
-    console.log("no probes installed. run: ggcoder-eyes detect | install <capability>");
+    console.log("no probes installed. run: ogcoder eyes detect | install <capability>");
     return;
   }
   for (const p of m.probes) {
@@ -266,7 +266,7 @@ const LOG_STATUSES: ReadonlySet<string> = new Set(["open", "deferred", "acked"])
 function doLog(args: string[]) {
   const sub = args[0];
   if (!sub) {
-    console.error("usage: ggcoder-eyes log <rough|wish|blocked|ack|defer|list|count> ...");
+    console.error("usage: ogcoder eyes log <rough|wish|blocked|ack|defer|list|count> ...");
     process.exit(1);
   }
 
@@ -282,7 +282,7 @@ function doLog(args: string[]) {
   if (LOG_KINDS.has(sub)) {
     const reason = args[1];
     if (!reason) {
-      console.error(`usage: ggcoder-eyes log ${sub} "<reason>" [--probe <name>]`);
+      console.error(`usage: ogcoder eyes log ${sub} "<reason>" [--probe <name>]`);
       process.exit(1);
     }
     let probe: string | undefined;
@@ -297,7 +297,7 @@ function doLog(args: string[]) {
   if (sub === "ack" || sub === "defer") {
     const id = args[1];
     if (!id) {
-      console.error(`usage: ggcoder-eyes log ${sub} <id>`);
+      console.error(`usage: ogcoder eyes log ${sub} <id>`);
       process.exit(1);
     }
     const ok = updateEntry(id, { status: sub === "ack" ? "acked" : "deferred" });
@@ -357,7 +357,7 @@ switch (cmd) {
     break;
   default:
     console.error(
-      `usage: ggcoder-eyes <command>
+      `usage: ogcoder eyes <command>
 
 commands:
   init                          create .gg/eyes/, copy shared infra, update .gitignore
