@@ -181,4 +181,19 @@ a fork minisign keypair, and set both `endpoints` and `pubkey`.
 
 Build on the Windows side (`C:\Users\riaza\gg-framework`, a checkout of this branch) — the
 staged Node runtime and the `sharp` binary are chosen by the _build_ platform. Prerequisites
-present there: VS 2022 C++ tools, WebView2, Node, Git for Windows, Rust (rustup), pnpm.
+there: VS 2022 with the **"Desktop development with C++" workload** (MSVC + Windows SDK —
+Community alone is not enough; `VC\Tools\MSVC` must be non-empty), WebView2, Node, Git for
+Windows, Rust via rustup (`stable-x86_64-pc-windows-msvc`), and **pnpm 10** (the
+`packageManager` pin — pnpm 12 renamed `onlyBuiltDependencies` and silently skips the
+allowed install scripts).
+
+Gotchas hit on the first Windows build:
+
+- `stage:node` runs `rustc --print host-tuple` to name `ggnode-<triple>.exe`, so
+  `%USERPROFILE%\.cargo\bin` must be on the PATH of the shell running it.
+- Adding the C++ workload from a script (elevated): `Installer\setup.exe modify --installPath
+"…\2022\Community" --add Microsoft.VisualStudio.Workload.NativeDesktop --includeRecommended
+--passive --norestart`. `--wait` is a bootstrapper-only flag — `setup.exe` rejects it with
+  exit code 87.
+- `installer/out/*.bmp|png` is generated (`pnpm --filter gg-app installer:art`, needs `sharp`)
+  and not tracked; NSIS bundling fails without it.
