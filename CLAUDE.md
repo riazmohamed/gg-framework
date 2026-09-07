@@ -18,6 +18,13 @@ Also in the workspace: `gg-app/` (Tauri v2 desktop app, from upstream) and
 `experiments/prompt-bench/`. The desktop app is built on the **Windows side** from
 `C:\Users\riaza\gg-framework` (a checkout of this branch) — see `gg-app/DISTRIBUTION.md`
 "Fork build". Windows projects use the app; WSL projects use the `ogcoder` CLI here.
+First fork build landed 2026-09-07: `gg-app.exe` + `GG Coder_0.62.0_x64-setup.exe` (NSIS, 79 MB)
+and `…_x64_en-US.msi` (122 MB) under `gg-app\src-tauri\target\release\bundle\`, unsigned
+(SmartScreen will warn once); Rust shell compile ≈ 5m40s, and `smoke-packaged-windows.mjs
+--artifact <msi>` passes. Windows toolchain is complete (MSVC 14.40, SDK 10.0.22621, rustup
+stable-msvc, pnpm 10.33 pinned). Helper scripts from that build live in
+`C:\Users\riaza\AppData\Local\Temp\` (`gg-app-stage.cmd`, `gg-app-tauri-build.cmd`,
+`steroids-cargo.ps1`, `gg-reinstall.cmd`) — disposable, not tracked.
 One sidecar per app, one OS: nothing bridges `\\wsl.localhost` and `/mnt/c`, and `~/.gg`
 (auth, sessions) is separate per OS.
 
@@ -86,6 +93,9 @@ with no release assets, so:
   (identical code, SHA256-verified) because the fork publishes none.
 - ogcoder runs it with `STEROIDS_NO_UPGRADE=1`, so the binary's own updater (hard-wired to
   upstream in `src/upgrade.rs`) never fires from the agent.
+- **State on 2026-09-07:** both sides run the fork build at `79fb437d` (WSL `~/.cargo/bin/steroids`,
+  Windows `C:\Users\riaza\.cargo\bin\steroids.exe`; the prebuilt copy under `AppData\Local\steroids`
+  was retired along with its PATH entry). Corpora are empty until `/steroids` runs in a project.
 - **One corpus per side, never shared.** The corpus is a SQLite `corpus.db` + trigram index
   under `~/.steroids` (relocatable via `STEROIDS_ROOT` / `steroids config root`). SQLite over
   the WSL↔Windows 9P boundary does not lock safely — do not point both sides at one file.
