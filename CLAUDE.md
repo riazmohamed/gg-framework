@@ -56,6 +56,9 @@ keeps it — a merge from main will silently drop its ~27 files unless they are 
 - **Windows / WSL support** — `utils/shell.ts` `resolveShell()` (Git Bash), `terminateProcessTree()`,
   the Windows env allowlist in `tools/safe-env.ts`, WSL scroll-pause (`ui/scroll-pause.ts`),
   reduced motion auto-enabled on WSL, OSC 11 theme detection skipped on WSL.
+- **CLI PATH enrichment** — `cli.ts` calls `enrichProcessPath()` in its startup `Promise.all`
+  (upstream only does this in the desktop sidecar), so `~/.cargo/bin` tools like `steroids`
+  are found even when the launching terminal's PATH lacks them.
 - **`ggcoder-eyes`** package, `EyesOverlay.tsx`, and the `ogcoder eyes …` passthrough in `cli.ts`.
 - **Vision / plan-execute / hybrid model router** — `core/model-router.ts` (no upstream equivalent),
   the `model_switch` event in `core/event-bus.ts`, and the `getVisionModel` /

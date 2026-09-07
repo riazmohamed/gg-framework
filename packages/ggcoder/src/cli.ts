@@ -113,6 +113,7 @@ import {
   requireInteractiveTTY,
 } from "./cli/shared.js";
 import { isEyesActive, journalCount } from "@abukhaled/ggcoder-eyes";
+import { enrichProcessPath } from "./core/shell-path.js";
 import { discoverAgents } from "./core/agents.js";
 import { applyAsyncSubagentPolicy } from "./core/subagent-policy.js";
 import { discoverSkills } from "./core/skills.js";
@@ -661,6 +662,10 @@ async function runInkTUI(opts: {
     fs.promises.mkdir(path.join(localGGDir, "agents"), { recursive: true }),
     discoverAgents({ globalAgentsDir: paths.agentsDir, projectDir: cwd }),
     discoverSkills({ globalSkillsDir: paths.skillsDir, projectDir: cwd }),
+    // Fork: like the desktop sidecar, merge the login-shell PATH and well-known
+    // bin dirs (~/.cargo/bin, Homebrew, ...) so tools such as `steroids` are found
+    // regardless of the PATH of the terminal that launched us. No-op on Windows.
+    enrichProcessPath(),
   ]);
 
   // Runtime mode refs — shared between tools and UI
