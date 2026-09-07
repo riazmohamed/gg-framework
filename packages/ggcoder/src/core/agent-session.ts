@@ -1779,7 +1779,10 @@ export class AgentSession {
     ) {
       return;
     }
-    this.semanticLoop.pending = true;
+    // resetHookState replaces this object on every prompt. A late judge must
+    // not publish a verdict or consume the next run's budget/cooldown.
+    const runState = this.semanticLoop;
+    runState.pending = true;
     log("INFO", "loop-break", "Starting semantic loop judge", {
       turn: String(this.hookStats.turns),
       consecutiveFailures: String(this.hookConsecutiveFailures),
@@ -1791,7 +1794,7 @@ export class AgentSession {
         const raw = await (this.opts.semanticLoopJudge?.(prompt) ??
           this.callSemanticLoopJudge(prompt));
         const verdict = parseSemanticLoopVerdict(raw);
-        if (verdict?.loop) this.semanticLoop.verdict = verdict;
+        if (this.semanticLoop === runState && verdict?.loop) runState.verdict = verdict;
       } catch (error) {
         // Fail open: judge errors never stop a run. Budget and cooldown are
         // still consumed in `finally` so a flaky judge cannot retry-loop.
@@ -1799,9 +1802,11 @@ export class AgentSession {
           error: error instanceof Error ? error.message : String(error),
         });
       } finally {
-        this.semanticLoop.pending = false;
-        this.semanticLoop.checksUsed += 1;
-        this.semanticLoop.lastCheckTurn = this.hookStats.turns;
+        if (this.semanticLoop === runState) {
+          runState.pending = false;
+          runState.checksUsed += 1;
+          runState.lastCheckTurn = this.hookStats.turns;
+        }
       }
     })();
   }

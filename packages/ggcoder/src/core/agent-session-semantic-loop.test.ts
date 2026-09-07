@@ -18,6 +18,7 @@ interface SemanticInternals {
     verdict: { loop: boolean; reason: string; advice: string } | null;
     injected: boolean;
   };
+  resetHookState(originalRequest: string): void;
   getHookSteeringMessages(): Message[] | null;
   trackHookEvent(event: Record<string, unknown>): Promise<void>;
 }
@@ -83,6 +84,65 @@ describe("AgentSession semantic loop check", () => {
     // Once per run even if a second check later returns another loop verdict.
     internal.semanticLoop.verdict = { loop: true, reason: "again", advice: "" };
     expect(internal.getHookSteeringMessages()).toBeNull();
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores an old judge's %s after a new question starts",
+    async (outcome) => {
+      let resolve!: (value: string) => void;
+      let reject!: (reason: Error) => void;
+      const pending = new Promise<string>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      const internal = makeSession(() => pending);
+      primeSuspicion(internal);
+      internal.getHookSteeringMessages();
+      expect(internal.semanticLoop.pending).toBe(true);
+
+      internal.resetHookState("Explain the previous change without editing anything");
+      const freshState = { ...internal.semanticLoop };
+      if (outcome === "resolve") {
+        resolve('{"loop": true, "reason": "old failure", "advice": "retry"}');
+      } else {
+        reject(new Error("old request failed"));
+      }
+      await new Promise<void>((done) => setImmediate(done));
+
+      expect(internal.semanticLoop).toEqual(freshState);
+      expect(internal.getHookSteeringMessages()).toBeNull();
+    },
+  );
+
+  it("keeps the current judge pending when an old judge finishes", async () => {
+    let finishOld!: (value: string) => void;
+    let finishCurrent!: (value: string) => void;
+    const old = new Promise<string>((resolve) => {
+      finishOld = resolve;
+    });
+    const current = new Promise<string>((resolve) => {
+      finishCurrent = resolve;
+    });
+    const judge = vi.fn().mockReturnValueOnce(old).mockReturnValueOnce(current);
+    const internal = makeSession(judge);
+    primeSuspicion(internal);
+    internal.getHookSteeringMessages();
+
+    internal.resetHookState("Fix a different problem");
+    primeSuspicion(internal);
+    internal.getHookSteeringMessages();
+    const freshState = { ...internal.semanticLoop };
+    finishOld('{"loop": true, "reason": "old failure", "advice": "retry"}');
+    await new Promise<void>((done) => setImmediate(done));
+
+    expect(internal.semanticLoop).toEqual(freshState);
+    expect(internal.getHookSteeringMessages()).toBeNull();
+    expect(judge).toHaveBeenCalledTimes(2);
+    finishCurrent('{"loop": true, "reason": "current failure", "advice": "inspect"}');
+    await new Promise<void>((done) => setImmediate(done));
+    expect(internal.semanticLoop.pending).toBe(false);
+    expect(internal.semanticLoop.checksUsed).toBe(1);
+    expect(internal.getHookSteeringMessages()?.[0]?.content).toContain("current failure");
   });
 
   it("fails open: a no-loop or unparseable verdict injects nothing", async () => {
