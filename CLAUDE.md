@@ -186,6 +186,23 @@ pnpm --filter @abukhaled/ogcoder publish --no-git-checks
 
 `gg-core` publishes first — `gg-ai` and `ogcoder` both depend on it.
 
-Global install for local testing: `cd packages/ggcoder && npm install -g .` (pnpm's
-global install fails without `PNPM_HOME`; the existing `ogcoder` symlink lives
-under the active nvm node version's `bin/`).
+### Local install — the `ogcoder` on PATH is THIS repo
+
+The global `ogcoder` is not a copied install, it is a **symlink into this working tree**:
+
+```
+~/.nvm/versions/node/<version>/bin/ogcoder
+  -> ../lib/node_modules/@abukhaled/ogcoder/dist/cli.js
+  -> <repo>/packages/ggcoder          # symlinked package, not a copy
+```
+
+So `pnpm --filter @abukhaled/ogcoder build` publishes straight to the CLI you actually
+run — no reinstall needed, but **a broken build breaks your live `ogcoder` immediately**.
+Always confirm the binary still starts after touching the build:
+
+```bash
+node packages/ggcoder/dist/cli.js --version
+```
+
+To recreate the link: `cd packages/ggcoder && npm install -g .` (pnpm's global install
+fails without `PNPM_HOME`).
