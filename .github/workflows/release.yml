@@ -191,9 +191,10 @@ jobs:
       - name: Build framework packages
         shell: bash
         run: |
-          pnpm --filter @kenkaiiii/gg-ai build
-          pnpm --filter @kenkaiiii/gg-agent build
-          pnpm --filter @kenkaiiii/ggcoder build
+          pnpm --filter @abukhaled/gg-ai build
+          pnpm --filter @abukhaled/gg-agent build
+          pnpm --filter @abukhaled/gg-core build
+          pnpm --filter @abukhaled/ogcoder build
 
       - name: Stage node runtime + bundle sidecar
         run: |

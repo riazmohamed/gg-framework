@@ -1,5 +1,35 @@
 # @kenkaiiii/ggcoder
 
+## 5.58.0
+
+### Minor Changes
+
+- Add independent read-only reviews for substantial coding tasks and model-assisted detection of unproductive retries. Keep stale loop judgments and unfinished verification from interrupting later question-only turns, and explain why a check does not count as verification.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.58.0
+- @kenkaiiii/gg-agent@5.58.0
+- @kenkaiiii/gg-core@5.58.0
+
+## 5.57.2
+
+### Patch Changes
+
+- Fix verification-gate false alarms: bash shells now run with pipefail so piped checks report the failing stage's exit code, `check | tail` pipelines count as verification evidence, stale failed checks are superseded by green runs at newer revisions, and verified sessions stay verified across resume.
+  - @kenkaiiii/gg-ai@5.57.2
+  - @kenkaiiii/gg-agent@5.57.2
+  - @kenkaiiii/gg-core@5.57.2
+
+## 5.57.1
+
+### Patch Changes
+
+- OpenAI tool calls now use strict (structured outputs) sampling so malformed arguments are guaranteed away at the provider, with a null-argument fallback re-parse for schemas strict mode rewrites.
+  - @kenkaiiii/gg-ai@5.57.1
+  - @kenkaiiii/gg-agent@5.57.1
+  - @kenkaiiii/gg-core@5.57.1
+
 ## 5.57.0
 
 ### Minor Changes

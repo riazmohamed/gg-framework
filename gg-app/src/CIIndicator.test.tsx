@@ -94,6 +94,22 @@ describe("CIIndicator", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
+  it("shimmers only while running; pass and fail render static colored text", () => {
+    const { rerender, container } = render(<CIIndicator ci={running} />);
+    expect(container.querySelector(".shimmer-text")).not.toBeNull();
+    rerender(
+      <CIIndicator ci={{ ...running, active: false, completed: 6, conclusion: "success" }} />,
+    );
+    expect(container.querySelector(".shimmer-text")).toBeNull();
+    expect(screen.getByRole("status").getAttribute("data-status")).toBe("passed");
+    rerender(<CIIndicator ci={{ ...running, failed: 1, active: false, conclusion: "failure" }} />);
+    expect(container.querySelector(".shimmer-text")).toBeNull();
+    expect(screen.getByRole("status").getAttribute("data-status")).toBe("failed");
+    // A job failing mid-run drops the shimmer immediately.
+    rerender(<CIIndicator ci={{ ...running, failed: 1 }} />);
+    expect(container.querySelector(".shimmer-text")).toBeNull();
+  });
+
   it("does not paint a cancelled run green", () => {
     vi.useFakeTimers();
     const { rerender } = render(<CIIndicator ci={running} />);

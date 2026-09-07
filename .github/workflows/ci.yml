@@ -24,10 +24,7 @@ concurrency:
 # it carries upstream's own (sometimes red) test suite, which is not our code to
 # keep green.
 #
-# We deliberately keep the gg-editor + gg-pixel packages out of the matrix
-# for now — they have heavier native deps (sharp, transformers) that slow CI
-# without buying us much for the framework's release-critical packages
-# (gg-ai, gg-agent, ogcoder, gg-boss).
+# The framework release spine is gg-ai, gg-agent, gg-core, and ggcoder.
 
 jobs:
   test:
@@ -67,8 +64,8 @@ jobs:
         run: |
           pnpm --filter @abukhaled/gg-ai build
           pnpm --filter @abukhaled/gg-agent build
+          pnpm --filter @abukhaled/gg-core build
           pnpm --filter @abukhaled/ogcoder build
-          pnpm --filter @kenkaiiii/gg-boss build
 
       # Deterministic perf budgets (fx-pattern ratchet): bundle size + CLI
       # startup. Baseline lives in bench/baseline/sizes.json; intentional
@@ -87,15 +84,15 @@ jobs:
         run: |
           pnpm --filter @abukhaled/gg-ai check
           pnpm --filter @abukhaled/gg-agent check
+          pnpm --filter @abukhaled/gg-core check
           pnpm --filter @abukhaled/ogcoder check
-          pnpm --filter @kenkaiiii/gg-boss check
 
       - name: Test framework packages
         shell: bash
         run: |
           pnpm --filter @abukhaled/gg-ai test
           pnpm --filter @abukhaled/gg-agent test
-          pnpm --filter @kenkaiiii/gg-boss test
+          pnpm --filter @abukhaled/gg-core test
 
       # Blocking on every OS, Windows included. This started as a 72-failure
       # Windows backlog that had been invisible because the default PowerShell
@@ -105,10 +102,6 @@ jobs:
       - name: Test ggcoder
         shell: bash
         run: pnpm --filter @abukhaled/ogcoder test
-
-      - name: ggboss CLI smoke (extra belt-and-braces)
-        run: node packages/gg-boss/dist/cli.js --help
-        shell: bash
 
   # Distribution-critical cross-OS job: stages the per-platform Node runtime,
   # bundles the sidecar, boots it with the bundled runtime (smoke), and runs the
@@ -163,6 +156,7 @@ jobs:
         run: |
           pnpm --filter @abukhaled/gg-ai build
           pnpm --filter @abukhaled/gg-agent build
+          pnpm --filter @abukhaled/gg-core build
           pnpm --filter @abukhaled/ogcoder build
 
       - name: Stage node runtime + bundle sidecar

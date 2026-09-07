@@ -125,11 +125,11 @@ OAuth login so there are no API keys to paste, full terminal UI, tools, MCP, LSP
 The desktop app forks **zero** agent logic. Windows, IPC and UI live in `gg-app/`; everything else is the exact same spine the CLI runs, and every layer ships on npm on its own.
 
 ```
-@abukhaled/gg-ai (standalone)
-  └─► @abukhaled/gg-agent
-        └─► @abukhaled/gg-core
-              ├─► @abukhaled/ogcoder ──► OG Coder desktop app ⭐
-              └─► @kenkaiiii/gg-boss
+OG Coder desktop app ⭐
+  └── @abukhaled/ogcoder (CLI + app sidecar)
+        ├── @abukhaled/gg-ai (standalone)
+        ├── @abukhaled/gg-agent ──► @abukhaled/gg-ai
+        └── @abukhaled/gg-core  ──► @abukhaled/gg-ai
 ```
 
 | Package                                                                  | What it does                                              |
@@ -138,8 +138,6 @@ The desktop app forks **zero** agent logic. Windows, IPC and UI live in `gg-app/
 | [`@abukhaled/gg-agent`](packages/gg-agent/README.md)                     | Agent loop with multi-turn tool execution                 |
 | [`@abukhaled/gg-core`](https://www.npmjs.com/package/@abukhaled/gg-core) | Shared guts: model registry, OAuth, auth storage, paths   |
 | [`@abukhaled/ogcoder`](packages/ggcoder/README.md)                       | The CLI, plus the sidecar the desktop app runs            |
-| [`@kenkaiiii/gg-boss`](packages/gg-boss/README.md)                       | Drives a bunch of workers across projects from one chat   |
-| [`@kenkaiiii/gg-voice`](packages/gg-voice/README.md)                     | Realtime voice sessions, bridged into ogcoder and gg-boss |
 
 <details>
 <summary><strong>👨‍💻 Run it from source</strong></summary>
@@ -153,7 +151,7 @@ cd gg-app && pnpm tauri dev
 ```
 
 ```bash
-pnpm build      # tsc across all packages (order: gg-ai → gg-agent → ogcoder)
+pnpm build      # build all packages (gg-ai → gg-agent + gg-core → ogcoder)
 pnpm check      # typecheck
 pnpm test       # vitest
 pnpm lint

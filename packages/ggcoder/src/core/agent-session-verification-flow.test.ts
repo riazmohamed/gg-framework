@@ -21,7 +21,7 @@ import type { ProcessManager } from "./process-manager.js";
 interface FlowInternals {
   sessionPath: string;
   processManager: ProcessManager;
-  getHookFollowUpMessages(): Message[] | null;
+  getHookFollowUpMessages(): Promise<Message[] | null>;
   getVerificationProblem(): string | null;
   trackHookEvent(event: AgentEvent): Promise<void>;
   eventBus: {
@@ -120,7 +120,7 @@ describe("verification gate flow", () => {
     expect(events.indexOf("hook_armed:verification:true")).toBe(0);
 
     // The stop: the gate injects, and says so.
-    const followUp = internal.getHookFollowUpMessages();
+    const followUp = await internal.getHookFollowUpMessages();
     expect(followUp).not.toBeNull();
     expect(String(followUp![0]!.content)).toContain("Run the project's verification");
     expect(events).toEqual([
@@ -133,7 +133,7 @@ describe("verification gate flow", () => {
 
     // One notice, one injection: the reviewed answer that follows streams live
     // and is the only final answer the user sees.
-    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
     expect(events.filter((e) => e === "hook:verification")).toHaveLength(1);
   });
 
@@ -145,7 +145,40 @@ describe("verification gate flow", () => {
 
     // Disarmed by the verification, so no draft is ever held back.
     expect(events).toEqual(["hook_armed:verification:true", "hook_armed:verification:false"]);
-    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
+  });
+
+  it("counts a check piped through a tail limiter, so a question turn is never hijacked", async () => {
+    const { internal, events } = await makeSession();
+
+    await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    // The agent-habit shape that caused the real-world incident: green suite,
+    // output piped through tail. Pre-pipefail this was rejected as evidence,
+    // the gate stayed armed past the turn, and the NEXT turn — a plain user
+    // question — had its draft held, discarded, and replaced by the hook
+    // notice. With pipefail + the limiter rule it is ordinary passing evidence.
+    await simulateToolCall(
+      internal,
+      "bash",
+      { command: "pnpm test 2>&1 | tail -6" },
+      "Exit code: 0\n3 passing",
+    );
+
+    expect(internal.getVerificationProblem()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
+    expect(events).toEqual(["hook_armed:verification:true", "hook_armed:verification:false"]);
+  });
+
+  it("still rejects piped checks whose stages can transform results", async () => {
+    const { internal } = await makeSession();
+    await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    await simulateToolCall(
+      internal,
+      "bash",
+      { command: "pnpm test | grep -q 'all passed'" },
+      "Exit code: 0",
+    );
+    expect(internal.getVerificationProblem()).toContain("Unverified");
   });
 
   it("does not treat a nonzero bash exit as passing merely because the tool returned normally", async () => {
@@ -269,7 +302,11 @@ describe("verification gate flow", () => {
       `ID: ${started.id}\n`,
     );
     expect(internal.getVerificationProblem()).toContain("Unverified");
-    expect(await internal.processManager.waitForExit(started.id, 5000)).toBe("exited");
+    // The npm chain (npm.cmd → node → npm → script) cold-starts far slower on a
+    // loaded Windows CI runner than the 5s cap used for direct `node --test`
+    // runs — waitForExit still returns the instant the process exits, this only
+    // raises the hang ceiling so a slow spawn is not misread as a hang.
+    expect(await internal.processManager.waitForExit(started.id, 30_000)).toBe("exited");
     await simulateToolCall(internal, "task_output", { id: started.id });
     expect(internal.getVerificationProblem()).toBeNull();
   });
@@ -312,6 +349,40 @@ describe("verification gate flow", () => {
     await simulateToolCall(internal, "write", { file_path: "README.md" });
 
     expect(events).toEqual([]);
-    expect(internal.getHookFollowUpMessages()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
+  });
+
+  it("answers later question turns instead of re-hijacking them with the verification hook", async () => {
+    // The live incident, replayed against the real session: code edited, the
+    // check the agent actually ran did not count as evidence, and EVERY later
+    // prompt — plain questions included — was answered by "Hook engaged"
+    // plus a verification status instead of the user's question.
+    const { internal, events } = await makeSession();
+
+    await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    // `make test` is a real check the evidence classifier cannot vouch for:
+    // green output, exit 0 — but not bounded evidence.
+    await simulateToolCall(internal, "bash", { command: "make test" });
+    expect(internal.getVerificationProblem()).toContain("Unverified");
+    // The work turn gets its one demand, as designed.
+    expect(await internal.getHookFollowUpMessages()).not.toBeNull();
+
+    // The next user prompt: a new run with no edits. The inherited debt must
+    // NOT re-arm — no hold, no notice, the answer streams untouched.
+    const before = events.length;
+    (internal as unknown as { verificationGate: { beginRun(): void } }).verificationGate.beginRun();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
+    expect(events.length).toBe(before);
+  });
+
+  it("records neither pass nor failure for persistent-shell checks, however they exit", async () => {
+    const { internal } = await makeSession();
+
+    await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    await simulateToolCall(internal, "bash", { command: "pnpm test", persist: true });
+    // Not evidence — but not a FAILED check either: a false failure here
+    // poisoned every later green run of a different command spelling.
+    expect(internal.getVerificationProblem()).toContain("Unverified");
+    expect(internal.getVerificationProblem()).not.toContain("failed");
   });
 });

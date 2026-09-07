@@ -22,6 +22,33 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.62.0",
+    date: "2026-09-07",
+    items: [
+      "Big coding jobs now get a fresh pair of eyes. I gave `Ideal` an independent reviewer that reads your changes without the original agent's excuses, then sends real issues back for another pass before you get the final answer.",
+      "Less spinning, more progress. I upgraded `loop detection` to spot failed retries even when the agent keeps changing the wording, so it can try a genuinely different approach. Your next prompt gets a clean slate, not yesterday's warning.",
+      "Ask a question and get an answer, not a surprise testing detour. I stopped unfinished checks from dragging `Hook engaged` into your question-only turns, and made verification explain exactly why a check did not count.",
+    ],
+  },
+  {
+    version: "0.61.2",
+    date: "2026-09-07",
+    items: [
+      "I killed the phantom `Hook engaged` interruptions. Ask a plain question right after opening the app and your answer now streams untouched, because verified work stays verified and checks piped through `tail` finally count as proof.",
+      "A red test suite can never dress up as green again. Every command now runs with `pipefail`, so piping tests through `tail` still surfaces the failure and the agent has to actually fix it.",
+      "No more endless `a check failed` loops. One stale failure no longer blocks every later green run: any fresh passing check on newer code clears the slate.",
+      "Follow-up re-checks now answer in `one line`, not a wall. After a tiny change the agent confirms with a short delta instead of re-printing the whole checklist you already read.",
+    ],
+  },
+  {
+    version: "0.61.1",
+    date: "2026-09-06",
+    items: [
+      "Your `CI` chip now tells the whole story at a glance. While jobs run it shimmers with quiet suspense, then settles to calm `green` on a pass or honest `red` the moment something breaks. No more guessing.",
+      "Agents on `OpenAI` got sharper hands. I made every tool call ship in a strictly validated shape, so fewer calls bounce back with malformed arguments. That means fewer retries and less waiting for you.",
+    ],
+  },
+  {
     version: "0.61.0",
     date: "2026-09-06",
     items: [
