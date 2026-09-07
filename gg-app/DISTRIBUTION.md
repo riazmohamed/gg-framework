@@ -176,7 +176,10 @@ value fails preflight rather than publishing an unsigned build):
 (`KenKaiii/gg-framework … latest.json`) is signed with upstream's `pubkey`, so a fork build
 that kept it would verify and install upstream's app over itself on the next check. The
 `check()` call in the webview then errors ("no endpoints") and is swallowed; the tray's
-"Update now" item never appears. To re-enable: publish a release feed for this fork, generate
+"Update now" item never appears. `bundle.createUpdaterArtifacts` is `false` for the same
+reason: generating the `.sig` updater artifacts needs the private key behind that `pubkey`,
+which only upstream holds — with it `true`, `tauri build` writes both installers and then
+exits non-zero on the signing step. To re-enable: publish a release feed for this fork, generate
 a fork minisign keypair, and set both `endpoints` and `pubkey`.
 
 Build on the Windows side (`C:\Users\riaza\gg-framework`, a checkout of this branch) — the

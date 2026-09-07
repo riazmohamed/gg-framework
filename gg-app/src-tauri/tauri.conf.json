@@ -19,7 +19,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "externalBin": ["binaries/ggnode"],
     "resources": ["sidecar/"],
     "macOS": {
