@@ -14,9 +14,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `packages/ggcoder`      | `@abukhaled/ogcoder`      | CLI coding agent (`ogcoder` binary)                                  |
 | `packages/ggcoder-eyes` | `@abukhaled/ggcoder-eyes` | Project-agnostic perception probes (screenshots, logs, HTTP capture) |
 
-Also in the workspace: `gg-app/` (Tauri v2 desktop app, from upstream — needs a Rust
-toolchain to build, and is not built or installed here) and
-`experiments/prompt-bench/`.
+Also in the workspace: `gg-app/` (Tauri v2 desktop app, from upstream) and
+`experiments/prompt-bench/`. The desktop app is built on the **Windows side** from
+`C:\Users\riaza\gg-framework` (a checkout of this branch) — see `gg-app/DISTRIBUTION.md`
+"Fork build". Windows projects use the app; WSL projects use the `ogcoder` CLI here.
+One sidecar per app, one OS: nothing bridges `\\wsl.localhost` and `/mnt/c`, and `~/.gg`
+(auth, sessions) is separate per OS.
 
 **Dependency chain**: `gg-core` → `gg-ai` → `gg-agent` → `ogcoder` (uses `ggcoder-eyes` for perception)
 
@@ -68,6 +71,25 @@ The literal string `"ggcoder"` is still load-bearing in several internal places 
 - `GGCODER_BUG_REPORT_URL` in `ui/error-item.ts` (still points at the upstream issue tracker — no fork-owned tracker has been set up)
 
 When upstream merges reintroduce "GG Coder" / "Ken Kai" / "ggcoder" in user-visible strings, rebrand only those — leave the internal IDs alone.
+
+## Agent Steroids (`steroids` CLI)
+
+Local code corpus the agent reads before writing; driven by the `/steroids` prompt command,
+the `steroids` tool (`tools/steroids.ts`), and the desktop Home-screen button. Source is the
+fork **https://github.com/riazmohamed/agent-steroids** — currently an exact mirror of upstream
+with no release assets, so:
+
+- Install with `cargo install --git https://github.com/riazmohamed/agent-steroids --locked`
+  on **both** sides (`~/.cargo/bin/steroids` on WSL, `%USERPROFILE%\.cargo\bin\steroids.exe`
+  on Windows). `core/steroids.ts` probes PATH (incl. `~/.cargo/bin`) before `~/.gg/bin`, so
+  the cargo build wins over the in-app installer, which still downloads upstream's prebuilt
+  (identical code, SHA256-verified) because the fork publishes none.
+- ogcoder runs it with `STEROIDS_NO_UPGRADE=1`, so the binary's own updater (hard-wired to
+  upstream in `src/upgrade.rs`) never fires from the agent.
+- **One corpus per side, never shared.** The corpus is a SQLite `corpus.db` + trigram index
+  under `~/.steroids` (relocatable via `STEROIDS_ROOT` / `steroids config root`). SQLite over
+  the WSL↔Windows 9P boundary does not lock safely — do not point both sides at one file.
+  `/steroids` indexes per project with a tag, so each side indexes what its projects need.
 
 ## Commands
 

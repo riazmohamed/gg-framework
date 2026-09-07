@@ -27,6 +27,11 @@ export interface SteroidsStatus {
   error?: string;
 }
 
+// The fork (riazmohamed/agent-steroids) is a mirror of upstream with no release
+// assets of its own, so the verified prebuilt download must still come from
+// upstream. A `cargo install --git https://github.com/riazmohamed/agent-steroids`
+// build is found first anyway (it lands in ~/.cargo/bin, probed before ~/.gg/bin).
+// Switch both URLs to the fork once it publishes releases with SHA256SUMS.
 const RELEASE_API = "https://api.github.com/repos/KenKaiii/agent-steroids/releases/latest";
 const DOWNLOAD_PREFIX = "https://github.com/KenKaiii/agent-steroids/releases/download/";
 /** Same cap as upgrade.rs: applied to the download AND the inflated binary. */

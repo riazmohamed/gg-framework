@@ -13,7 +13,7 @@ interface Props {
   onClose: () => void;
 }
 
-const README_URL = "https://github.com/KenKaiii/agent-steroids#readme";
+const README_URL = "https://github.com/riazmohamed/agent-steroids#readme";
 
 function fmt(n: number): string {
   return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);

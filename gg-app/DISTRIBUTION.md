@@ -169,3 +169,16 @@ value fails preflight rather than publishing an unsigned build):
 
 - **Windows code signing** — unsigned installers trigger SmartScreen. Add an
   Authenticode cert + signing step.
+
+## Fork build (riazmohamed/gg-framework, `windows` branch)
+
+`plugins.updater.endpoints` is deliberately **empty** in this fork. Upstream's feed
+(`KenKaiii/gg-framework … latest.json`) is signed with upstream's `pubkey`, so a fork build
+that kept it would verify and install upstream's app over itself on the next check. The
+`check()` call in the webview then errors ("no endpoints") and is swallowed; the tray's
+"Update now" item never appears. To re-enable: publish a release feed for this fork, generate
+a fork minisign keypair, and set both `endpoints` and `pubkey`.
+
+Build on the Windows side (`C:\Users\riaza\gg-framework`, a checkout of this branch) — the
+staged Node runtime and the `sharp` binary are chosen by the _build_ platform. Prerequisites
+present there: VS 2022 C++ tools, WebView2, Node, Git for Windows, Rust (rustup), pnpm.
