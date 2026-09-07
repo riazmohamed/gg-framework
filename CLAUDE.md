@@ -14,7 +14,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `packages/ggcoder`      | `@abukhaled/ogcoder`      | CLI coding agent (`ogcoder` binary)                                  |
 | `packages/ggcoder-eyes` | `@abukhaled/ggcoder-eyes` | Project-agnostic perception probes (screenshots, logs, HTTP capture) |
 
-Also in the workspace: `gg-app/` (Electron desktop app, from upstream) and
+Also in the workspace: `gg-app/` (Tauri v2 desktop app, from upstream — needs a Rust
+toolchain to build, and is not built or installed here) and
 `experiments/prompt-bench/`.
 
 **Dependency chain**: `gg-core` → `gg-ai` → `gg-agent` → `ogcoder` (uses `ggcoder-eyes` for perception)
