@@ -989,6 +989,10 @@ function App(): React.ReactElement {
     stateRef.current = state;
   }, [state]);
 
+  const windowFocused = useWindowFocused();
+  // Cosmetic work only belongs to a focused, visible, empty code composer.
+  const animatePlaceholder =
+    windowFocused && !needsProject && !showPicker && workspaceMode === "code" && input.length === 0;
   const inputPlaceholder = running
     ? RUNNING_INPUT_PLACEHOLDERS[placeholderIndex % RUNNING_INPUT_PLACEHOLDERS.length]
     : INPUT_PLACEHOLDERS[placeholderIndex % INPUT_PLACEHOLDERS.length];
@@ -997,14 +1001,14 @@ function App(): React.ReactElement {
     setDisplayPlaceholder(text);
   }, []);
   useEffect(() => {
-    if (input.length > 0) return;
+    if (!animatePlaceholder) return;
     const id = window.setInterval(() => {
       setPlaceholderIndex((i) => i + 1);
     }, INPUT_PLACEHOLDER_INTERVAL_MS);
     return () => window.clearInterval(id);
-  }, [input.length]);
+  }, [animatePlaceholder]);
   useEffect(() => {
-    if (input.length > 0) {
+    if (!animatePlaceholder) {
       setAnimatedPlaceholder(inputPlaceholder);
       return;
     }
@@ -1021,7 +1025,7 @@ function App(): React.ReactElement {
       if (frame >= PLACEHOLDER_SHUFFLE_FRAMES) window.clearInterval(id);
     }, PLACEHOLDER_SHUFFLE_FRAME_MS);
     return () => window.clearInterval(id);
-  }, [input.length, inputPlaceholder, setAnimatedPlaceholder]);
+  }, [animatePlaceholder, inputPlaceholder, setAnimatedPlaceholder]);
 
   // Stop the browser from navigating to / opening a file dropped anywhere
   // (which would replace the whole UI with the raw file). The active chat view
@@ -1196,9 +1200,6 @@ function App(): React.ReactElement {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
-
-  // Whether THIS window holds OS focus — input border + animation pausing.
-  const windowFocused = useWindowFocused();
 
   // Position in the multi-window reading order (e.g. window 2 of 4), plus
   // whether this window is the focused one. Driven by the Rust `window-order`

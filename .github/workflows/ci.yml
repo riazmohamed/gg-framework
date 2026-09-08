@@ -176,6 +176,12 @@ jobs:
         run: node bench/size-gate.mjs --only sidecar
         shell: bash
 
+      - name: Frontend build + initial JavaScript size gate
+        shell: bash
+        run: |
+          pnpm --filter gg-app build
+          node bench/size-gate.mjs --only frontend:initial
+
       - name: Frontend platform-class test
         run: pnpm --filter gg-app test
 
