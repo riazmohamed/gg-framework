@@ -7,6 +7,10 @@
     "sidecar": {
       "bytes": 8157676,
       "recorded_at": "2026-08-20T20:12:18.316Z"
+    },
+    "frontend:initial": {
+      "bytes": 845843,
+      "recorded_at": "2026-09-07T14:38:04.389Z"
     }
   },
   "startup": {
