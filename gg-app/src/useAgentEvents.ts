@@ -1206,8 +1206,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                 kind: "hook",
                 id: nextId(),
                 hook: kind,
-                ...(kind === "verification" && d.verificationReason === "recheck"
-                  ? { verificationReason: "recheck" as const }
+                ...(kind === "verification" &&
+                (d.verificationReason === "recheck" || d.verificationReason === "check_review")
+                  ? { verificationReason: d.verificationReason }
                   : {}),
               },
               { skipIfSameAsLast: true },

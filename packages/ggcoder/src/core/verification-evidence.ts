@@ -61,7 +61,7 @@ const AMBIGUOUS_FLAGS = new Set([
 const SAFE_PACKAGE_SCRIPTS =
   /^(?:test(?::(?:unit|integration|e2e))?|check|typecheck|type-check|lint(?::check)?|format(?::check|-check)|prettier:check)$/i;
 const UNSAFE_PACKAGE_SCRIPTS =
-  /^(?:build|clean|dev|serve|start|watch|preview|prepare|install|format|lint:fix|test:watch)(?::|$)/i;
+  /^(?:build|clean|dev|serve|start|watch|preview|prepare|install|format(?!:check$)|lint:fix|test:watch)(?::|$)/i;
 const VERIFIER_WORDS =
   /(?:^|\s|\/)(?:tsc|vitest|jest|pytest|eslint|prettier|pyright|mypy|ruff|cargo|go|shellcheck)(?:\s|$)/i;
 
@@ -240,7 +240,7 @@ function classifyPackageRunner(tokens: readonly string[]): VerificationCommandCl
   const scriptArgs = tokens.slice(scriptIndex + 1).filter((token) => token !== "--");
   const flags = lowerFlags(scriptArgs);
   if (hasFlag(flags, LONG_RUNNING_FLAGS)) return rejected(true, "long-running package-script mode");
-  if (hasFlag(flags, MUTATING_FLAGS)) return rejected(true, "mutating package-script mode");
+  if (hasFlag(flags, MUTATING_FLAGS)) return rejected(true, "mutating package-script mode", true);
   if (hasFlag(flags, AMBIGUOUS_FLAGS))
     return rejected(true, "package script does not prove correctness");
   return accepted(`bounded ${runner} verification script`);

@@ -148,6 +148,37 @@ describe("verification gate flow", () => {
     expect(await internal.getHookFollowUpMessages()).toBeNull();
   });
 
+  it("accepts the transcript's format-check chain and only requests an internal test review", async () => {
+    const { internal } = await makeSession();
+    const notices: Record<string, unknown>[] = [];
+    internal.eventBus.on("hook", (data) => notices.push(data));
+    await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    await simulateToolCall(internal, "edit", { file_path: "src/a.test.ts" });
+    await simulateToolCall(internal, "bash", {
+      command: "pnpm check && pnpm lint && pnpm format:check && pnpm test",
+    });
+    expect(internal.getVerificationProblem()).toBeNull();
+    const followUp = await internal.getHookFollowUpMessages();
+    expect(followUp).toHaveLength(1);
+    expect(String(followUp![0]!.content)).toContain("review them internally");
+    expect(String(followUp![0]!.content)).toContain("task outcome");
+    expect(String(followUp![0]!.content)).not.toContain("Run the project's verification");
+    expect(notices).toEqual([{ kind: "verification", verificationReason: "check_review" }]);
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
+  });
+
+  it("combines test review with verification and does not interrupt the corrected final again", async () => {
+    const { internal, events } = await makeSession();
+    await simulateToolCall(internal, "edit", { file_path: "src/a.test.ts" });
+    const followUp = await internal.getHookFollowUpMessages();
+    expect(followUp).toHaveLength(2);
+    expect(String(followUp![1]!.content)).toContain("src/a.test.ts");
+    await simulateToolCall(internal, "bash", { command: "pnpm test" });
+    expect(internal.getVerificationProblem()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
+    expect(events.filter((e) => e === "hook:verification")).toHaveLength(1);
+  });
+
   it("counts a check piped through a tail limiter, so a question turn is never hijacked", async () => {
     const { internal, events } = await makeSession();
 
@@ -265,7 +296,7 @@ describe("verification gate flow", () => {
         `ID: ${started.id}\n`,
       );
       expect(internal.getVerificationProblem()).toContain("Unverified");
-      expect(await internal.processManager.waitForExit(started.id, 5000)).toBe("exited");
+      expect(await internal.processManager.waitForExitOrWake(started.id, 5000)).toBe("exited");
       await simulateToolCall(internal, "task_output", { id: started.id });
       return started.id;
     };
@@ -304,9 +335,9 @@ describe("verification gate flow", () => {
     expect(internal.getVerificationProblem()).toContain("Unverified");
     // The npm chain (npm.cmd → node → npm → script) cold-starts far slower on a
     // loaded Windows CI runner than the 5s cap used for direct `node --test`
-    // runs — waitForExit still returns the instant the process exits, this only
+    // runs — waitForExitOrWake still returns the instant the process exits, this only
     // raises the hang ceiling so a slow spawn is not misread as a hang.
-    expect(await internal.processManager.waitForExit(started.id, 30_000)).toBe("exited");
+    expect(await internal.processManager.waitForExitOrWake(started.id, 30_000)).toBe("exited");
     await simulateToolCall(internal, "task_output", { id: started.id });
     expect(internal.getVerificationProblem()).toBeNull();
   });

@@ -1877,6 +1877,7 @@ export function App(props: AppProps) {
         // Verification gate: code was edited but no test/typecheck/lint/build
         // completed since the last edit — demand it once, then let the run stop.
         if (verificationGateEnabledRef.current) {
+          const verificationReason = verificationGateRef.current.pendingReason();
           const verificationFollowUp = verificationGateRef.current.followUp();
           if (verificationFollowUp) {
             // Say why the run is continuing past its apparent end, or the extra
@@ -1885,7 +1886,12 @@ export function App(props: AppProps) {
               ...prev,
               {
                 kind: "ideal_hook",
-                text: VERIFICATION_HOOK_NOTICE_TEXT,
+                text:
+                  verificationReason === "tamper"
+                    ? "Hook engaged — reviewing changes to tests and checks."
+                    : verificationReason === "recheck"
+                      ? "Hook engaged — re-checking the changes made after verification."
+                      : VERIFICATION_HOOK_NOTICE_TEXT,
                 tone: "review",
                 id: getId(),
               },

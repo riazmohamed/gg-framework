@@ -523,6 +523,40 @@ describe("useAgentEvents", () => {
     expect(getItems()[1]).toMatchObject({ hook: "verification", verificationReason: "recheck" });
   });
 
+  it("keeps check-review notices distinct and shows the completed outcome after the hook", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Unreviewed draft" }));
+      hook.result.current.handleEvent(
+        ev("hook", { kind: "verification", verificationReason: "check_review" }),
+      );
+      hook.result.current.handleEvent(
+        ev("hook", { kind: "verification", verificationReason: "check_review" }),
+      );
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: false }));
+      hook.result.current.handleEvent(
+        ev("text_delta", {
+          text: "Two fixes complete. Tests pass. Commit and push remain paused.",
+        }),
+      );
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "verification" }),
+      expect.objectContaining({
+        kind: "hook",
+        hook: "verification",
+        verificationReason: "check_review",
+      }),
+      expect.objectContaining({
+        kind: "assistant",
+        text: "Two fixes complete. Tests pass. Commit and push remain paused.",
+      }),
+    ]);
+  });
+
   it("retains an evidence limitation on an approved plan marker", () => {
     const { hook, getItems } = setup();
     act(() =>

@@ -25,10 +25,17 @@ describe("classifyVerificationCommand", () => {
     "pnpm test -- --runInBand",
     "cargo fmt --check && cargo clippy",
     "ruff format --check .",
+    "pnpm format:check",
+    "npm run format:check",
+    "yarn format:check",
+    "bun run format:check",
+    "pnpm format-check",
+    "pnpm check && pnpm lint && pnpm format:check && pnpm test",
   ])("accepts bounded check: %s", (command) => {
     expect(classifyVerificationCommand(command)).toMatchObject({
       accepted: true,
       candidate: true,
+      mayMutate: false,
     });
   });
 
@@ -44,6 +51,11 @@ describe("classifyVerificationCommand", () => {
     ["tsc --noEmit --tsBuildInfoFile cache.tsbuildinfo", "mutating"],
     ["prettier --write src", "mutating"],
     ["pnpm build", "artifact-producing"],
+    ["pnpm format", "mutating"],
+    ["pnpm format:write", "mutating"],
+    ["pnpm format:check:write", "mutating"],
+    ["pnpm format:check --write", "mutating"],
+    ["pnpm format:check --watch", "long-running"],
     ["tsc --watch --noEmit", "long-running"],
     ["vitest --watch", "long-running"],
     ["pnpm vitest --watch", "long-running"],
@@ -122,6 +134,8 @@ describe("classifyVerificationCommand", () => {
     // classifier just cannot vouch for — must not poison the revision and
     // re-arm the gate into every later question turn.
     expect(classifyVerificationCommand("pnpm lint:fix").mayMutate).toBe(true);
+    expect(classifyVerificationCommand("pnpm format:check --write").mayMutate).toBe(true);
+    expect(classifyVerificationCommand("pnpm test --update").mayMutate).toBe(true);
     expect(classifyVerificationCommand("pnpm build").mayMutate).toBe(true);
     expect(classifyVerificationCommand("pnpm eslint --fix src/foo.ts").mayMutate).toBe(true);
     expect(classifyVerificationCommand("tsc -p .").mayMutate).toBe(true); // emits JS files

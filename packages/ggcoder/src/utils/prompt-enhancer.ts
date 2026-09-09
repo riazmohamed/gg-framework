@@ -1,4 +1,10 @@
-import { stream, type Message, type Provider, type TextContent } from "@abukhaled/gg-ai";
+import {
+  stream,
+  type Message,
+  type Provider,
+  type TextContent,
+  type ThinkingLevel,
+} from "@abukhaled/gg-ai";
 
 /**
  * One piece of an enhanced prompt. A `text` segment is verbatim prose; a `term`
@@ -155,6 +161,8 @@ function stripWrapping(raw: string): string {
 export async function enhancePrompt(opts: {
   provider: Provider;
   model: string;
+  maxTokens: number;
+  thinking?: ThinkingLevel;
   prompt: string;
   /** Short project stack string (e.g. "Next.js, TypeScript, Tailwind CSS") used
    *  to bias terminology toward the user's stack. Omitted when unknown. */
@@ -162,6 +170,8 @@ export async function enhancePrompt(opts: {
   apiKey?: string;
   baseUrl?: string;
   accountId?: string;
+  projectId?: string;
+  userAgent?: string;
   signal?: AbortSignal;
 }): Promise<EnhanceResult> {
   // Append a one-line, fact-only stack hint so terminology is idiomatic to the
@@ -180,14 +190,17 @@ export async function enhancePrompt(opts: {
     provider: opts.provider,
     model: opts.model,
     messages,
-    // simplification: a character-based allowance leaves room for markers, capped
-    // at 4096 tokens; use model-aware tokenization for tighter budgeting.
-    maxTokens: Math.min(4096, Math.max(700, opts.prompt.length)),
+    // Use the session's model-clamped ceiling: always-on reasoning (e.g. Fable)
+    // shares this allowance with the answer, even for a tiny draft.
+    maxTokens: opts.maxTokens,
+    thinking: opts.thinking,
     // No temperature — the enhancer runs on whatever model is active, and some
     // (e.g. OpenAI reasoning models like gpt-5.5) reject the parameter outright.
     apiKey: opts.apiKey,
     baseUrl: opts.baseUrl,
     accountId: opts.accountId,
+    projectId: opts.projectId,
+    userAgent: opts.userAgent,
     signal: opts.signal,
   });
 
@@ -208,5 +221,9 @@ export async function enhancePrompt(opts: {
           .map((c) => c.text)
           .join("");
 
-  return parseEnhanced(text);
+  const enhanced = parseEnhanced(text);
+  if (!enhanced.enhanced.trim()) {
+    throw new Error("Prompt enhancement returned no text. Your original draft has been kept.");
+  }
+  return enhanced;
 }

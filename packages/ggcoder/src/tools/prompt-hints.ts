@@ -52,7 +52,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "Matches become callable on your next step. Check the catalog BEFORE concluding you " +
     "lack a capability.",
   generate_image:
-    "Generate or edit images via OpenAI's gpt-image-2. Only when the user explicitly asks — never proactively. Pass `image` to edit an existing file.",
+    "Generate or edit images via OpenAI's GPT Image 2.5 (Flare/Sunburst). Only when the user explicitly asks — never proactively. Pass `image` to edit an existing file.",
   steroids:
     "Local corpus of real, current open-source repos. `search` (regex, NOT semantic) for how projects do X, `define` for where a symbol lives, `show` to read the file. Topic not covered = corpus gap: run `discover`, don't retry variants.",
 };

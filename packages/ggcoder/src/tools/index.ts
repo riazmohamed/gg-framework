@@ -91,11 +91,13 @@ export interface CreateToolsOptions {
   /** Persistent child workers omit every subagent tool to enforce one-level fan-out. */
   disableSubagents?: boolean;
   /**
-   * Append LSP diagnostics to edit/write results (default true). Servers are
+   * Enable LSP diagnostics after edit/write (default true). Servers are
    * resolved from the project/PATH only and spawn lazily on the first edit of
    * a matching file — disabling this is a pure opt-out, not a capability loss.
    */
   lspDiagnostics?: boolean;
+  /** Only hosts that drain diagnostics during steering and flush before completion may opt in. */
+  deferLspDiagnostics?: boolean;
   /**
    * Auth storage for conditional tool registration. When provided AND the user
    * has OpenAI connected, the `generate_image` tool is registered — letting the
@@ -172,8 +174,10 @@ export async function createTools(
   const lspEnabled = (opts?.lspDiagnostics ?? true) && ops === localOperations;
   const lspManager = lspEnabled ? new LspManager(cwd) : undefined;
   const getDiagnostics = lspManager
-    ? (filePath: string, content: string, source?: EditSource): Promise<string> =>
-        lspManager.diagnosticsAfterWrite(filePath, content, source)
+    ? async (filePath: string, content: string, source?: EditSource): Promise<string> =>
+        opts?.deferLspDiagnostics
+          ? lspManager.queueDiagnosticsAfterWrite(filePath, content, source)
+          : lspManager.diagnosticsAfterWrite(filePath, content, source)
     : undefined;
 
   // Enable native video returns from the read tool for any video-capable model

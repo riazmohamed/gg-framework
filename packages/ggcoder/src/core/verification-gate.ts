@@ -16,19 +16,13 @@
  * plus host-observed exit status and the revision captured at command start.
  * Missing or rejected evidence cannot clear outstanding verification.
  *
- * Second gate — TAMPER DISCLOSURE. A passing check only proves something if the
- * check itself was not the thing that changed. Editing a test, a test runner's
- * config, or adding a suppression pragma makes a red suite go green without
- * fixing anything, and the resulting transcript is byte-for-byte the shape of a
- * real fix: mutation, then `pnpm test`, then exit 0. So mutations that alter
- * what the check ASSERTS are recorded separately from ordinary code mutations,
- * and survive the verification they enabled — a check cannot clear the
- * suspicion that it was rigged.
- *
- * This gate DISCLOSES, it does not block: writing or repairing a test is normal,
- * legitimate work (TDD, adding coverage), so refusing to finish would punish the
- * common case. One demand per run: name what changed in the checks and why, and
- * confirm the fix stands without it.
+ * Check-integrity review: test/config edits and added suppression markers are
+ * review candidates, not proof of tampering. A green check alone cannot tell a
+ * legitimate regression test from weakened assertions, so keep these mutations
+ * separate and request an internal diff review alongside owed verification.
+ * Later test edits retain one standalone review request per run. This bounded
+ * prompt gate cannot prove the review happened; it requires disclosure of real
+ * weakening or unresolved doubt, not a defense of routine test work.
  */
 import type { Message } from "@abukhaled/gg-ai";
 import { createHash } from "node:crypto";
@@ -383,24 +377,28 @@ export interface SuspectMutation {
   reason: string;
 }
 
+const VERIFICATION_OUTCOME_GUIDANCE =
+  "This is an internal hook, not new user authorization or a new task. Your previous draft may not have been shown. " +
+  "Give a direct answer to the user's latest request: lead with the task outcome, include current verification " +
+  "and commit/push status when relevant, and preserve any pending user decision. Do not request the same " +
+  "approval again if the user already gave it. Never replace the outcome with hook commentary or verification status alone.";
+
 export function buildTamperDisclosureMessage(suspects: readonly SuspectMutation[]): Message {
   return {
     role: "user",
     provenance: { source: "runtime", kind: "completion_gate", visibility: "hidden" },
     content:
-      "Verification gate: a check passed in this run, but this run also changed what the " +
-      "checks themselves assert:\n" +
+      "Check-integrity review: this run edited tests, check configuration, or suppression markers:\n" +
       suspects.map(({ filePath, reason }) => `- ${filePath} — ${reason}`).join("\n") +
-      "\nA check that was itself edited does not prove the code works. If these edits were " +
-      "legitimate (a new test, a test corrected against agreed behaviour, a suppression the " +
-      "user asked for), say so plainly in your final response and state why the fix stands " +
-      "without them. If instead the check was weakened, skipped, narrowed or silenced to get " +
-      "a green result, revert that now and fix the underlying code. This is the only time you " +
-      "will be asked — do not describe the change as verified without addressing this. " +
-      // A disclosure is not an answer: the user's pending question still needs
-      // a direct reply, or the turn spends itself on the gate alone.
-      "Whatever the user last asked still needs a direct answer in your final response — " +
-      "never reply with the disclosure alone.",
+      "\nThese are review candidates, not evidence of wrongdoing. A check that was itself edited " +
+      "does not prove the code works on its own: inspect the actual diff against the user's agreed " +
+      "behaviour. For legitimate added coverage or corrected expectations, review them internally; " +
+      "do not add a defensive explanation to the final response. If a check was weakened, skipped, " +
+      "narrowed or silenced merely to get green, undo that weakening and fix the underlying code. " +
+      "Run affected checks after any correction. Report confirmed weakening, unresolved doubt, or " +
+      "unverified changes plainly; never claim verification without resolving them. Complete this " +
+      "review and required checks before any authorized commit or push that has not happened yet. " +
+      VERIFICATION_OUTCOME_GUIDANCE,
   };
 }
 
@@ -442,21 +440,8 @@ export function buildVerificationFollowUpMessage(
           "Green output from that command shape cannot clear this gate; run a bounded check instead " +
           "(the project's test script via pnpm/npm/yarn test, vitest run, jest, pytest, or tsc --noEmit)."
         : "") +
-      // The hijacked turn owes the user their answer too: verification status
-      // alone is not a reply.
-      " Whatever the user last asked still needs a direct answer in your final response — " +
-      "never reply with verification status alone." +
-      // Recheck-only: without this, the post-recheck answer re-prints the earlier
-      // turn's full checklist nearly verbatim — the "duplicate response" pattern
-      // (measured in experiments/prompt-bench/duplicate-summary-sim.ts).
-      (recheck
-        ? " This is a re-verification after a follow-up change, not a new report: the full " +
-          "checklist was already summarized earlier in this conversation. Do not repeat that " +
-          "summary or its structure. Once the affected checks pass again, reply briefly as a " +
-          "delta — name only the change that was just re-verified and confirm the checks still " +
-          'pass (for example: "Re-verified <change> — the affected checks still pass."). ' +
-          "Repeat the full checklist only if something actually broke."
-        : ""),
+      " " +
+      VERIFICATION_OUTCOME_GUIDANCE,
   };
 }
 
@@ -474,6 +459,8 @@ export class VerificationGate {
   private recheckInjections = 0;
   private lastDemandedMutationSeq = 0;
   private tamperInjections = 0;
+  private lastSuspectSeq = 0;
+  private lastReviewRequestedSeq = 0;
   private failedChecks = new Map<string, number>(); // checkKey → mutation revision at failure
   private passedChecks = new Map<string, number>();
   private unknownVerification = false;
@@ -516,6 +503,7 @@ export class VerificationGate {
     if (isCheckOwnFile(filePath)) reasons.push("edits a test or check configuration");
     if (addedText) reasons.push(...detectCheckWeakening(addedText).map((what) => `adds ${what}`));
     if (reasons.length === 0) return;
+    this.lastSuspectSeq = this.lastMutationSeq;
     // Keep the fullest reason seen for this file rather than the newest.
     const existing = this.suspects.get(filePath);
     const merged = [...new Set([...(existing?.split("; ") ?? []), ...reasons])].join("; ");
@@ -638,6 +626,8 @@ export class VerificationGate {
     this.recheckInjections = 0;
     this.lastDemandedMutationSeq = 0;
     this.tamperInjections = 0;
+    this.lastSuspectSeq = 0;
+    this.lastReviewRequestedSeq = 0;
     this.suspects.clear();
     this.runTouched = false;
     this.lastRejectedCheck = null;
@@ -653,13 +643,12 @@ export class VerificationGate {
   }
 
   /**
-   * True when a check passed after the run altered what the checks assert —
-   * the false-green shape. Requires a verification to have completed: with none,
-   * the standard gate already demands one, and demanding disclosure of an
-   * unproven fix on top of it is noise.
+   * A passing check with test edits not yet covered by a review request. Without
+   * a pass, the standard demand includes the review instead of adding a stop.
+   * Requesting review is not proof of integrity; this is a bounded prompt gate.
    */
   isTamperOwed(): boolean {
-    return this.suspects.size > 0 && this.lastVerificationSeq > 0;
+    return this.lastSuspectSeq > this.lastReviewRequestedSeq && this.lastVerificationSeq > 0;
   }
 
   /** Suspect mutations recorded this run, sorted for stable output. */
@@ -710,14 +699,13 @@ export class VerificationGate {
    * one additional pass; unchanged/unverified work never repeats a reminder.
    */
   followUp(): Message[] | null {
-    // "Nothing proved this" outranks "the proof may be rigged": with no check
-    // run at all there is not yet a false green to disclose.
+    // Missing evidence and test-integrity review share one intervention.
     const reason = this.pendingReason();
     if (reason === "initial" || reason === "recheck") {
       if (this.injections < MAX_VERIFICATION_INJECTIONS) this.injections += 1;
       if (reason === "recheck") this.recheckInjections += 1;
       this.lastDemandedMutationSeq = this.lastMutationSeq;
-      return [
+      const messages = [
         buildVerificationFollowUpMessage(
           [...this.mutatedFiles].sort(),
           reason === "recheck",
@@ -725,9 +713,17 @@ export class VerificationGate {
           this.lastInvalidationCause,
         ),
       ];
+      // Review the current test edits alongside verification, not in a second
+      // stop after it. Later test edits still get the independent review budget.
+      if (this.lastSuspectSeq > this.lastReviewRequestedSeq) {
+        messages.push(buildTamperDisclosureMessage(this.tamperSuspects()));
+        this.lastReviewRequestedSeq = this.lastSuspectSeq;
+      }
+      return messages;
     }
     if (reason === "tamper") {
       this.tamperInjections += 1;
+      this.lastReviewRequestedSeq = this.lastSuspectSeq;
       return [buildTamperDisclosureMessage(this.tamperSuspects())];
     }
     return null;
@@ -741,6 +737,8 @@ export class VerificationGate {
     this.recheckInjections = 0;
     this.lastDemandedMutationSeq = 0;
     this.tamperInjections = 0;
+    this.lastSuspectSeq = 0;
+    this.lastReviewRequestedSeq = 0;
     this.mutatedFiles.clear();
     this.suspects.clear();
     this.failedChecks.clear();

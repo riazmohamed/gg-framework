@@ -1675,11 +1675,19 @@ async fn agent_enhance_prompt(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.error_for_status()
-        .map_err(|e| e.to_string())?
+    let status = res.status();
+    let body = res
         .json::<serde_json::Value>()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Couldn't enhance the prompt. Your original draft has been kept.")
+            .to_owned());
+    }
+    Ok(body)
 }
 
 /// Proxy: cycle the reasoning/thinking level to the next supported value.

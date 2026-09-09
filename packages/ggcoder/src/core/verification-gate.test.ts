@@ -390,20 +390,22 @@ describe("VerificationGate", () => {
     expect(demand).toContain("direct answer");
   });
 
-  it("asks the recheck reply to be a delta, not a repeat of the earlier checklist", () => {
+  it("preserves the task outcome when the recheck replaces a hidden draft", () => {
     const gate = new VerificationGate();
     gate.recordMutation("a.ts");
     gate.followUp();
     gate.recordVerification();
     gate.recordMutation("b.ts");
     const recheck = String(gate.followUp()![0]!.content);
-    expect(recheck).toContain("reply briefly as a delta");
-    expect(recheck).toContain("Do not repeat that summary");
-    // Initial demands keep the plain instruction — no earlier summary exists to delta against.
+    expect(recheck).toContain("previous draft may not have been shown");
+    expect(recheck).toContain("task outcome");
+    expect(recheck).toContain("commit/push status");
+    expect(recheck).not.toContain("reply briefly as a delta");
+    expect(recheck).not.toContain("checklist was already summarized");
     gate.reset();
     gate.recordMutation("a.ts");
     const initial = String(gate.followUp()![0]!.content);
-    expect(initial).not.toContain("reply briefly as a delta");
+    expect(initial).toContain("task outcome");
   });
 
   it("does not spend a recheck on ignored verification, even with more edits", () => {
@@ -419,12 +421,13 @@ describe("VerificationGate", () => {
 
   it("keeps test-change disclosure independent of the recheck budget", () => {
     const gate = new VerificationGate();
-    gate.recordMutation("a.test.ts");
+    gate.recordMutation("a.ts");
     gate.followUp();
     gate.recordVerification();
     gate.recordMutation("b.ts");
     expect(gate.pendingReason()).toBe("recheck");
     gate.followUp();
+    gate.recordMutation("a.test.ts", "it.skip('regression', () => {})");
     gate.recordVerification();
     expect(gate.pendingReason()).toBe("tamper");
     const tamperDemand = String(gate.followUp()![0]!.content);
@@ -616,14 +619,43 @@ describe("VerificationGate tamper disclosure (bench 18 replay)", () => {
     expect(gate.isTamperOwed()).toBe(true);
   });
 
-  it("stays silent until a check has actually passed — the standard gate speaks first", () => {
+  it("reviews changed tests alongside missing verification, without a second stop", () => {
     const gate = new VerificationGate();
     gate.recordMutation("src/parser.test.ts", "it.skip('x', () => {})");
-    // Nothing has run yet: demand the check, not a disclosure about it.
     expect(gate.isTamperOwed()).toBe(false);
-    expect(String(gate.followUp()![0]!.content)).toContain("Run the project's verification");
+    const messages = gate.followUp()!;
+    expect(String(messages[0]!.content)).toContain("Run the project's verification");
+    const review = String(messages[1]!.content);
+    expect(review).toContain("src/parser.test.ts");
+    expect(review).toContain("skipped test");
+    expect(review).toContain("fix the underlying code");
     gate.recordVerification();
-    expect(String(gate.followUp()![0]!.content)).toContain("does not prove the code works");
+    expect(gate.followUp()).toBeNull();
+  });
+
+  it("still reviews test edits made after a combined verification demand", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("src/parser.test.ts", "expect(out).toEqual(expected);");
+    expect(gate.followUp()).toHaveLength(2);
+    gate.recordMutation("src/parser.test.ts", "it.skip('regression', () => {})");
+    gate.recordVerification();
+    expect(gate.pendingReason()).toBe("tamper");
+    expect(String(gate.followUp()![0]!.content)).toContain("skipped test");
+  });
+
+  it("reviews legitimate test changes internally without demanding a defensive final", () => {
+    const gate = replay([["src/parser.test.ts", "expect(out).toEqual(expected);"]]);
+    const review = String(gate.followUp()![0]!.content);
+    expect(review).toContain("does not prove the code works");
+    expect(review).toContain("not evidence of wrongdoing");
+    expect(review).toContain("review them internally");
+    expect(review).toContain("do not add a defensive explanation");
+    expect(review).toContain("task outcome");
+    expect(review).toContain("commit/push status");
+    expect(review).toContain("user decision");
+    expect(review).toContain("not new user authorization");
+    expect(review).toContain("before any authorized commit or push");
+    expect(review).toContain("fix the underlying code");
   });
 
   it("demands disclosure once per run, then goes silent", () => {

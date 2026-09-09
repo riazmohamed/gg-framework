@@ -539,6 +539,7 @@ export class AgentSession {
   private readonly notifications = new AgentNotificationQueue();
   private managerAbortSignal?: AbortSignal;
   private readonly managerAbortHandler = () => {
+    this.lspManager?.clearPendingDiagnostics();
     void this.subAgentManager?.interruptAll();
   };
   private mcpManager?: MCPClientManager;
@@ -712,6 +713,7 @@ export class AgentSession {
       provider: this.provider,
       model: this.model,
       lspDiagnostics: this.settingsManager.get("lspDiagnostics"),
+      deferLspDiagnostics: true,
       getWriteGuardSettings: () => ({
         allowOutsideWorkspaceWrites: this.settingsManager.get("allowOutsideWorkspaceWrites"),
         additionalRoots: this.additionalRoots,
@@ -1362,6 +1364,7 @@ export class AgentSession {
    * is the verbatim user ask, pinned for post-compaction re-grounding.
    */
   private resetHookState(originalRequest: string): void {
+    this.lspManager?.clearPendingDiagnostics();
     this.hookStats = {
       changedLines: 0,
       toolCalls: 0,
@@ -1639,12 +1642,20 @@ export class AgentSession {
     // it in the very next turn instead of discovering it at the pre-stop
     // completion gate — but it never displaces user steering, which rides out
     // in the same batch when both are pending.
+    const diagnosticText = this.lspManager?.drainDiagnostics(
+      this.getVerificationProblem() !== null,
+    );
+    if (diagnosticText) this.eventBus.emit("hook", { kind: "verification" });
+    this.refreshVerificationArmed();
     const notified = this.notifications.drain();
     const notificationMessage: Message | null =
-      notified.length > 0
+      notified.length > 0 || diagnosticText
         ? {
             role: "user",
-            content: buildNotificationSteeringText(notified.map((entry) => entry.text)),
+            content: buildNotificationSteeringText([
+              ...notified.map((entry) => entry.text),
+              ...(diagnosticText ? [diagnosticText] : []),
+            ]),
             provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
           }
         : null;
@@ -1999,6 +2010,7 @@ export class AgentSession {
   /** Would a stop right now inject the verification gate? Same conditions as
    *  the pre-stop branch below, so arming and injection cannot disagree. */
   private wouldInjectVerification(): boolean {
+    if (this.lspManager?.hasQueuedDiagnostics()) return true;
     if (this.opts.selfCorrectionHooks === false) return false;
     if (!this.settingsManager.get("verificationGateEnabled")) return false;
     if (this.opts.allowedTools && !this.opts.allowedTools.includes("bash")) return false;
@@ -2017,6 +2029,11 @@ export class AgentSession {
   private refreshHookArming(): void {
     if (!this.settingsManager) return;
     this.refreshIdealReviewArmed();
+    this.refreshVerificationArmed();
+  }
+
+  private refreshVerificationArmed(): void {
+    if (!this.settingsManager) return;
     const armed = this.wouldInjectVerification();
     if (armed === this.verificationArmed) return;
     this.verificationArmed = armed;
@@ -2035,6 +2052,24 @@ export class AgentSession {
    * blocked until harness-owned post-injection reads cover every changed file.
    */
   private async getHookFollowUpMessages(): Promise<Message[] | null> {
+    // Edits return immediately; only the completion boundary waits for remaining
+    // checks. Queued timeouts stay explicitly unverified, never a false all-clear.
+    await this.lspManager?.flushDiagnostics(this.opts.signal);
+    if (this.opts.signal?.aborted) return null;
+    const diagnosticText = this.lspManager?.drainDiagnostics(
+      this.getVerificationProblem() !== null,
+    );
+    if (diagnosticText) this.eventBus.emit("hook", { kind: "verification" });
+    this.refreshVerificationArmed();
+    if (diagnosticText) {
+      return [
+        {
+          role: "user",
+          content: buildNotificationSteeringText([diagnosticText]),
+          provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+        },
+      ];
+    }
     const childCompletionFollowUp = buildSubAgentCompletionFollowUp(this.subAgentManager);
     if (childCompletionFollowUp) return childCompletionFollowUp;
 
@@ -2071,7 +2106,11 @@ export class AgentSession {
         // flash arming exists to prevent.
         this.eventBus.emit("hook", {
           kind: "verification",
-          ...(verificationReason === "recheck" ? { verificationReason } : {}),
+          ...(verificationReason === "tamper"
+            ? { verificationReason: "check_review" as const }
+            : verificationReason === "recheck"
+              ? { verificationReason }
+              : {}),
         });
         this.refreshHookArming();
         return verificationFollowUp;
@@ -3760,7 +3799,10 @@ export class AgentSession {
    */
   async enhancePrompt(text: string): Promise<EnhanceResult> {
     if (!text.trim()) return { enhanced: text, segments: [{ kind: "text", text }] };
-    const creds = await this.authStorage.resolveCredentials(this.provider, {
+    // Keep credentials and settings on the model selected at click time, even
+    // if the user switches models while credential resolution is pending.
+    const { provider, model, thinkingLevel, maxTokens, baseUrl } = this;
+    const creds = await this.authStorage.resolveCredentials(provider, {
       storageKeys: this.currentAuthStorageKeys(),
     });
     // Cheap, best-effort stack detection from the project root so terminology is
@@ -3772,12 +3814,16 @@ export class AgentSession {
       /* detection is best-effort — fall back to no stack hint */
     }
     return enhancePrompt({
-      provider: this.provider,
-      model: this.model,
+      provider,
+      model,
+      thinking: thinkingLevel,
+      maxTokens,
+      userAgent: provider === "anthropic" ? await getClaudeCliUserAgent() : undefined,
+      projectId: creds.projectId,
       prompt: text,
       stack,
       apiKey: creds.accessToken,
-      baseUrl: this.baseUrl ?? creds.baseUrl,
+      baseUrl: baseUrl ?? creds.baseUrl,
       accountId: creds.accountId,
       signal: this.opts.signal,
     });

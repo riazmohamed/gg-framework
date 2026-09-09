@@ -433,6 +433,14 @@ export interface EnhanceResult {
 export async function enhancePrompt(text: string): Promise<EnhanceResult> {
   await waitForReady();
   const result = await invoke<unknown>("agent_enhance_prompt", { text });
+  if (
+    result &&
+    typeof result === "object" &&
+    "error" in result &&
+    typeof result.error === "string"
+  ) {
+    throw new Error(result.error);
+  }
   // IPC types are not runtime validation: an error payload or empty rewrite must
   // reach the caller's catch, never replace the draft or enter the animation.
   if (

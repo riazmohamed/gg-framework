@@ -113,6 +113,14 @@ describe("generate_image param schema", () => {
         out_path: "out.png",
       }).success,
     ).toBe(true);
+    for (const model of ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"]) {
+      expect(schema.safeParse({ prompt: "x", model, background: "transparent" }).success).toBe(
+        true,
+      );
+    }
+    for (const model of ["gpt-image-2", "gpt-image-2.5", "unknown"]) {
+      expect(schema.safeParse({ prompt: "x", model }).success).toBe(false);
+    }
     // Invalid quality rejected.
     expect(schema.safeParse({ prompt: "x", quality: "ultra" }).success).toBe(false);
     // n out of range.
@@ -142,6 +150,7 @@ describe("generate_image — generation (no image input)", () => {
     expect(body.model).toBe("gpt-5.5");
     expect(body.stream).toBe(true);
     expect(body.tools[0].type).toBe("image_generation");
+    expect(body.tools[0].model).toBe("gpt-image-2.5-flare");
     expect(body.tools[0].action).toBe("generate");
 
     // The prompt should be in the input content
@@ -162,6 +171,31 @@ describe("generate_image — generation (no image input)", () => {
     expect(details!.imagePreviews!.length).toBe(1);
   });
 
+  it.each(["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] as const)(
+    "forwards explicit model %s and transparent background",
+    async (model) => {
+      const fetchMock = vi.fn().mockResolvedValue(makeImageSSEResponse([TINY_PNG_B64]));
+      globalThis.fetch = fetchMock;
+      const { createGenerateImageTool } = await import("./generate-image.js");
+      const tool = createGenerateImageTool(tmpDir, fakeAuth());
+      const result = await tool.execute(
+        { prompt: "a logo", model, background: "transparent" },
+        ctx(),
+      );
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
+      expect(body.model).toBe("gpt-5.5");
+      expect(body.tools[0]).toMatchObject({
+        model,
+        action: "generate",
+        background: "transparent",
+        output_format: "png",
+      });
+      expect(isStructured(result)).toBe(true);
+    },
+  );
+
   it("generates multiple images without sending unsupported tool n", async () => {
     const fetchMock = vi.fn().mockImplementation(async () => makeImageSSEResponse([TINY_PNG_B64]));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
@@ -174,6 +208,7 @@ describe("generate_image — generation (no image input)", () => {
     for (const [, init] of fetchMock.mock.calls) {
       const body = JSON.parse(init?.body as string);
       expect(body.tools[0].n).toBeUndefined();
+      expect(body.tools[0].model).toBe("gpt-image-2.5-flare");
     }
     expect(isStructured(result)).toBe(true);
     if (!isStructured(result)) return;
@@ -199,37 +234,41 @@ describe("generate_image — generation (no image input)", () => {
 });
 
 describe("generate_image — edit (with image input)", () => {
-  it("includes the reference image as input_image and sets action to edit", async () => {
-    const refPath = path.join(tmpDir, "input.png");
-    await mkdir(path.dirname(refPath), { recursive: true });
-    await writeFile(refPath, TINY_PNG);
+  it.each([undefined, "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] as const)(
+    "includes the reference image and sets action to edit with model %s",
+    async (model) => {
+      const refPath = path.join(tmpDir, "input.png");
+      await mkdir(path.dirname(refPath), { recursive: true });
+      await writeFile(refPath, TINY_PNG);
 
-    const fetchMock = vi.fn().mockResolvedValue(makeImageSSEResponse([TINY_PNG_B64]));
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+      const fetchMock = vi.fn().mockResolvedValue(makeImageSSEResponse([TINY_PNG_B64]));
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    const tool = createGenerateImageTool(tmpDir, fakeAuth());
-    const result = await tool.execute(
-      { prompt: "make the background darker", image: refPath },
-      ctx(),
-    );
+      const { createGenerateImageTool } = await import("./generate-image.js");
+      const tool = createGenerateImageTool(tmpDir, fakeAuth());
+      const result = await tool.execute(
+        { prompt: "make the background darker", image: refPath, model },
+        ctx(),
+      );
 
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [url] = fetchMock.mock.calls[0]!;
-    expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const [url] = fetchMock.mock.calls[0]!;
+      expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
 
-    const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
-    expect(body.tools[0].action).toBe("edit");
+      const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
+      expect(body.tools[0].action).toBe("edit");
+      expect(body.tools[0].model).toBe(model ?? "gpt-image-2.5-flare");
 
-    // The input should have both text and input_image
-    const inputContent = body.input[0].content;
-    expect(inputContent).toHaveLength(2);
-    expect(inputContent[0].type).toBe("input_text");
-    expect(inputContent[1].type).toBe("input_image");
-    expect(inputContent[1].image_url).toContain("data:image/png;base64,");
+      // The input should have both text and input_image
+      const inputContent = body.input[0].content;
+      expect(inputContent).toHaveLength(2);
+      expect(inputContent[0].type).toBe("input_text");
+      expect(inputContent[1].type).toBe("input_image");
+      expect(inputContent[1].image_url).toContain("data:image/png;base64,");
 
-    expect(isStructured(result)).toBe(true);
-  });
+      expect(isStructured(result)).toBe(true);
+    },
+  );
 
   it("returns a helpful error when the image path does not exist", async () => {
     const { createGenerateImageTool } = await import("./generate-image.js");
@@ -244,6 +283,19 @@ describe("generate_image — edit (with image input)", () => {
 });
 
 describe("generate_image — error handling", () => {
+  it("rejects transparent JPEG before calling OpenAI", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock;
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    const result = await tool.execute(
+      { prompt: "a logo", background: "transparent", output_format: "jpeg" },
+      ctx(),
+    );
+    expect(result).toBe("Transparent backgrounds require png or webp output, not jpeg.");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("returns a user-facing message when OpenAI is not connected", async () => {
     const { createGenerateImageTool } = await import("./generate-image.js");
     const tool = createGenerateImageTool(tmpDir, noAuth());

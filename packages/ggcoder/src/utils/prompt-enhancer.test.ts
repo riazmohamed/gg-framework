@@ -68,7 +68,7 @@ describe("enhancer examples", () => {
 });
 
 describe("enhancePrompt", () => {
-  const options = { provider: "anthropic" as const, model: "claude-sonnet-5" };
+  const options = { provider: "anthropic" as const, model: "claude-sonnet-5", maxTokens: 128000 };
 
   beforeEach(() => vi.mocked(stream).mockReset());
 
@@ -92,17 +92,42 @@ describe("enhancePrompt", () => {
   });
 
   it.each([
-    [10, 700],
-    [2000, 2000],
-    [10000, 4096],
+    [10, 128000],
+    [2000, 16384],
+    [10000, 2048],
   ])(
-    "bounds the output allowance for a %i-character draft at %i tokens",
+    "uses the session's %i-character draft allowance of %i tokens unchanged",
     async (length, maxTokens) => {
       respond("Keep the draft details.");
-      await enhancePrompt({ ...options, prompt: "x".repeat(length) });
+      await enhancePrompt({ ...options, maxTokens, prompt: "x".repeat(length) });
       expect(vi.mocked(stream).mock.calls[0][0].maxTokens).toBe(maxTokens);
     },
   );
+
+  it("preserves the active model's reasoning budget and provider context", async () => {
+    respond("Fix the bug.");
+    const active = {
+      provider: "anthropic" as const,
+      model: "claude-fable-5-1",
+      maxTokens: 128000,
+      thinking: "high" as const,
+      projectId: "account-project",
+      userAgent: "claude-cli/test",
+      baseUrl: "https://provider.example/v1",
+      accountId: "account-id",
+      signal: new AbortController().signal,
+    };
+    await enhancePrompt({ ...active, prompt: "fix bug" });
+    expect(vi.mocked(stream).mock.calls[0][0]).toMatchObject(active);
+    expect(vi.mocked(stream).mock.calls[0][0]).not.toHaveProperty("temperature");
+  });
+
+  it("rejects empty output instead of returning an empty replacement", async () => {
+    respond("   ");
+    await expect(enhancePrompt({ ...options, prompt: "fix bug" })).rejects.toThrow(
+      "returned no text",
+    );
+  });
 
   it("rejects truncated output instead of returning a partial replacement", async () => {
     respond("Add CSV export, but", "max_tokens");
