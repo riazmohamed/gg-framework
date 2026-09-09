@@ -18,6 +18,8 @@ export interface BackgroundProcess {
   startedAt: number;
   exitCode: number | null;
   lastReadOffset: number;
+  /** Unread one-shot wake, retained even if it fired before task_output waited. */
+  wakeReason?: "pattern" | "silence";
   /**
    * Last known size of `logFile` in bytes. Kept current by the progress
    * watcher, the exit handler and every `readOutput`, so consumers (notably
@@ -62,7 +64,7 @@ const BG_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const WATCH_INTERVAL_MS = 5_000;
 /** Tick for model-declared wake rules (match/silence). Cheap: one stat + a
  * bounded tail read, so a flat interval (no backoff) is fine. */
-const WAKE_INTERVAL_MS = 5_000;
+const WAKE_INTERVAL_MS = 500;
 /** Ceiling on the progress interval as it backs off between reports. */
 const WATCH_INTERVAL_MAX_MS = 120_000;
 /**
@@ -93,7 +95,7 @@ const WATCH_INTERVAL_MAX_MS = 120_000;
 const WATCH_MAX_REPORTS = 3;
 /** Chars of log tail carried in a progress checkpoint. */
 const CHECKPOINT_TAIL_CHARS = 320;
-/** Ceiling on a single blocking `waitForExit`, so one wedged process cannot
+/** Ceiling on a single blocking `waitForExitOrWake`, so one wedged process cannot
  *  hold the agent loop indefinitely; callers re-wait if they still want to. */
 export const MAX_PROCESS_WAIT_MS = 600_000;
 /** Chars of the matched log line carried in a pattern-wake notification. */
@@ -355,9 +357,9 @@ export class ProcessManager {
           // and disposeWatcher may already have cleared this entry.
           if (proc.exitCode !== null || !this.watchers.has(proc.id)) return;
           if (emitted && ++reports >= WATCH_MAX_REPORTS) {
-            // Budget spent: stop watching for good. `task_output` remains the
-            // way to inspect this process, and its exit still notifies.
-            this.disposeWatcher(proc.id);
+            // Retire generic progress only; declared readiness must still fire
+            // if a slow server finishes starting after this budget is spent.
+            this.disposeProgressWatcher(proc.id);
             return;
           }
           // Back off only on an actual report. A process that goes quiet must
@@ -528,6 +530,7 @@ export class ProcessManager {
     if (pattern && !state.matched && size > state.scanOffset) {
       const start = Math.max(0, state.scanOffset - overlap);
       const chunk = await this.readRange(proc.logFile, start, size);
+      if (proc.exitCode !== null || !this.wakeStates.has(proc.id)) return;
       state.scanOffset = size;
       const match = pattern.exec(chunk);
       if (match) {
@@ -548,6 +551,8 @@ export class ProcessManager {
             `pattern /${pattern.source}/: ${boundedLine(line)}. Still running — ` +
             `task_output id="${proc.id}" for full context.`,
         );
+        proc.wakeReason = "pattern";
+        this.children.get(proc.id)?.emit("gg:wake", proc.wakeReason);
       }
     }
 
@@ -560,6 +565,7 @@ export class ProcessManager {
       state.silenceFired = true;
       this.disposeProgressWatcher(proc.id);
       const tail = await this.readTail(proc.logFile, size);
+      if (proc.exitCode !== null || !this.wakeStates.has(proc.id)) return;
       queue.enqueue(
         "process",
         proc.id,
@@ -568,6 +574,8 @@ export class ProcessManager {
           `${tail ? `. Last output: ${tail}` : " (no output so far)"}. ` +
           `Check task_output id="${proc.id}" and decide whether to wait, send input, or stop it.`,
       );
+      proc.wakeReason = "silence";
+      this.children.get(proc.id)?.emit("gg:wake", proc.wakeReason);
     }
   }
 
@@ -604,7 +612,9 @@ export class ProcessManager {
   }
 
   /**
-   * Block until a background process exits, bounded by `timeoutMs`.
+   * Block until a process exits or a declared wake fires, bounded by `timeoutMs`.
+   * Steering notifications cannot interrupt a tool call; the wake must also
+   * release this wait directly so a ready dev server doesn't wait for shutdown.
    *
    * Without this, "wait for the build" can only be expressed as a guessed
    * `sleep N`: too short burns a turn, too long burns wall-clock, and neither
@@ -613,34 +623,38 @@ export class ProcessManager {
    * loop step to be delivered, which is exactly what an agent with nothing
    * else to do does not have.
    */
-  async waitForExit(
+  async waitForExitOrWake(
     id: string,
     timeoutMs: number,
     signal?: AbortSignal,
-  ): Promise<"exited" | "timeout" | "unknown"> {
+  ): Promise<"exited" | "timeout" | "unknown" | "pattern" | "silence"> {
     const proc = this.processes.get(id);
     if (!proc) return "unknown";
     const child = this.children.get(id);
     // Already terminal (or no live child tracked): nothing to wait on.
     if (!child || proc.exitCode !== null) return "exited";
     if (signal?.aborted) return "timeout";
+    if (proc.wakeReason) return proc.wakeReason;
     const bounded = Math.min(Math.max(timeoutMs, 0), MAX_PROCESS_WAIT_MS);
     return await new Promise((resolve) => {
-      const settle = (outcome: "exited" | "timeout"): void => {
+      const settle = (outcome: "exited" | "timeout" | "pattern" | "silence"): void => {
         clearTimeout(timer);
         child.off("close", onClose);
+        child.off("gg:wake", onWake);
         signal?.removeEventListener("abort", onAbort);
         resolve(outcome);
       };
       // Registered after start()'s own 'close' handler, so `exitCode` is
       // already set by the time this resolves.
       const onClose = (): void => settle("exited");
+      const onWake = (reason: "pattern" | "silence"): void => settle(reason);
       // Give up the wait when the caller is cancelled; the process itself is
       // left running — this only ends our observation of it.
       const onAbort = (): void => settle("timeout");
       const timer = setTimeout(() => settle("timeout"), bounded);
       timer.unref?.();
       child.once("close", onClose);
+      child.once("gg:wake", onWake);
       signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
@@ -656,6 +670,7 @@ export class ProcessManager {
       };
     }
 
+    delete proc.wakeReason;
     const offset = fromStart ? 0 : proc.lastReadOffset;
     let output = "";
 
