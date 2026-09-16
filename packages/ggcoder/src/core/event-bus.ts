@@ -59,6 +59,9 @@ export interface BusEventMap {
     reason: string;
   };
 
+  /** Informational edit feedback, not a completion gate or a draft replacement. */
+  diagnostics: { text: string };
+
   // Agent self-correction hooks (ideal review / verification / loop-break /
   // re-grounding). Carries only the semantic kind; the presentation layer owns
   // text + color.

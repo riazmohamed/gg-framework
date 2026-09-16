@@ -99,8 +99,8 @@ function setup(
     setPlanReview: ((u: string | null | ((p: string | null) => string | null)) => {
       planReview = typeof u === "function" ? u(planReview) : u;
     }) as AgentEventsDeps["setPlanReview"],
-    setQueuedCount: noop as unknown as AgentEventsDeps["setQueuedCount"],
-    setQueuedMessages: noop as unknown as AgentEventsDeps["setQueuedMessages"],
+    setQueuedCount: vi.fn<AgentEventsDeps["setQueuedCount"]>(),
+    setQueuedMessages: vi.fn<AgentEventsDeps["setQueuedMessages"]>(),
     setAttachments: noop as unknown as AgentEventsDeps["setAttachments"],
     setCommands: noop as unknown as AgentEventsDeps["setCommands"],
     setModels,
@@ -144,6 +144,95 @@ describe("useAgentEvents", () => {
   beforeEach(() => vi.clearAllMocks());
 
   describe("queued pill lifecycle", () => {
+    it("removes the cancelled duplicate, not the identical message still pending", () => {
+      const { hook, getItems, pushUserItem } = setup();
+      pushUserItem("same", true);
+      pushUserItem("same", true);
+      const firstId = getItems()[0]!.id;
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 2,
+            messages: [
+              { id: "a", text: "same" },
+              { id: "b", text: "same" },
+            ],
+          }),
+        ),
+      );
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 1,
+            messages: [{ id: "a", text: "same" }],
+            cancelledId: "b",
+          }),
+        ),
+      );
+      expect(getItems()).toEqual([
+        expect.objectContaining({ id: firstId, text: "same", queued: true }),
+      ]);
+    });
+
+    it("keeps newer enqueues and drains after cancellation, including repeated cancellation events", () => {
+      const { hook, getItems, pushUserItem, deps } = setup();
+      pushUserItem("cancel me", true);
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 1,
+            messages: [{ id: "a", text: "cancel me" }],
+          }),
+        ),
+      );
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 0,
+            messages: [],
+            cancelledId: "a",
+          }),
+        ),
+      );
+      expect(getItems()).toEqual([]);
+      pushUserItem("newer", true);
+      const pending = [{ id: "b", text: "newer" }];
+      act(() => hook.result.current.handleEvent(ev("queued", { count: 1, messages: pending })));
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 1,
+            messages: pending,
+            cancelledId: "a",
+          }),
+        ),
+      );
+      expect(deps.setQueuedMessages).toHaveBeenLastCalledWith(pending);
+      expect(getItems()).toEqual([expect.objectContaining({ text: "newer", queued: true })]);
+      act(() => hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] })));
+      expect(deps.setQueuedCount).toHaveBeenLastCalledWith(0);
+      expect(deps.setQueuedMessages).toHaveBeenLastCalledWith([]);
+      expect(getItems()).toEqual([expect.objectContaining({ text: "newer", queued: false })]);
+    });
+
+    it("preserves consumed input when cancellation loses the race", () => {
+      const { hook, getItems, pushUserItem } = setup();
+      pushUserItem("already running", true);
+      act(() =>
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 1,
+            messages: [{ id: "a", text: "already running" }],
+          }),
+        ),
+      );
+      act(() => hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] })));
+      // Failed cancellation broadcasts the current list without a cancelled id.
+      act(() => hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] })));
+      expect(getItems()).toEqual([
+        expect.objectContaining({ text: "already running", queued: false }),
+      ]);
+    });
     it("clears a bubble's queued pill as soon as the agent consumes it, mid-run", () => {
       const { hook, getItems, pushUserItem, setRunning } = setup();
       act(() => setRunning(true));
@@ -461,6 +550,53 @@ describe("useAgentEvents", () => {
     items = getItems();
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "assistant", text: "Hello world" });
+  });
+
+  it("keeps raw diagnostics out of chat without interrupting plan progress", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "[DONE:2]" }));
+      hook.result.current.handleEvent(
+        ev("diagnostics", { text: "Diagnostics in a.ts: type mismatch" }),
+      );
+      hook.result.current.handleEvent(ev("text_delta", { text: "Continuing step 3." }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "assistant", text: "[DONE:2]Continuing step 3." }),
+    ]);
+  });
+
+  it("does not add chat rows for repeated diagnostic or timeout notices", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      for (const text of [
+        "Post-edit diagnostics for the latest queued changes:\nL16:30 Expected 1 arguments, but got 4.",
+        "a.ts: diagnostics timeout; not verified. Run the project checks.",
+        "a.ts: diagnostics timeout; not verified. Run the project checks.",
+      ]) {
+        hook.result.current.handleEvent(ev("diagnostics", { text }));
+      }
+    });
+    expect(getItems()).toEqual([]);
+  });
+
+  it("does not release an armed final draft when diagnostics arrive", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Unverified draft" }));
+      hook.result.current.handleEvent(
+        ev("diagnostics", { text: "Diagnostics in a.ts: type mismatch" }),
+      );
+    });
+    expect(getItems()).toEqual([]);
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: false }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems().some((item) => item.kind === "assistant")).toBe(false);
   });
 
   it("discards a draft the late-arming fallback could not hold back", () => {

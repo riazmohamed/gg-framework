@@ -11,12 +11,12 @@ thing we ship. The CLI is the same engine without the face.
 
 ```bash
 pnpm install                              # from the repo root
-pnpm --filter @kenkaiiii/ggcoder build    # build the sidecar first
+pnpm --filter @abukhaled/ogcoder build    # build the sidecar first
 pnpm --filter gg-app tauri dev
 ```
 
 Webview edits hot-reload through Vite. **Restart the app** after Rust or sidecar changes,
-and rebuild `@kenkaiiii/ggcoder` any time you touch `packages/ggcoder/src/app-sidecar.ts`.
+and rebuild `@abukhaled/ogcoder` any time you touch `packages/ggcoder/src/app-sidecar.ts`.
 
 ```bash
 pnpm --filter gg-app check    # tsc --noEmit

@@ -700,20 +700,18 @@ async function buildMcpRows(cwd: string, settingsFile: string): Promise<McpWireR
           requiresAuth: result?.requiresAuth,
         };
       }),
-      ...blocked.map(
-        (s): McpWireRow => ({
-          name: s.config.name,
-          scope: s.scope,
-          ok: false,
-          toolCount: 0,
-          error:
-            "Project-scope server not connected — this repo's .gg/mcp.json runs " +
-            "repo-controlled commands. Add or re-add a server in this project via " +
-            "the MCP modal to trust it.",
-          kind: (s.config.url ? "http" : "stdio") as "http" | "stdio",
-          summary: mcpRowSummary(s.config),
-        }),
-      ),
+      ...blocked.map((s): McpWireRow => ({
+        name: s.config.name,
+        scope: s.scope,
+        ok: false,
+        toolCount: 0,
+        error:
+          "Project-scope server not connected — this repo's .gg/mcp.json runs " +
+          "repo-controlled commands. Add or re-add a server in this project via " +
+          "the MCP modal to trust it.",
+        kind: (s.config.url ? "http" : "stdio") as "http" | "stdio",
+        summary: mcpRowSummary(s.config),
+      })),
     ];
   } finally {
     await manager.dispose();
@@ -1364,6 +1362,8 @@ function buildKenContext(
     cwd,
     gitBranch,
     messages: buildSession.getMessages(),
+    verificationEvidence: buildSession.getVerificationEvidence(),
+    verificationProblem: buildSession.getVerificationProblem(),
     workflowCommands,
     injectedPrompts,
   });
@@ -2388,6 +2388,7 @@ async function createSession(
   });
   session.eventBus.on("model_change", (d) => broadcast("model_change", d));
   session.eventBus.on("hook", (d) => broadcast("hook", d));
+  session.eventBus.on("diagnostics", (d) => broadcast("diagnostics", d));
   // Fires BEFORE the candidate final answer streams. The webview holds assistant
   // text back while armed, so an Ideal review supersedes a draft that was never
   // painted instead of deleting one the user already started reading.
@@ -2816,6 +2817,8 @@ async function createSession(
         cwd,
         gitBranch,
         messages: session.getMessages(),
+        verificationEvidence: session.getVerificationEvidence(),
+        verificationProblem: session.getVerificationProblem(),
         originalRequest,
         injectedPrompts: [...injectedAutopilotPrompts],
         workflowCommands: await loadWorkflowCommandSpecs(),
@@ -2855,6 +2858,8 @@ async function createSession(
         cwd,
         gitBranch,
         messages: session.getMessages(),
+        verificationEvidence: session.getVerificationEvidence(),
+        verificationProblem: session.getVerificationProblem(),
         originalRequest,
         injectedPrompts: [...injectedAutopilotPrompts],
         workflowCommands: await loadWorkflowCommandSpecs(),
@@ -4682,10 +4687,14 @@ async function createSession(
         }
         // `false` means it already drained into the run between render and
         // click. That is a race, not an error, so report it as a normal result
-        // and let the client reconcile from the fresh list.
+        // and let the client reconcile through the ordered event stream.
         const cancelled = session.cancelQueuedMessage(id);
         const queued = session.listQueuedMessages();
-        broadcast("queued", { count: queued.length, messages: queued });
+        broadcast("queued", {
+          count: queued.length,
+          messages: queued,
+          ...(cancelled ? { cancelledId: id } : {}),
+        });
         json(res, 200, { cancelled, queued });
       });
       return;
