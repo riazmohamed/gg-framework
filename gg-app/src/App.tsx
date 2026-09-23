@@ -69,7 +69,7 @@ import { glowPlacement, glowStateFor, glowVars } from "./window-glow";
 import { ActivityBar } from "./ActivityBar";
 import { autosizeComposer } from "./composer-autosize";
 import { KenActivityBar } from "./KenActivityBar";
-import { AutopilotReviewBar } from "./AutopilotReviewBar";
+import { useTaskActivity } from "./useTaskActivity";
 import { useKenMentor } from "./useKenMentor";
 import { useAutopilot } from "./useAutopilot";
 import { useAgentEvents, HOOK_PRESENTATION, type HookKind } from "./useAgentEvents";
@@ -575,6 +575,7 @@ function App(): React.ReactElement {
   const [showPicker, setShowPicker] = useState(false);
   // Bumped on each workspace/session choice to force re-hydration.
   const [hydrateNonce, setHydrateNonce] = useState(0);
+  const { activity, handleActivityEvent } = useTaskActivity(hydrateNonce);
   // New-session confirmation modal + in-flight guard.
   const [confirmNewSession, setConfirmNewSession] = useState(false);
   // Hide/show the nav button row (the bar + centered title always stay).
@@ -1292,6 +1293,7 @@ function App(): React.ReactElement {
     nextId,
     handleKenEvent,
     handleAutopilotEvent,
+    handleActivityEvent,
     setState,
     setTasks,
     setProjectTasks,
@@ -2692,9 +2694,6 @@ function App(): React.ReactElement {
       </div>
 
       <div className="liveregion">
-        {workspaceMode === "code" && autopilotReviewing && (
-          <AutopilotReviewBar onCancel={requestCancel} />
-        )}
         {workspaceMode === "code" && kenRunning && (
           <KenActivityBar
             runStartTs={kenRunStartTs}
@@ -2706,12 +2705,11 @@ function App(): React.ReactElement {
           />
         )}
         {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
-        {/* Ken's bar (chat OR autopilot review) REPLACES the main bar while the
-            build is idle — otherwise the idle "Ready for work" line stacks under
-            Ken's spinner. When the build is also running, both bars show. */}
-        {(workspaceMode === "chat" || running || (!kenRunning && !autopilotReviewing)) && (
+        {/* Automatic review stays in the same task row; manual @Ken keeps its own bar. */}
+        {(workspaceMode === "chat" || running || autopilotReviewing || !kenRunning) && (
           <ActivityBar
             running={running}
+            activity={activity}
             cancelling={cancelling}
             tokens={tokens}
             doneStatus={doneStatus}

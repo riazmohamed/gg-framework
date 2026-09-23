@@ -22,6 +22,90 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.70.0",
+    date: "2026-09-23",
+    items: [
+      "OpenAI's brand new `GPT-6 Sol` and `GPT-6 Luna` just landed. Sol is your new OpenAI default, a serious coder that climbs all the way to `ultra` effort, and Luna is the lightning-fast, dirt-cheap sidekick I now hand your helper agents. Both read screenshots and remember a huge amount of your project at once.",
+      "Your secrets are safer than ever. I hide API keys and passwords from the AI, and now I also make sure it can never accidentally overwrite a real key in your files with the hidden placeholder it was shown. Your `.env` stays exactly as you left it.",
+    ],
+  },
+  {
+    version: "0.69.0",
+    date: "2026-09-23",
+    items: [
+      "`Claude Opus 5.5` just landed and I made it the flagship Anthropic pick. Anthropic built it for exactly the long coding sessions we live in, it thinks adaptively at every effort level up to `max`, and it dropped `20%` off the price at `$4/$20` per million tokens. Pick it in the model menu and it just works.",
+    ],
+  },
+  {
+    version: "0.68.0",
+    date: "2026-09-22",
+    items: [
+      "`Grok 4.7` is here and it's your new default on xAI. xAI built it for exactly what we do: hours of coding, agents that don't wander, and deep research. Same huge `500K` context and price as before, plus a new extra-deep `xhigh` thinking mode for the gnarliest problems.",
+      "Xiaomi's whole `MiMo-V2.6` family just landed. `MiMo-V2.6-Pro` now reads screenshots and watches video clips right alongside your code, the bargain `MiMo-V2.6-Flash` quietly handles the quick lookups so your bill stays tiny, and `UltraSpeed` returns when you want raw pace.",
+    ],
+  },
+  {
+    version: "0.67.1",
+    date: "2026-09-22",
+    items: [
+      "Long sessions just stay fast now. I taught the engine to slim a conversation down on a smart per-model budget before it ever gets heavy, so that sluggish crawl an hour into a big task is gone. A task that took `60 minutes` now finishes in around `10`.",
+      "No more phantom stalls on big prompts. The engine used to give up after `45 seconds` and restart from scratch; now it waits as long as the work actually needs, so you see far fewer random pauses and retries mid-task.",
+    ],
+  },
+  {
+    version: "0.67.0",
+    date: "2026-09-22",
+    items: [
+      "Ask for UI and get the real thing. Your agent can now browse `Bklit` and `Kokonutui` for actual components, pull their genuine source into your project, and wire up imports and dependencies for you. No more invented lookalikes. I watched it nail `6 out of 6` fresh builds in testing with the real library code, verbatim.",
+      "Animations that behave like an adult. New `Motion` guidance means the agent builds with real animation APIs, honors your `reduced motion` preference, and cleans up its own animation drivers on unmount. Smooth where it should be, still where you need it.",
+    ],
+  },
+  {
+    version: "0.66.4",
+    date: "2026-09-21",
+    items: [
+      "Less clutter, more care in the interfaces your agent builds. I tightened the `UI skill` to cut repetitive descriptions, reuse consistent controls, and check `keyboard focus` and `dropdowns` through real interactions instead of relying on screenshots alone.",
+    ],
+  },
+  {
+    version: "0.66.3",
+    date: "2026-09-21",
+    items: [
+      "Your agent's scratch files should keep work moving, not hold it up. I fixed temporary-file handling across `macOS`, `Linux`, and `Windows`, so your agent can read, write, and edit its scratch files without getting tripped up by the wrong folder.",
+    ],
+  },
+  {
+    version: "0.66.2",
+    date: "2026-09-21",
+    items: [
+      "Your pictures no longer get left behind in connected editors. I fixed missing `screenshots` and `generated images` in `ACP` connections, so you can see them as they arrive and when you reopen a saved chat.",
+    ],
+  },
+  {
+    version: "0.66.1",
+    date: "2026-09-20",
+    items: [
+      "Your `activity bar` now tells the story of the request you just made, not the last one. I separated earlier check warnings from fresh answers, gave research and background work clearer finish messages, and stopped blocked checks from leaving you waiting on a review that won't start.",
+    ],
+  },
+  {
+    version: "0.66.0",
+    date: "2026-09-20",
+    items: [
+      "Know what's happening without reading the whole chat. I rebuilt the `activity bar` with short, color-coded statuses and smooth transitions, so `Needs you` and `Not verified` stand out even after the work stops.",
+      "I tightened `Ken` and `Autopilot` reviews around what you actually asked for. Your latest decisions stay in focus, and reviews check for unfinished work without chasing endless optional improvements.",
+      "Your `slash commands` now listen to what you ask this time. I fixed custom instructions getting lost behind template defaults, so your chosen scope and format take priority.",
+    ],
+  },
+  {
+    version: "0.65.2",
+    date: "2026-09-19",
+    items: [
+      "Deep-thinking models just got dramatically faster out of the gate. New chats on models like `GPT-6 Astra` no longer start at maximum reasoning, and `plan mode` caps its deep thinking, so you get answers sooner and burn far less of your usage.",
+      "Your next message no longer waits for housekeeping. I moved context compaction into the background so it tidies up while you read the answer, which keeps long conversations snappy instead of pausing your next prompt.",
+    ],
+  },
+  {
     version: "0.65.1",
     date: "2026-09-16",
     items: [

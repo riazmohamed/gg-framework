@@ -451,7 +451,7 @@ describe("agentLoop", () => {
 
     await collectLoop([{ role: "user", content: "test" }], {
       provider: "openai",
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       transportSessionId: "transport-session",
       promptCacheKey: "shared-cache-family",
       toolChoice: "none",

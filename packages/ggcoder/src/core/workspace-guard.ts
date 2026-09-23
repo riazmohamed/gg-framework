@@ -2,6 +2,7 @@ import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getAppPaths } from "../config.js";
+import { getTempRoots } from "./temp-paths.js";
 
 /**
  * Workspace write guard + catastrophic-command guard.
@@ -86,7 +87,7 @@ function workspaceRootsFor(cwd: string, settings?: WriteGuardSettings): string[]
   return [
     realResolve(cwd),
     ...(settings?.additionalRoots ?? []).map((root) => realResolve(root)),
-    realResolve(os.tmpdir()),
+    ...getTempRoots().map(realResolve),
     realResolve(getAppPaths().agentDir),
   ];
 }

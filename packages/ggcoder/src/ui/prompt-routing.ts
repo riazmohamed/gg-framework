@@ -5,6 +5,7 @@ import type { Provider, TextContent, ImageContent, VideoContent } from "@abukhal
 import type { ImageAttachment } from "../utils/image.js";
 import { VIDEO_MEDIA_TYPES } from "../utils/image.js";
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
+import { expandPromptCommand } from "../core/prompt-command-expansion.js";
 import type { CustomCommand } from "../core/custom-commands.js";
 
 export function routePromptCommandInput(
@@ -21,16 +22,11 @@ export function routePromptCommandInput(
   const customCmd = !builtinCmd ? customCommands.find((c) => c.name === cmdName) : undefined;
   const promptText = builtinCmd?.prompt ?? customCmd?.prompt;
   if (!promptText) return null;
-  const fullPrompt = promptText.includes("$ARGUMENTS")
-    ? promptText.replaceAll("$ARGUMENTS", cmdArgs)
-    : cmdArgs
-      ? `${promptText}\n\n## User Instructions\n\n${cmdArgs}`
-      : promptText;
   return {
     cmdName,
     cmdArgs,
     promptText,
-    fullPrompt,
+    fullPrompt: expandPromptCommand(promptText, cmdArgs),
   };
 }
 
