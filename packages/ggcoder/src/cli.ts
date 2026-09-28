@@ -409,7 +409,7 @@ function main(): void {
     if (p === "minimax") return "MiniMax-M3";
     if (p === "deepseek") return "deepseek-v4-pro";
     if (p === "huggingface") return "Qwen/Qwen3-Coder-480B-A35B-Instruct";
-    if (p === "openrouter") return "qwen/qwen3.6-plus";
+    if (p === "openrouter") return "qwen/qwen3.8-max";
     if (p === "sakana") return "fugu";
     if (p === "xai") return "grok-4.7";
     return "claude-opus-5-5";

@@ -325,7 +325,7 @@ export function createBashTool(
         return `Exit code: 1\nOS sandbox unavailable; command was not run: ${(error as Error).message}`;
       }
 
-      return new Promise<string>((resolve) => {
+      return new Promise<string>((resolve, reject) => {
         const child = ops.spawn(launch.file, launch.args, {
           cwd,
           detached: true,
@@ -409,7 +409,7 @@ export function createBashTool(
         child.on("error", (err) => {
           clearTimeout(timer);
           context.signal.removeEventListener("abort", onAbort);
-          resolve(`Exit code: 1\nFailed to spawn: ${err.message}`);
+          reject(new Error(`Exit code: 1\nFailed to spawn: ${err.message}`));
         });
       });
     },

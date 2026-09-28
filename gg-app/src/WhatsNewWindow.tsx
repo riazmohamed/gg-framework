@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import { recentChangelog } from "./changelog";
 import { Confetti } from "./Confetti";
@@ -108,7 +109,7 @@ export function WhatsNewWindow(): React.ReactElement {
           title="Close"
           onClick={closeSelf}
         >
-          {"\u00d7"}
+          <XIcon size={14} weight="bold" aria-hidden="true" />
         </button>
       </div>
       <div className="whatsnew-scroll">

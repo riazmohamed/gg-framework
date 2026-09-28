@@ -1484,17 +1484,25 @@ export class AgentSession {
       case "text_delta":
         this.hookText += event.text;
         break;
-      case "tool_call_start":
+      case "tool_call_start": {
         this.hookToolCalls.set(event.toolCallId, {
           name: event.name,
           args: event.args ?? {},
           revision: this.verificationGate.revision,
         });
+        const startClassification =
+          event.name === "bash" && typeof event.args?.command === "string"
+            ? classifyVerificationCommand(event.args.command)
+            : null;
         if (
-          event.name === "bash" &&
+          startClassification &&
           typeof event.args?.command === "string" &&
           (isVerificationCommand(event.args.command) ||
-            classifyVerificationCommand(event.args.command).accepted)
+            startClassification.accepted ||
+            // Must match the tool_call_end predicate: a snapshot-eligible
+            // command that never captured a "before" snapshot is misread at
+            // the end as an uncomparable workspace and re-arms the gate.
+            startClassification.snapshotEligible === true)
         ) {
           // A check that can rewrite files (--fix, build scripts, emitters)
           // invalidates earlier in-flight evidence AND marks the run as
@@ -1503,7 +1511,7 @@ export class AgentSession {
           // it poisoned the gate on green output and re-armed the hook into
           // every later question turn.
           this.verificationGate.recordVerificationAttempt();
-          const classification = classifyVerificationCommand(event.args.command);
+          const classification = startClassification;
           if (classification.snapshotEligible && event.args.persist !== true) {
             const call = this.hookToolCalls.get(event.toolCallId)!;
             call.sourceSnapshot = await captureVerificationSnapshot(this.opts.cwd, [
@@ -1520,6 +1528,7 @@ export class AgentSession {
           await this.persistVerificationState();
         }
         break;
+      }
       case "tool_call_end": {
         const call = this.hookToolCalls.get(event.toolCallId);
         const name = call?.name ?? "";

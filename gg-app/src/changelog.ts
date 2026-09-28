@@ -22,6 +22,74 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.72.1",
+    date: "2026-09-28",
+    items: [
+      "The `Radio` is ready the moment GG Coder opens. I fixed a startup hiccup where it could ask for your stations before the app had fully woken up, so your music is there from the very first click.",
+      "Typing and sending feels smoother. I tidied up how the chat box resizes itself, so it glides to the right size without tripping over its own feet every time you hit send.",
+    ],
+  },
+  {
+    version: "0.72.0",
+    date: "2026-09-28",
+    items: [
+      "Your home screen now moves. I added a living `dithered wave` background that drifts behind your projects and pauses whenever the window is out of focus, so it never burns your battery. Not your vibe? Turn it off under Settings, Effects.",
+      "Settings got a proper home. Instead of a cramped popup, you now get a full `Settings` screen with tabs for General, AI Providers, Remote, MCP and Steroids, and a tab bar that glides smoothly between them.",
+      "The whole app got a fresh coat of paint. I swapped in a crisper icon set, restyled the sign-in screen, and polished menus, popups and notifications so everything feels cleaner and more consistent.",
+    ],
+  },
+  {
+    version: "0.71.0",
+    date: "2026-09-28",
+    items: [
+      "Four fresh brains just landed in your model picker. Sign in with Kimi and you get `Kimi K2.8 Preview` with a huge 1M memory and video support, `DeepSeek V4.1 Flash` can now look at your screenshots, Sakana's new `Fugu Max` joins the lineup, and OpenRouter now starts on the mighty `Qwen3.8 Max`. Pick the one that fits the job and keep right on going.",
+      "Your Kimi sign-in now stays fresh on its own. When your login quietly expired, the new Kimi model could fail out of nowhere. I made it renew in the background, so you just keep chatting.",
+      "GG Coder stops nagging you after simple housekeeping. Quick commands like `git status` could trick it into thinking your work still needed re-checking. I taught it the difference, so it only asks for proof when something actually changed.",
+    ],
+  },
+  {
+    version: "0.70.5",
+    date: "2026-09-27",
+    items: [
+      "Big edits and deep thinking now go all the way through. The AI used to get cut off halfway through writing a large file, then start over and hit the same wall again. I gave big file edits up to `5 minutes` of quiet and deep thinking up to `10 minutes`, so your biggest changes land on the first try. If a retry does happen after a long wait, I now show it on screen instead of hiding it.",
+    ],
+  },
+  {
+    version: "0.70.4",
+    date: "2026-09-26",
+    items: [
+      "No more blank screens when the AI asks you a few quick questions. When a question card had two or more `Yes / No` questions, the whole window could go empty. I fixed the root cause, and now the app sets aside any card it can't draw instead of wiping your screen. Your sessions stay right where you left them.",
+    ],
+  },
+  {
+    version: "0.70.3",
+    date: "2026-09-23",
+    items: [
+      "Your network rules stay in charge even while a page is loading. I made `web fetch` and `web search` stop when you block their destination, instead of letting an already-started request slip through.",
+      "No more accidental double moves. If the AI repeats the exact same `tool call` in one response, I run it once, but I still let it retry when your task actually changes.",
+      "A command that never started now says so. I fixed `shell` launch failures so you and the AI see the error right away instead of a result that looks successful.",
+    ],
+  },
+  {
+    version: "0.70.2",
+    date: "2026-09-23",
+    items: [
+      "GG Coder feels alive now. Your messages rise into the chat, tool steps slide in as they run, popups and menus fade away instead of vanishing, and every screen change glides with a soft `crossfade`. Hit `Show full output` on a long code block and it grows open smoothly instead of jumping.",
+      "Reviewing a plan is a proper moment now. The `YOUR PLAN` banner draws itself in line by line, your plan rises in underneath, and a stray Enter can never approve it by accident. It's fully keyboard friendly, so Tab stays right where your decision is.",
+      "Errors wait for you now. They stay on screen until you close them, and any notice holds still while you hover it, so nothing important slips past while you're looking away.",
+      "A calmer, cleaner look. The top bar keeps `/commit` as the one standout action, Ken's replies read in easy normal text with his signature teal stripe, and your project list is tidier with neat, lined-up times.",
+    ],
+  },
+  {
+    version: "0.70.1",
+    date: "2026-09-23",
+    items: [
+      "Every button now tells you what it does. I built slick new `tooltips` across the whole app that actually show up on Mac, pop in instantly as you glide between buttons, and never appear when you didn't ask for them.",
+      "GG Coder got a serious polish pass. Faint grey text is crisper and easier on the eyes, menus and popups now float in smoothly, and keyboard users get a clear `focus ring` so you always know where you are. Got `Reduce Motion` switched on? I calm every animation down for you now.",
+      "Squeeze your windows as small as you like. At narrow sizes the header buttons neatly wrap instead of sliding off the edge, your issue and PR counts stay fully readable, and the logo shrinks to fit.",
+    ],
+  },
+  {
     version: "0.70.0",
     date: "2026-09-23",
     items: [

@@ -5,6 +5,7 @@ import { theme } from "./theme";
 import { WorkingBeam } from "./WorkingBeam";
 import { MetalButton } from "./MetalButton";
 import { ActionMetal } from "./ActionMetal";
+import { withViewTransition } from "./view-transition";
 import {
   waitForReady,
   getState,
@@ -131,14 +132,14 @@ import { TitleUsageMeter } from "./TitleUsageMeter";
 import { useWindowFocused } from "./useWindowFocused";
 import { formatWorkspaceTitle, WorkspaceHeader } from "./WorkspaceHeader";
 import { useProgress } from "./useProgress";
-import { LoginScreen } from "./LoginScreen";
+import { SettingsScreen, type SettingsTabId } from "./SettingsScreen";
 import { Markdown, PromptSendProvider } from "./Markdown";
 import { FooterSkeleton, TranscriptSkeleton, Skeleton } from "./Skeleton";
 import { useAppUpdate } from "./update";
 import { recoverPromptLabel } from "./prompt-labels";
 import { playSound } from "./sounds";
 import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps";
-import { Paperclip, AtSign, ArrowUp, Square } from "lucide-react";
+import { PaperclipIcon, AtIcon, ArrowUpIcon, SquareIcon, PlusIcon } from "@phosphor-icons/react";
 import { AttachmentBar } from "./AttachmentBar";
 import { EnhancedSegments } from "./PromptEnhancement";
 import { EnhanceDissolve } from "./EnhanceDissolve";
@@ -146,6 +147,8 @@ import { toast } from "./toast";
 import { fileToPending, toWire, attachmentToPending, type PendingAttachment } from "./attachments";
 import { basename } from "./tool-format";
 import "./App.css";
+// Liquid glass trial layer (from veditor-app). Delete this line to revert.
+import "./glass.css";
 
 const DEFAULT_INPUT_PLACEHOLDER = "Type a message, / commands, @ files, @Ken for help";
 const INPUT_PLACEHOLDERS = [
@@ -571,6 +574,7 @@ function App(): React.ReactElement {
   const [restoreChecked, setRestoreChecked] = useState(false);
   // Every window starts from the mode-neutral home screen before choosing Code or Chat.
   const [entryView, setEntryView] = useState<EntryView>(initialEntryView(isSecondaryWindow));
+  const [settingsTab, setSettingsTab] = useState<SettingsTabId>("general");
   // Re-open the matching session picker over an already-open workspace.
   const [showPicker, setShowPicker] = useState(false);
   // Bumped on each workspace/session choice to force re-hydration.
@@ -793,6 +797,11 @@ function App(): React.ReactElement {
   // reveal fully-formed in one pass instead of popping in piecemeal (cwd, git,
   // thinking, model each arriving separately would reflow the bar mid-load).
   const [hydrated, setHydrated] = useState(false);
+  // First transcript id that should animate in. Everything restored by a
+  // hydrate gets a lower id, so reopening a session (or switching projects)
+  // lands instantly and only rows that arrive live afterwards rise into place.
+  // Infinity while hydrating: nothing animates until the history is settled.
+  const [liveFromId, setLiveFromId] = useState(Number.POSITIVE_INFINITY);
 
   const readyRef = useRef(false);
   // Bumped by every hydrate. Lets work that outlives a hydrate (a project
@@ -1139,22 +1148,34 @@ function App(): React.ReactElement {
   // is acted on; reacting to height would feed our own resize back in as a loop.
   // Attached via a callback ref because the composer unmounts whenever a
   // picker/home view takes over the window.
-  const inputRoRef = useRef<ResizeObserver | null>(null);
+  //
+  // The resize runs on the next frame, not inside the callback: autosizing
+  // changes this same textarea's height (and width, via is-multiline), and
+  // resizing an observed element from its own callback leaves a notification
+  // undelivered, which WebKit reports as "ResizeObserver loop completed with
+  // undelivered notifications" on every send.
+  const inputRoRef = useRef<{ observer: ResizeObserver; cancel: () => void } | null>(null);
   const attachInput = useCallback(
     (el: HTMLTextAreaElement | null) => {
       inputRef.current = el;
-      inputRoRef.current?.disconnect();
+      inputRoRef.current?.observer.disconnect();
+      inputRoRef.current?.cancel();
       inputRoRef.current = null;
       if (!el || typeof ResizeObserver === "undefined") return;
       let lastWidth = el.clientWidth;
+      let frame = 0;
       const ro = new ResizeObserver(() => {
         const width = el.clientWidth;
         if (width === lastWidth) return;
         lastWidth = width;
-        autosizeInput();
+        cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          autosizeInput();
+        });
       });
       ro.observe(el);
-      inputRoRef.current = ro;
+      inputRoRef.current = { observer: ro, cancel: () => cancelAnimationFrame(frame) };
     },
     [autosizeInput],
   );
@@ -1329,6 +1350,7 @@ function App(): React.ReactElement {
     const generation = ++hydrateGenerationRef.current;
     readyRef.current = false;
     setHydrated(false);
+    setLiveFromId(Number.POSITIVE_INFINITY);
     setStatus("connecting to agent\u2026");
     try {
       await waitForReady();
@@ -1478,6 +1500,7 @@ function App(): React.ReactElement {
     } finally {
       // Reveal the footer + chrome now that everything we know about the
       // session is in hand — one fade-in, no staggered reflow.
+      setLiveFromId(idSeq + 1);
       setHydrated(true);
     }
   }, []);
@@ -1495,7 +1518,8 @@ function App(): React.ReactElement {
       .then((target) => {
         if (target) {
           setWorkspaceMode(target.mode);
-          onProjectChosen();
+          // No crossfade on boot: there's no previous screen to fade from.
+          resetForChosenProject();
         }
       })
       .finally(() => setRestoreChecked(true));
@@ -2390,6 +2414,10 @@ function App(): React.ReactElement {
   // the hydrate effect even when needsProject is already false (switching
   // sessions from the reopened picker), which flipping the boolean alone won't.
   function onProjectChosen(): void {
+    // Picker → workspace crossfades like every other screen change.
+    withViewTransition(resetForChosenProject);
+  }
+  function resetForChosenProject(): void {
     stickToBottomRef.current = true;
     setItems([]);
     setLiveToolFeed([]);
@@ -2433,26 +2461,47 @@ function App(): React.ReactElement {
       <div className="app" style={{ background: theme.background }}>
         {entryView === "home" ? (
           <HomeScreen
-            onProjects={() => {
-              setWorkspaceMode("code");
-              setEntryView("projects");
-            }}
-            onChat={() => {
-              setWorkspaceMode("chat");
-              setEntryView("chats");
-            }}
-            onLogin={() => setEntryView("login")}
+            onProjects={() =>
+              withViewTransition(() => {
+                setWorkspaceMode("code");
+                setEntryView("projects");
+              })
+            }
+            onChat={() =>
+              withViewTransition(() => {
+                setWorkspaceMode("chat");
+                setEntryView("chats");
+              })
+            }
+            onSettings={(tab) =>
+              withViewTransition(() => {
+                setSettingsTab(tab ?? "general");
+                setEntryView("settings");
+              })
+            }
             refreshSignal={homeRefreshSignal}
           />
-        ) : entryView === "login" ? (
-          <LoginScreen onClose={() => setEntryView("home")} />
+        ) : entryView === "settings" ? (
+          <SettingsScreen
+            initialTab={settingsTab}
+            onClose={() =>
+              withViewTransition(() => {
+                setEntryView("home");
+                // Settings may have changed the folder or providers.
+                setHomeRefreshSignal((n) => n + 1);
+              })
+            }
+          />
         ) : entryView === "chats" ? (
-          <ChatPicker onChosen={onProjectChosen} onClose={() => setEntryView("home")} />
+          <ChatPicker
+            onChosen={onProjectChosen}
+            onClose={() => withViewTransition(() => setEntryView("home"))}
+          />
         ) : (
           <ProjectPicker
             onChosen={onProjectChosen}
             // Every window can return to the mode-neutral home screen.
-            onClose={() => setEntryView("home")}
+            onClose={() => withViewTransition(() => setEntryView("home"))}
           />
         )}
         {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
@@ -2465,15 +2514,17 @@ function App(): React.ReactElement {
   // to the home screen; choosing a session resets and re-hydrates this window.
   if (showPicker) {
     const pickerProps = {
-      onChosen: () => {
-        setShowPicker(false);
-        onProjectChosen();
-      },
-      onClose: () => {
-        setShowPicker(false);
-        setNeedsProject(true);
-        setEntryView("home" as const);
-      },
+      onChosen: () =>
+        withViewTransition(() => {
+          setShowPicker(false);
+          resetForChosenProject();
+        }),
+      onClose: () =>
+        withViewTransition(() => {
+          setShowPicker(false);
+          setNeedsProject(true);
+          setEntryView("home" as const);
+        }),
     };
     return (
       <div className="app" style={{ background: theme.background }}>
@@ -2528,7 +2579,7 @@ function App(): React.ReactElement {
       >
         <BackButton
           label={workspaceMode === "chat" ? "Back to chats" : "Back to this project's sessions"}
-          onClick={() => setShowPicker(true)}
+          onClick={() => withViewTransition(() => setShowPicker(true))}
         />
         <div className="rank-badge-wrap">
           <RankBadge
@@ -2553,7 +2604,8 @@ function App(): React.ReactElement {
               title="Start a new chat"
               onClick={() => setConfirmNewSession(true)}
             >
-              {"+ New"}
+              <PlusIcon size={14} aria-hidden="true" />
+              New
             </MetalButton>
             <button
               className="btn btn-sm btn-ghost"
@@ -2577,15 +2629,17 @@ function App(): React.ReactElement {
                   setKenPowerBanner(next ? "on" : "off");
                 }}
               />
-              <MetalButton
-                windowFocused={windowFocused}
-                className="btn btn-primary btn-sm"
+              {/* Quiet here on purpose: in a project the header's one accent is
+                  the commit action, so New sits with the other tools. */}
+              <button
+                className="btn btn-sm btn-ghost"
                 disabled={running}
                 title="Start a new session for this project"
                 onClick={() => setConfirmNewSession(true)}
               >
-                {"+ New"}
-              </MetalButton>
+                <PlusIcon size={14} aria-hidden="true" />
+                New
+              </button>
               <button
                 className="btn btn-sm btn-ghost"
                 title="Open your notes for this project"
@@ -2675,6 +2729,7 @@ function App(): React.ReactElement {
                   <TranscriptRow
                     key={it.id}
                     item={it}
+                    animateIn={it.id >= liveFromId}
                     onContentGrow={maybeScrollToBottom}
                     onAskAnswer={answerAsk}
                     onAskType={typeAskInstead}
@@ -2773,7 +2828,7 @@ function App(): React.ReactElement {
             title="Attach files"
             onClick={() => fileInputRef.current?.click()}
           >
-            <Paperclip size={15} />
+            <PaperclipIcon size={15} />
           </button>
           <div className="input-stack">
             {enhanceAnim && (
@@ -2904,7 +2959,7 @@ function App(): React.ReactElement {
                 else submit();
               }}
             >
-              {running ? <Square size={12} fill="currentColor" /> : <ArrowUp size={16} />}
+              {running ? <SquareIcon size={12} weight="fill" /> : <ArrowUpIcon size={16} />}
             </button>
           </div>
         </div>
@@ -3201,6 +3256,43 @@ function StreamingMarkdown({
 // instead of O(transcript length).
 const TranscriptRow = memo(function TranscriptRow({
   item,
+  animateIn = false,
+  onContentGrow,
+  onAskAnswer,
+  onAskType,
+}: {
+  item: Item;
+  /** Arrived live (not restored from history): rise into place once. */
+  animateIn?: boolean;
+  onContentGrow?: () => void;
+  onAskAnswer?: (
+    itemId: number,
+    promptId: string,
+    delta: Record<string, string | string[]>,
+  ) => void;
+  onAskType?: (itemId: number, promptId: string, questionId: string, seed?: string) => void;
+}): React.ReactElement | null {
+  const row = (
+    <TranscriptRowBody
+      item={item}
+      onContentGrow={onContentGrow}
+      onAskAnswer={onAskAnswer}
+      onAskType={onAskType}
+    />
+  );
+  if (!animateIn) return row;
+  // One wrapper per live row carries the entrance so none of the ~20 row
+  // shapes below needs to know about it. `data-kind` picks the direction:
+  // your own message rises from the composer, everything else settles in.
+  return (
+    <div className="row-enter" data-kind={item.kind}>
+      {row}
+    </div>
+  );
+});
+
+function TranscriptRowBody({
+  item,
   onContentGrow,
   onAskAnswer,
   onAskType,
@@ -3280,7 +3372,7 @@ const TranscriptRow = memo(function TranscriptRow({
             <div className="user-files-row">
               {item.files.map((p) => (
                 <span key={p} className="user-file-chip" title={p}>
-                  <AtSign size={11} style={{ color: theme.accent }} />
+                  <AtIcon size={11} style={{ color: theme.accent }} />
                   <span style={{ color: theme.code }}>{p}</span>
                 </span>
               ))}
@@ -3498,6 +3590,6 @@ const TranscriptRow = memo(function TranscriptRow({
     default:
       return null;
   }
-});
+}
 
 export default App;

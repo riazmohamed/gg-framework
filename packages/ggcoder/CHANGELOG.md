@@ -1,5 +1,53 @@
 # @kenkaiiii/ggcoder
 
+## 5.65.1
+
+### Patch Changes
+
+- Expose in-flight LSP call counts on the language-server pool and speed up the ACP and background-process test suites.
+  - @kenkaiiii/gg-ai@5.65.1
+  - @kenkaiiii/gg-agent@5.65.1
+  - @kenkaiiii/gg-core@5.65.1
+
+## 5.65.0
+
+### Minor Changes
+
+- Add Kimi K2.8 Preview (Kimi sign-in), DeepSeek V4.1 Flash with image input, Sakana Fugu Max, and Qwen3.8 Max as the OpenRouter default; retire DeepSeek V4 Flash ids; refresh expired OAuth credentials reached through model storage keys; stop `git status` preludes from re-arming the verification gate.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.65.0
+- @kenkaiiii/gg-agent@5.65.0
+- @kenkaiiii/gg-core@5.65.0
+
+## 5.64.3
+
+### Patch Changes
+
+- Stop the stream stall watchdog from killing large tool-call edits and long silent thinking: 5min idle budget inside an open tool call, 10min/15min silent-thinking idle/hard caps, thinking-aware non-streaming fallback cap, and visible retries after a long failed attempt.
+  - @kenkaiiii/gg-ai@5.64.3
+  - @kenkaiiii/gg-agent@5.64.3
+  - @kenkaiiii/gg-core@5.64.3
+
+## 5.64.2
+
+### Patch Changes
+
+- Fix redaction marking objects shared by siblings as `[CIRCULAR]`, which corrupted `ask_user` frames with several yes/no questions and blanked the desktop app.
+  - @kenkaiiii/gg-ai@5.64.2
+  - @kenkaiiii/gg-agent@5.64.2
+  - @kenkaiiii/gg-core@5.64.2
+
+## 5.64.1
+
+### Patch Changes
+
+- Stop web requests when network access is revoked, prevent duplicate tool calls, and report shell launch failures accurately.
+  - @kenkaiiii/gg-ai@5.64.1
+  - @kenkaiiii/gg-agent@5.64.1
+  - @kenkaiiii/gg-core@5.64.1
+
 ## 5.64.0
 
 ### Minor Changes
