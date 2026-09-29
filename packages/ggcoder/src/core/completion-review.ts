@@ -1,5 +1,5 @@
-import type { AgentEvent } from "@kenkaiiii/gg-agent";
-import type { ImageContent, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { AgentEvent } from "@abukhaled/gg-agent";
+import type { ImageContent, ThinkingLevel } from "@abukhaled/gg-ai";
 
 export interface CompletionReviewRequest {
   instruction: string;

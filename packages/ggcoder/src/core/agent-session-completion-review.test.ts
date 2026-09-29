@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AgentEvent } from "@kenkaiiii/gg-agent";
-import type { Message } from "@kenkaiiii/gg-ai";
-import type * as GGAI from "@kenkaiiii/gg-ai";
+import type { AgentEvent } from "@abukhaled/gg-agent";
+import type { Message } from "@abukhaled/gg-ai";
+import type * as GGAI from "@abukhaled/gg-ai";
 import { AgentSession } from "./agent-session.js";
 import type {
   CompletionReview,
@@ -10,7 +10,7 @@ import type {
 } from "./completion-review.js";
 
 const transport = vi.hoisted(() => vi.fn());
-vi.mock("@kenkaiiii/gg-ai", async (original) => ({
+vi.mock("@abukhaled/gg-ai", async (original) => ({
   ...(await original<typeof GGAI>()),
   stream: transport,
 }));

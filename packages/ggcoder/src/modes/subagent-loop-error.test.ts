@@ -3,8 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { GGAIError, type Message } from "@kenkaiiii/gg-ai";
-import type * as GgAgentModule from "@kenkaiiii/gg-agent";
+import { GGAIError, type Message } from "@abukhaled/gg-ai";
+import type * as GgAgentModule from "@abukhaled/gg-agent";
 import type * as McpModule from "../core/mcp/index.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 
@@ -21,8 +21,8 @@ import { useFakeHome } from "../test-support/fake-home.js";
 
 const agentLoopMock = vi.hoisted(() => vi.fn());
 
-vi.mock("@kenkaiiii/gg-agent", async () => {
-  const actual = await vi.importActual<typeof GgAgentModule>("@kenkaiiii/gg-agent");
+vi.mock("@abukhaled/gg-agent", async () => {
+  const actual = await vi.importActual<typeof GgAgentModule>("@abukhaled/gg-agent");
   return { ...actual, agentLoop: agentLoopMock };
 });
 

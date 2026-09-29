@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { AgentTool, StructuredToolResult } from "@kenkaiiii/gg-agent";
+import type { AgentTool, StructuredToolResult } from "@abukhaled/gg-agent";
 import { z } from "zod";
 import { log } from "../core/logger.js";
 import type { MotionBundle } from "../core/skills.js";

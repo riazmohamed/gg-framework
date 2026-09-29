@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { AgentEvent, AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentEvent, AgentTool } from "@abukhaled/gg-agent";
 import { z } from "zod";
 import type { CompletionReview, CompletionReviewer } from "../core/completion-review.js";
 import type { MotionBundle } from "../core/skills.js";

@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { StructuredToolResult } from "@kenkaiiii/gg-agent";
+import type { StructuredToolResult } from "@abukhaled/gg-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { findMotionBundle, type MotionBundle } from "../core/skills.js";
