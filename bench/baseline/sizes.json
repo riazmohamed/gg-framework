@@ -1,16 +1,16 @@
 {
   "artifacts": {
     "dist:ggcoder": {
-      "bytes": 6417830,
-      "recorded_at": "2026-09-02T04:23:58.582Z"
+      "bytes": 6501777,
+      "recorded_at": "2026-09-28T09:53:36.215Z"
     },
     "sidecar": {
-      "bytes": 8157676,
-      "recorded_at": "2026-08-20T20:12:18.316Z"
+      "bytes": 7580515,
+      "recorded_at": "2026-09-28T09:53:36.217Z"
     },
     "frontend:initial": {
-      "bytes": 845843,
-      "recorded_at": "2026-09-07T14:38:04.389Z"
+      "bytes": 971248,
+      "recorded_at": "2026-09-28T09:53:36.215Z"
     }
   },
   "startup": {

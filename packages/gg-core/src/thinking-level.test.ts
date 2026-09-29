@@ -30,10 +30,10 @@ describe("thinking-level helpers", () => {
 
   it("exposes Ultra only for GPT-6 models that support proactive delegation", () => {
     const baseLevels = ["low", "medium", "high", "xhigh", "max"];
-    expect(getSupportedThinkingLevels("openai", "gpt-6-sol")).toEqual([...baseLevels, "ultra"]);
+    expect(getSupportedThinkingLevels("openai", "gpt-6.1-sol")).toEqual([...baseLevels, "ultra"]);
     expect(getSupportedThinkingLevels("openai", "gpt-6-luna")).toEqual(baseLevels);
-    expect(getNextThinkingLevel("openai", "gpt-6-sol", "max")).toBe("ultra");
-    expect(getNextThinkingLevel("openai", "gpt-6-sol", "ultra")).toBeUndefined();
+    expect(getNextThinkingLevel("openai", "gpt-6.1-sol", "max")).toBe("ultra");
+    expect(getNextThinkingLevel("openai", "gpt-6.1-sol", "ultra")).toBeUndefined();
   });
 
   it("cycles Anthropic adaptive Opus models through max, including xhigh", () => {
@@ -48,14 +48,18 @@ describe("thinking-level helpers", () => {
     expect(getNextThinkingLevel("anthropic", "claude-opus-5-5", "max")).toBeUndefined();
   });
 
-  it("cycles Anthropic adaptive Sonnet models without xhigh", () => {
-    expect(getSupportedThinkingLevels("anthropic", "claude-sonnet-5")).toEqual([
+  it("cycles Sonnet 5.5 through max, including its new xhigh level", () => {
+    expect(getSupportedThinkingLevels("anthropic", "claude-sonnet-5-5")).toEqual([
       "low",
       "medium",
       "high",
+      "xhigh",
       "max",
     ]);
-    expect(getNextThinkingLevel("anthropic", "claude-sonnet-5", "high")).toBe("max");
+    expect(getNextThinkingLevel("anthropic", "claude-sonnet-5-5", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("anthropic", "claude-sonnet-5-5", "xhigh")).toBe("max");
+    expect(getNextThinkingLevel("anthropic", "claude-sonnet-5-5", "max")).toBeUndefined();
+    expect(isThinkingLevelSupported("anthropic", "claude-sonnet-5-5", "xhigh")).toBe(true);
     expect(isThinkingLevelSupported("anthropic", "claude-sonnet-5", "xhigh")).toBe(false);
   });
 

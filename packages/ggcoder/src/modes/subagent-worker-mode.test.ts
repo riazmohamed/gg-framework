@@ -1,11 +1,52 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../core/agent-session.js";
-import { recoverTimedOutTurn } from "./subagent-worker-mode.js";
+import { classifyResolvedTurn, recoverTimedOutTurn } from "./subagent-worker-mode.js";
 
 type RecoverySession = Pick<AgentSession, "prompt" | "setSignal">;
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("classifyResolvedTurn", () => {
+  const quiet = {
+    aborted: false,
+    abortReason: undefined,
+    recoveredAfterTimeout: false,
+    loopError: undefined,
+  } as const;
+  const LOOP_ERROR = "The model repeatedly issued invalid arguments for tool `read`.";
+
+  it.each([
+    ["a clean finish", quiet, { status: "completed" }],
+    [
+      "a loop that stopped on an error",
+      { ...quiet, loopError: LOOP_ERROR },
+      { status: "failed", error: LOOP_ERROR },
+    ],
+    [
+      "an interrupt, even when the loop also reported an error",
+      { ...quiet, aborted: true, abortReason: "interrupt", loopError: LOOP_ERROR },
+      { status: "interrupted", error: "Interrupted" },
+    ],
+    [
+      "an aborted signal with no recorded reason",
+      { ...quiet, aborted: true },
+      { status: "interrupted", error: "Interrupted" },
+    ],
+    [
+      "a timeout whose recovery summary failed",
+      { ...quiet, aborted: true, abortReason: "timeout", loopError: LOOP_ERROR },
+      { status: "failed", error: "Timed out after 10 minutes; recovery summary failed" },
+    ],
+    [
+      "a timeout rescued by the recovery summary",
+      { ...quiet, abortReason: "timeout", recoveredAfterTimeout: true },
+      { status: "completed", recovered_after_timeout: true },
+    ],
+  ] as const)("settles %s", (_label, turn, expected) => {
+    expect(classifyResolvedTurn(turn)).toEqual(expected);
+  });
 });
 
 describe("subagent timeout recovery", () => {

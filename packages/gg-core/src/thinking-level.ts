@@ -2,8 +2,9 @@ import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { getMaxThinkingLevel, getModel } from "./model-registry.js";
 
 const OPENAI_GPT_THINKING_LEVELS: readonly ThinkingLevel[] = ["medium", "high", "xhigh"];
-// GPT-5.6 and GPT-6 share the six-rung Codex ladder (low → ultra); older GPT
-// models only expose medium/high/xhigh.
+// GPT-5.6 and GPT-6.x (gpt-6-*, plus point releases like gpt-6.1-sol) share the
+// six-rung Codex ladder (low → ultra); older GPT models only expose
+// medium/high/xhigh.
 const OPENAI_GPT_56_THINKING_LEVELS: readonly ThinkingLevel[] = [
   "low",
   "medium",
@@ -21,8 +22,8 @@ const DEEPSEEK_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "high", "max"
 // rung (docs: low/medium/high default/xhigh); each model slices this ladder
 // by its registry maxThinkingLevel.
 const XAI_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh"];
-// Opus 5.x / 4.7 expose the full ladder including xhigh ("extended capability for
-// long-horizon work"). Other adaptive Anthropic models omit xhigh and would 400.
+// Opus 5.x / 4.7 and Sonnet 5.5 expose the full ladder including xhigh.
+// Other adaptive Anthropic models omit xhigh and would 400.
 const ANTHROPIC_XHIGH_THINKING_LEVELS: readonly ThinkingLevel[] = [
   "low",
   "medium",
@@ -80,7 +81,7 @@ function isGlmModel(provider: Provider): boolean {
 }
 
 function isAnthropicXhighModel(provider: Provider, model: string): boolean {
-  return provider === "anthropic" && /opus-5|opus-4-8|opus-4-7/.test(model);
+  return provider === "anthropic" && /opus-5|opus-4-8|opus-4-7|sonnet-5[-.]5/.test(model);
 }
 
 function isAnthropicAdaptiveModel(provider: Provider, model: string): boolean {
@@ -143,7 +144,7 @@ export function getSupportedThinkingLevels(
   if (!isOpenAIGptModel(provider, model)) return [maxLevel];
 
   const levels =
-    model.startsWith("gpt-5.6-") || model.startsWith("gpt-6-")
+    model.startsWith("gpt-5.6-") || model.startsWith("gpt-6-") || model.startsWith("gpt-6.")
       ? OPENAI_GPT_56_THINKING_LEVELS
       : OPENAI_GPT_THINKING_LEVELS;
   const maxIndex = levels.indexOf(maxLevel);

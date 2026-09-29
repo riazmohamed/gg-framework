@@ -375,7 +375,7 @@ describe("streamOpenAICodex", () => {
     const fetchMock = vi.mocked(fetch);
     const result = streamOpenAICodex({
       provider: "openai",
-      model: "gpt-6-sol",
+      model: "gpt-6.1-sol",
       messages: [{ role: "user", content: longMessage }],
       apiKey: "test-credential",
       accountId: "acct",
@@ -610,7 +610,7 @@ describe("streamOpenAICodex", () => {
   it.each([
     ["gpt-5.5", "none"],
     ["gpt-6-luna", "low"],
-    ["gpt-6-sol", "low"],
+    ["gpt-6.1-sol", "low"],
     ["gpt-6-astra", "low"],
     ["gpt-5.6-terra", "low"],
   ])("uses a supported default effort for %s without explicit thinking", async (model, effort) => {
@@ -753,7 +753,7 @@ describe("streamOpenAICodex", () => {
 
     const result = streamOpenAICodex({
       provider: "openai",
-      model: "gpt-6-sol",
+      model: "gpt-6.1-sol",
       messages: [{ role: "user", content: "hi" }],
       apiKey: "token",
       accountId: "acct",

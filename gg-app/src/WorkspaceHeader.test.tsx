@@ -12,7 +12,8 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   }),
 }));
 
-import { formatWorkspaceTitle, WorkspaceHeader } from "./WorkspaceHeader";
+import { WorkspaceHeader } from "./WorkspaceHeader";
+import { formatWorkspaceTitle } from "./workspace-title";
 
 afterEach(cleanup);
 

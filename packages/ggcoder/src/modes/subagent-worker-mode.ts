@@ -4,6 +4,7 @@ import { AgentSession } from "../core/agent-session.js";
 import { isModelUnavailableError } from "../tools/subagent.js";
 import {
   boundSubAgentOutput,
+  promptSubAgent,
   SUB_AGENT_MAX_TURN_EXTENSIONS,
   SUB_AGENT_TIMEOUT_MS,
 } from "../tools/subagent-shared.js";
@@ -39,6 +40,37 @@ export async function recoverTimedOutTurn(
   } finally {
     clearTimeout(recoveryTimer);
   }
+}
+
+export type AbortReason = "timeout" | "interrupt" | "shutdown" | "stdin_closed";
+
+const TIMEOUT_ERROR = `Timed out after ${Math.round(SUB_AGENT_TIMEOUT_MS / 60_000)} minutes; recovery summary failed`;
+
+export interface TurnOutcome {
+  status: "completed" | "interrupted" | "failed";
+  error?: string;
+  recovered_after_timeout?: true;
+}
+
+/**
+ * Settle a turn whose prompt resolved instead of throwing. A timeout or an
+ * interrupt explains the stop better than whatever the loop reported on its
+ * way out, so they win; after that, `loopError` (the error the loop stopped
+ * on — see promptSubAgent) must still fail a turn that otherwise looks done.
+ */
+export function classifyResolvedTurn(turn: {
+  aborted: boolean;
+  abortReason: AbortReason | undefined;
+  recoveredAfterTimeout: boolean;
+  loopError: string | undefined;
+}): TurnOutcome {
+  if (turn.recoveredAfterTimeout) return { status: "completed", recovered_after_timeout: true };
+  if (turn.abortReason === "timeout") return { status: "failed", error: TIMEOUT_ERROR };
+  if (turn.aborted || turn.abortReason !== undefined) {
+    return { status: "interrupted", error: "Interrupted" };
+  }
+  if (turn.loopError !== undefined) return { status: "failed", error: turn.loopError };
+  return { status: "completed" };
 }
 
 export interface SubagentWorkerInitialize {
@@ -111,7 +143,7 @@ export async function runSubagentWorkerMode(): Promise<void> {
   let controller = new AbortController();
   let activeTurn: Promise<void> | undefined;
   let turnTimer: ReturnType<typeof setTimeout> | undefined;
-  let abortReason: "timeout" | "interrupt" | "shutdown" | "stdin_closed" | undefined;
+  let abortReason: AbortReason | undefined;
   let output = "";
   let recoveryOutput = "";
   let recoveringAfterTimeout = false;
@@ -196,8 +228,9 @@ export async function runSubagentWorkerMode(): Promise<void> {
       controller.abort();
     }, SUB_AGENT_TIMEOUT_MS);
     activeTurn = (async () => {
+      let loopError: Error | undefined;
       try {
-        await session!.prompt(task);
+        loopError = await promptSubAgent(session!, task);
       } catch (error) {
         const message = errorMessage(error);
         const fallbackModel = initializeOptions?.fallbackModel;
@@ -218,7 +251,7 @@ export async function runSubagentWorkerMode(): Promise<void> {
             fallbackModel: undefined,
           };
           session = await createSession(initializeOptions);
-          await session.prompt(task);
+          loopError = await promptSubAgent(session, task);
         } else {
           throw error;
         }
@@ -244,28 +277,16 @@ export async function runSubagentWorkerMode(): Promise<void> {
         }
       }
 
-      const interrupted =
-        controller.signal.aborted || (abortReason !== undefined && abortReason !== "timeout");
-      const timedOut = abortReason === "timeout" && !recoveredAfterTimeout;
-      setState(interrupted && !timedOut ? "interrupted" : "idle");
+      const outcome = classifyResolvedTurn({
+        aborted: controller.signal.aborted,
+        abortReason,
+        recoveredAfterTimeout,
+        loopError: loopError?.message,
+      });
+      setState(outcome.status === "interrupted" ? "interrupted" : "idle");
       completeTurn({
-        status: recoveredAfterTimeout
-          ? "completed"
-          : timedOut
-            ? "failed"
-            : interrupted
-              ? "interrupted"
-              : "completed",
+        ...outcome,
         output: boundSubAgentOutput(output),
-        ...(recoveredAfterTimeout
-          ? { recovered_after_timeout: true }
-          : timedOut
-            ? {
-                error: `Timed out after ${Math.round(SUB_AGENT_TIMEOUT_MS / 60_000)} minutes; recovery summary failed`,
-              }
-            : interrupted
-              ? { error: "Interrupted" }
-              : {}),
         model: initializeOptions?.model,
       });
     })()
@@ -277,11 +298,7 @@ export async function runSubagentWorkerMode(): Promise<void> {
         completeTurn({
           status: timedOut ? "failed" : interrupted ? "interrupted" : "failed",
           output: boundSubAgentOutput(output),
-          error: timedOut
-            ? `Timed out after ${Math.round(SUB_AGENT_TIMEOUT_MS / 60_000)} minutes; recovery summary failed`
-            : interrupted
-              ? "Interrupted"
-              : errorMessage(error),
+          error: timedOut ? TIMEOUT_ERROR : interrupted ? "Interrupted" : errorMessage(error),
           model: initializeOptions?.model,
         });
       })

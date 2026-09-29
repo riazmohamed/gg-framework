@@ -76,13 +76,13 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "anthropic",
     label: "Anthropic",
-    description: "Claude Fable 5.1, Opus 5.5, Sonnet 5, Haiku 4.5",
+    description: "Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 4.5",
     methods: ["oauth"],
   },
   {
     value: "openai",
     label: "OpenAI",
-    description: "GPT-6 Astra, GPT-6 Sol, GPT-6 Luna",
+    description: "GPT-6 Astra, GPT-6.1 Sol, GPT-6 Luna",
     methods: ["oauth"],
   },
   {
