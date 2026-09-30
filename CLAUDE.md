@@ -29,7 +29,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 public / 272K Codex-OAuth context, 128K output) with the new top thinking rung **`ultra`**;
 **GPT-6.1 Sol** (`gpt-6.1-sol`, replacing GPT-6 Sol on 2026-09-29) is the provider default and **GPT-6 Luna** (`gpt-6-luna`) is its
 `low` tier — both share Astra's 1.05M/272K window split, 128K output and responses-lite
-transport, and both need a **Codex client >= 0.155.0** on the ChatGPT OAuth route. Sol's ladder
+transport, and both need a **Codex client >= 0.155.0** on the ChatGPT OAuth route. **GPT-6.1 Sol
+only appears in the ChatGPT account's Codex catalog for clients >= 0.159.0**, even though its
+catalog entry declares `minimal_client_version: 0.153.0` — an older advertised client gets
+*"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account"*, which
+looks like a subscription problem but is not. `CODEX_CLIENT_VERSION` in
+`gg-ai/src/providers/openai-codex.ts` is therefore **0.159.2** (bumped 2026-09-30; the
+2026-09-29 sync made 6.1 Sol the default without bumping it). When a new OpenAI model lands,
+confirm it is actually listed by `GET https://chatgpt.com/backend-api/codex/models?client_version=<v>`
+for the advertised version, and bump to the latest `openai/codex` `rust-v*` release if not. Sol's ladder
 reaches `ultra`, Luna's tops out at `max`. The whole **GPT-5.6 family was retired 2026-09-22**
 (there is no GPT-6 Terra — Codex upgrades 5.6 Terra to 6 Sol). Anthropic's flagship is
 **Claude Opus 5.5** (`claude-opus-5-5`, 1M/128K, full low→max ladder including `xhigh`; Opus 5

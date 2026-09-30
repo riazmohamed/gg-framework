@@ -668,8 +668,8 @@ describe("streamOpenAICodex", () => {
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect(init.headers).toMatchObject({
       originator: "codex_cli_rs",
-      version: "0.155.1",
-      "User-Agent": "codex_cli_rs/0.155.1",
+      version: "0.159.2",
+      "User-Agent": "codex_cli_rs/0.159.2",
       "X-OpenAI-Internal-Codex-Responses-Lite": "true",
     });
     expect(body).toMatchObject({

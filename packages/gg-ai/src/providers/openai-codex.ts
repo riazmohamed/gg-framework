@@ -35,9 +35,13 @@ import { extractRequestIdFromMessage } from "../utils/request-id.js";
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
 // Advertised Codex client version. The ChatGPT backend gates models on the
 // catalog's `minimal_client_version` (GPT-6 Luna needs >= 0.155.0) and
-// rejects older clients with "requires a newer version of Codex". Track the
-// latest openai/codex `rust-v*` release when adding a model.
-const CODEX_CLIENT_VERSION = "0.155.1";
+// rejects older clients with "requires a newer version of Codex". The catalog
+// can also hide a model entirely below an unadvertised floor: gpt-6.1-sol
+// declares >= 0.153.0 yet only appears for clients >= 0.159.0, and requests
+// from older clients fail with "not supported when using Codex with a ChatGPT
+// account". Track the latest openai/codex `rust-v*` release when adding a
+// model, and check `/codex/models?client_version=` actually lists it.
+const CODEX_CLIENT_VERSION = "0.159.2";
 // OpenAI's Codex CLI enables zstd request compression by default. Keep tiny
 // synthetic/API requests readable, but compress real agent payloads before they
 // hit the backend's finite Envoy retry buffer.
