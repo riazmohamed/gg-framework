@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../core/agent-session.js";
-import { classifyResolvedTurn, recoverTimedOutTurn } from "./subagent-worker-mode.js";
+import {
+  classifyResolvedTurn,
+  recoverTimedOutTurn,
+  resolveTurnTimeLimit,
+} from "./subagent-worker-mode.js";
 
 type RecoverySession = Pick<AgentSession, "prompt" | "setSignal">;
 
@@ -40,12 +44,31 @@ describe("classifyResolvedTurn", () => {
       { status: "failed", error: "Timed out after 10 minutes; recovery summary failed" },
     ],
     [
+      "a timeout under a shorter per-spawn limit, naming that limit",
+      { ...quiet, aborted: true, abortReason: "timeout", timeLimitMs: 120_000 },
+      { status: "failed", error: "Timed out after 2 minutes; recovery summary failed" },
+    ],
+    [
       "a timeout rescued by the recovery summary",
       { ...quiet, abortReason: "timeout", recoveredAfterTimeout: true },
       { status: "completed", recovered_after_timeout: true },
     ],
   ] as const)("settles %s", (_label, turn, expected) => {
     expect(classifyResolvedTurn(turn)).toEqual(expected);
+  });
+});
+
+describe("resolveTurnTimeLimit", () => {
+  it.each([
+    ["no request", undefined, 600_000],
+    ["a shorter limit", 120_000, 120_000],
+    ["a longer limit, capped at the default", 3_600_000, 600_000],
+    ["zero", 0, 600_000],
+    ["a negative number", -5, 600_000],
+    ["NaN", Number.NaN, 600_000],
+    ["a numeric string", "120000", 600_000],
+  ] as const)("resolves %s", (_label, requested, expected) => {
+    expect(resolveTurnTimeLimit(requested)).toBe(expected);
   });
 });
 
@@ -73,7 +96,7 @@ describe("subagent timeout recovery", () => {
     expect(prompt).toHaveBeenCalledWith(
       expect.stringContaining("one final 60-second recovery turn"),
       { source: "runtime", kind: "completion_gate", visibility: "hidden" },
-      { disableTools: true },
+      { disableTools: true, capThinking: true },
     );
     expect(setSignal).toHaveBeenCalledOnce();
     expect(setSignal).toHaveBeenCalledWith(controller?.signal);
@@ -114,6 +137,7 @@ describe("subagent timeout recovery", () => {
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(prompt).toHaveBeenCalledWith(expect.any(String), expect.any(Object), {
       disableTools: true,
+      capThinking: true,
     });
   });
 });

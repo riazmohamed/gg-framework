@@ -3,6 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import { WorkingBeam } from "./WorkingBeam";
+import { CacheExpiryNotice } from "./CacheExpiryNotice";
 import { MetalButton } from "./MetalButton";
 import { ActionMetal } from "./ActionMetal";
 import { withViewTransition } from "./view-transition";
@@ -16,6 +17,7 @@ import {
   cancel,
   newSession,
   cycleThinking,
+  prewarmCache,
   listModels,
   switchModel,
   isSwitchModelError,
@@ -70,14 +72,17 @@ import { dropSupersededAsks, mergeAskAnswers } from "./ask-user";
 import { glowPlacement, glowStateFor, glowVars } from "./window-glow";
 import { ActivityBar } from "./ActivityBar";
 import { autosizeComposer } from "./composer-autosize";
+import { pinAfterScroll, pinAfterWheel } from "./transcript-pin";
 import { KenActivityBar } from "./KenActivityBar";
 import { useTaskActivity } from "./useTaskActivity";
 import { useKenMentor } from "./useKenMentor";
 import { useAutopilot } from "./useAutopilot";
-import { useAgentEvents, HOOK_PRESENTATION, type HookKind } from "./useAgentEvents";
+import { useAgentEvents } from "./useAgentEvents";
+import { HookNotice, type HookKind, type VerificationReason } from "./HookNotice";
 import { useSmoothText } from "./useSmoothText";
 import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
 import { SubAgentFeed, type SubAgentLine } from "./SubAgentFeed";
+import { CritterFloor, type CritterGroup } from "./CritterFloor";
 import { CompactionNotice } from "./CompactionNotice";
 import { ModelSelect, loadModelsInto } from "./ModelSelect";
 import { SlashMenu } from "./SlashMenu";
@@ -105,6 +110,8 @@ import { ConfirmModal } from "./ConfirmModal";
 import { InitGitModal } from "./InitGitModal";
 import { PlanModeLogo } from "./PlanModeLogo";
 import { KenPowerBanner } from "./KenPowerBanner";
+import { KenFace } from "./KenFace";
+import { GgFace } from "./GgFace";
 import { ExportChatButton } from "./ExportChatButton";
 import { PlanReviewModal } from "./PlanReviewModal";
 import { McpElicitModal } from "./McpElicitModal";
@@ -278,8 +285,8 @@ export type Item =
       guidance?: string;
     }
   // Agent self-correction hook notice (ideal review / loop-break / re-grounding),
-  // rendered like the TUI: a shimmering tone-colored one-liner.
-  | { kind: "hook"; id: number; hook: HookKind; verificationReason?: "recheck" | "check_review" }
+  // rendered as a working critter row with critter-themed wording.
+  | { kind: "hook"; id: number; hook: HookKind; verificationReason?: VerificationReason }
   // Images produced by a tool (screenshot / read of an image file).
   | { kind: "images"; id: number; images: TranscriptImage[]; caption?: string }
   // Image generation in progress — a shimmering square placeholder that gets
@@ -299,13 +306,15 @@ export type Item =
       /** The complete set reached the blocked tool call. */
       sent?: boolean;
       cancelled?: boolean;
+      /** Soft deadline passed: the agent went on; an answer is still delivered late. */
+      deferred?: boolean;
     }
   // A task kicked off from the Tasks modal (shown at the top of its session).
   | { kind: "task"; id: number; title: string }
   // Sub-agents delegated in a turn — a live, in-chat feed of each one's tools.
   | { kind: "subagent_group"; id: number; agents: SubAgentLine[]; aborted?: boolean }
-  // Context compaction — shimmering "compacting…" while running, then a quiet
-  // "compacted · N → M messages" summary when done.
+  // Context compaction — a critter row: shimmering "A critter is munching…"
+  // while running, then "A critter ate N messages and spat out M" when done.
   | {
       kind: "compaction";
       id: number;
@@ -413,6 +422,10 @@ function App(): React.ReactElement {
     kenThinkingAccumMs,
     handleKenEvent,
   } = useKenMentor({ setItems, nextId });
+  // Ken's face talks on the reply he is streaming right now: the last row,
+  // while his run is live. Only that row's props change, so memo holds.
+  const lastItem = items[items.length - 1];
+  const talkingKenId = kenRunning && lastItem?.kind === "ken" ? lastItem.id : null;
   // Autopilot Ken (auto-reviewer): consumes the `autopilot_*` event family into
   // compact transcript markers + a "Ken reviewing…" flag. Separate hook, same
   // shared setItems/nextId pattern as useKenMentor.
@@ -471,6 +484,9 @@ function App(): React.ReactElement {
   // once its slide-out animation finishes.
   const [kenPowerBanner, setKenPowerBanner] = useState<"on" | "off" | null>(null);
   const [running, setRunning] = useState(false);
+  // Last composer keystroke (0 = none since this chat opened). The first
+  // keystroke after opening or a >4 min idle pause prewarms the prompt cache.
+  const lastKeystrokeAtRef = useRef(0);
   // Whether a run has completed in this window. Drives the ambient glow's
   // "done" state, which PERSISTS until the next run starts — the window really
   // is finished until you ask for something else (see window-glow.ts).
@@ -545,7 +561,7 @@ function App(): React.ReactElement {
     onFire: useCallback((prompt: string) => {
       // keepInput: the user did not press Enter for this — leave whatever they
       // are typing untouched.
-      submitTextRef.current(prompt, undefined, { keepInput: true });
+      submitTextRef.current(prompt, undefined, { keepInput: true, scheduled: true });
     }, []),
   });
   // `@`-mention file picker state. `mention` is the active token being typed
@@ -824,16 +840,24 @@ function App(): React.ReactElement {
 
   // Whether the transcript is "pinned" to the bottom. Auto-scroll only runs
   // while pinned. The user scrolling up un-pins it — so they can read freely
-  // even while the agent keeps streaming — and scrolling back to the bottom
-  // re-pins. Default true so a fresh transcript follows the newest output.
+  // even while the agent keeps streaming — and scrolling back down to the
+  // bottom re-pins (rules in transcript-pin.ts). Default true so a fresh
+  // transcript follows the newest output.
   const stickToBottomRef = useRef(true);
+  // The transcript's offset as last seen by a scroll event or left by our own
+  // scrollToBottom — the baseline that tells an up-scroll from a down-scroll.
+  const lastScrollTopRef = useRef(0);
 
   // Pin to the bottom. Images (screenshots / attachments) load asynchronously
   // and grow the content after this fires, so it's also called from each image's
   // onLoad to keep the newest content visible.
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTo({ top: el.scrollHeight });
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight });
+    // A reader's scroll landing in this same frame shares one scroll event with
+    // this jump; measuring it from the pre-jump offset would read up as down.
+    lastScrollTopRef.current = el.scrollTop;
   }, []);
 
   // Same as scrollToBottom, but a no-op while the user has scrolled up to read.
@@ -841,15 +865,23 @@ function App(): React.ReactElement {
     if (stickToBottomRef.current) scrollToBottom();
   }, [scrollToBottom]);
 
-  // Track the user's scroll intent. Any real scroll that lands more than a
-  // small threshold above the bottom un-pins; returning to (near) the bottom
-  // re-pins. Our own programmatic scrollToBottom lands at the bottom, so it
-  // simply keeps the pin set — no need to distinguish it from a user scroll.
+  // Track the user's scroll intent by direction, not distance: while a reply
+  // streams, every commit re-pins, so any "near the bottom" allowance snapped a
+  // small scroll up straight back down. The wheel handler runs before the
+  // scroll it causes, so a commit landing in between can't erase the move.
   const onTranscriptScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickToBottomRef.current = distanceFromBottom <= 48;
+    stickToBottomRef.current = pinAfterScroll(
+      stickToBottomRef.current,
+      lastScrollTopRef.current,
+      el,
+    );
+    lastScrollTopRef.current = el.scrollTop;
+  }, []);
+  const onTranscriptWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    const el = scrollRef.current;
+    if (el) stickToBottomRef.current = pinAfterWheel(stickToBottomRef.current, e, el);
   }, []);
 
   // The "Drop files to attach" overlay must never outlive the drag. macOS keeps
@@ -966,6 +998,7 @@ function App(): React.ReactElement {
   const attachTranscript = useCallback(
     (el: HTMLDivElement | null) => {
       scrollRef.current = el;
+      if (el) lastScrollTopRef.current = el.scrollTop;
       transcriptRoRef.current?.disconnect();
       transcriptRoRef.current = null;
       if (!el || typeof ResizeObserver === "undefined") return;
@@ -1862,7 +1895,11 @@ function App(): React.ReactElement {
   // `keepInput` is for sends the user did not initiate right now — a scheduled
   // prompt firing on its interval. Those must NOT clear the composer, or a
   // schedule that comes due mid-sentence deletes what the user was typing.
-  function submitText(text: string, label?: string, opts?: { keepInput?: boolean }): void {
+  function submitText(
+    text: string,
+    label?: string,
+    opts?: { keepInput?: boolean; scheduled?: boolean },
+  ): void {
     const trimmed = text.trim();
     // Mid-run this QUEUES as steering, exactly like a typed message (see
     // submit()): the sidecar injects it into the running loop. Dropping it
@@ -1893,7 +1930,9 @@ function App(): React.ReactElement {
       setSlashIndex(0);
     }
     if (disposition !== "queue") endStreamingText();
-    void sendPrompt(trimmed);
+    // `scheduled` tells the sidecar nobody is watching this run, so an
+    // ask_user in it gets the short (autopilot) deadline.
+    void sendPrompt(trimmed, [], opts?.scheduled ? { scheduled: true } : undefined);
   }
 
   // Scheduled prompts fire from a ticker that is set up once, so it can't close
@@ -1956,6 +1995,16 @@ function App(): React.ReactElement {
   const visibleQueuedMessages = useMemo(
     () => withoutSupersedingMessage(queuedMessages, supersedingText),
     [queuedMessages, supersedingText],
+  );
+  // Sub-agent groups for the critter floor. Recomputed with `items`, but the
+  // floor compares group identities and ignores token-only re-renders.
+  const critterGroups = useMemo(
+    () =>
+      items.filter(
+        (item): item is Extract<Item, { kind: "subagent_group" }> & CritterGroup =>
+          item.kind === "subagent_group",
+      ),
+    [items],
   );
 
   // Click handler for the "Send to GG Coder" button on Ken's recommended prompts.
@@ -2642,6 +2691,13 @@ function App(): React.ReactElement {
               <PlusIcon size={14} aria-hidden="true" />
               New
             </MetalButton>
+            <button
+              className="btn btn-sm btn-ghost"
+              title="Open your notes"
+              onClick={() => setShowNotes(true)}
+            >
+              Notes
+            </button>
             {workspaceMode === "chat" && (
               <button
                 className="btn btn-sm btn-ghost"
@@ -2748,7 +2804,12 @@ function App(): React.ReactElement {
         {workspaceMode === "code" && kenPowerBanner && (
           <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
         )}
-        <div className="transcript" ref={attachTranscript} onScroll={onTranscriptScroll}>
+        <div
+          className="transcript"
+          ref={attachTranscript}
+          onScroll={onTranscriptScroll}
+          onWheel={onTranscriptWheel}
+        >
           {!hydrated && items.length === 0 ? (
             <TranscriptSkeleton />
           ) : (
@@ -2767,6 +2828,7 @@ function App(): React.ReactElement {
                     key={it.id}
                     item={it}
                     animateIn={it.id >= liveFromId}
+                    kenTalking={it.id === talkingKenId}
                     onContentGrow={maybeScrollToBottom}
                     onAskAnswer={answerAsk}
                     onAskType={typeAskInstead}
@@ -2785,6 +2847,9 @@ function App(): React.ReactElement {
         )}
       </div>
 
+      {/* Sub-agents walk on top of the pinned region as critters; the lane
+          opens (pushing the chat up) only while one is out. */}
+      <CritterFloor groups={critterGroups} />
       <div className="liveregion">
         {/* Motion's starting points sit just above the activity bar and go away
             once the conversation has its first message. */}
@@ -2852,6 +2917,11 @@ function App(): React.ReactElement {
         )}
         <AttachmentBar attachments={attachments} onRemove={removeAttachment} />
         <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
+        <CacheExpiryNotice
+          expiry={state?.cacheExpiry}
+          running={running}
+          onCompact={() => void sendPrompt("/compact").catch(() => {})}
+        />
         <QueuedBar messages={visibleQueuedMessages} onCancel={handleCancelQueued} />
         <div className="inputrow">
           <input
@@ -2918,6 +2988,11 @@ function App(): React.ReactElement {
                 }
               }}
               onChange={(e) => {
+                const now = Date.now();
+                if (!running && now - lastKeystrokeAtRef.current > 4 * 60_000) {
+                  void prewarmCache();
+                }
+                lastKeystrokeAtRef.current = now;
                 setInput(e.target.value);
                 setSlashIndex(0);
                 setCaret(e.target.selectionStart ?? e.target.value.length);
@@ -3125,6 +3200,7 @@ function App(): React.ReactElement {
                 })()}
               <span className="model-anchor">
                 <span className="model-label" style={{ color: theme.text }}>
+                  <GgFace mood="ready" />
                   GG
                 </span>
                 <ModelSelect
@@ -3140,6 +3216,7 @@ function App(): React.ReactElement {
                   <FooterSep />
                   <span className="model-anchor">
                     <span className="model-label" style={{ color: theme.ken }}>
+                      <KenFace mood="chat" />
                       Ken
                     </span>
                     <ModelSelect
@@ -3245,7 +3322,7 @@ function App(): React.ReactElement {
         <MemoryModal onClose={() => setShowMemories(false)} />
       )}
 
-      {workspaceMode === "code" && showNotes && (
+      {showNotes && (
         <NotesModal
           value={notes}
           onChange={handleNotesChange}
@@ -3309,6 +3386,7 @@ function StreamingMarkdown({
 const TranscriptRow = memo(function TranscriptRow({
   item,
   animateIn = false,
+  kenTalking = false,
   onContentGrow,
   onAskAnswer,
   onAskType,
@@ -3316,6 +3394,8 @@ const TranscriptRow = memo(function TranscriptRow({
   item: Item;
   /** Arrived live (not restored from history): rise into place once. */
   animateIn?: boolean;
+  /** This is the Ken reply currently streaming in, so his face talks. */
+  kenTalking?: boolean;
   onContentGrow?: () => void;
   onAskAnswer?: (
     itemId: number,
@@ -3327,6 +3407,7 @@ const TranscriptRow = memo(function TranscriptRow({
   const row = (
     <TranscriptRowBody
       item={item}
+      kenTalking={kenTalking}
       onContentGrow={onContentGrow}
       onAskAnswer={onAskAnswer}
       onAskType={onAskType}
@@ -3345,11 +3426,14 @@ const TranscriptRow = memo(function TranscriptRow({
 
 function TranscriptRowBody({
   item,
+  kenTalking = false,
   onContentGrow,
   onAskAnswer,
   onAskType,
 }: {
   item: Item;
+  /** This is the Ken reply currently streaming in, so his face talks. */
+  kenTalking?: boolean;
   onContentGrow?: () => void;
   /** Record answers for an `ask_user` band (App settles the tool call). */
   onAskAnswer?: (
@@ -3463,14 +3547,14 @@ function TranscriptRowBody({
       );
     }
     case "ken":
-      // Ken Kai's reply: the whole bubble is tinted in Ken's color (dot + all
-      // text), which is the ONLY differentiator from a normal GG Coder reply.
-      // No badge, no byline. The Markdown component special-cases ```prompt
-      // fences into a "Send to GG Coder" button.
+      // Ken Kai's reply: led by his little pixel face (it talks while the reply
+      // streams in) instead of the dot, framed by a teal rule. No badge, no
+      // byline. The Markdown component special-cases ```prompt fences into a
+      // "Send to GG Coder" button.
       return (
         <div className="assistant-msg ken-msg">
-          <span className="assistant-dot" style={{ color: theme.ken }}>
-            {DOT}
+          <span className="assistant-dot ken-face-slot">
+            <KenFace mood="chat" talking={kenTalking} />
           </span>
           <div className="assistant-text">
             <StreamingMarkdown text={item.text} onGrow={onContentGrow} />
@@ -3478,8 +3562,8 @@ function TranscriptRowBody({
         </div>
       );
     case "autopilot": {
-      // Autopilot Ken's verdict, rendered like a normal @Ken reply (Ken-tinted
-      // dot + text) rather than its own marker style. The text is his verdict as
+      // Autopilot Ken's verdict, rendered like a normal @Ken reply (his face +
+      // teal-framed text) rather than its own marker style. The text is his verdict as
       // prose: for a PROMPT he shows what he sent GG Coder back to do; the
       // terminal verdicts read as short Ken one-liners. `done` rotates through
       // several casual Ken lines (picked deterministically off the item's
@@ -3503,8 +3587,8 @@ function TranscriptRowBody({
       };
       return (
         <div className="assistant-msg ken-msg">
-          <span className="assistant-dot" style={{ color: theme.ken }}>
-            {DOT}
+          <span className="assistant-dot ken-face-slot">
+            <KenFace mood="chat" />
           </span>
           <div className="assistant-text">
             <Markdown>{copy[item.phase]}</Markdown>
@@ -3533,29 +3617,14 @@ function TranscriptRowBody({
         </div>
       );
     }
-    case "hook": {
-      // Mirrors the TUI IdealHookMessage: assistant-style dot + a shimmering
-      // tone-colored one-liner so the self-correction is obvious.
-      const { text: defaultText, color } = HOOK_PRESENTATION[item.hook];
-      const text =
-        item.verificationReason === "check_review"
-          ? "Hook engaged. Reviewing changes to tests and checks."
-          : item.verificationReason === "recheck"
-            ? "Hook engaged. Re-checking the changes made after verification."
-            : defaultText;
+    case "hook":
       return (
-        <div className="assistant-msg">
-          <span className="assistant-dot" style={{ color }}>
-            {DOT}
-          </span>
-          <div className="assistant-text">
-            <ShimmerText base={color} bright="#ffffff">
-              {text}
-            </ShimmerText>
-          </div>
-        </div>
+        <HookNotice
+          hook={item.hook}
+          variantKey={`hook-${item.id}`}
+          verificationReason={item.verificationReason}
+        />
       );
-    }
     case "images":
       return (
         <div className="img-grid">
@@ -3613,6 +3682,7 @@ function TranscriptRowBody({
           answers={item.answers}
           sent={item.sent}
           cancelled={item.cancelled}
+          deferred={item.deferred}
           onAnswer={(delta) => onAskAnswer?.(item.id, item.prompt.id, delta)}
           onTypeInstead={(questionId, seed) =>
             onAskType?.(item.id, item.prompt.id, questionId, seed)
@@ -3635,6 +3705,7 @@ function TranscriptRowBody({
       return (
         <CompactionNotice
           status={item.status}
+          variantKey={`compaction-${item.id}`}
           originalCount={item.originalCount}
           newCount={item.newCount}
         />

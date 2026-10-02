@@ -962,6 +962,43 @@ async fn agent_progress(
         .map_err(|e| e.to_string())
 }
 
+/// Proxy: the app-wide "keep computer awake while the agent works" setting.
+/// Daemon-level (one OS assertion for every window), so no session header.
+#[tauri::command]
+async fn agent_keep_awake_get(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let res = client
+        .get(format!("{}/keep-awake", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Proxy: turn keep-awake on/off; applies live to in-flight runs.
+#[tauri::command]
+async fn agent_keep_awake_set(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let res = client
+        .post(format!("{}/keep-awake", sidecar_base(port)))
+        .json(&serde_json::json!({ "enabled": enabled }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Proxy: the active provider's subscription quota snapshot. Account-wide, so
 /// no per-window session header is needed.
 #[tauri::command]
@@ -1692,6 +1729,23 @@ async fn agent_enhance_prompt(
             .to_owned());
     }
     Ok(body)
+}
+
+/// Proxy: best-effort Anthropic prompt-cache prewarm (fire-and-forget; 202).
+#[tauri::command]
+async fn agent_prewarm(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<(), String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    client
+        .post(format!("{}/prewarm", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Proxy: cycle the reasoning/thinking level to the next supported value.
@@ -5137,6 +5191,8 @@ pub fn run() {
             agent_jiwa,
             agent_delete_jiwa,
             agent_progress,
+            agent_keep_awake_get,
+            agent_keep_awake_set,
             agent_usage,
             agent_prompt,
             agent_cancel,
@@ -5163,6 +5219,7 @@ pub fn run() {
             agent_run_tasks,
             agent_delete_task,
             agent_cycle_thinking,
+            agent_prewarm,
             agent_models,
             agent_switch_model,
             agent_switch_ken_model,

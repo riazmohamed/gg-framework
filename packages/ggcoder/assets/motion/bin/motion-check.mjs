@@ -102,12 +102,18 @@ export function parseMotionOutput(text, slideshowRequested = false, holds = []) 
       error:
         "Holds cannot exempt the entire video; explicitly requested slideshows use their own mode",
     };
-  if (
-    holds.some(
-      (hold) => !freezes.some((freeze) => freeze.end > hold.start && freeze.start < hold.end),
-    )
-  )
-    return { ok: false, error: "Stale hold declaration: no detected freeze overlaps its window" };
+  const staleHolds = holds.filter(
+    (hold) => !freezes.some((freeze) => freeze.end > hold.start && freeze.start < hold.end),
+  );
+  // Name the stale holds and where pixels actually freeze, so the plan is fixed in one
+  // step instead of guessed again against another full check.
+  if (staleHolds.length)
+    return {
+      ok: false,
+      error: "Stale hold declaration: no detected freeze overlaps its window",
+      staleHolds,
+      freezes,
+    };
   const unexpectedFreezes = freezes.filter(
     (freeze) =>
       !holds.some(

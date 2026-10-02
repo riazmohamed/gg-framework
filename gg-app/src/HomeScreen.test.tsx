@@ -8,6 +8,7 @@ vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn(async () => "1.0.0") }
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("./AsciiLogo", () => ({ AsciiLogo: () => null }));
 vi.mock("./HomeDither", () => ({ HomeDither: () => null }));
+vi.mock("./HomeCritters", () => ({ HomeCritters: () => null }));
 vi.mock("./RankBadge", () => ({ RankBadge: () => null }));
 vi.mock("./ScorecardModal", () => ({ ScorecardModal: () => null }));
 vi.mock("./update", () => ({ useAppUpdate: () => ({ status: "idle" }) }));
@@ -54,5 +55,27 @@ describe("HomeScreen", () => {
     fireEvent.click(motion);
 
     expect(onMotion).toHaveBeenCalledOnce();
+  });
+
+  it("says under the Motion button that Motion is still in process", async () => {
+    vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    vi.mocked(authStatus).mockResolvedValue([]);
+
+    render(
+      <HomeScreen onProjects={vi.fn()} onChat={vi.fn()} onMotion={vi.fn()} onSettings={vi.fn()} />,
+    );
+
+    const note = await screen.findByText("Still in process");
+    expect(note.id).not.toBe("");
+    // Screen readers hear it with the Motion button, and only with that one.
+    expect(screen.getByRole("button", { name: "Motion" }).getAttribute("aria-describedby")).toBe(
+      note.id,
+    );
+    expect(screen.getByRole("button", { name: "Code" }).hasAttribute("aria-describedby")).toBe(
+      false,
+    );
+    expect(screen.getByRole("button", { name: "Chat" }).hasAttribute("aria-describedby")).toBe(
+      false,
+    );
   });
 });

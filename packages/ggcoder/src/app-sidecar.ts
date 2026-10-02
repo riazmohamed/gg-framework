@@ -94,6 +94,7 @@ import {
   type PullPhase,
 } from "./hf-pull.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
+import { spawnedTasks } from "./tools/subagent-shared.js";
 import { readCappedBody } from "./utils/http-body.js";
 import {
   fetchSubscriptionUsage,
@@ -171,6 +172,7 @@ import {
 } from "./core/tasks-store.js";
 import { initLogger, log } from "./core/logger.js";
 import { installTerminationHandlers } from "./core/shutdown.js";
+import { KeepAwake } from "./core/keep-awake.js";
 import {
   RADIO_STATIONS,
   getCurrentStation,
@@ -197,7 +199,12 @@ import {
   type MCPServerConfig,
 } from "./core/mcp/index.js";
 import type { ElicitResult } from "@modelcontextprotocol/client";
-import { createAskUserBridge, type AskUserResult } from "./core/ask-user.js";
+import {
+  askSoftDeadlineMs,
+  createAskUserBridge,
+  deliverLateAnswer,
+  type AskUserResult,
+} from "./core/ask-user.js";
 import { createAskUserTool } from "./tools/ask-user.js";
 import { buildSnapshot, levelForXp, rankForLevel } from "./core/progress/ranks.js";
 import { loadProgress, peekProgress, updateProgress } from "./core/progress/store.js";
@@ -205,6 +212,10 @@ import { awardPrompt, awardCommits } from "./core/progress/engine.js";
 import { detectNewCommits, repoKey } from "./core/progress/git-xp.js";
 import { rebuildFromSessions } from "./core/progress/rebuild.js";
 import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
+
+/** App-wide idle-sleep guard: every window's runs share one OS assertion. The
+ *  `keepAwake` setting is applied at daemon start and live via /keep-awake. */
+const keepAwake = new KeepAwake();
 
 const AUTOMATION_PROVENANCE: MessageProvenance = {
   source: "runtime",
@@ -859,6 +870,8 @@ async function main(): Promise<void> {
   // ~/.gg/debug.log (initLogger truncates on each start).
   const sidecarLog = path.join(paths.agentDir, "gg-app-sidecar.log");
   initLogger(sidecarLog);
+  // Apply the saved keepAwake setting before any run can acquire the guard.
+  keepAwake.setEnabled((await new SettingsManager(paths.settingsFile).load()).keepAwake);
 
   // The desktop sidecar previously omitted the stream diagnostic hook used by
   // the CLI, leaving device-specific provider stalls impossible to distinguish from
@@ -1236,6 +1249,38 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Keep-awake is app-wide (one OS assertion for every window), so its
+    // setting lives at the daemon level and applies live to in-flight runs.
+    if (method === "GET" && url === "/keep-awake") {
+      daemonJson(res, 200, { enabled: keepAwake.isEnabled });
+      return;
+    }
+    if (method === "POST" && url === "/keep-awake") {
+      void daemonReadBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let enabled: unknown;
+        try {
+          enabled = (JSON.parse(raw) as { enabled?: unknown }).enabled;
+        } catch {
+          enabled = undefined;
+        }
+        if (typeof enabled !== "boolean") {
+          daemonJson(res, 400, { error: "enabled must be a boolean" });
+          return;
+        }
+        keepAwake.setEnabled(enabled);
+        try {
+          const sm = new SettingsManager(paths.settingsFile);
+          await sm.load();
+          await sm.set("keepAwake", enabled);
+        } catch (err) {
+          log("WARN", "app-sidecar", "failed to persist keepAwake", { err: String(err) });
+        }
+        daemonJson(res, 200, { enabled });
+      });
+      return;
+    }
+
     // Progress is daemon-level so the Home screen can paint before a project
     // session exists; per-session callers still work through the same endpoint.
     if (method === "GET" && url === "/progress") {
@@ -1292,6 +1337,8 @@ async function main(): Promise<void> {
       // Radio playback is app-wide (one stream across all windows), so it stops
       // at the daemon level, not per session.
       stopRadio();
+      // Drop the idle-sleep assertion first: session teardown may hang.
+      keepAwake.dispose();
       // Close the ~/.gg progress fs.watch handle (baseline #8 leak fix).
       progress.dispose();
       await Promise.all([...sessions.values()].map((c) => c.dispose().catch(() => {})));
@@ -1744,9 +1791,35 @@ async function createSession(
   // MCP bridge above: broadcast over SSE, resolved when the webview POSTs
   // /ask/:id. Registered ONLY here — a TUI/headless/subagent run has nobody to
   // answer, so the tool is absent there rather than hanging on a dead channel.
+  //
+  // Soft deadline ("async ask"): past it the tool returns "no answer yet —
+  // proceed on your best guess" and the question STAYS OPEN. A later answer
+  // rides the ordinary user queue: steering into a live run, or the next turn
+  // when idle. The deadline is short when nobody is watching (autopilot, task
+  // run-all, a scheduled prompt).
+  let scheduledRunActive = false;
   const asks = createAskUserBridge({
     broadcast: (prompt) => broadcast("ask_user", prompt),
-    onTimeout: (prompt) => log("WARN", "app-sidecar", "ask_user timed out", { id: prompt.id }),
+    timeoutMs: () =>
+      askSoftDeadlineMs(autopilot || autopilotActive || taskRunAll || scheduledRunActive),
+    onTimeout: (prompt) => {
+      log("WARN", "app-sidecar", "ask_user deadline passed; agent proceeding", { id: prompt.id });
+      broadcast("ask_user_deferred", { id: prompt.id });
+    },
+    onClosed: (ids) => broadcast("ask_user_closed", { ids }),
+    onLateAnswer: (late) => {
+      log("INFO", "app-sidecar", "ask_user late answer queued", { id: late.prompt.id });
+      deliverLateAnswer(late, {
+        queueMessage: (text) => session.queueMessage(text),
+        isBusy: () => running || runClaim.active || autopilotActive,
+        onQueued: () =>
+          broadcast("queued", {
+            count: session.getQueuedCount(),
+            messages: session.listQueuedMessages(),
+          }),
+        startIdleRun: () => void runStrandedQueue(),
+      });
+    },
   });
   const askUserTool = createAskUserTool(asks.park);
 
@@ -2362,6 +2435,9 @@ async function createSession(
   session.eventBus.on("retry", (d) => {
     if (!d.silent) broadcast("retry", { reason: d.reason, attempt: d.attempt, delayMs: d.delayMs });
   });
+  session.eventBus.on("stream_rule_triggered", (d) =>
+    broadcast("stream_rule_triggered", { rules: d.rules, source: d.source, toolName: d.toolName }),
+  );
   session.eventBus.on("max_turns", (d) => broadcast("max_turns", d));
   // The agent consumed queued steering at a turn boundary. Re-broadcast as the
   // usual `queued` depth update so the webview drops the pending affordance the
@@ -2369,6 +2445,8 @@ async function createSession(
   session.eventBus.on("queue_drained", (d) =>
     broadcast("queued", { count: d.count, messages: session.listQueuedMessages() }),
   );
+  // A fresh/loaded session must not receive late answers to the old one's questions.
+  session.eventBus.on("session_start", () => asks.closeDeferred());
   session.eventBus.on("tool_call_start", (d) => {
     toolCallNames.set(d.toolCallId, d.name);
     broadcast("tool_call_start", d);
@@ -2431,6 +2509,30 @@ async function createSession(
   session.eventBus.on("subagent_state", (d) => broadcast("subagent_state", d));
   session.eventBus.on("compaction_start", (d) => broadcast("compaction_start", d));
   session.eventBus.on("compaction_end", (d) => broadcast("compaction_end", d));
+  // Cold-prompt-cache notice: push the fresh TTL anchor + context size whenever
+  // a run or compaction settles. Expiry itself is time-based, so the webview
+  // also re-reads `cacheExpiry` from /state when the user returns or types.
+  for (const ev of ["agent_done", "compaction_end", "model_change"] as const) {
+    session.eventBus.on(ev, () => broadcast("cache_expiry", session.getCacheExpiryStatus()));
+  }
+
+  // Keep the computer awake while this window's agent works: owned runs and
+  // autopilot cycles (RunLifecycle state), Ken replies, and background
+  // sub-agents that outlive their parent run. Released on settle (completed,
+  // failed or cancelled) and on session dispose.
+  let releaseRunAwake: (() => void) | null = null;
+  let releaseSubagentAwake: (() => void) | null = null;
+  const activeSubagents = new Set<string>();
+  session.eventBus.on("subagent_state", (d) => {
+    if (d.state === "starting" || d.state === "running") activeSubagents.add(d.agent_id);
+    else activeSubagents.delete(d.agent_id);
+    if (activeSubagents.size > 0) {
+      releaseSubagentAwake ??= keepAwake.acquire("subagent");
+    } else {
+      releaseSubagentAwake?.();
+      releaseSubagentAwake = null;
+    }
+  });
 
   let running = false;
   // Closes the window between `/prompt` deciding to start a run and `runAgent`
@@ -2440,6 +2542,12 @@ async function createSession(
   const runLifecycle = new RunLifecycle(
     (runState) => {
       running = runState !== "idle";
+      if (running) {
+        releaseRunAwake ??= keepAwake.acquire("run");
+      } else {
+        releaseRunAwake?.();
+        releaseRunAwake = null;
+      }
       if (runState === "cancelling") broadcast("run_cancelling", { runState });
     },
     // Durable run journal. Fire-and-forget on purpose: an unwritten journal
@@ -3395,6 +3503,7 @@ async function createSession(
         supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
         supportsVideo: getModel(st.model)?.supportsVideo ?? false,
         autopilot,
+        cacheExpiry: session.getCacheExpiryStatus(),
         ...kenStatePayload(),
         ...footerExtras(),
       });
@@ -4060,19 +4169,25 @@ async function createSession(
                 } => c.type === "tool_call" && (c.name === "subagent" || c.name === "spawn_agent"),
               );
               if (subagentCalls.length > 0) {
-                const agents = subagentCalls.map((c) => {
+                const agents = subagentCalls.flatMap((c) => {
                   const result = toolResultMap.get(c.id);
-                  return {
-                    agentName:
-                      c.name === "spawn_agent" && typeof c.args?.task_name === "string"
-                        ? c.args.task_name
-                        : typeof c.args?.agent === "string"
-                          ? c.args.agent
-                          : undefined,
-                    // Async workers are intentionally non-resumable; restored rows are historical.
-                    status: result?.isError ? ("error" as const) : ("done" as const),
-                    toolUseCount: 0,
-                  };
+                  // Async workers are intentionally non-resumable; restored rows are historical.
+                  const status = result?.isError ? ("error" as const) : ("done" as const);
+                  if (c.name === "spawn_agent") {
+                    // One row per child: a batch call starts several.
+                    return spawnedTasks(c.args).map((spawn) => ({
+                      agentName: spawn.task_name ?? spawn.agent,
+                      status,
+                      toolUseCount: 0,
+                    }));
+                  }
+                  return [
+                    {
+                      agentName: typeof c.args?.agent === "string" ? c.args.agent : undefined,
+                      status,
+                      toolUseCount: 0,
+                    },
+                  ];
                 });
                 history.push({
                   role: "assistant",
@@ -4164,12 +4279,13 @@ async function createSession(
           if (raw === null) return;
           let text: string;
           let attachments: AppAttachment[];
-          let meta: { kenSent?: boolean; enhancements?: unknown[] } | undefined;
+          let meta:
+            { kenSent?: boolean; enhancements?: unknown[]; scheduled?: boolean } | undefined;
           try {
             const body = JSON.parse(raw) as {
               text?: string;
               attachments?: AppAttachment[];
-              meta?: { kenSent?: boolean; enhancements?: unknown[] };
+              meta?: { kenSent?: boolean; enhancements?: unknown[]; scheduled?: boolean };
             };
             text = body.text ?? "";
             attachments = Array.isArray(body.attachments) ? body.attachments : [];
@@ -4218,6 +4334,8 @@ async function createSession(
           // Claim the run NOW, synchronously. Everything below this line may
           // yield, and `running` does not flip until runAgent begins.
           claimedStart = runClaim.claim();
+          // A scheduled prompt has nobody watching: short ask deadline.
+          scheduledRunActive = meta?.scheduled === true;
           json(res, 202, { accepted: true });
           // Gate inputs captured around the run: whether this turn is a workflow
           // slash command (attachment prompts skip slash expansion entirely), and
@@ -4329,7 +4447,10 @@ async function createSession(
           await runStrandedQueue();
         })
         .finally(() => {
-          if (claimedStart) runClaim.release();
+          if (claimedStart) {
+            scheduledRunActive = false;
+            runClaim.release();
+          }
         });
       return;
     }
@@ -4364,6 +4485,7 @@ async function createSession(
         }
         json(res, 202, { accepted: true });
         kenRunning = true;
+        const releaseKenAwake = keepAwake.acquire("ken");
         broadcast("ken_run_start", { text });
         try {
           const ken = await ensureKenSession();
@@ -4384,6 +4506,7 @@ async function createSession(
         } catch (err) {
           broadcastError("ken_error", "ken run failed", err);
         } finally {
+          releaseKenAwake();
           kenRunning = false;
           broadcast("ken_run_end", {});
           const pending = pendingKenModel;
@@ -4849,6 +4972,19 @@ async function createSession(
       };
       broadcast("thinking_change", payload);
       json(res, 200, payload);
+      return;
+    }
+
+    if (method === "POST" && url === "/prewarm") {
+      // Best-effort Anthropic cache prewarm on the composer's first keystroke.
+      // Fire-and-forget: AgentSession.prewarm() applies its own gating (provider,
+      // setting, history size, TTL, in-flight) and swallows request errors.
+      if (!running) {
+        void session.prewarm().catch((err: unknown) => {
+          log("WARN", "app-sidecar", "prewarm failed", { err: String(err) });
+        });
+      }
+      json(res, 202, { accepted: !running });
       return;
     }
 
@@ -5713,6 +5849,10 @@ async function createSession(
   }
 
   async function dispose(): Promise<void> {
+    releaseRunAwake?.();
+    releaseRunAwake = null;
+    releaseSubagentAwake?.();
+    releaseSubagentAwake = null;
     elicitations.cancelAll();
     asks.cancelAll();
     tasksPollStopped = true;

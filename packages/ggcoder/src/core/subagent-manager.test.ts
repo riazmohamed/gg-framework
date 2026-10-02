@@ -87,10 +87,12 @@ describe("SubAgentManager", () => {
     );
 
     // The independent Ideal reviewer: read-only tools, forced ACTIVE model —
-    // agent-definition routing ("fake" would use the fast model) is bypassed.
+    // agent-definition routing ("fake" would use the fast model) is bypassed —
+    // and its own shorter time limit, which the worker enforces.
     await instance.spawn("reviewer", "review the work", undefined, {
       model: "gpt-6.1-sol",
       tools: ["read", "grep", "find", "ls"],
+      turnTimeoutMs: 120_000,
     });
 
     const initializeCall = requestSpy.mock.calls.find(([, command]) => command === "initialize");
@@ -99,6 +101,7 @@ describe("SubAgentManager", () => {
         model: "gpt-6.1-sol",
         allowedTools: ["read", "grep", "find", "ls"],
         promptCacheKey: "parent-cache:subagent:gpt-6.1-sol:default",
+        turnTimeoutMs: 120_000,
       },
     });
   });
@@ -125,15 +128,23 @@ describe("SubAgentManager", () => {
 
   it("returns after launch and overlaps eight child turns", async () => {
     const instance = manager();
+    // "hold" turns run until released, so all eight are provably still active
+    // when the ninth spawn hits the cap. A timed turn raced process startup:
+    // on a loaded runner the first child finished before the last one
+    // launched, which freed a slot for the ninth.
     const children = await Promise.all(
-      [1, 2, 3, 4, 5, 6, 7, 8].map((number) => instance.spawn(`task-${number}`, "slow", "fake")),
+      [1, 2, 3, 4, 5, 6, 7, 8].map((number) => instance.spawn(`task-${number}`, "hold", "fake")),
     );
     // Returning every child in the running state proves spawn resolves on the
     // start acknowledgement rather than waiting for the turn to complete.
     // Avoid a wall-clock threshold here: process startup is scheduler-dependent
     // under the full parallel workspace suite.
     expect(children.every((child) => child.state === "running")).toBe(true);
-    await expect(instance.spawn("ninth", "slow", "fake")).rejects.toThrow("At most 8");
+    await expect(instance.spawn("ninth", "hold", "fake")).rejects.toThrow("At most 8");
+    // A queued message releases each held turn.
+    for (const child of children) {
+      expect(await instance.sendMessage(child.agent_id, "release")).toBe(1);
+    }
     const result = await instance.wait(
       children.map((child) => child.agent_id),
       "all",
@@ -147,6 +158,29 @@ describe("SubAgentManager", () => {
       cacheRead: 20,
       cacheWrite: 5,
     });
+  });
+
+  it("holds the limit and unique names when a batch starts children together", async () => {
+    const instance = manager();
+    // spawn_agent's batch form starts every task at once with allSettled; the
+    // limit and name checks must still see the siblings started in the same tick.
+    const names = ["a", "b", "c", "d", "e", "f", "g", "a", "h", "i"];
+    const settled = await Promise.allSettled(
+      names.map((name) => instance.spawn(name, "hold", "fake")),
+    );
+
+    const started = settled.filter((result) => result.status === "fulfilled");
+    const refused = settled.flatMap((result) =>
+      result.status === "rejected" ? [String(result.reason)] : [],
+    );
+    expect(started).toHaveLength(8);
+    expect(refused).toEqual([
+      expect.stringContaining('An agent named "a" already exists'),
+      expect.stringContaining("At most 8"),
+    ]);
+    for (const result of started) {
+      expect(await instance.sendMessage(result.value.agent_id, "release")).toBe(1);
+    }
   });
 
   it("pushes a bounded completion notification without waiting", async () => {
@@ -164,6 +198,19 @@ describe("SubAgentManager", () => {
     expect(drained[0]!.text).toContain("completed");
     expect(drained[0]!.text).toContain("wait_agent");
     expect(drained[0]!.text.length).toBeLessThanOrEqual(512);
+  });
+
+  it("carries the child's receipt in wait() payloads, after a truncated output", async () => {
+    const instance = manager();
+    const child = await instance.spawn("receipt-child", "x".repeat(40_000), "fake");
+    const waited = await instance.wait([child.agent_id], "all", 1_000);
+    const agent = waited.agents[0]!;
+    expect(agent.state).toBe("completed");
+    expect(agent.output).toContain("[output truncated at");
+    expect(agent.receipt).toBe("Receipt (1 call): read a.ts");
+    // Rendered after `output` in the wait_agent JSON the parent reads.
+    const keys = Object.keys(agent);
+    expect(keys.indexOf("receipt")).toBe(keys.indexOf("output") + 1);
   });
 
   it("waits for any, times out, steers, interrupts, and reuses context", async () => {
@@ -528,6 +575,7 @@ describe("durable turn-record adoption on hydrate", () => {
     await writeTurnRecord(childPath, {
       status: "completed",
       output: "orphan result",
+      receipt: "Receipt (2 calls): read src/a.ts ×2",
       model: "fast",
       turn_count: 4,
       token_usage: { input: 30, output: 8 },
@@ -546,6 +594,7 @@ describe("durable turn-record adoption on hydrate", () => {
     const snapshot = instance.list().find((s) => s.agent_id === "a1")!;
     expect(snapshot.state).toBe("completed");
     expect(snapshot.output).toBe("orphan result");
+    expect(snapshot.receipt).toBe("Receipt (2 calls): read src/a.ts ×2");
     expect(snapshot.error).toBeUndefined();
     expect(snapshot.turn_count).toBe(4);
     expect(snapshot.token_usage).toMatchObject({ input: 30, output: 8 });

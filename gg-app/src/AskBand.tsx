@@ -215,6 +215,7 @@ export function AskBand({
   answers = {},
   sent,
   cancelled,
+  deferred,
   onAnswer,
   onTypeInstead,
 }: {
@@ -229,6 +230,11 @@ export function AskBand({
   sent?: boolean;
   /** The run ended without an answer — the question is dead, say so quietly. */
   cancelled?: boolean;
+  /**
+   * The soft deadline passed and the agent continued on its best guess. The
+   * band stays fully answerable — a later answer is sent as a message.
+   */
+  deferred?: boolean;
   /** Report answered questions. App merges, then settles once none are left. */
   onAnswer: (delta: Answers) => void;
   /** The user wants to write their own answer: focus the composer, seeded. */
@@ -320,6 +326,12 @@ export function AskBand({
 
   return (
     <div className="ask-band" ref={bandRef} role="group" aria-label="GG Coder needs your answer">
+      {/* A status note about the run, set apart from the question below it. */}
+      {deferred && (
+        <p className="ask-deferred-note" role="status">
+          Agent continued with its best guess — your answer will still be sent
+        </p>
+      )}
       {questions.map((q, i) => (
         <Question
           key={q.id}

@@ -14,6 +14,7 @@ import {
 import { toast } from "./toast";
 import { SoundButton } from "./SoundButton";
 import { HomeBackgroundButton } from "./HomeBackgroundButton";
+import { KeepAwakeButton } from "./KeepAwakeButton";
 import { SettingsSection } from "./settings-section";
 import { SettingsHeaderAction } from "./settings-header";
 
@@ -112,6 +113,14 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
             <div className="modal-row">
               <SoundButton variant="settings" />
               <HomeBackgroundButton />
+            </div>
+          </SettingsSection>
+          <SettingsSection
+            title="Power"
+            description="Stop your computer sleeping mid-task. The screen can still turn off."
+          >
+            <div className="modal-row">
+              <KeepAwakeButton />
             </div>
           </SettingsSection>
         </div>

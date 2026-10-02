@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
 import { killProcessTree } from "../utils/process.js";
-import { truncateTail, MAX_BYTES } from "./truncate.js";
+import { truncateTail, MAX_BYTES, describeCompressed } from "./truncate.js";
 import { compressToolOutput } from "./compress.js";
 import { writeOverflow } from "./overflow.js";
 import { localOperations, type ToolOperations } from "./operations.js";
@@ -12,6 +12,9 @@ import { PersistentShell } from "../core/persistent-shell.js";
 import { isReadOnlyCommand, sleepOnlySeconds } from "./read-only-bash.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
 import { isCatastrophicCommand, type WriteGuardSettings } from "../core/workspace-guard.js";
+import { checkDestructiveGit } from "../core/destructive-git-guard.js";
+import { shellThreatBlockMessage } from "../core/shell-threats.js";
+import { checkPackageInstall } from "../core/package-threats.js";
 import { checkCommandPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import {
   prepareSandboxLaunch,
@@ -30,6 +33,37 @@ function sandboxAwareEnv(sandboxed: boolean): Record<string, string> {
 
 const DEFAULT_TIMEOUT = 120_000; // 120 seconds
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB — cap buffered output to prevent OOM
+/**
+ * How long to keep collecting output after the shell exits while something it
+ * left behind (`cmd &`, `nohup cmd`) still holds its stdout/stderr open.
+ */
+const LEFTOVER_DRAIN_MS = 1_000;
+
+/**
+ * Result for a call whose Stop arrived while the launch was still being
+ * prepared. Wording matches the agent loop's result for a tool call that never
+ * reached its tool.
+ */
+const CANCELLED_BEFORE_START =
+  "Exit code: CANCELLED\n`bash` was cancelled before it started, so it had no effect. Safe to retry.";
+
+/**
+ * SIGKILL what is left of the process group the shell led, returning whether
+ * anything was there to stop. Group-only: once the shell has exited its lone
+ * pid may already belong to an unrelated process. Windows has no process
+ * groups, and taskkill /T cannot find the tree of a parent that already
+ * exited, so leftovers there are left running.
+ */
+function killLeftoverGroup(pid: number): boolean {
+  if (process.platform === "win32") return false;
+  try {
+    process.kill(-pid, "SIGKILL");
+    return true;
+  } catch {
+    // The group is empty: whatever still holds the output left it (setsid).
+    return false;
+  }
+}
 /** A sleep at least this long is a guess at when something finishes, not a
  *  settle pause before poking a service that is already up. */
 const GUESSED_WAIT_SECONDS = 10;
@@ -53,7 +87,8 @@ export async function renderBashOutput(rawOutput: string): Promise<string> {
     ? ` Full output saved to ${overflowPath} — read it with offset/limit if needed.`
     : "";
   const c = compressToolOutput(rawOutput);
-  return `[${c.notice}${overflowNotice}]\n${c.content}`;
+  const what = describeCompressed(rawOutput, c.content);
+  return `[${c.notice}${what ? ` ${what}` : ""}${overflowNotice}]\n${c.content}`;
 }
 
 const BashParams = z.object({
@@ -132,6 +167,8 @@ export function createBashTool(
   // Lazily created on the first persist:true call; one session per tool
   // instance (i.e. per agent session), killed when the process exits.
   let sessionShell: PersistentShell | null = null;
+  /** Install commands the model re-ran after a typosquat warning. */
+  const confirmedInstalls = new Set<string>();
   let sessionSandboxKey: string | null = null;
   let sessionSandboxed = false;
   // Shell selection doesn't depend on the command, so resolve ONCE at tool
@@ -228,6 +265,41 @@ export function createBashTool(
       if (catastrophic) {
         return `Error: ${catastrophic}`;
       }
+      // Destructive-git guard — refuses reset --hard / checkout -- / restore /
+      // clean -f / stash drop / branch -D / force push when work would be lost.
+      // A persist:true call runs wherever the session shell last cd'd to.
+      const liveShell = persist && process.platform !== "win32" ? sessionShell : null;
+      const gitBlocked = await checkDestructiveGit(command, {
+        cwd,
+        resolveCwd:
+          liveShell && !liveShell.isBusy
+            ? async () => (await liveShell.run("pwd", 2_000, context.signal)).output.trim() || null
+            : undefined,
+      });
+      if (gitBlocked) {
+        return `Error: ${gitBlocked}`;
+      }
+      // Shell-threat guard — pipe-to-shell, reverse shells, secret exfiltration,
+      // lookalike hosts and terminal-escape tricks (core/shell-threats.ts).
+      const threatBlocked = shellThreatBlockMessage(command);
+      if (threatBlocked) {
+        return `Error: ${threatBlocked}`;
+      }
+      // Package-install guard: known malware (OSV, fail-open) is refused;
+      // a likely typosquat is stopped once and allowed on an identical retry.
+      const packageThreats = await checkPackageInstall(command, { signal: context.signal });
+      const malware = packageThreats.find((threat) => threat.severity === "block");
+      if (malware) {
+        return `Error: Blocked by package safety check (${malware.rule}): ${malware.detail}`;
+      }
+      const typosquats = packageThreats.filter((threat) => threat.severity === "warn");
+      if (typosquats.length > 0 && !confirmedInstalls.has(command)) {
+        confirmedInstalls.add(command);
+        return (
+          `Error: not run — ${typosquats.map((threat) => threat.detail).join("; ")}. ` +
+          `If this really is the package you want, run the exact same command again.`
+        );
+      }
       // Network allowlist — defence in depth only. Recognises the common egress
       // command shapes; an unrecognised command is never blocked (see
       // core/network-guard.ts for why this is not a sandbox).
@@ -268,6 +340,7 @@ export function createBashTool(
             return `Error: OS sandbox unavailable; command was not run: ${(error as Error).message}`;
           }
         }
+        if (context.signal.aborted) return CANCELLED_BEFORE_START;
         const res = await sessionShell.run(
           command,
           timeoutMs ?? DEFAULT_TIMEOUT,
@@ -279,9 +352,16 @@ export function createBashTool(
         const output = await renderBashOutput(res.output);
         const exitCode =
           res.exitCode === "TIMEOUT"
-            ? `TIMEOUT (${timeoutMs ?? DEFAULT_TIMEOUT}ms) — session shell was reset; cd/env state is gone`
+            ? `TIMEOUT (${timeoutMs ?? DEFAULT_TIMEOUT}ms)` +
+              (res.shellKept
+                ? " — the command was stopped; the session shell kept its cwd/env"
+                : "")
             : String(res.exitCode);
-        return annotateSandboxDenial(`Exit code: ${exitCode}\n${output}`, sessionSandboxed);
+        // The restart note sits right under the exit code so output truncation
+        // can never drop it.
+        const restartNote = sessionShell.takeRestartNote();
+        const note = restartNote ? `${restartNote}\n` : "";
+        return annotateSandboxDenial(`Exit code: ${exitCode}\n${note}${output}`, sessionSandboxed);
       }
       if (run_in_background) {
         let launch: SandboxLaunch;
@@ -290,6 +370,7 @@ export function createBashTool(
         } catch (error) {
           return `Error: OS sandbox unavailable; command was not run: ${(error as Error).message}`;
         }
+        if (context.signal.aborted) return CANCELLED_BEFORE_START;
         const result = await processManager.start(command, cwd, launch, wakeRules);
         return (
           `Background process started.\n` +
@@ -324,6 +405,9 @@ export function createBashTool(
       } catch (error) {
         return `Exit code: 1\nOS sandbox unavailable; command was not run: ${(error as Error).message}`;
       }
+      // Stop may have landed while the launch was being prepared. The abort
+      // listener below would never fire for an already-aborted signal.
+      if (context.signal.aborted) return CANCELLED_BEFORE_START;
 
       return new Promise<string>((resolve, reject) => {
         const child = ops.spawn(launch.file, launch.args, {
@@ -375,8 +459,24 @@ export function createBashTool(
         };
         context.signal.addEventListener("abort", onAbort, { once: true });
 
+        // "close" waits for every holder of the stdout/stderr pipes, and a
+        // process the command left running (`cmd &`, `nohup cmd`) inherits them,
+        // so without this the call hangs until the timeout. Once the shell
+        // itself exits, let late output drain briefly, then stop the leftovers
+        // and release the pipes so "close" fires.
+        let leftover: "stopped" | "detached" | undefined;
+        let drainTimer: ReturnType<typeof setTimeout> | undefined;
+        child.on("exit", () => {
+          drainTimer = setTimeout(() => {
+            leftover = child.pid && killLeftoverGroup(child.pid) ? "stopped" : "detached";
+            child.stdout?.destroy();
+            child.stderr?.destroy();
+          }, LEFTOVER_DRAIN_MS);
+        });
+
         child.on("close", async (code) => {
           clearTimeout(timer);
+          clearTimeout(drainTimer);
           context.signal.removeEventListener("abort", onAbort);
 
           const rawOutput = Buffer.concat(chunks).toString("utf-8");
@@ -396,6 +496,17 @@ export function createBashTool(
               "Install Git for Windows to get bash.]\n" +
               output;
           }
+          if (leftover && !killed) {
+            const fate =
+              leftover === "stopped"
+                ? "so it was stopped"
+                : "so its later output was not captured; it may still be running";
+            output =
+              `[The command exited, but a process it left running in the background ` +
+              `(& or nohup) still held its output ${LEFTOVER_DRAIN_MS / 1000}s later, ${fate}. ` +
+              `Use run_in_background=true for anything that should keep running.]\n` +
+              output;
+          }
 
           const exitCode = timedOut
             ? `TIMEOUT (${effectiveTimeout}ms)`
@@ -408,6 +519,7 @@ export function createBashTool(
 
         child.on("error", (err) => {
           clearTimeout(timer);
+          clearTimeout(drainTimer);
           context.signal.removeEventListener("abort", onAbort);
           reject(new Error(`Exit code: 1\nFailed to spawn: ${err.message}`));
         });

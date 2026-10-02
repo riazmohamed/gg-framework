@@ -12,26 +12,56 @@ import {
   isMotionTechnicalReport,
   motionPath,
   motionRegistrationSchema,
+  motionSourceHash,
   validateMotionManifest,
 } from "./motion-review.js";
 
 const exec = promisify(execFile);
-const parameters = motionRegistrationSchema.omit({ depth: true, references: true });
+const parameters = motionRegistrationSchema.omit({ depth: true, references: true }).extend({
+  spot: z
+    .boolean()
+    .optional()
+    .describe(
+      "Quick pre-check of only the rendered frames inside `windows`; never the delivery check.",
+    ),
+});
 const binariesSchema = z.object({
   ffmpeg: z.string().refine(path.isAbsolute),
   ffprobe: z.string().refine(path.isAbsolute),
 });
 const audioSchema = z.object({ streams: z.array(z.object({ codec_type: z.literal("audio") })) });
+const videoSchema = z.object({
+  streams: z.tuple([z.object({ avg_frame_rate: z.string() })]),
+  format: z.object({ duration: z.string() }),
+});
 const levelsSchema = z.object({ input_i: z.string(), input_tp: z.string() });
 const pixelsSchema = z.object({
   ok: z.literal(true),
   videoSha256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+const flashChannelSchema = z.object({
+  maxFlashesPerSecond: z.number(),
+  failures: z.array(z.object({ start: z.number(), end: z.number() })),
+});
+const flashSchema = z.object({
+  ok: z.boolean(),
+  videoSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  general: flashChannelSchema,
+  red: flashChannelSchema,
 });
 
 type CommandOutput = { stdout: string; stderr: string };
 /** A busy 15 s WebGL composition sampled at every transition measured ~130 s on an M4 Pro. */
 const SOURCE_CHECK_MS = 240_000;
 const STEP_MS = 120_000;
+/** A full 30 s check measured ~0.2 s per layout sample on an M4 Pro: 240 stay under a minute. */
+const SPOT_MAX_FRAMES = 240;
+const SOURCE_CHECK = "Runtime/layout/contrast (includes lint)";
+const FLASH_CHECK = "No harmful flashing (WCAG 2.3.1)";
+/** Errors beyond this many keep their where/when line but drop the repeated message and fix. */
+const DETAILED_ERRORS = 15;
+/** Keeps the error list inside the 12,000-character details cap, with room for notes. */
+const ERROR_LIST_CHARS = 9_000;
 const findingSchema = z.object({
   code: z.string(),
   severity: z.string(),
@@ -61,8 +91,142 @@ const clip = (text: string, size: number): string =>
   text.length <= size ? text : `${text.slice(0, size - 1)}…`;
 
 /**
+ * Times of every frame the export contains inside `windows`, so a spot check audits what
+ * viewers see. Never a thinned set: across several samples the layout audit reports a
+ * collision seen only once as info, so skipped frames would hide the brief collisions a
+ * spot check exists to catch.
+ */
+export function spotSampleTimes(
+  windows: readonly { start: number; end: number }[],
+  fps: number,
+  duration: number,
+): number[] {
+  const frames = new Set<number>();
+  for (const window of windows) {
+    const first = Math.max(0, Math.ceil(window.start * fps - 1e-6));
+    for (let frame = first; frame <= window.end * fps + 1e-6; frame++) {
+      if (frame / fps < duration) frames.add(frame);
+    }
+  }
+  return [...frames].sort((a, b) => a - b).map((frame) => Math.round((frame / fps) * 1000) / 1000);
+}
+
+/** What the agent acts on: whether it flashes, when, how fast, and the levers that fix it. */
+function summarizeFlashes(output: CommandOutput): string {
+  let json: unknown;
+  try {
+    json = JSON.parse(output.stdout);
+  } catch {
+    return `${output.stdout}\n${output.stderr}`;
+  }
+  const parsed = flashSchema.safeParse(json);
+  if (!parsed.success) return `${output.stdout}\n${output.stderr}`;
+  const { general, red } = parsed.data;
+  if (parsed.data.ok) {
+    const peak = Math.max(general.maxFlashesPerSecond, red.maxFlashesPerSecond);
+    return (
+      `Passed: at most ${peak} flashes in any one second (the limit is 3), measured on the ` +
+      "rendered pixels. A screening, not a formal photosensitivity certification."
+    );
+  }
+  const spans = (failures: { start: number; end: number }[]): string =>
+    failures.map(({ start, end }) => `${start}–${end} s`).join(", ");
+  const found = [
+    general.failures.length
+      ? `brightness flashes at ${spans(general.failures)} (up to ${general.maxFlashesPerSecond} per second)`
+      : "",
+    red.failures.length
+      ? `saturated red flashes at ${spans(red.failures)} (up to ${red.maxFlashesPerSecond} per second)`
+      : "",
+  ].filter(Boolean);
+  return (
+    `Fails: ${found.join("; ")}. More than three flashes in one second can trigger seizures ` +
+    "in people with photosensitive epilepsy. Fix it by keeping light/dark or red swaps to at " +
+    "most three in any second, shrinking the flashing area below about 3% of the frame, or " +
+    "reducing the brightness difference between the alternating states."
+  );
+}
+
+/**
+ * Source fingerprint for reusing a passing audit; a project it cannot fingerprint is re-audited.
+ * The hold plan is excluded: the composition never reads it, and the pixel check re-reads it.
+ */
+async function sourceFingerprint(
+  project: string,
+  output: string,
+  holds: string | undefined,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  try {
+    return await motionSourceHash(project, output, signal, holds ? [holds] : []);
+  } catch {
+    signal.throwIfAborted();
+    return undefined;
+  }
+}
+
+/**
+ * Browser pages `hf check` audits sample times on at once. Each seek mostly waits on a fixed
+ * settle, so pages overlap almost perfectly: on a 25 s reel, 4 pages took the audit from 90 s
+ * to 29 s for ~1.1 GB more memory (each page holds its own copy of the composition), with the
+ * same report. Capped at 4 so a render running alongside keeps its cores.
+ */
+export function auditPages(cpus: number, memoryBytes: number): number {
+  const byCpu = Math.floor(cpus / 2);
+  const byMemory = Math.floor(memoryBytes / 4 / 1024 ** 3);
+  return Math.max(1, Math.min(4, byCpu, byMemory));
+}
+
+/** Frame rate and duration of the export, or undefined when they are missing or out of range. */
+async function probeVideo(
+  ffprobe: string,
+  output: string,
+  signal: AbortSignal,
+): Promise<{ fps: number; duration: number } | undefined> {
+  let stdout: string;
+  try {
+    ({ stdout } = await exec(
+      ffprobe,
+      [
+        "-v",
+        "error",
+        "-protocol_whitelist",
+        "file,pipe",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=avg_frame_rate:format=duration",
+        "-of",
+        "json",
+        output,
+      ],
+      {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(STEP_MS)]),
+        maxBuffer: 64 * 1024,
+        windowsHide: true,
+      },
+    ));
+  } catch {
+    signal.throwIfAborted();
+    return undefined;
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  const video = videoSchema.safeParse(json);
+  if (!video.success) return undefined;
+  const [num, den] = video.data.streams[0].avg_frame_rate.split("/").map(Number);
+  const fps = Number(num) / Number(den);
+  const duration = Number(video.data.format.duration);
+  return fps >= 1 && fps <= 120 && duration > 0 && duration <= 3600 ? { fps, duration } : undefined;
+}
+
+/**
  * `hf check --json` prints ~100 KB for a busy video. Give the agent what it acts on:
- * per-section counts, the first errors with where and when, warning types, and
+ * per-section counts, every error with where and when, warning types, and
  * renderer contract notes (e.g. undeclared fonts) that only appear on stderr.
  */
 function summarizeSourceCheck(output: CommandOutput): string {
@@ -77,7 +241,7 @@ function summarizeSourceCheck(output: CommandOutput): string {
   const report = parsed.data;
   const lines = [`HyperFrames check: ${report.ok ? "passed" : "found problems"}`];
   // One line per problem and element; later sightings add times instead of lines.
-  const errors = new Map<string, { line: string; times: number[] }>();
+  const errors = new Map<string, { brief: string; detail: string; times: number[] }>();
   const warnings = new Map<string, number>();
   for (const name of SECTIONS) {
     const section = report[name];
@@ -106,21 +270,29 @@ function summarizeSourceCheck(output: CommandOutput): string {
         .filter(Boolean)
         .join(" ");
       const fix = finding.fixHint ? ` Fix: ${clip(finding.fixHint, 200)}` : "";
+      const brief = `- ${name} ${finding.code} ${where}`;
       errors.set(key, {
-        line: `- ${name} ${finding.code} ${where}: ${clip(finding.message ?? "", 200)}${fix}`,
+        brief,
+        detail: `${brief}: ${clip(finding.message ?? "", 200)}${fix}`,
         times: finding.time === undefined ? [] : [finding.time],
       });
     }
   }
   if (errors.size) {
-    const shown = [...errors.values()].slice(0, 15);
-    lines.push(`Errors (${shown.length} of ${errors.size} distinct problems listed):`);
-    for (const { line, times } of shown) {
+    // List where and when for as many problems as the report fits, not a fixed few: a
+    // short list hides later scenes' problems until another render and full check.
+    const listed: string[] = [];
+    let size = 0;
+    for (const [index, { brief, detail, times }] of [...errors.values()].entries()) {
       const at = times.length
         ? ` [at ${times.slice(0, 4).join("s, ")}s${times.length > 4 ? " …" : ""}]`
         : "";
-      lines.push(`${line}${at}`);
+      const line = `${index < DETAILED_ERRORS ? detail : brief}${at}`;
+      size += line.length + 1;
+      if (size > ERROR_LIST_CHARS) break;
+      listed.push(line);
     }
+    lines.push(`Errors (${listed.length} of ${errors.size} distinct problems listed):`, ...listed);
   }
   if (warnings.size) {
     const types = [...warnings].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
@@ -142,9 +314,13 @@ function summarizeSourceCheck(output: CommandOutput): string {
 export function createMotionCheckTool(
   cwd: string,
   bundle: MotionBundle,
-  limits: { sourceCheckMs?: number } = {},
+  limits: { sourceCheckMs?: number; spotMaxFrames?: number } = {},
 ): AgentTool<typeof parameters> {
   const sourceCheckMs = limits.sourceCheckMs ?? SOURCE_CHECK_MS;
+  const spotMaxFrames = limits.spotMaxFrames ?? SPOT_MAX_FRAMES;
+  // The source audit reads the project, never the export: re-checking unchanged source
+  // (e.g. after correcting only a hold plan) reuses its last full pass.
+  const passedSources = new Map<string, { fingerprint: string; result: CommandOutput }>();
   return {
     name: "motion_check",
     description:
@@ -152,8 +328,14 @@ export function createMotionCheckTool(
       "and audio levels when present. Returns technical findings plus actual rendered images for YOU " +
       "to inspect against the video's plan and inputs. Supply representative action " +
       "windows (start/end seconds); for videos over 180 seconds select a range to inspect. " +
+      "With spot: true the layout check covers only the rendered frames inside the windows " +
+      `(at most ${spotMaxFrames} in total), much faster than the full check: use it on the ` +
+      "moments a targeted fix or small edit changed, then run the full check once on the " +
+      "export you deliver. A spot check is never delivery verification. " +
+      "Unchanged project source reuses its last passing full source check. " +
       "This does not approve creative quality or watch/listen to the full video. Do not repeat the " +
-      "same checks manually or recheck an unchanged export. All paths must stay inside the workspace.",
+      "same checks manually or recheck an unchanged export unless you corrected its hold plan. " +
+      "All paths must stay inside the workspace.",
     parameters,
     executionMode: "sequential",
     async execute(args, context): Promise<string | StructuredToolResult> {
@@ -212,13 +394,80 @@ export function createMotionCheckTool(
         const validate = (name: string, ok: boolean): void => {
           checks.push({ name, ok, details: ok ? "passed" : "Missing or failed check evidence" });
         };
-        // HyperFrames check includes lint; running `hf lint` separately duplicates that work.
-        const runtime = await run(
-          "Runtime/layout/contrast (includes lint)",
+        const binaries = await exec(
           process.execPath,
-          [bundle.launcher, "check", project, "--json", "--contrast", "--at-transitions"],
-          { timeoutMs: sourceCheckMs, describe: summarizeSourceCheck },
+          [path.join(bundle.root, "bin", "media-binaries.mjs")],
+          {
+            signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+            maxBuffer: 64 * 1024,
+            windowsHide: true,
+          },
         );
+        const { ffmpeg, ffprobe } = binariesSchema.parse(JSON.parse(binaries.stdout));
+        const video = await probeVideo(ffprobe, output, signal);
+        // Tween boundaries and midpoints land between frames: on a cut-heavy video most are
+        // instants no viewer sees. Moving each onto its nearest rendered frame (and merging
+        // duplicates) audits only what the export shows: ~460 → ~300 seeks on a 10 s reel.
+        // Unreadable metadata keeps the unsnapped audit rather than skipping the check.
+        let sampling = ["--at-transitions", ...(video ? [`--frame-rate=${video.fps}`] : [])];
+        let spotFrames: number | undefined;
+        if (input.spot) {
+          if (!video) throw new Error("Unsupported video metadata for a spot check");
+          const { fps, duration } = video;
+          const times = spotSampleTimes(input.windows, fps, duration);
+          if (!times.length) throw new Error("Spot windows contain no rendered frames");
+          if (times.length > spotMaxFrames)
+            throw new Error(
+              `Spot windows cover ${times.length} rendered frames; keep them to at most ` +
+                `${spotMaxFrames} (${(spotMaxFrames / fps).toFixed(1)} s at this video's ` +
+                `${Math.round(fps * 100) / 100} fps) around the moments you changed, or run the full check.`,
+            );
+          spotFrames = times.length;
+          sampling = ["--at", times.join(",")];
+        }
+        // The frame rate decides which instants are audited, so a pass holds only for it.
+        const source = input.spot
+          ? undefined
+          : await sourceFingerprint(project, output, holds, signal);
+        const fingerprint = source === undefined ? undefined : `${source}@${video?.fps ?? 0}`;
+        const passed = passedSources.get(project);
+        let runtime: CommandOutput | null;
+        if (fingerprint !== undefined && passed?.fingerprint === fingerprint) {
+          runtime = passed.result;
+          checks.push({
+            name: SOURCE_CHECK,
+            ok: true,
+            details:
+              `Reused: the project source is unchanged since this check passed.\n${summarizeSourceCheck(runtime)}`.slice(
+                0,
+                12_000,
+              ),
+          });
+        } else {
+          // HyperFrames check includes lint; running `hf lint` separately duplicates that work.
+          runtime = await run(
+            SOURCE_CHECK,
+            process.execPath,
+            [
+              bundle.launcher,
+              "check",
+              project,
+              "--json",
+              "--contrast",
+              ...sampling,
+              `--workers=${auditPages(os.availableParallelism(), os.totalmem())}`,
+            ],
+            { timeoutMs: sourceCheckMs, describe: summarizeSourceCheck },
+          );
+          // Keep a pass only if the source did not change while it was being audited.
+          if (
+            fingerprint !== undefined &&
+            runtime !== null &&
+            isMotionTechnicalReport(runtime.stdout) &&
+            (await sourceFingerprint(project, output, holds, signal)) === source
+          )
+            passedSources.set(project, { fingerprint, result: runtime });
+        }
         validate(
           "Structured runtime report",
           runtime !== null && isMotionTechnicalReport(runtime.stdout),
@@ -231,16 +480,17 @@ export function createMotionCheckTool(
         ]);
         const pixelReport = pixels ? pixelsSchema.safeParse(JSON.parse(pixels.stdout)) : null;
         validate("Structured pixel report", pixelReport?.success === true);
-        const binaries = await exec(
+        // Always the whole export, spot or not: about 2 s for 30 s of 1080p60 on an M4 Pro.
+        const flashes = await run(
+          FLASH_CHECK,
           process.execPath,
-          [path.join(bundle.root, "bin", "media-binaries.mjs")],
-          {
-            signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
-            maxBuffer: 64 * 1024,
-            windowsHide: true,
-          },
+          [path.join(bundle.root, "bin", "flash-check.mjs"), output],
+          { describe: summarizeFlashes },
         );
-        const { ffmpeg, ffprobe } = binariesSchema.parse(JSON.parse(binaries.stdout));
+        const flashReport = flashes ? flashSchema.safeParse(JSON.parse(flashes.stdout)) : null;
+        // A failing check already reports its findings; only a passing exit needs its report proven.
+        if (flashes)
+          validate("Structured flash report", flashReport?.success === true && flashReport.data.ok);
         const audio = await run("Audio metadata", ffprobe, [
           "-v",
           "error",
@@ -279,12 +529,22 @@ export function createMotionCheckTool(
             const measured = levelsSchema.parse(JSON.parse(levels.stderr.slice(start, end + 2)));
             const loudness = Number(measured.input_i);
             const peak = Number(measured.input_tp);
+            const finite = Number.isFinite(loudness) && Number.isFinite(peak);
             // Measure, don't impose a new mix. Clipping is a failure; distribution-specific
-            // loudness targets remain the user's contract.
-            validate(
-              "Audio is finite and not clipping",
-              Number.isFinite(loudness) && Number.isFinite(peak) && peak <= 0,
-            );
+            // loudness targets remain the user's contract, so the numbers are reported as is.
+            checks.push({
+              name: "Audio is finite and not clipping",
+              ok: finite && peak <= 0,
+              details:
+                `Integrated loudness ${measured.input_i} LUFS, true peak ${measured.input_tp} dBTP. ` +
+                (!finite
+                  ? "Not measurable: the audio may be silent or unreadable."
+                  : peak > 0
+                    ? "Clipping: the true peak is above 0 dBTP."
+                    : peak > -1
+                      ? "No clipping, but peaks above -1 dBTP can distort once a platform re-encodes the audio."
+                      : "No clipping."),
+            });
           }
         }
         const id = randomUUID();
@@ -312,8 +572,23 @@ export function createMotionCheckTool(
         validate(
           "Pixel report matches rendered frames",
           pixelReport?.success === true &&
-            pixelReport.data.videoSha256 === evidence.manifest.video.sha256,
+            pixelReport.data.videoSha256 === evidence.manifest.video.sha256 &&
+            (flashReport === null ||
+              (flashReport.success &&
+                flashReport.data.videoSha256 === evidence.manifest.video.sha256)),
         );
+        if (spotFrames !== undefined) {
+          // Honest scope: frames outside the windows, and the instants between frames that
+          // the full check samples at every transition, were not audited.
+          checks.push({
+            name: "Full-video source check",
+            ok: false,
+            details:
+              `Not run: the spot check audited the ${spotFrames} rendered frames inside the windows ` +
+              "only. Fix what it found; before delivery, call motion_check without spot on the " +
+              "export you deliver.",
+          });
+        }
         technical = checks.every((check) => check.ok);
         return {
           content: [
@@ -321,6 +596,7 @@ export function createMotionCheckTool(
               type: "text",
               text: JSON.stringify({
                 technical,
+                ...(spotFrames !== undefined ? { scope: "spot" } : {}),
                 output,
                 checks,
                 coverage: evidence.manifest.range,
@@ -350,6 +626,7 @@ export function createMotionCheckTool(
           output: args.output,
           elapsedMs: Date.now() - started,
           technical,
+          spot: args.spot === true,
         });
       }
     },

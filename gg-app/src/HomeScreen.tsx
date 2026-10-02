@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import {
   CodeIcon,
   ChatCircleTextIcon,
@@ -10,6 +10,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AsciiLogo } from "./AsciiLogo";
 import { HomeDither } from "./HomeDither";
+import { HomeCritters } from "./HomeCritters";
 import { useHomeBackgroundEnabled } from "./home-background";
 import type { SettingsTabId } from "./SettingsScreen";
 import {
@@ -59,6 +60,7 @@ export function HomeScreen({
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
   const [showScorecard, setShowScorecard] = useState(false);
   const appUpdate = useAppUpdate();
+  const motionNoteId = useId();
 
   useEffect(() => {
     void getVersion()
@@ -162,15 +164,22 @@ export function HomeScreen({
           <ChatCircleTextIcon size={18} weight="bold" aria-hidden="true" />
           Chat
         </button>
-        <button
-          type="button"
-          className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
-          aria-disabled={ready ? undefined : true}
-          onClick={() => handleWorkspace(onMotion)}
-        >
-          <FilmSlateIcon size={18} weight="bold" aria-hidden="true" />
-          Motion
-        </button>
+        {/* Motion is still being built, so its button says so underneath. */}
+        <div className="home-action-slot">
+          <button
+            type="button"
+            className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
+            aria-disabled={ready ? undefined : true}
+            aria-describedby={motionNoteId}
+            onClick={() => handleWorkspace(onMotion)}
+          >
+            <FilmSlateIcon size={18} weight="bold" aria-hidden="true" />
+            Motion
+          </button>
+          <span id={motionNoteId} className="home-action-note">
+            Still in process
+          </span>
+        </div>
       </div>
       <button
         type="button"
@@ -181,6 +190,9 @@ export function HomeScreen({
       >
         <GearSixIcon size={20} weight="bold" aria-hidden="true" />
       </button>
+      {/* Along the bottom edge: every critter, out playing. The links and the
+        version corner sit just above their lane. */}
+      <HomeCritters />
       {/* Bottom centre: your links. */}
       <div className="home-byline home-links">
         By Ken Kai

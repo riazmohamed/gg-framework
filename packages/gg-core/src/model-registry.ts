@@ -203,11 +203,11 @@ export const MODELS: ModelInfo[] = [
   // next start.
   {
     // GPT-6.1 Sol — "Latest workhorse model for coding and everyday work."
-    // (Codex priority 1, default low; the catalog declares a Codex client
-    // >= 0.153.0 but only lists it for >= 0.159.0 — see CODEX_CLIENT_VERSION). $2/$10
-    // MTok, cached input $0.10. Ladder low → medium → high → xhigh → max →
-    // ultra; ultra is the Codex orchestration preset (max effort on the wire +
-    // proactive local subagent delegation).
+    // (Codex priority 1, default low). The catalog says Codex client >= 0.153.0,
+    // but the ChatGPT backend only serves it from 0.159.0 (see
+    // CODEX_CLIENT_VERSION). $2/$10 MTok, cached input $0.10. Ladder low →
+    // medium → high → xhigh → max → ultra; ultra is the Codex orchestration
+    // preset (max effort on the wire + proactive local subagent delegation).
     id: "gpt-6.1-sol",
     name: "GPT-6.1 Sol",
     provider: "openai",

@@ -4,6 +4,8 @@ import { ThinkingOrb } from "thinking-orbs";
 import { theme } from "./theme";
 import { ShimmerText } from "./ShimmerText";
 import { outcomePhrase } from "./activity-copy";
+import { GgFace } from "./GgFace";
+import type { GgFaceMood } from "./gg-face";
 
 // Braille rotation spinner — the native language of CLI coding tools (ora,
 // npm, cargo). Smooth, monospace, and unmistakably "ours" rather than the
@@ -169,6 +171,21 @@ const SHORT_LABELS: Record<string, string> = {
   "Cancellation failed · task still running": "Stop failed",
 };
 
+/**
+ * GG Coder's face for a settled status. Picked from the same tone as the text,
+ * so the face's glow always matches the words beside it: green → happy, red →
+ * shocked, amber → sad when stopped, curious when it needs you, worried
+ * otherwise (unverified, cut short, reconnecting), and ready when idle.
+ */
+export function ggMoodFor(activity: TaskActivity | undefined, tone: string): GgFaceMood {
+  if (tone === theme.success) return "happy";
+  if (tone === theme.error) return "shocked";
+  if (tone !== theme.warning) return "ready";
+  if (activity?.phase === "stopped") return "sad";
+  if (activity?.phase === "attention") return "curious";
+  return "worried";
+}
+
 /** The existing animated row now represents a whole task, including Ken's review. */
 export function ActivityBar({
   running,
@@ -259,13 +276,7 @@ export function ActivityBar({
                 style={{ flexShrink: 0 }}
               />
             ) : (
-              <span
-                className="statusrow-icon"
-                aria-hidden="true"
-                style={{ color: bareIdle ? theme.accent : tone }}
-              >
-                {bareIdle ? "\u276f" : activity?.phase === "done" ? "\u2713" : "\u2022"}
-              </span>
+              <GgFace mood={ggMoodFor(activity, tone)} size={21} />
             )}
             {/* Remount only the label when its meaning changes. Timer/token
                 updates must not restart the reveal or the running orb. */}

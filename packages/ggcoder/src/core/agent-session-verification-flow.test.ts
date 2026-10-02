@@ -607,16 +607,18 @@ describe("verification gate flow", () => {
     const { VERIFICATION_HOOK_NOTICE_TEXT } = await import("../ui/app-items.js");
     expect(VERIFICATION_HOOK_NOTICE_TEXT).toContain("verification");
 
-    const appEvents = await fs.readFile(
-      path.join(__dirname, "..", "..", "..", "..", "gg-app", "src", "useAgentEvents.ts"),
+    const hookNotice = await fs.readFile(
+      path.join(__dirname, "..", "..", "..", "..", "gg-app", "src", "HookNotice.tsx"),
       "utf-8",
     );
-    const presentation = appEvents.slice(
-      appEvents.indexOf("HOOK_PRESENTATION"),
-      appEvents.indexOf("function formatElapsed"),
+    const start = hookNotice.indexOf("export const HOOK_LINES");
+    expect(start).toBeGreaterThan(-1);
+    const presentation = hookNotice.slice(
+      start,
+      hookNotice.indexOf("export function describeHook"),
     );
     for (const kind of ["ideal", "verification", "loop_break", "regrounding"]) {
-      expect(presentation).toContain(`${kind}: {`);
+      expect(presentation).toContain(`${kind}: [`);
     }
   });
 
@@ -651,6 +653,25 @@ describe("verification gate flow", () => {
     (internal as unknown as { verificationGate: { beginRun(): void } }).verificationGate.beginRun();
     expect(await internal.getHookFollowUpMessages()).toBeNull();
     expect(events.length).toBe(before);
+  });
+
+  it.each([
+    ["an unrecognized check", { command: "npx biome ci ." }],
+    ["an unrecognized package check script", { command: "npm run check:local-discovery" }],
+    ["a persistent-shell check", { command: "pnpm test", persist: true }],
+  ])("does not re-open verified work when %s runs after a passing check", async (_label, args) => {
+    // The live incident: edit, `tsc --noEmit` passes, then `biome ci` runs
+    // last. Neither its start nor its end can produce evidence, yet the
+    // start flagged the workspace unknown and nothing ever cleared it — every
+    // later run ended Unverified and autopilot silently refused to review.
+    const { internal } = await makeSession();
+    await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    await simulateToolCall(internal, "bash", { command: "npx tsc --noEmit -p apps/web" });
+    expect(internal.getVerificationProblem()).toBeNull();
+
+    await simulateToolCall(internal, "bash", args);
+
+    expect(internal.getVerificationProblem()).toBeNull();
   });
 
   it("records neither pass nor failure for persistent-shell checks, however they exit", async () => {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
-import { theme } from "./theme";
+import { isHookKind, type HookKind } from "./HookNotice";
 import {
   listCommands,
   listModels,
@@ -13,7 +13,7 @@ import {
   type QueuedMessage,
   type SlashCommand,
 } from "./agent";
-import { isAskUserPrompt } from "./ask-user";
+import { closeAsks, isAskUserPrompt, markAskDeferred } from "./ask-user";
 import { formatTokenCount } from "./ActivityBar";
 import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
@@ -45,28 +45,8 @@ export interface ImagePreview {
   path?: string;
 }
 
-// Hook kind → notice copy + tone color, mirroring the TUI's app-items.ts.
-export type HookKind = "ideal" | "verification" | "loop_break" | "regrounding";
 /** Hooks that fire in place of a final answer, so their draft must be held. */
 export type PreFinalHookKind = Extract<HookKind, "ideal" | "verification">;
-export const HOOK_PRESENTATION: Record<HookKind, { text: string; color: string }> = {
-  ideal: {
-    text: "Hook engaged. Running an ideal review before finalizing.",
-    color: theme.secondary,
-  },
-  verification: {
-    text: "Hook engaged. Running the project's verification before finalizing.",
-    color: theme.secondary,
-  },
-  loop_break: {
-    text: "Hook engaged. Breaking a stuck loop and rethinking the approach.",
-    color: theme.warning,
-  },
-  regrounding: {
-    text: "Hook engaged. Re-grounding on the original request after compaction.",
-    color: theme.primary,
-  },
-};
 
 function formatElapsed(ms: number): string {
   const s = Math.round(ms / 1000);
@@ -809,6 +789,19 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           break;
         }
+        case "stream_rule_triggered": {
+          // The aborted attempt is discarded by the loop (its retry is silent, so
+          // nothing else rolls it back here): drop its partial text too.
+          discardStreamingDraft();
+          const names = Array.isArray(d.rules) ? d.rules.map(String) : [];
+          const name = names.join(", ") || "stream rule";
+          pushItem({
+            kind: "info",
+            id: nextId(),
+            text: `Rule "${name}" caught the reply mid-stream — retrying`,
+          });
+          break;
+        }
         case "compaction_start": {
           const id = nextId();
           compactionIdRef.current = id;
@@ -990,6 +983,21 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // malformed frame is dropped rather than rendered as an empty band
           // the user could never answer.
           if (isAskUserPrompt(d)) pushItem({ kind: "ask", id: nextId(), prompt: d });
+          break;
+        case "ask_user_deferred":
+          // Soft deadline passed: the agent continued on its best guess, but the
+          // band stays answerable — a later answer is sent to it as a message.
+          if (typeof d.id === "string") {
+            const promptId = d.id;
+            setItems((prev) => markAskDeferred(prev, promptId));
+          }
+          break;
+        case "ask_user_closed":
+          // A newer question or a new session superseded deferred questions.
+          if (Array.isArray(d.ids)) {
+            const ids = d.ids.filter((id): id is string => typeof id === "string");
+            setItems((prev) => closeAsks(prev, ids));
+          }
           break;
         case "plan_progress": {
           // The sidecar reads the live approved-plan file, so this snapshot
@@ -1177,8 +1185,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         }
         case "hook": {
-          const kind = String(d.kind ?? "ideal") as HookKind;
-          if (kind in HOOK_PRESENTATION) {
+          const kind = String(d.kind ?? "ideal");
+          if (isHookKind(kind)) {
             if (kind === "ideal" || kind === "verification") {
               // Draft dies here — held (never painted) in the normal armed path,
               // or removed from the transcript when arming came too late. Both

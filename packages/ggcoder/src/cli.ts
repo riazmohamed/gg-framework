@@ -80,6 +80,7 @@ import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { matchPromptCommand } from "./core/prompt-command-expansion.js";
 import { createTools } from "./tools/index.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
+import { spawnedTasks, type SpawnedTaskArgs } from "./tools/subagent-shared.js";
 import { CheckpointStore } from "./core/checkpoint-store.js";
 import { ReviewCoverageTracker } from "./core/ideal-review.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
@@ -642,9 +643,8 @@ async function runInkTUI(opts: {
   let activeModel = model;
   let activeThinking = opts.thinkingLevel;
 
-  const { tools, processManager, rebuildReadTool, lspManager, subAgentManager } = await createTools(
-    cwd,
-    {
+  const { tools, processManager, rebuildReadTool, clearReadTracker, lspManager, subAgentManager } =
+    await createTools(cwd, {
       agents,
       skills,
       provider,
@@ -665,8 +665,7 @@ async function runInkTUI(opts: {
       getModel: () => activeModel,
       getThinkingLevel: () => activeThinking,
       getMaxPerModel: () => opts.subagentMaxPerModel,
-    },
-  );
+    });
 
   // MCP startup can involve `npx` installing/booting servers. Do it after the
   // TUI paints so a slow network or npm cache never looks like "nothing happens".
@@ -993,6 +992,7 @@ async function runInkTUI(opts: {
     checkpointStore: checkpointRef.current ?? undefined,
     idealReviewEnabled: opts.idealReviewEnabled,
     rebuildReadTool,
+    clearReadTracker,
     connectInitialMcpTools,
     planCallbacks: planToolCallbacks,
     onRuntimeStateChange: (updates) => {
@@ -1645,24 +1645,27 @@ export function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
             flushText();
             const result = toolResults.get(block.id);
             if (block.name === "subagent" || block.name === "spawn_agent") {
+              // One row per child: a batch spawn_agent call starts several.
+              const spawned: SpawnedTaskArgs[] =
+                block.name === "spawn_agent" ? spawnedTasks(block.args) : [{}];
               items.push({
                 kind: "subagent_group",
-                agents: [
-                  {
-                    toolCallId: block.id,
-                    task: String(
-                      block.name === "spawn_agent"
-                        ? (block.args.task_name ?? block.args.task ?? "Async agent")
-                        : (block.args.task ?? "Sub-agent"),
-                    ),
-                    agentName: String(block.args.agent ?? "default"),
-                    status: result?.isError ? "error" : "done",
-                    toolUseCount: 0,
-                    tokenUsage: { input: 0, output: 0 },
-                    result: result?.content ?? "",
-                    durationMs: 0,
-                  },
-                ],
+                agents: spawned.map((spawn, index) => ({
+                  toolCallId: spawned.length > 1 ? `${block.id}:${index}` : block.id,
+                  task: String(
+                    block.name === "spawn_agent"
+                      ? (spawn.task_name ?? spawn.task ?? "Async agent")
+                      : (block.args.task ?? "Sub-agent"),
+                  ),
+                  agentName: String(
+                    (block.name === "spawn_agent" ? spawn.agent : block.args.agent) ?? "default",
+                  ),
+                  status: result?.isError ? "error" : "done",
+                  toolUseCount: 0,
+                  tokenUsage: { input: 0, output: 0 },
+                  result: result?.content ?? "",
+                  durationMs: 0,
+                })),
                 id: `restore-${id++}`,
               });
             } else {
