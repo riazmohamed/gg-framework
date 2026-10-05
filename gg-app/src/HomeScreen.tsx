@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useMemo, useState, type CSSProperties } from "react";
 import {
   CodeIcon,
   ChatCircleTextIcon,
@@ -9,9 +9,12 @@ import {
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AsciiLogo } from "./AsciiLogo";
-import { HomeDither } from "./HomeDither";
+import { HomeScenery, withScenery } from "./HomeScenery";
 import { HomeCritters } from "./HomeCritters";
 import { useHomeBackgroundEnabled } from "./home-background";
+import { groundFilter, lightAt } from "./scene-light";
+import { useLocalHour } from "./use-local-hour";
+import { useRandomBiome } from "./use-random-biome";
 import type { SettingsTabId } from "./SettingsScreen";
 import {
   waitForReady,
@@ -123,10 +126,20 @@ export function HomeScreen({
   }
 
   const backgroundOn = useHomeBackgroundEnabled();
+  // The critters' terrain for this visit. With the scenery on it has to be one
+  // with a horizon painted behind it, and its ground takes the sky's light.
+  const [visitBiome] = useRandomBiome();
+  const biome = backgroundOn ? withScenery(visitBiome) : visitBiome;
+  const hour = useLocalHour();
+  const sceneStyle = useMemo(
+    (): (CSSProperties & Record<"--scene-ground", string>) | undefined =>
+      backgroundOn ? { "--scene-ground": groundFilter(lightAt(hour)) } : undefined,
+    [backgroundOn, hour],
+  );
 
   return (
-    <div className="home" data-tauri-drag-region>
-      {backgroundOn && <HomeDither />}
+    <div className="home" data-tauri-drag-region style={sceneStyle}>
+      {backgroundOn && <HomeScenery hour={hour} />}
       {/* Above the banner: your rank and What's new. */}
       <div className="home-version-row">
         <RankBadge
@@ -190,9 +203,9 @@ export function HomeScreen({
       >
         <GearSixIcon size={20} weight="bold" aria-hidden="true" />
       </button>
-      {/* Along the bottom edge: every critter, out playing. The links and the
-        version corner sit just above their lane. */}
-      <HomeCritters />
+      {/* Along the bottom edge: every critter, out playing. The links sit just
+        above their lane. */}
+      <HomeCritters biome={biome} />
       {/* Bottom centre: your links. */}
       <div className="home-byline home-links">
         By Ken Kai
@@ -223,7 +236,7 @@ export function HomeScreen({
           YouTube
         </a>
       </div>
-      {/* Bottom left: the version, or the update button when one is ready. */}
+      {/* Top centre: the version, or the update button when one is ready. */}
       <div className="home-version-corner">
         {appUpdate.phase === "available" || appUpdate.phase === "installing" ? (
           <button

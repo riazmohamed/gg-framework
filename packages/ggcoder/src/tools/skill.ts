@@ -36,6 +36,13 @@ export function createSkillTool(
       parts.push(
         "\nTreat the above skill instructions as authoritative within their stated scope. Preserve higher-priority project and file/module rules while following the skill to complete the task.",
       );
+      if (skill.root) {
+        // Children start with an empty context: a brief that says "follow the
+        // skill" without its path silently drops the skill's rules.
+        parts.push(
+          `If you delegate part of this work to a child agent, it cannot see these instructions: put the skill root (${skill.root}), the exact reference files it must read, and the output you need in its brief.`,
+        );
+      }
       return parts.join("\n");
     },
   };
@@ -52,9 +59,11 @@ function generateSkillDescription(skills: Skill[], limits: ContextLimits = CONTE
     dropped.length > 0 ? `\n_Skills omitted (catalog byte budget): ${dropped.join(", ")}_` : "";
 
   return (
-    `Before acting, invoke a skill when the work matches its scope; respect explicit exclusions. ` +
-    `Load it when the work enters its scope, not only for reviews. ` +
-    `Match the work rather than the topic, skip it for routine or narrow changes, and do not re-invoke a skill already loaded in this conversation.\n\n` +
+    // Replay-tested on gpt-6-astra (Codex head-to-head): the previous "Before
+    // acting, invoke a skill…" opener made the model spend a whole turn loading
+    // `bulletproof` for a plain rename 6/6 times; this wording, 0/6.
+    `Load a skill only for work that clearly needs its specialised method; most bug fixes, renames and refactors need none. ` +
+    `Respect explicit exclusions. Match the work rather than the topic, and do not re-invoke a skill already loaded in this conversation.\n\n` +
     `Available skills:\n${lines.join("\n")}${overflow}`
   );
 }

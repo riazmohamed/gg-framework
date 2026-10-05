@@ -33,7 +33,6 @@ export const CORE_TOOL_NAMES: readonly string[] = [
   "ls",
   "code_search",
   "code_nav",
-  "web_search",
   "web_fetch",
   "steroids",
   "task_output",
@@ -49,15 +48,23 @@ export const CORE_TOOL_NAMES: readonly string[] = [
 
 /**
  * Built-ins that live in the catalog as index lines until `tool_search` is
- * called. Each one is either rare (image generation, screenshots, package
- * source resolution) or only reachable after another tool has already run
+ * called. Each one is either rare (image generation, screenshots, the
+ * debugger, package source resolution) or only reachable after another tool has already run
  * (the child-agent control cluster follows `spawn_agent`).
+ *
+ * `web_search` moved here after a 30-day usage count over 718 local sessions
+ * found it in ~6% of working sessions. `task_send`
+ * stays core even though it is rarer: bash's own description points at it,
+ * and promoting it mid-session would change the tool list, which restarts
+ * Anthropic's prompt cache (tools are cached ahead of system and messages).
  */
 export const DEFERRED_TOOL_NAMES: readonly string[] = [
+  "web_search",
   "ui_registry",
   "ui_adopt",
   "source_path",
   "screenshot",
+  "debug",
   "generate_image",
   "tasks",
   "send_message",

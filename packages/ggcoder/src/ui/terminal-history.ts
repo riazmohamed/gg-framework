@@ -60,6 +60,7 @@ import {
   presentThemeTransition,
 } from "./transcript/presentation.js";
 import { toolTonePalette } from "./transcript/tool-presentation.js";
+import { editTargetLabel, editTargetPaths } from "../tools/edit-targets.js";
 
 // OG Coder renders no ASCII logo — text-only branding (3 blank rows reserve
 // vertical space for the side-by-side info column).
@@ -974,6 +975,7 @@ function getToolHeaderParts(
       return { label: displayName, detail: command.includes("\n") ? `${detail} …` : detail };
     }
     case "edit":
+      return { label: displayName, detail: editTargetLabel(args, shortenPath) };
     case "write":
       return { label: displayName, detail: shortenPath(String(args.file_path ?? "")) };
     case "read":
@@ -1259,7 +1261,11 @@ function renderDiffPreview(
       `Added ${added} line${added !== 1 ? "s" : ""}, removed ${removed} line${removed !== 1 ? "s" : ""}`,
     ),
   ];
-  const diffLines = buildDiffLines(diff, String(args.file_path ?? ""), context);
+  const diffLines = buildDiffLines(
+    diff,
+    String(args.file_path ?? editTargetPaths(args)[0] ?? ""),
+    context,
+  );
   if (diffLines.length > 0) {
     lines.push(dim(context, "────────────────────────────────────────────────────────────────"));
     lines.push(...diffLines);

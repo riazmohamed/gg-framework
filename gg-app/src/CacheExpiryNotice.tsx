@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { theme } from "./theme";
 import type { CacheExpiryStatus } from "./agent";
+import { pinSize, usePresenceList } from "./usePresenceList";
 
 /**
  * Strip above the composer warning that the provider's prompt cache for this
@@ -15,8 +16,13 @@ import type { CacheExpiryStatus } from "./agent";
  * cache) and a later lapse show the notice again — but a re-render, a /state
  * poll, or a remount for the same lapse does not.
  *
- * Reuses QueuedBar's `.queued-bar*` classes so both strips share one look.
+ * Reuses QueuedBar's `.queued-bar*` classes so both strips share one look and
+ * one motion: it grows open when shown and folds shut when hidden (dismiss,
+ * compact, or a run starting), held mounted for EXIT_MS so the exit can play.
  */
+
+/** Exit-animation duration. Must match `.queued-bar.leaving` in App.css. */
+const EXIT_MS = 220;
 
 /** Keys already acted on this app session. Module-level so a remount (chat
  *  switch and back) does not resurrect a notice the user dismissed. */
@@ -37,6 +43,15 @@ export function formatTokens(tokens: number): string {
   if (tokens >= 1_000) return `~${Math.round(tokens / 1_000)}k`;
   return `~${tokens}`;
 }
+
+/** What the strip says, snapshotted so the exit keeps showing the last copy. */
+interface Shown {
+  readonly key: string;
+  readonly lead: string;
+  readonly tokens: string;
+}
+
+const keyOfShown = (s: Shown): string => s.key;
 
 interface Props {
   expiry: CacheExpiryStatus | null | undefined;
@@ -66,28 +81,52 @@ export function CacheExpiryNotice({
     return () => clearTimeout(timer);
   }, [expiresAt]);
 
-  if (!expiry || running) return null;
-  const expired = expiry.expired || (expiry.expiresAt !== null && now >= expiry.expiresAt);
-  const notable = expired && expiry.prefixTokens >= expiry.minTokens;
-  if (!notable) return null;
-  const key = expiryKey(expiry);
-  if (dismissed.has(key)) return null;
+  let liveKey: string | null = null;
+  let liveLead = "";
+  let liveTokens = "";
+  if (expiry && !running) {
+    const expired = expiry.expired || (expiry.expiresAt !== null && now >= expiry.expiresAt);
+    const key = expiryKey(expiry);
+    if (expired && expiry.prefixTokens >= expiry.minTokens && !dismissed.has(key)) {
+      liveKey = key;
+      liveTokens = formatTokens(expiry.prefixTokens);
+      liveLead =
+        expiry.confidence === "may_be_cold"
+          ? "This chat's cache may have expired"
+          : "This chat's cache expired";
+    }
+  }
+  // Stable identity: usePresenceList re-merges whenever the list changes.
+  const items = useMemo<readonly Shown[]>(
+    () => (liveKey === null ? [] : [{ key: liveKey, lead: liveLead, tokens: liveTokens }]),
+    [liveKey, liveLead, liveTokens],
+  );
+  const shown = usePresenceList(items, keyOfShown, EXIT_MS);
+  // A new lapse can arrive while the previous one is still folding away; the
+  // live one wins.
+  const current = shown.find((p) => !p.leaving) ?? shown[0];
+  const leaving = current?.leaving ?? false;
+  const empty = current === undefined;
+  const barRef = useRef<HTMLDivElement>(null);
+  // Measure on mount (enter grows to this height) and again when leaving starts
+  // (exit folds from it), so neither end guesses the strip's height.
+  useLayoutEffect(() => pinSize(barRef.current), [leaving, empty]);
 
+  if (!current) return null;
+  const { key, lead, tokens } = current.item;
   const dismiss = (): void => {
     dismissed.add(key);
     setDismissTick((n) => n + 1);
   };
-  const tokens = formatTokens(expiry.prefixTokens);
-  const lead =
-    expiry.confidence === "may_be_cold"
-      ? "This chat's cache may have expired"
-      : "This chat's cache expired";
 
   return (
     <div
-      className="queued-bar"
+      ref={barRef}
+      className={`queued-bar${leaving ? " leaving" : ""}`}
       role="status"
       aria-label="Prompt cache expired"
+      aria-hidden={leaving || undefined}
+      inert={leaving}
       style={{ borderColor: theme.border, color: theme.textMuted }}
     >
       <div className="queued-bar-row">

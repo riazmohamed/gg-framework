@@ -8,6 +8,7 @@ import {
   type SubAgentStatePayload,
   type AgentState,
   type BackgroundTask,
+  type CacheExpiryStatus,
   type ModelOption,
   type ProjectTask,
   type QueuedMessage,
@@ -21,6 +22,7 @@ import { playSound } from "./sounds";
 import { findCompletedSteps, countPlanSteps } from "./plan-steps";
 import type { PendingAttachment } from "./attachments";
 import type { Item } from "./App";
+import type { LiveTextStore } from "./live-text";
 
 /**
  * Build-session SSE event handling + assistant-streaming helpers, extracted from
@@ -100,6 +102,8 @@ export interface AgentEventsDeps {
   planReviewPathRef: MutableRefObject<string | null>;
   pendingPlanTotalRef: MutableRefObject<number | null>;
   stickToBottomRef: MutableRefObject<boolean>;
+  /** Where the streaming reply's text grows until it ends (live-text.ts). */
+  liveText: LiveTextStore;
 }
 
 export interface AgentEvents {
@@ -144,6 +148,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     planReviewPathRef,
     pendingPlanTotalRef,
     stickToBottomRef,
+    liveText,
   } = deps;
 
   // ── Event-machine private refs (used nowhere outside this hook) ──
@@ -213,6 +218,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
 
   /** Queued→sent morph duration. Must match `.user-msg.promoted` in App.css. */
   const PROMOTE_MS = 300;
+  // Flushed chunks go to the live-text store, which re-renders only the
+  // streaming row; `items` gets the final text once, in endStreamingText.
   const flushChunks = useCallback(() => {
     flushTimerRef.current = null;
     const chunk = pendingChunksRef.current;
@@ -220,12 +227,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     pendingChunksRef.current = "";
     const current = streamingIdRef.current;
     if (current === null) return; // streaming ended while waiting
-    setItems((prev) =>
-      prev.map((it) =>
-        it.kind === "assistant" && it.id === current ? { ...it, text: it.text + chunk } : it,
-      ),
-    );
-  }, [setItems]);
+    liveText.append(current, chunk);
+  }, [liveText]);
 
   const appendAssistant = useCallback(
     (text: string) => {
@@ -241,6 +244,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         // on first paint — the user should see the bubble appear right away).
         const id = nextId();
         streamingIdRef.current = id;
+        liveText.begin(id, text);
         setItems((prev) => [...prev, { kind: "assistant", id, text }]);
       } else {
         // Subsequent tokens: buffer and flush on the 100ms timer
@@ -250,7 +254,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         }
       }
     },
-    [flushChunks, nextId, setItems],
+    [flushChunks, liveText, nextId, setItems],
   );
 
   // Paint text held under arming. Called the moment the turn proves it was not
@@ -263,31 +267,36 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     if (!held) return;
     const id = nextId();
     streamingIdRef.current = id;
+    liveText.begin(id, held);
     setItems((prev) => [...prev, { kind: "assistant", id, text: held }]);
-  }, [nextId, setItems]);
+  }, [liveText, nextId, setItems]);
 
   // Flush any pending buffered text and end the current streaming section.
   // Called whenever streaming transitions to tool calls, a new prompt, etc.
   // Without this, the last few buffered tokens (waiting for the timer) would be lost.
+  // The streamed text lives in the live-text store until here: write it into
+  // `items` once, then release the store entry.
   const endStreamingText = useCallback(() => {
     if (flushTimerRef.current !== null) {
       clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
     }
-    if (pendingChunksRef.current) {
-      const chunk = pendingChunksRef.current;
-      pendingChunksRef.current = "";
-      const current = streamingIdRef.current;
-      if (current !== null) {
-        setItems((prev) =>
-          prev.map((it) =>
-            it.kind === "assistant" && it.id === current ? { ...it, text: it.text + chunk } : it,
-          ),
-        );
-      }
-    }
+    const chunk = pendingChunksRef.current;
+    pendingChunksRef.current = "";
+    const current = streamingIdRef.current;
     streamingIdRef.current = null;
-  }, [setItems]);
+    if (current === null) return;
+    const live = liveText.get(current);
+    if (live !== undefined) {
+      const final = live + chunk;
+      setItems((prev) =>
+        prev.map((it) =>
+          it.kind === "assistant" && it.id === current ? { ...it, text: final } : it,
+        ),
+      );
+    }
+    liveText.release(current);
+  }, [liveText, setItems]);
 
   // Ideal review is a pre-final hook: the no-tool response immediately before
   // it is an internal draft, not a transcript answer. Normally the draft was
@@ -308,8 +317,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       setItems((prev) =>
         prev.filter((item) => !(item.kind === "assistant" && item.id === current)),
       );
+      liveText.release(current);
     }
-  }, [setItems]);
+  }, [liveText, setItems]);
 
   const pushItem = useCallback(
     (item: Item, opts?: { skipIfSameAsLast?: boolean }) => {
@@ -647,7 +657,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           if (name === "generate_image") {
             const prompt = typeof args.prompt === "string" ? args.prompt : "generating image…";
             endStreamingText();
-            pushItem({ kind: "generating_image", id: nextId(), prompt });
+            pushItem({ kind: "generating_image", id: nextId(), prompt, toolCallId });
           }
           break;
         }
@@ -730,9 +740,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                 : entry,
             ),
           );
-          // Remove any generating_image placeholders — the tool has finished
-          // (success or failure). If it produced images, they're pushed below.
-          setItems((prev) => prev.filter((it) => it.kind !== "generating_image"));
+          // Remove this call's generating_image placeholder — the tool has
+          // finished (success or failure). If it produced images, they're pushed
+          // below. Other tools ending must not clear a still-running generation.
+          setItems((prev) =>
+            prev.filter((it) => it.kind !== "generating_image" || it.toolCallId !== id),
+          );
           // Surface any image previews (screenshot / read of an image) inline in
           // the transcript — the tool panel is text-only.
           const previews = (details as { imagePreviews?: ImagePreview[] } | undefined)
@@ -1228,12 +1241,17 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           queueSnapshotRef.current = [];
           armedHooksRef.current.clear();
           heldTextRef.current = "";
+          // Its row is going away with the transcript; nothing left to show.
+          if (streamingIdRef.current !== null) liveText.release(streamingIdRef.current);
           stickToBottomRef.current = true;
           setItems([]);
           setLiveToolFeed([]);
           setTokens(0);
           setDoneStatus(null);
           setContextTokens(0);
+          // A fresh session has no history, so nothing to re-read: drop the
+          // previous chat's cold-cache notice instead of carrying it over.
+          setState((s) => (s ? { ...s, cacheExpiry: null } : s));
           setPlanReview(null);
           planReviewContentRef.current = null;
           {
@@ -1256,6 +1274,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           endStreamingText();
           subagentGroupIdRef.current = null;
           subagentGroupByAgentRef.current.clear();
+          break;
+        case "cache_expiry":
+          // Live cold-cache status pushed after a run, compaction or model
+          // switch settles. Null (empty chat / no known TTL) hides the notice.
+          setState((s) =>
+            s ? { ...s, cacheExpiry: (e.data as CacheExpiryStatus | null) ?? null } : s,
+          );
           break;
         case "models_change":
           // The set of usable models changed: local-model discovery landed
@@ -1347,6 +1372,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       planReviewPathRef,
       pendingPlanTotalRef,
       stickToBottomRef,
+      liveText,
     ],
   );
 

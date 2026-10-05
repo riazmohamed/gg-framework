@@ -22,6 +22,48 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.81.0",
+    date: "2026-10-05",
+    items: [
+      "I put GG head to head with OpenAI's own `Codex` on the same model and tasks, then tuned until it won. GG now finishes the whole run about `5%` faster than Codex and roughly `20%` faster than before, with every task still passing.",
+      "Big changes land in one sweep. The agent can now edit `10` files in a single step instead of crawling through them one at a time, so renames and refactors across your project finish way sooner.",
+      "Bug fixes are quicker and they stick. When the cause is clear, I have the agent ship the fix together with a small regression test and run it once, so the same bug can't sneak back.",
+      "Less busywork before the real work. The agent stops hunting for instruction files it already knows about, skips loading extra skills for everyday fixes, and reads the files it needs in one go.",
+    ],
+  },
+  {
+    version: "0.80.0",
+    date: "2026-10-04",
+    items: [
+      "OpenAI models just got a serious speed boost. Your `ChatGPT` and API key chats can now fire off several tool calls in one go instead of one at a time, and they stop wasting tokens filling in blanks, so work lands faster and costs less. Prefer the old style? Two new settings bring it right back.",
+      "`Gemini` is back in full swing. I fixed a hidden snag that made it refuse requests whenever tools like `web_fetch` were loaded, so it now just works with your whole toolbox.",
+      "Helper agents are rock solid in the desktop app again. I squashed a crash that stopped the `subagent` tool before it even started, so you can hand off work and get answers back without a hitch.",
+      "Every turn is a little leaner. I tightened the agent's instructions and moved rarely used tools out of the way until they're needed, so each request is lighter, quicker and cheaper.",
+    ],
+  },
+  {
+    version: "0.79.0",
+    date: "2026-10-04",
+    items: [
+      "Your home screen is now a cozy campfire clearing in the pines, and it lives on your clock. Stars and an owl at `night`, mist and waking birds at dawn, sunbeams through the trees by day, then fireflies and bats at dusk. Every visit feels a little different.",
+      "Replies look finished from the very first letter. Bold, code and links render as they stream instead of flashing raw symbols, long chats stay light and snappy, and a floating pill appears to whisk you back down to `You have new chats` or straight to `You have a new question` the moment you scroll away.",
+      "Plan review got a glow up. Plans now open full window, laid out just like your chat, with a little critter crew cheering you on while you decide to accept, reject or send feedback.",
+      "Motion mode just learned sound and style. Your animations can now mark their own sound effects that stay locked to the action even when you retime it, plus real motion blur, music that cuts to your video on the beat, and `10` fresh animation pieces to build from.",
+      "Your agent got faster and cheaper. I cut the extra review passes that padded every turn, so answers land sooner and spend fewer tokens, and sign-ins and the Telegram bot no longer freeze on a flaky connection.",
+    ],
+  },
+  {
+    version: "0.78.0",
+    date: "2026-10-03",
+    items: [
+      "Your agent can now debug like a pro. The new `debug` tool pauses your Node program on a breakpoint, steps through it line by line, and peeks at live variables, so bugs get found by watching the code run instead of guessing.",
+      "Slow builds and test runs no longer get cut off. Anything still going after `2 minutes` slides into the background and keeps running while the agent carries on, and when you quit the app every background command shuts down with it, so nothing is left running behind your back.",
+      "Helper agents now have to meet the bar. The main agent can set checks up front, like a file must exist or a command must pass, and I verify each one from what the helper really did: `PASS`, `FAIL` or `UNVERIFIED`. And if a model isn't available on your plan, helpers and chat summaries quietly fall back to the one you're using instead of failing.",
+      "Fewer wasted turns. After an edit the agent now learns exactly which tests reach the file it touched, and when it fumbles a tool call it gets told the right name and fields so the very next try lands.",
+      "The cache heads-up above your chat box now glides open and folds away smoothly instead of popping in and out.",
+    ],
+  },
+  {
     version: "0.77.0",
     date: "2026-10-02",
     items: [

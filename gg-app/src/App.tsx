@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, memo } from "react";
+import { flushSync } from "react-dom";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
@@ -51,6 +52,7 @@ import {
   windowLabel,
   setWindowTitle,
   openProjectPath,
+  openImageDataUrl,
   workspaceProductName,
   type AgentState,
   type WorkspaceMode,
@@ -68,18 +70,22 @@ import {
   type AskUserPrompt,
   answerAskUser,
 } from "./agent";
-import { dropSupersededAsks, mergeAskAnswers } from "./ask-user";
+import { answerAskItem, dropSupersededAsks, firstOpenAskId } from "./ask-user";
 import { glowPlacement, glowStateFor, glowVars } from "./window-glow";
 import { ActivityBar } from "./ActivityBar";
 import { autosizeComposer } from "./composer-autosize";
 import { pinAfterScroll, pinAfterWheel } from "./transcript-pin";
+import { earlierStartId, windowStartIndex } from "./transcript-window";
+import { dissolveInAbove, teleport } from "./transcript-motion";
+import { TranscriptJumpControls } from "./TranscriptJumpControls";
+import { createLiveTextStore, LiveTextContext, useLiveText } from "./live-text";
+import { StreamingMarkdown } from "./StreamingMarkdown";
 import { KenActivityBar } from "./KenActivityBar";
 import { useTaskActivity } from "./useTaskActivity";
 import { useKenMentor } from "./useKenMentor";
 import { useAutopilot } from "./useAutopilot";
 import { useAgentEvents } from "./useAgentEvents";
 import { HookNotice, type HookKind, type VerificationReason } from "./HookNotice";
-import { useSmoothText } from "./useSmoothText";
 import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
 import { SubAgentFeed, type SubAgentLine } from "./SubAgentFeed";
 import { CritterFloor, type CritterGroup } from "./CritterFloor";
@@ -109,6 +115,7 @@ import { MotionStarters } from "./MotionStarters";
 import { ConfirmModal } from "./ConfirmModal";
 import { InitGitModal } from "./InitGitModal";
 import { PlanModeLogo } from "./PlanModeLogo";
+import { PlanDecisionNotice, type PlanDecision } from "./PlanDecisionNotice";
 import { KenPowerBanner } from "./KenPowerBanner";
 import { KenFace } from "./KenFace";
 import { GgFace } from "./GgFace";
@@ -291,9 +298,11 @@ export type Item =
   | { kind: "images"; id: number; images: TranscriptImage[]; caption?: string }
   // Image generation in progress — a shimmering square placeholder that gets
   // replaced by the final image when the tool result arrives.
-  | { kind: "generating_image"; id: number; prompt: string }
+  | { kind: "generating_image"; id: number; prompt: string; toolCallId: string }
   // Plan-mode entry banner (ASCII logo + optional reason).
   | { kind: "plan"; id: number; reason: string }
+  // What the user did with a reviewed plan: an amber critter row.
+  | { kind: "plan_decision"; id: number; decision: PlanDecision }
   // A question from the `ask_user` tool — clickable options rendered in the
   // thread. The turn is blocked until the answers are sent, or until the run
   // ends without them (`cancelled`, which closes the band).
@@ -305,6 +314,8 @@ export type Item =
       answers?: Record<string, string | string[]>;
       /** The complete set reached the blocked tool call. */
       sent?: boolean;
+      /** Answered in this window just now (it moved to the end as a new row). */
+      answeredLive?: boolean;
       cancelled?: boolean;
       /** Soft deadline passed: the agent went on; an answer is still delivered late. */
       deferred?: boolean;
@@ -410,6 +421,9 @@ function canHandleWindowFileDrop(): boolean {
 
 function App(): React.ReactElement {
   const [items, setItems] = useState<Item[]>([]);
+  // Text of the reply streaming right now, grown outside `items` so each chunk
+  // re-renders only that row (live-text.ts). One store for the window's life.
+  const [liveText] = useState(createLiveTextStore);
   // Ken Kai (mentor agent): own running flag, token/thinking metrics, streaming
   // bubble, and `ken_*` SSE handling. Lives in its own hook; App just consumes
   // the state for rendering and delegates ken events to `handleKenEvent`.
@@ -421,7 +435,7 @@ function App(): React.ReactElement {
     kenThinkingStartTs,
     kenThinkingAccumMs,
     handleKenEvent,
-  } = useKenMentor({ setItems, nextId });
+  } = useKenMentor({ setItems, nextId, liveText });
   // Ken's face talks on the reply he is streaming right now: the last row,
   // while his run is live. Only that row's props change, so memo holds.
   const lastItem = items[items.length - 1];
@@ -865,6 +879,73 @@ function App(): React.ReactElement {
     if (stickToBottomRef.current) scrollToBottom();
   }, [scrollToBottom]);
 
+  // ── History window + the way back down ──
+  // Only the newest page of turns stays mounted (rules in transcript-window.ts);
+  // reading up to the top mounts the page before it. `windowStartId` null
+  // follows the newest turns; once the reader scrolls up it pins the first
+  // mounted row so nothing they're reading shifts as replies arrive below, and
+  // returning to the bottom lets go, unmounting the older pages again.
+  const [windowStartId, setWindowStartId] = useState<number | null>(null);
+  // Mirrors stickToBottomRef for rendering the jump controls.
+  const [following, setFollowing] = useState(true);
+  // Newest row id the reader had when they scrolled up; anything newer shows
+  // the "new chats" pill. Null while following.
+  const [seenUpToId, setSeenUpToId] = useState<number | null>(null);
+  const windowStart = useMemo(() => windowStartIndex(items, windowStartId), [items, windowStartId]);
+  const visibleItems = useMemo(
+    () => (windowStart === 0 ? items : items.slice(windowStart)),
+    [items, windowStart],
+  );
+  const firstNewId = useMemo(
+    () =>
+      seenUpToId === null ? null : (visibleItems.find((it) => it.id > seenUpToId)?.id ?? null),
+    [visibleItems, seenUpToId],
+  );
+  // Latest list + window start for the scroll handlers, which are stable
+  // callbacks and don't re-capture render values.
+  const windowRef = useRef<{ items: readonly Item[]; start: number }>({ items: [], start: 0 });
+  useLayoutEffect(() => {
+    windowRef.current = { items, start: windowStart };
+  }, [items, windowStart]);
+  // The oldest question still waiting on the user, for the "You have a
+  // question" pill, and where it sits in the transcript.
+  const openAskId = useMemo(() => firstOpenAskId(items), [items]);
+  const openAskPromptId = useMemo(() => {
+    const ask = items.find((it) => it.id === openAskId);
+    return ask?.kind === "ask" ? ask.prompt.id : null;
+  }, [items, openAskId]);
+  // Where that question is relative to the view: on screen, or above / below
+  // it (the agent kept talking after asking, or the reader scrolled away).
+  // Null when there is no open question.
+  const [askPlace, setAskPlace] = useState<"visible" | "above" | "below" | null>(null);
+  // The row that was first before older turns mounted above it, and where it
+  // sat on screen, so the layout effect below can hold it in place.
+  const pendingLoadRef = useRef<{ anchor: Element; top: number } | null>(null);
+  const newMarkerRef = useRef<HTMLDivElement>(null);
+  const cancelTeleportRef = useRef<(() => void) | null>(null);
+
+  // Read the reader's position after the pin rules ran: follow or hold the
+  // window, track what's new, and mount older turns near the top.
+  const syncReaderPosition = useCallback((el: HTMLDivElement): void => {
+    const pinned = stickToBottomRef.current;
+    setFollowing(pinned);
+    if (pinned) {
+      setWindowStartId(null);
+      setSeenUpToId(null);
+      return;
+    }
+    const { items: all, start } = windowRef.current;
+    const newestId = all[all.length - 1]?.id ?? 0;
+    setSeenUpToId((prev) => prev ?? newestId);
+    setWindowStartId((prev) => prev ?? all[start]?.id ?? null);
+    if (el.scrollTop > Math.min(400, el.clientHeight / 2) || pendingLoadRef.current) return;
+    const earlier = earlierStartId(all, start);
+    const anchor = el.firstElementChild;
+    if (earlier === null || !anchor) return;
+    pendingLoadRef.current = { anchor, top: anchor.getBoundingClientRect().top };
+    setWindowStartId(earlier);
+  }, []);
+
   // Track the user's scroll intent by direction, not distance: while a reply
   // streams, every commit re-pins, so any "near the bottom" allowance snapped a
   // small scroll up straight back down. The wheel handler runs before the
@@ -878,11 +959,129 @@ function App(): React.ReactElement {
       el,
     );
     lastScrollTopRef.current = el.scrollTop;
-  }, []);
-  const onTranscriptWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    syncReaderPosition(el);
+  }, [syncReaderPosition]);
+  const onTranscriptWheel = useCallback(
+    (e: React.WheelEvent<HTMLDivElement>) => {
+      const el = scrollRef.current;
+      if (!el) return;
+      stickToBottomRef.current = pinAfterWheel(stickToBottomRef.current, e, el);
+      // A chat whose newest page fits on screen can't scroll, so no scroll event
+      // will ever ask for older turns: a wheel up is the request.
+      if (e.deltaY < 0 && el.scrollHeight <= el.clientHeight && windowRef.current.start > 0) {
+        stickToBottomRef.current = false;
+        syncReaderPosition(el);
+      }
+    },
+    [syncReaderPosition],
+  );
+
+  // Older turns just mounted above: put the reader's row back where it was
+  // (prepending pushed it down), then dissolve the new rows in.
+  useLayoutEffect(() => {
+    const pending = pendingLoadRef.current;
+    pendingLoadRef.current = null;
     const el = scrollRef.current;
-    if (el) stickToBottomRef.current = pinAfterWheel(stickToBottomRef.current, e, el);
+    if (!pending || !el || !pending.anchor.isConnected) return;
+    el.scrollTop += pending.anchor.getBoundingClientRect().top - pending.top;
+    lastScrollTopRef.current = el.scrollTop;
+    dissolveInAbove(el, pending.anchor);
+  }, [windowStart]);
+
+  // Anything that re-pins the chat to the bottom without a scroll (a session
+  // reset, a hydrate, a project switch) also drops the reader's scrolled-up
+  // state: a short new chat never scrolls, so no scroll event would.
+  useLayoutEffect(() => {
+    if (!stickToBottomRef.current) return;
+    setFollowing(true);
+    setSeenUpToId(null);
+    setWindowStartId(null);
+  }, [items]);
+
+  useEffect(() => () => cancelTeleportRef.current?.(), []);
+  const jumpTo = useCallback((land: (el: HTMLDivElement) => void) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    cancelTeleportRef.current?.();
+    cancelTeleportRef.current = teleport(el, () => land(el));
   }, []);
+  const jumpToLatest = useCallback(() => {
+    jumpTo(() => {
+      stickToBottomRef.current = true;
+      setFollowing(true);
+      setSeenUpToId(null);
+      setWindowStartId(null);
+      scrollToBottom();
+    });
+  }, [jumpTo, scrollToBottom]);
+  const jumpToNew = useCallback(() => {
+    jumpTo((el) => {
+      const marker = newMarkerRef.current;
+      const { items: all } = windowRef.current;
+      setSeenUpToId(all[all.length - 1]?.id ?? null);
+      if (!marker) return;
+      // Land with the first new row at the top, a little breathing room above.
+      el.scrollTop += marker.getBoundingClientRect().top - el.getBoundingClientRect().top - 8;
+    });
+  }, [jumpTo]);
+
+  // Track the open question's place against the transcript viewport. Observed
+  // rather than measured on scroll, so it also catches the agent's later output
+  // pushing it up out of view. A band outside the mounted history window (older
+  // pages are unmounted) has no element, so it counts as above.
+  useEffect(() => {
+    const root = scrollRef.current;
+    if (!openAskPromptId || !root) {
+      setAskPlace(null);
+      return;
+    }
+    const band = root.querySelector(`.ask-band[data-ask-prompt="${CSS.escape(openAskPromptId)}"]`);
+    if (!band) {
+      setAskPlace("above");
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry) return;
+        const bounds = entry.rootBounds ?? root.getBoundingClientRect();
+        setAskPlace(
+          entry.isIntersecting
+            ? "visible"
+            : entry.boundingClientRect.top >= bounds.bottom
+              ? "below"
+              : "above",
+        );
+      },
+      { root },
+    );
+    observer.observe(band);
+    return () => observer.disconnect();
+  }, [openAskPromptId, windowStart]);
+
+  // "You have a new question": dissolve to the open question, with a little
+  // room above it, mounting its page of history first if it was unloaded.
+  const jumpToAsk = useCallback(() => {
+    const askId = openAskId;
+    const promptId = openAskPromptId;
+    if (askId === null || promptId === null) return;
+    jumpTo((el) => {
+      const selector = `.ask-band[data-ask-prompt="${CSS.escape(promptId)}"]`;
+      // Reading it means leaving the bottom: stop following, and count what is
+      // below it as already seen, so the "new chats" pill doesn't pop up too.
+      stickToBottomRef.current = false;
+      const { items: all } = windowRef.current;
+      flushSync(() => {
+        setFollowing(false);
+        setSeenUpToId(all[all.length - 1]?.id ?? null);
+        if (!el.querySelector(selector)) setWindowStartId(askId);
+      });
+      const band = el.querySelector(selector);
+      if (!band) return;
+      // The reply the question belongs to sits just above it: keep a line of it.
+      el.scrollTop += band.getBoundingClientRect().top - el.getBoundingClientRect().top - 56;
+      lastScrollTopRef.current = el.scrollTop;
+    });
+  }, [jumpTo, openAskId, openAskPromptId]);
 
   // The "Drop files to attach" overlay must never outlive the drag. macOS keeps
   // Tauri's native drag-drop handler (so folder drops carry a real path), and
@@ -975,7 +1174,7 @@ function App(): React.ReactElement {
   // scrolled up reading mid-stream.
   useLayoutEffect(() => {
     maybeScrollToBottom();
-  }, [items, liveToolFeed, running, doneStatus, queuedCount, maybeScrollToBottom]);
+  }, [items, windowStart, liveToolFeed, running, doneStatus, queuedCount, maybeScrollToBottom]);
 
   // …and keep re-pinning while the chrome below the transcript ANIMATES its
   // height. The queued-message strip (`.queued-bar`) slides open over 260ms, the
@@ -1194,6 +1393,15 @@ function App(): React.ReactElement {
   const attachInput = useCallback(
     (el: HTMLTextAreaElement | null) => {
       inputRef.current = el;
+      // Turn off macOS inline predictive text in the composer. WebKit lays the
+      // grey suggested words out INSIDE the textarea, so a suggestion that runs
+      // past the line end adds a wrapped line to scrollHeight; the next
+      // keystroke's autosize grows the box to fit it, and the box drops back the
+      // moment the suggestion is dismissed. That is the composer "randomly
+      // growing a line and going back" while typing. WKWebView shows these by
+      // default and the configuration switch is unreliable, so use the HTML
+      // attribute (WebKit 18+). Not in React's DOM types, hence setAttribute.
+      el?.setAttribute("writingsuggestions", "false");
       inputRoRef.current?.observer.disconnect();
       inputRoRef.current?.cancel();
       inputRoRef.current = null;
@@ -1377,6 +1585,7 @@ function App(): React.ReactElement {
     planReviewPathRef,
     pendingPlanTotalRef,
     stickToBottomRef,
+    liveText,
   });
 
   // Run the connect/ready flow against the current sidecar and hydrate state,
@@ -2032,16 +2241,25 @@ function App(): React.ReactElement {
   // The POST is optimistic: a failed one means the question already timed out or
   // the run was cancelled, and re-opening the band would hand the user a button
   // that can no longer reach anyone.
+  //
+  // The finished answer moves to the end of the conversation (see
+  // answerAskItem): it reads as sent the way a typed prompt does, and the chat
+  // follows it down even when the question was far up in the scrollback.
   const answerAsk = useCallback(
     (itemId: number, promptId: string, delta: Record<string, string | string[]>) => {
-      setItems((prev) =>
-        prev.map((it) => {
-          if (it.kind !== "ask" || it.id !== itemId || it.sent) return it;
-          const { answers, complete } = mergeAskAnswers(it.answers, delta, it.prompt.questions);
-          if (complete) void answerAskUser(promptId, "answer", answers).catch(() => {});
-          return { ...it, answers, ...(complete ? { sent: true } : {}) };
-        }),
+      const result = answerAskItem(
+        windowRef.current.items,
+        itemId,
+        delta,
+        (it) => (it.kind === "ask" ? it.prompt.questions : []),
+        nextId,
       );
+      if (result.completed) {
+        // Sending is the user's own action: back to the bottom, like submit.
+        stickToBottomRef.current = true;
+        void answerAskUser(promptId, "answer", result.completed).catch(() => {});
+      }
+      setItems(result.items);
     },
     [setItems],
   );
@@ -2413,12 +2631,12 @@ function App(): React.ReactElement {
   }
 
   // ── Plan review actions (mirror the ggcoder CLI plan overlay) ──
-  // Each closes the modal, drops a short info line, and drives the agent with
+  // Each closes the modal, drops a critter decision row, and drives the agent with
   // the corresponding instruction via the existing prompt path.
-  function runPlanPrompt(prompt: string, info: string): void {
+  function runPlanPrompt(prompt: string, decision: PlanDecision): void {
     setPlanReview(null);
     if (!readyRef.current || running) return;
-    pushItem({ kind: "info", id: nextId(), text: info });
+    pushItem({ kind: "plan_decision", id: nextId(), decision });
     endStreamingText();
     void sendPrompt(prompt);
   }
@@ -2439,7 +2657,7 @@ function App(): React.ReactElement {
     await acceptPlanIPC(planReviewPathRef.current);
     runPlanPrompt(
       "The plan has been approved. Implement it now, following each step in order.",
-      "\u2713 Plan accepted. Implementing.",
+      "accepted",
     );
   }
 
@@ -2447,14 +2665,14 @@ function App(): React.ReactElement {
     runPlanPrompt(
       `The plan was not approved. Feedback from the user:\n\n${feedback}\n\n` +
         "Revise the plan based on this feedback, then call exit_plan again for review.",
-      "\u270e Feedback sent. Revising the plan.",
+      "feedback",
     );
   }
 
   function rejectPlan(): void {
     runPlanPrompt(
       "The plan was rejected and dismissed. Do not implement it. Wait for new instructions.",
-      "\u2715 Plan rejected.",
+      "rejected",
     );
   }
 
@@ -2522,7 +2740,10 @@ function App(): React.ReactElement {
 
   if (needsProject) {
     return (
-      <div className="app" style={{ background: theme.background }}>
+      <div
+        className={`app${windowFocused ? " window-focused" : ""}`}
+        style={{ background: theme.background }}
+      >
         {entryView === "home" ? (
           <HomeScreen
             onProjects={() =>
@@ -2603,7 +2824,10 @@ function App(): React.ReactElement {
         }),
     };
     return (
-      <div className="app" style={{ background: theme.background }}>
+      <div
+        className={`app${windowFocused ? " window-focused" : ""}`}
+        style={{ background: theme.background }}
+      >
         {workspaceMode === "chat" ? (
           <ChatPicker initialAgent={state?.chatAgent ?? "general"} {...pickerProps} />
         ) : workspaceMode === "motion" ? (
@@ -2612,6 +2836,8 @@ function App(): React.ReactElement {
           <ProjectPicker initialProjectPath={state?.cwd ?? null} {...pickerProps} />
         )}
         {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
+        {/* Tray Settings can toast a save failure over the picker. */}
+        <Toaster />
       </div>
     );
   }
@@ -2823,17 +3049,34 @@ function App(): React.ReactElement {
                   </div>
                 ))}
               <PromptSendProvider value={sendKenRecommendedPrompt}>
-                {items.map((it) => (
-                  <TranscriptRow
-                    key={it.id}
-                    item={it}
-                    animateIn={it.id >= liveFromId}
-                    kenTalking={it.id === talkingKenId}
-                    onContentGrow={maybeScrollToBottom}
-                    onAskAnswer={answerAsk}
-                    onAskType={typeAskInstead}
-                  />
-                ))}
+                <LiveTextContext.Provider value={liveText}>
+                  {visibleItems.flatMap((it) => {
+                    const row = (
+                      <TranscriptRow
+                        key={it.id}
+                        item={it}
+                        animateIn={it.id >= liveFromId}
+                        kenTalking={it.id === talkingKenId}
+                        onContentGrow={maybeScrollToBottom}
+                        onAskAnswer={answerAsk}
+                        onAskType={typeAskInstead}
+                      />
+                    );
+                    // Zero-height landing spot for "You have new chats". A flat
+                    // keyed list, so rows never remount when it comes and goes.
+                    return it.id === firstNewId
+                      ? [
+                          <div
+                            key="new-marker"
+                            ref={newMarkerRef}
+                            className="transcript-new-marker"
+                            aria-hidden="true"
+                          />,
+                          row,
+                        ]
+                      : [row];
+                  })}
+                </LiveTextContext.Provider>
               </PromptSendProvider>
             </>
           )}
@@ -2843,6 +3086,16 @@ function App(): React.ReactElement {
             visible={chatHovered || exporting}
             busy={exporting}
             onExport={() => void exportTranscript()}
+          />
+        )}
+        {items.length > 0 && (
+          <TranscriptJumpControls
+            away={!following}
+            hasNew={firstNewId !== null}
+            askAt={askPlace === "above" || askPlace === "below" ? askPlace : null}
+            onScrollToBottom={jumpToLatest}
+            onJumpToNew={jumpToNew}
+            onJumpToAsk={jumpToAsk}
           />
         )}
       </div>
@@ -2915,7 +3168,11 @@ function App(): React.ReactElement {
             onHover={setFileIndex}
           />
         )}
-        <AttachmentBar attachments={attachments} onRemove={removeAttachment} />
+        <AttachmentBar
+          attachments={attachments}
+          onRemove={removeAttachment}
+          onOpenImage={(src) => void openImageDataUrl(src)}
+        />
         <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
         <CacheExpiryNotice
           expiry={state?.cacheExpiry}
@@ -3349,40 +3606,97 @@ function App(): React.ReactElement {
           onClose={() => setShowTasks(false)}
         />
       )}
+      {/* Workspace toasts (saved transcript, Remote on/off, rank-up) need their
+          own host: the one in the Home/Settings branch isn't mounted here. */}
+      <Toaster />
     </div>
   );
 }
 
 /**
- * Assistant prose while it streams: the text is revealed at a steady rate
- * (rather than in whatever bursts the network delivered) and each new word
- * fades in as it lands.
- *
- * `onGrow` re-pins the transcript to the bottom. The reveal adds height
- * BETWEEN item updates, which the transcript's `items`-keyed scroll effect
- * cannot see, so without this the tail of a reply drifts under the fold.
+ * A GG Coder reply. While it streams, its text comes from the live-text store
+ * (`useLiveText`), so new chunks re-render this row alone, not the App.
  */
-function StreamingMarkdown({
-  text,
+function AssistantReply({
+  id,
+  text: stored,
   onGrow,
 }: {
+  id: number;
   text: string;
   onGrow?: () => void;
 }): React.ReactElement {
-  const { text: revealed, animating } = useSmoothText(text);
-  useLayoutEffect(() => {
-    onGrow?.();
-  }, [revealed, onGrow]);
-  return <Markdown animate={animating}>{revealed}</Markdown>;
+  const { text, streaming } = useLiveText(id, stored);
+  // Split out [DONE:n] plan-step markers so each renders as a "✓ Step n"
+  // completion row instead of leaking the raw marker into the prose.
+  const segments = hasDoneMarker(text)
+    ? segmentDoneMarkers(text)
+    : [{ kind: "text" as const, text }];
+  // Step rows that arrive mid-stream dissolve in; ones already in the reply
+  // when it mounted (restored history) don't.
+  const [mountedSegments] = useState(segments.length);
+  return (
+    <>
+      {segments.map((seg, i) =>
+        seg.kind === "done" ? (
+          <div key={i} className={`plan-step-done${i >= mountedSegments ? " dissolve-in" : ""}`}>
+            <span className="plan-step-check" aria-hidden="true">
+              {"\u2713"}
+            </span>
+            <span className="plan-step-label">{`Step ${seg.stepNum} completed`}</span>
+          </div>
+        ) : (
+          <div key={i} className="assistant-msg">
+            <span className="assistant-dot" style={{ color: theme.primary }}>
+              {DOT}
+            </span>
+            <div className="assistant-text">
+              <StreamingMarkdown text={seg.text} streaming={streaming} onGrow={onGrow} />
+            </div>
+          </div>
+        ),
+      )}
+    </>
+  );
+}
+
+/**
+ * Ken Kai's reply: led by his little pixel face (it talks while the reply
+ * streams in) instead of the dot, framed by a teal rule. No badge, no byline.
+ * The Markdown component special-cases ```prompt fences into a "Send to GG
+ * Coder" button. Streams through the live-text store like `AssistantReply`.
+ */
+function KenReply({
+  id,
+  text: stored,
+  talking,
+  onGrow,
+}: {
+  id: number;
+  text: string;
+  talking: boolean;
+  onGrow?: () => void;
+}): React.ReactElement {
+  const { text, streaming } = useLiveText(id, stored);
+  return (
+    <div className="assistant-msg ken-msg">
+      <span className="assistant-dot ken-face-slot">
+        <KenFace mood="chat" talking={talking} />
+      </span>
+      <div className="assistant-text">
+        <StreamingMarkdown text={text} streaming={streaming} onGrow={onGrow} />
+      </div>
+    </div>
+  );
 }
 
 // ── Row renderers ──────────────────────────────────────────
-// Memoized per row: the streaming run rebuilds the `items` array on every
-// `text_delta`, but `appendAssistant` returns the SAME object reference for
-// every non-streaming row, and `onContentGrow` is a stable useCallback. So a
-// default shallow `memo` re-renders ONLY the row whose `item` reference changed
-// (the one actively streaming) — the rest bail out, keeping per-token cost O(1)
-// instead of O(transcript length).
+// Memoized per row. While a reply streams, its text grows in the live-text
+// store (live-text.ts) and only that row re-renders, via `useLiveText`; `items`
+// changes when rows are added, finished or removed. Those updates keep the SAME
+// object reference for every untouched row, and `onContentGrow` is a stable
+// useCallback, so a default shallow `memo` re-renders only the rows whose
+// `item` actually changed and the rest bail out.
 const TranscriptRow = memo(function TranscriptRow({
   item,
   animateIn = false,
@@ -3489,13 +3803,16 @@ function TranscriptRowBody({
           {item.images && item.images.length > 0 && (
             <div className="user-img-row">
               {item.images.map((src, i) => (
-                <img
+                <button
                   key={i}
-                  className="user-img"
-                  src={src}
-                  alt="attachment"
-                  onLoad={onContentGrow}
-                />
+                  type="button"
+                  className="user-img-open"
+                  aria-label="Open attached image"
+                  title="Open in image viewer"
+                  onClick={() => void openImageDataUrl(src)}
+                >
+                  <img className="user-img" src={src} alt="" onLoad={onContentGrow} />
+                </button>
               ))}
             </div>
           )}
@@ -3516,51 +3833,10 @@ function TranscriptRowBody({
           )}
         </div>
       );
-    case "assistant": {
-      // Split out [DONE:n] plan-step markers so each renders as a "✓ Step n"
-      // completion row instead of leaking the raw marker into the prose.
-      const segments = hasDoneMarker(item.text)
-        ? segmentDoneMarkers(item.text)
-        : [{ kind: "text" as const, text: item.text }];
-      return (
-        <>
-          {segments.map((seg, i) =>
-            seg.kind === "done" ? (
-              <div key={i} className="plan-step-done">
-                <span className="plan-step-check" aria-hidden="true">
-                  {"\u2713"}
-                </span>
-                <span className="plan-step-label">{`Step ${seg.stepNum} completed`}</span>
-              </div>
-            ) : (
-              <div key={i} className="assistant-msg">
-                <span className="assistant-dot" style={{ color: theme.primary }}>
-                  {DOT}
-                </span>
-                <div className="assistant-text">
-                  <StreamingMarkdown text={seg.text} onGrow={onContentGrow} />
-                </div>
-              </div>
-            ),
-          )}
-        </>
-      );
-    }
+    case "assistant":
+      return <AssistantReply id={item.id} text={item.text} onGrow={onContentGrow} />;
     case "ken":
-      // Ken Kai's reply: led by his little pixel face (it talks while the reply
-      // streams in) instead of the dot, framed by a teal rule. No badge, no
-      // byline. The Markdown component special-cases ```prompt fences into a
-      // "Send to GG Coder" button.
-      return (
-        <div className="assistant-msg ken-msg">
-          <span className="assistant-dot ken-face-slot">
-            <KenFace mood="chat" talking={kenTalking} />
-          </span>
-          <div className="assistant-text">
-            <StreamingMarkdown text={item.text} onGrow={onContentGrow} />
-          </div>
-        </div>
-      );
+      return <KenReply id={item.id} text={item.text} talking={kenTalking} onGrow={onContentGrow} />;
     case "autopilot": {
       // Autopilot Ken's verdict, rendered like a normal @Ken reply (his face +
       // teal-framed text) rather than its own marker style. The text is his verdict as
@@ -3675,12 +3951,15 @@ function TranscriptRowBody({
       );
     case "plan":
       return <PlanModeLogo reason={item.reason} />;
+    case "plan_decision":
+      return <PlanDecisionNotice decision={item.decision} variantKey={String(item.id)} />;
     case "ask":
       return (
         <AskBand
           prompt={item.prompt}
           answers={item.answers}
           sent={item.sent}
+          answeredLive={item.answeredLive}
           cancelled={item.cancelled}
           deferred={item.deferred}
           onAnswer={(delta) => onAskAnswer?.(item.id, item.prompt.id, delta)}

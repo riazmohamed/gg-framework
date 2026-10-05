@@ -40,11 +40,9 @@ const SettingsSchema = z.object({
     ])
     .default("auto"),
   showTokenUsage: z.boolean().default(true),
+  /** Legacy name: switches loop-break and re-grounding nudges (Ideal review
+   *  itself was removed). Kept so existing settings files keep their meaning. */
   idealReviewEnabled: z.boolean().default(true),
-  /** Pre-stop gate: when code was edited but no test/typecheck/lint/build
-   *  command completed since the last edit, the turn is continued once with a
-   *  demand to verify (then one escalation demanding an honest statement). */
-  verificationGateEnabled: z.boolean().default(true),
   /** Append LSP diagnostics to edit/write tool results. */
   lspDiagnostics: z.boolean().default(true),
   /** Allow write/edit outside the workspace (cwd, tmpdir, ~/.gg). Off by
@@ -152,6 +150,14 @@ const SettingsSchema = z.object({
   /** Pre-warm the Anthropic prompt cache (max_tokens: 1, identical prefix) when the
    *  desktop app signals the user is about to type after opening a chat / idling. */
   cachePrewarm: z.boolean().default(true),
+  /** Codex (ChatGPT login) Responses-Lite request shape for gpt-5.6/gpt-6 models.
+   *  Lite allows one tool call per response. `auto` turns it off (measured
+   *  faster on gpt-6-astra, gpt-6.1-sol and gpt-6-luna); `on` restores it. */
+  codexResponsesLite: z.enum(["auto", "on", "off"]).default("auto"),
+  /** OpenAI strict tool schemas. Strict calls spell out every optional
+   *  argument as null, costing output tokens and latency per call. `auto`
+   *  turns it off (measured faster on all three gpt-6 models); `on` restores it. */
+  codexStrictTools: z.enum(["auto", "on", "off"]).default("auto"),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -165,7 +171,6 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "auto",
   showTokenUsage: true,
   idealReviewEnabled: true,
-  verificationGateEnabled: true,
   lspDiagnostics: true,
   allowOutsideWorkspaceWrites: false,
   networkMode: "off",
@@ -182,6 +187,8 @@ export const DEFAULT_SETTINGS: Settings = {
   speedProfile: "optimized",
   keepAwake: true,
   cachePrewarm: true,
+  codexResponsesLite: "auto",
+  codexStrictTools: "auto",
 };
 
 // ── Settings Manager ───────────────────────────────────────

@@ -82,7 +82,6 @@ import { createTools } from "./tools/index.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
 import { spawnedTasks, type SpawnedTaskArgs } from "./tools/subagent-shared.js";
 import { CheckpointStore } from "./core/checkpoint-store.js";
-import { ReviewCoverageTracker } from "./core/ideal-review.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import {
   createCompactedSessionCheckpoint,
@@ -119,16 +118,7 @@ import chalk from "chalk";
 import { checkAndAutoUpdate } from "./core/auto-update.js";
 
 import { routeCliCommandInput, type CliSubcommandName } from "./cli/command-routing.js";
-
-const THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh", "max", "ultra"]);
-
-export function parseThinkingLevel(value: string | undefined): ThinkingLevel | undefined {
-  if (value === undefined) return undefined;
-  if (THINKING_LEVELS.has(value as ThinkingLevel)) return value as ThinkingLevel;
-  throw new Error(
-    `Invalid --thinking value "${value}". Expected low, medium, high, xhigh, max, or ultra.`,
-  );
-}
+import { parseThinkingLevel } from "./cli/thinking-arg.js";
 
 function printHelp(): void {
   // Clear the visible viewport for a clean look without erasing scrollback.
@@ -636,36 +626,38 @@ async function runInkTUI(opts: {
   // Holder so the (cwd-bound) tools can snapshot pre-mutation file state for
   // /rewind. The store is created once the session id is known (below).
   const checkpointRef: { current: CheckpointStore | null } = { current: null };
-  const reviewCoverageTracker = new ReviewCoverageTracker(cwd);
   const onPreFileMutation = (filePath: string): Promise<void> =>
     checkpointRef.current?.recordPreMutation(filePath) ?? Promise.resolve();
   let activeProvider = provider;
   let activeModel = model;
-  let activeThinking = opts.thinkingLevel;
 
-  const { tools, processManager, rebuildReadTool, clearReadTracker, lspManager, subAgentManager } =
-    await createTools(cwd, {
-      agents,
-      skills,
-      provider,
-      model,
-      planModeRef,
-      onPreFileMutation,
-      onFileRead: (filePath) => reviewCoverageTracker.recordRead(filePath),
-      onFileMutated: (filePath) => reviewCoverageTracker.recordChanged(filePath),
-      lspDiagnostics: opts.lspDiagnostics,
-      getWriteGuardSettings: () => ({
-        allowOutsideWorkspaceWrites: opts.allowOutsideWorkspaceWrites ?? false,
-      }),
-      authStorage,
-      onEnterPlan: (reason) => planToolCallbacks.onEnterPlan?.(reason),
-      onExitPlan: (planPath) =>
-        planToolCallbacks.onExitPlan?.(planPath) ?? Promise.resolve("Plan review is unavailable."),
-      getProvider: () => activeProvider,
-      getModel: () => activeModel,
-      getThinkingLevel: () => activeThinking,
-      getMaxPerModel: () => opts.subagentMaxPerModel,
-    });
+  const {
+    tools,
+    processManager,
+    rebuildReadTool,
+    clearReadTracker,
+    lspManager,
+    debugManager,
+    subAgentManager,
+  } = await createTools(cwd, {
+    agents,
+    skills,
+    provider,
+    model,
+    planModeRef,
+    onPreFileMutation,
+    lspDiagnostics: opts.lspDiagnostics,
+    getWriteGuardSettings: () => ({
+      allowOutsideWorkspaceWrites: opts.allowOutsideWorkspaceWrites ?? false,
+    }),
+    authStorage,
+    onEnterPlan: (reason) => planToolCallbacks.onEnterPlan?.(reason),
+    onExitPlan: (planPath) =>
+      planToolCallbacks.onExitPlan?.(planPath) ?? Promise.resolve("Plan review is unavailable."),
+    getProvider: () => activeProvider,
+    getModel: () => activeModel,
+    getMaxPerModel: () => opts.subagentMaxPerModel,
+  });
 
   // MCP startup can involve `npx` installing/booting servers. Do it after the
   // TUI paints so a slow network or npm cache never looks like "nothing happens".
@@ -709,6 +701,7 @@ async function runInkTUI(opts: {
     subAgentManager?.shutdownAllNow();
     processManager.shutdownAll();
     lspManager?.shutdownAll();
+    debugManager?.shutdown();
     mcpManager.dispose().catch(() => {});
   });
 
@@ -982,8 +975,6 @@ async function runInkTUI(opts: {
     sessionId,
     processManager,
     subAgentManager,
-    lspManager,
-    reviewCoverageTracker,
     settingsFile: paths.settingsFile,
     mcpManager,
     authStorage,
@@ -998,7 +989,6 @@ async function runInkTUI(opts: {
     onRuntimeStateChange: (updates) => {
       if (updates.provider) activeProvider = updates.provider;
       if (updates.model) activeModel = updates.model;
-      if ("thinking" in updates) activeThinking = updates.thinking;
     },
   });
 

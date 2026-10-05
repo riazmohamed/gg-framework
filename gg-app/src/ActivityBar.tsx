@@ -107,7 +107,7 @@ function ToolsToggle({
 }): React.ReactElement {
   return (
     <button
-      className="nav-toggle tools-toggle"
+      className="nav-toggle tools-toggle dissolve-in"
       title={hidden ? "Show tool panel" : "Hide tool panel"}
       aria-label={hidden ? "Show tool panel" : "Hide tool panel"}
       onClick={onToggle}
@@ -296,7 +296,7 @@ export function ActivityBar({
             )}
           </span>
           {(active || hasActivity) && !starting && (
-            <span className="activity-meta">
+            <span className="activity-meta dissolve-in">
               {formatElapsed(elapsed)}
               {totalTokens > 0 && (
                 <span className="activity-token-count" title="Output tokens">
@@ -307,7 +307,7 @@ export function ActivityBar({
           )}
         </div>
         {active && planTotal > 0 && planDone < planTotal && (
-          <span className="plan-steps-running">
+          <span className="plan-steps-running dissolve-in">
             <span className="plan-steps-badge">
               <span style={{ color: theme.textMuted }}>Plan</span>{" "}
               <span style={{ color: theme.textMuted }}>
@@ -322,7 +322,7 @@ export function ActivityBar({
           )}
           {canCancel && (
             <button
-              className="cancel"
+              className="cancel dissolve-in"
               style={{ color: cancelling ? theme.textMuted : theme.error }}
               onClick={onCancel}
               disabled={cancelling}

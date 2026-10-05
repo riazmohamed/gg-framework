@@ -25,6 +25,15 @@ function status(extra: Partial<CacheExpiryStatus> = {}): CacheExpiryStatus {
 
 const TEXT = /re-reads ~120k tokens at full price/;
 
+/** The strip folds away (`.leaving`) and unmounts once the exit has played. */
+function expectExitThenGone(): void {
+  expect(document.querySelector(".queued-bar.leaving")).toBeTruthy();
+  act(() => {
+    vi.advanceTimersByTime(220);
+  });
+  expect(screen.queryByText(TEXT)).toBeNull();
+}
+
 beforeEach(() => resetCacheExpiryNoticeDismissals());
 afterEach(() => {
   cleanup();
@@ -88,12 +97,24 @@ describe("CacheExpiryNotice", () => {
     expect(screen.getByText(TEXT)).toBeTruthy();
   });
 
+  it("enters without the leaving state and folds away when a run starts", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(
+      <CacheExpiryNotice expiry={status()} running={false} onCompact={vi.fn()} />,
+    );
+    expect(document.querySelector(".queued-bar")).toBeTruthy();
+    expect(document.querySelector(".queued-bar.leaving")).toBeNull();
+    rerender(<CacheExpiryNotice expiry={status()} running onCompact={vi.fn()} />);
+    expectExitThenGone();
+  });
+
   it("'Send anyway' dismisses once per expiry per chat", () => {
+    vi.useFakeTimers();
     const { rerender, unmount } = render(
       <CacheExpiryNotice expiry={status()} running={false} onCompact={vi.fn()} />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Send anyway" }));
-    expect(screen.queryByText(TEXT)).toBeNull();
+    expectExitThenGone();
     // Same expiry: a new /state snapshot or a remount keeps it dismissed.
     rerender(<CacheExpiryNotice expiry={status()} running={false} onCompact={vi.fn()} />);
     expect(screen.queryByText(TEXT)).toBeNull();
@@ -122,11 +143,12 @@ describe("CacheExpiryNotice", () => {
   });
 
   it("'Compact first' calls onCompact once and hides the notice", () => {
+    vi.useFakeTimers();
     const onCompact = vi.fn();
     render(<CacheExpiryNotice expiry={status()} running={false} onCompact={onCompact} />);
     fireEvent.click(screen.getByRole("button", { name: "Compact first" }));
     expect(onCompact).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText(TEXT)).toBeNull();
+    expectExitThenGone();
   });
 
   it("hedges the copy when the TTL is only a guaranteed minimum", () => {

@@ -1,5 +1,53 @@
 # @kenkaiiii/ggcoder
 
+## 5.73.0
+
+### Minor Changes
+
+- Add a multi-file `files` form to the `edit` tool and tighten agent prompts (edit batching, bug fixes with a small regression test, preloaded instruction files, leaner skill loading) to cut model round trips; GG now edges out Codex on gpt-6-astra.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.73.0
+- @kenkaiiii/gg-agent@5.73.0
+- @kenkaiiii/gg-core@5.73.0
+
+## 5.72.0
+
+### Minor Changes
+
+- OpenAI requests (ChatGPT login and API key) now default to the faster request shape: gpt-5.6/gpt-6 models on the Codex route drop the Responses-Lite shape, so a response can carry several tool calls instead of one, and tools are sent without strict schemas, so calls no longer spell out every optional argument as null. Two new settings, `codexResponsesLite` and `codexStrictTools` (`auto`/`on`/`off`), restore the previous behaviour. Gemini no longer rejects every request whose tools use exclusive numeric bounds (zod `.positive()`/`.lt()`); they are rewritten to inclusive ones. In the desktop app, the `subagent` tool no longer crashes with "Unknown option '--thinking'": the sidecar's JSON mode now accepts the flag, and the flag-parity test covers it. `web_search` moves to the on-demand tool catalog, the `subagent` description points at `spawn_agent`'s agent roster instead of repeating it, and the system prompt, tool hints, Motion prompt and Motion skills are tightened.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.72.0
+- @kenkaiiii/gg-agent@5.72.0
+- @kenkaiiii/gg-core@5.72.0
+
+## 5.71.0
+
+### Minor Changes
+
+- Motion mode gains a shared animation kit (`library/kit/moves.js`) and new tools. The cue export (`bin/cues.mjs`) loads a composition in HyperFrames' Chrome and writes the sounds it marked with `kit.cue(tl, at, sfx)` to `cues.json` in root-timeline time, with the camera's speed curve, so retiming the animation moves every sound with its event. `bin/motion-blur.mjs` renders real motion blur, `bin/music-fit.mjs` cuts a music track to the picture's length on whole bars, and `bin/reference-study.mjs` measures a reference video's pace and cuts. The library adds 10 pieces (camera rig, chain knock, gather to logo, morph carry, one-shape journey, open from subject, request to result, scale dive, screen replica steps, zoom into card), and the Motion references and skills are expanded. The automatic Ideal review, the verification gate and the Motion check tool are removed, which makes turns shorter and cheaper; the `idealReviewEnabled` setting keeps its name and now switches only the loop-break and re-grounding nudges. A full-file `cat` in `bash` now counts as reading the file, so `edit`/`write` no longer ask for a redundant `read`. Images returned by MCP tools now show as previews, and restored sessions keep tool images clickable. OAuth token requests time out after 30 seconds instead of holding the auth lock forever, and the Telegram bot no longer hangs on a dead connection or spins on API errors. The bundled skills are refreshed.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.71.0
+- @kenkaiiii/gg-agent@5.71.0
+- @kenkaiiii/gg-core@5.71.0
+
+## 5.70.0
+
+### Minor Changes
+
+- Add a Node `debug` tool (breakpoints, stepping, evaluate), parent-set acceptance checks for helper agents, test-impact hints after edits, and repair hints for malformed tool calls. Long foreground commands now move to the background instead of being killed, sub-agents and compaction fall back to the active model when the chosen one is unavailable, and background commands are stopped before any slow teardown when the app quits.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.70.0
+- @kenkaiiii/gg-agent@5.70.0
+- @kenkaiiii/gg-core@5.70.0
+
 ## 5.69.0
 
 ### Minor Changes

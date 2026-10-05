@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { theme } from "./theme";
 import { ShimmerText } from "./ShimmerText";
 import { renderCritterFrame, type CritterDef } from "./critter-sprites";
@@ -28,15 +28,24 @@ export function CritterLine({
   critter,
   tone,
   text,
+  color: colorOverride,
 }: {
   critter: CritterDef;
   tone: CritterTone;
   text: string;
+  /** Replaces the tone's colour (plan rows read in plan-mode amber). */
+  color?: string | undefined;
 }): React.ReactElement {
   // The sprite only depends on which critter it is; the transcript re-renders
   // on every streamed token, so don't rebuild the SVG each time.
   const sprite = useMemo(() => renderCritterFrame(critter, 0), [critter]);
-  const color = CRITTER_TONE_COLOR[tone];
+  const color = colorOverride ?? CRITTER_TONE_COLOR[tone];
+  // The wording flips as the critters work ("Sent a critter off…" to "The
+  // critter is back…"). Re-keying the text on its wording remounts it, so each
+  // new line dissolves in. The first wording doesn't: a live row already
+  // dissolves in as a whole, and restored history must not animate.
+  const [firstText] = useState(text);
+  const changed = text !== firstText;
   return (
     <div className="subagents subagents-compact">
       <span className="subagents-critter" aria-hidden="true">
@@ -47,7 +56,11 @@ export function CritterLine({
           draggable={false}
         />
       </span>
-      <span className="subagents-compact-text" style={{ color }}>
+      <span
+        key={text}
+        className={`subagents-compact-text${changed ? " dissolve-swap" : ""}`}
+        style={{ color }}
+      >
         {tone === "working" ? (
           <ShimmerText base={color} bright="#ffffff">
             {text}

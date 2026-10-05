@@ -790,6 +790,58 @@ fn open_project_path(webview: WebviewWindow, path: String) -> Result<(), String>
         .map_err(|e| e.to_string())
 }
 
+/// Image types `open_image_data` will write, mapped to the extension it uses.
+/// The extension comes from this fixed list (never from the caller), so the
+/// webview cannot drop an executable or script into the temp folder.
+fn image_extension_for(media_type: &str) -> Option<&'static str> {
+    match media_type {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/bmp" => Some("bmp"),
+        _ => None,
+    }
+}
+
+/// Temp file for a chat image that has no file of its own. Named by a hash of
+/// the bytes so clicking the same image again reuses one file.
+fn image_temp_path(dir: &Path, extension: &str, bytes: &[u8]) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    dir.join(format!("image-{:016x}.{}", hasher.finish(), extension))
+}
+
+/// Open a pasted/attached chat image in the default image viewer. These images
+/// live only in memory (base64), so write a copy into the app's per-user cache
+/// folder (not the shared system temp dir) and open that.
+#[tauri::command]
+fn open_image_data(webview: WebviewWindow, media_type: String, data: String) -> Result<(), String> {
+    let extension =
+        image_extension_for(&media_type).ok_or_else(|| format!("not an image: {media_type}"))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .map_err(|e| format!("invalid image data: {e}"))?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_DROPPED_FILE_BYTES {
+        return Err("image is empty or too large to open".into());
+    }
+    let dir = webview
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("chat-images");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = image_temp_path(&dir, extension, &bytes);
+    if !file.is_file() {
+        std::fs::write(&file, &bytes).map_err(|e| e.to_string())?;
+    }
+    webview
+        .opener()
+        .open_path(file.to_string_lossy().to_string(), None::<String>)
+        .map_err(|e| e.to_string())
+}
+
 /// Open an http(s) URL in the system browser (title-bar GitHub issue/PR links).
 /// Scheme-validated so the webview can't turn this into a local-file opener.
 #[tauri::command]
@@ -1071,6 +1123,9 @@ async fn sidecar_get_json(
     let res = client
         .get(format!("{}{}", sidecar_base(port), path))
         .header("x-gg-session", &gg_sid)
+        // Local reads (history, export): bounded so a wedged daemon surfaces
+        // an error instead of an endless spinner.
+        .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -4310,12 +4365,14 @@ fn drain_sse_frames(buf: &mut Vec<u8>) -> Vec<String> {
 /// Connect to a window's sidecar SSE stream and re-emit each frame ONLY to that
 /// window (`emit_to` the window label) as `agent-event`, so windows never see
 /// each other's agent activity. Rust has no mixed-content restriction, so the
-/// webview never touches plain HTTP directly. Reconnects on stream end.
+/// webview never touches plain HTTP directly. Reconnects on stream end, backing
+/// off while the daemon stays unreachable.
 fn start_event_bridge(app: tauri::AppHandle, label: String, port: u16, session_id: String) {
     // Reuse the app's shared HTTP client (cheap Arc clone) so the SSE connect
     // shares the connection pool with the proxy commands.
     let client = app.state::<reqwest::Client>().inner().clone();
     tauri::async_runtime::spawn(async move {
+        let mut retry_delay = SSE_RETRY_MIN;
         loop {
             // Stop once this window's active session has moved on (project switch
             // created a new session) or the window is gone — otherwise the old
@@ -4336,7 +4393,12 @@ fn start_event_bridge(app: tauri::AppHandle, label: String, port: u16, session_i
                 urlencoding(&session_id)
             );
             match client.get(&url).send().await {
+                Ok(res) if !res.status().is_success() => {
+                    log::warn!("agent event stream refused: {}", res.status());
+                }
                 Ok(res) => {
+                    // Connected: the next drop is a fresh outage, retried fast.
+                    retry_delay = SSE_RETRY_MIN;
                     let mut stream = res.bytes_stream();
                     // Raw byte buffer — decode only at frame boundaries so a
                     // codepoint split across TCP chunks is never corrupted.
@@ -4389,9 +4451,21 @@ fn start_event_bridge(app: tauri::AppHandle, label: String, port: u16, session_i
                     serde_json::json!({ "type": "connection_lost", "data": {} }),
                 );
             }
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = next_sse_retry_delay(retry_delay);
         }
     });
+}
+
+/// First reconnect after a dropped event stream: quick, so a blip is invisible.
+const SSE_RETRY_MIN: std::time::Duration = std::time::Duration::from_secs(1);
+/// Ceiling while the daemon stays down. If it never returns (the crash circuit
+/// breaker opened), every window would otherwise wake, log and re-render a
+/// "Reconnecting" event once a second until the app quits.
+const SSE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn next_sse_retry_delay(current: std::time::Duration) -> std::time::Duration {
+    (current * 2).min(SSE_RETRY_MAX)
 }
 
 /// Resolve the Node runtime used to run the sidecar.
@@ -5144,6 +5218,9 @@ pub fn run() {
     );
     let http_client = reqwest::Client::builder()
         .default_headers(default_headers)
+        // The daemon is on loopback, so a connect that doesn't land quickly
+        // never will. No overall timeout here: the SSE stream is long-lived.
+        .connect_timeout(std::time::Duration::from_secs(5))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -5184,6 +5261,7 @@ pub fn run() {
             open_permissions_settings,
             read_dropped_file_attachment,
             open_project_path,
+            open_image_data,
             open_url,
             agent_state,
             agent_memories,
@@ -5468,6 +5546,35 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sse_retry_backs_off_to_a_ceiling() {
+        let mut delay = SSE_RETRY_MIN;
+        let mut seen = vec![delay.as_secs()];
+        for _ in 0..8 {
+            delay = next_sse_retry_delay(delay);
+            seen.push(delay.as_secs());
+        }
+        assert_eq!(seen, [1, 2, 4, 8, 16, 30, 30, 30, 30]);
+    }
+
+    #[test]
+    fn open_image_data_only_writes_known_image_extensions() {
+        assert_eq!(image_extension_for("image/png"), Some("png"));
+        assert_eq!(image_extension_for("image/jpeg"), Some("jpg"));
+        assert_eq!(image_extension_for("application/x-sh"), None);
+        assert_eq!(image_extension_for("image/svg+xml"), None);
+    }
+
+    #[test]
+    fn image_temp_path_is_stable_per_image() {
+        let dir = Path::new("/tmp/gg");
+        let a = image_temp_path(dir, "png", b"one");
+        assert_eq!(a, image_temp_path(dir, "png", b"one"));
+        assert_ne!(a, image_temp_path(dir, "png", b"two"));
+        assert_eq!(a.extension().and_then(|e| e.to_str()), Some("png"));
+        assert_eq!(a.parent(), Some(dir));
+    }
 
     /// Guards the startup crash from the reqwest 0.13 bump: the shared client is
     /// built before anything else in `run()`, and without a rustls provider that

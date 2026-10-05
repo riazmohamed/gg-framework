@@ -24,4 +24,28 @@ describe("CritterLine", () => {
     expect(img?.classList.contains(`subagents-critter-${tone}`)).toBe(true);
     expect(text?.textContent).toBe("A critter");
   });
+
+  it("a colour override replaces the tone colour, keeping the tone's pose and shimmer", () => {
+    const { container } = render(
+      <CritterLine critter={critter} tone="working" color={theme.warning} text="Plan accepted" />,
+    );
+    const text = container.querySelector<HTMLElement>(".subagents-compact-text");
+    const shimmer = container.querySelector<HTMLElement>(".shimmer-text");
+    expect(text?.style.color).toBe(theme.warning);
+    expect(shimmer?.style.getPropertyValue("--shimmer-base")).toBe(theme.warning);
+    expect(container.querySelector(".subagents-critter-working")).not.toBeNull();
+  });
+
+  it("dissolves to new wording when the status changes, but not on first show", () => {
+    const { container, rerender } = render(
+      <CritterLine critter={critter} tone="working" text="Sent a critter off to help…" />,
+    );
+    const text = (): Element | null => container.querySelector(".subagents-compact-text");
+    // The row itself already dissolves in; restored history must not animate.
+    expect(text()?.classList.contains("dissolve-swap")).toBe(false);
+
+    rerender(<CritterLine critter={critter} tone="done" text="The critter is back" />);
+    expect(text()?.classList.contains("dissolve-swap")).toBe(true);
+    expect(text()?.textContent).toBe("The critter is back");
+  });
 });

@@ -5,7 +5,13 @@ import type { AgentTool } from "@abukhaled/gg-agent";
 import type { Provider } from "@abukhaled/gg-ai";
 import { mcpServersForAgent, type AgentDefinition } from "../core/agents.js";
 import { log } from "../core/logger.js";
+import { isModelUnavailableError } from "../core/model-unavailable.js";
 import { ReceiptRecorder } from "../core/subagent-receipt.js";
+import {
+  AcceptanceChecksParam,
+  formatCheckResults,
+  verifyAcceptanceChecks,
+} from "../core/acceptance-checks.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
 import {
   boundSubAgentOutput,
@@ -16,19 +22,14 @@ import {
   resolveSubAgentCliEntry,
   selectSubAgent,
   subAgentCacheKey,
+  subAgentThinkingLevel,
   type SubAgentTokenUsage,
   SUB_AGENT_MAX_OUTPUT_CHARS,
   SUB_AGENT_MAX_STDERR_CHARS,
   SUB_AGENT_MAX_TURNS,
   SUB_AGENT_TIMEOUT_MS,
 } from "./subagent-shared.js";
-
-/** Only retry errors that specifically mean the selected model cannot be used. */
-export function isModelUnavailableError(stderr: string): boolean {
-  return /does not recognize the requested model|requested model[^\n]*(?:not available|no access)|model[^\n]*(?:does not exist|not found|not available)/i.test(
-    stderr,
-  );
-}
+import { editTargetLabel } from "./edit-targets.js";
 
 const SubAgentParams = z.object({
   task: z.string().describe("The task to delegate to the sub-agent"),
@@ -36,6 +37,7 @@ const SubAgentParams = z.object({
     .string()
     .optional()
     .describe("Named agent definition to use (from ~/.gg/agents/ or .gg/agents/)"),
+  checks: AcceptanceChecksParam,
 });
 
 export interface SubAgentUpdate {
@@ -50,6 +52,24 @@ export interface SubAgentDetails {
   durationMs: number;
 }
 
+const SUBAGENT_DESCRIPTION =
+  "Spawn an isolated sub-agent to handle a focused task and block until it answers. The sub-agent runs as a separate process with its own context window, tools, and system prompt, and sees none of this conversation — so its task must stand alone.";
+
+/**
+ * The `subagent` tool description. When `spawn_agent` is also active it
+ * already carries the full roster, so repeating it here only adds ~1k chars
+ * to every request; point at it instead.
+ */
+export function subAgentDescription(
+  agents: readonly AgentDefinition[],
+  rosterOnSpawnAgent: boolean,
+): string {
+  if (rosterOnSpawnAgent && agents.length > 0) {
+    return `${SUBAGENT_DESCRIPTION}\n\nNamed agents: the same roster listed on \`spawn_agent\`; pass one as \`agent\`.`;
+  }
+  return SUBAGENT_DESCRIPTION + renderAgentRoster(agents);
+}
+
 export function createSubAgentTool(
   cwd: string,
   agents: AgentDefinition[],
@@ -60,9 +80,7 @@ export function createSubAgentTool(
 ): AgentTool<typeof SubAgentParams> {
   return {
     name: "subagent",
-    description:
-      `Spawn an isolated sub-agent to handle a focused task and block until it answers. The sub-agent runs as a separate process with its own context window, tools, and system prompt, and sees none of this conversation — so its task must stand alone.` +
-      renderAgentRoster(agents),
+    description: subAgentDescription(agents, false),
     parameters: SubAgentParams,
     // Sub-agents are isolated child processes (own cwd, context, and PID), so
     // they're safe to run concurrently — unlike bash/edit/write, which mutate
@@ -115,6 +133,13 @@ export function createSubAgentTool(
         if (childCacheKey) {
           cliArgs.push("--prompt-cache-key", childCacheKey);
         }
+        // Without --thinking the child runs with reasoning OFF. Every child
+        // runs at the lowest rung of the model THIS attempt uses (the parent
+        // model on a retry), same as spawn_agent children.
+        const thinkingLevel = subAgentThinkingLevel(useProvider, model);
+        if (thinkingLevel) {
+          cliArgs.push("--thinking", thinkingLevel);
+        }
         if (agentDef?.systemPrompt) {
           // --agent-prompt, not --system-prompt: the definition body is composed
           // with the Tools/project-context/Environment scaffolding instead of
@@ -139,7 +164,7 @@ export function createSubAgentTool(
         return cliArgs;
       };
 
-      // Track progress across both attempts. The cheap-model attempt can only
+      // Track progress across both attempts. A pinned-model attempt can only
       // fall back before producing output or using a tool, so these totals remain
       // an accurate picture of the actual agent run.
       let toolUseCount = 0;
@@ -298,7 +323,7 @@ export function createSubAgentTool(
               !context.signal.aborted &&
               isModelUnavailableError(stderr);
             if (canFallback) {
-              log("WARN", "subagent", "Cheap sub-agent model unavailable; retrying parent", {
+              log("WARN", "subagent", "Pinned sub-agent model unavailable; retrying parent", {
                 provider: useProvider,
                 model,
                 fallbackModel: parentModel,
@@ -328,7 +353,10 @@ export function createSubAgentTool(
             });
 
             const body = boundSubAgentOutput(textOutput);
-            const receiptBlock = `\n\n${receipt.render(textOutput, cwd)}`;
+            const checksBlock = formatCheckResults(
+              verifyAcceptanceChecks(args.checks ?? [], receipt.snapshot(), cwd),
+            );
+            const receiptBlock = `\n\n${receipt.render(textOutput, cwd)}${checksBlock ? `\n${checksBlock}` : ""}`;
             if (code !== 0) {
               // A provider/process failure can happen AFTER the model has emitted
               // a progress sentence (for example: "I'll read both files now.").
@@ -359,7 +387,7 @@ export function createSubAgentTool(
                 // check: partial output or tool calls the child made.
                 content: textOutput
                   ? `Sub-agent failed (exit ${code}): ${error}\n\nPartial output before failure:\n${body}${receiptBlock}`
-                  : toolUseCount > 0
+                  : toolUseCount > 0 || checksBlock
                     ? `Sub-agent failed (exit ${code}): ${error}${receiptBlock}`
                     : `Sub-agent failed (exit ${code}): ${error}`,
                 details,
@@ -398,7 +426,7 @@ function formatToolActivity(name: string, args: Record<string, unknown>): string
     case "write":
       return `Writing ${shortenPath(String(args.file_path ?? ""))}`;
     case "edit":
-      return `Editing ${shortenPath(String(args.file_path ?? ""))}`;
+      return `Editing ${editTargetLabel(args, shortenPath)}`;
     case "grep": {
       const pat = String(args.pattern ?? "");
       return `Searching for "${truncateStr(pat, 30)}"`;

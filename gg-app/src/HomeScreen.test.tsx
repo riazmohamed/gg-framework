@@ -7,7 +7,7 @@ import { HomeScreen } from "./HomeScreen";
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn(async () => "1.0.0") }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("./AsciiLogo", () => ({ AsciiLogo: () => null }));
-vi.mock("./HomeDither", () => ({ HomeDither: () => null }));
+vi.mock("./HomeScenery", () => ({ HomeScenery: () => null, withScenery: (b: unknown) => b }));
 vi.mock("./HomeCritters", () => ({ HomeCritters: () => null }));
 vi.mock("./RankBadge", () => ({ RankBadge: () => null }));
 vi.mock("./ScorecardModal", () => ({ ScorecardModal: () => null }));

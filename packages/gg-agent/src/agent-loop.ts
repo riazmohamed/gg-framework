@@ -28,6 +28,7 @@ import type {
   StructuredToolResult,
 } from "./types.js";
 import { isLocalBackendUrl } from "./local-backend.js";
+import { argumentHints, unknownToolMessage } from "./tool-call-hints.js";
 import {
   clampOutputTokens,
   outputRouteKey,
@@ -1087,6 +1088,8 @@ export async function* agentLoop(
           onContextPrepared: options.onContextPrepared,
           promptCacheKey: options.promptCacheKey,
           serviceTier: options.serviceTier,
+          responsesLite: options.responsesLite,
+          strictTools: options.strictTools,
           supportsImages: options.supportsImages,
           supportsVideo: options.supportsVideo,
           compaction: options.compaction,
@@ -2242,7 +2245,7 @@ async function executeSingleToolCall(
     options.seenToolCalls.add(signature);
   }
   if (!tool) {
-    resultContent = `Unknown tool: ${toolCall.name}`;
+    resultContent = unknownToolMessage(toolCall.name, [...options.toolMap.keys()]);
     isError = true;
   } else {
     try {
@@ -2319,9 +2322,11 @@ async function executeSingleToolCall(
         const failureCount = (options.invalidToolArgumentCounts.get(failureKey) ?? 0) + 1;
         options.invalidToolArgumentCounts.set(failureKey, failureCount);
         invalidArgAttempt = failureCount;
+        const hints = argumentHints(tool, toolCall.args);
         resultContent =
           `Invalid arguments for tool \`${toolCall.name}\`:\n` +
           prettyError +
+          (hints ? `\n${hints}` : "") +
           "\nRe-issue the call with each field as the correct type.";
         if (failureCount >= 3) {
           // Empty raw args (no fields at all) is the signature of a provider

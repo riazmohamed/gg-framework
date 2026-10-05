@@ -10,8 +10,6 @@ import type { MCPClientManager } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
 import type { Skill } from "../core/skills.js";
 import type { CheckpointStore } from "../core/checkpoint-store.js";
-import type { LspManager } from "../core/lsp/manager.js";
-import type { ReviewCoverageTracker } from "../core/ideal-review.js";
 import type { TurnMetricPayload } from "../core/session-manager.js";
 import { App, type CompletedItem, type DoneStatus } from "./App.js";
 import { itemHasImagePreviews } from "./app-items.js";
@@ -69,8 +67,6 @@ export interface RenderAppConfig {
   sessionId?: string;
   processManager?: ProcessManager;
   subAgentManager?: SubAgentManager;
-  lspManager?: LspManager;
-  reviewCoverageTracker?: ReviewCoverageTracker;
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
@@ -592,8 +588,6 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             sessionId: sessionStore.sessionId,
             processManager: config.processManager,
             subAgentManager: config.subAgentManager,
-            lspManager: config.lspManager,
-            reviewCoverageTracker: config.reviewCoverageTracker,
             settingsFile: config.settingsFile,
             mcpManager: config.mcpManager,
             authStorage: config.authStorage,

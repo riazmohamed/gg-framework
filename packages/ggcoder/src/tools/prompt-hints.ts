@@ -29,6 +29,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
   task_stop: "Stop a background process by id.",
   screenshot:
     "Verify rendered UI with browser screenshots, click/type actions and viewport controls.",
+  debug: "Node.js breakpoints, stepping and live variables.",
   send_message: "Queue steering into a running child agent without starting another turn.",
   followup_task: "Start another turn in an idle child agent, preserving its context.",
   wait_agent:
@@ -75,7 +76,10 @@ export const TOOL_STEERING_CLAUSES: ReadonlyArray<{
   },
   {
     needs: ["bash", "find", "grep"],
-    text: "Use `find`/`grep` rather than `bash` to locate files and search content.",
+    // A head-to-head against the pi agent found the strict
+    // "rather than bash" wording split exploration into one ls/find per turn
+    // (~50s per suite); one combined read-only bash command does it in one.
+    text: "Use `find`/`grep` to locate files and search content; when orienting in an unfamiliar tree, one read-only `bash` command that combines several lookups (`ls`, `find`, `rg`, `cat` of the small relevant files) is fine and saves turns — list and read in the same step rather than listing first and reading next turn.",
   },
   {
     needs: ["code_search", "grep", "read"],
@@ -112,6 +116,7 @@ export const BUILTIN_TOOL_NAMES: readonly string[] = [
   "bash",
   "code_nav",
   "code_search",
+  "debug",
   "edit",
   "enter_plan",
   "exit_plan",
