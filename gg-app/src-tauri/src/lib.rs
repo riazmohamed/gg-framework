@@ -173,6 +173,33 @@ struct FocusedWindow(Mutex<Option<String>>);
 #[derive(Default)]
 struct MoveDebounce(Mutex<Option<std::time::Instant>>);
 
+/// Debounce token for persisting window geometry. Same superseding scheme as
+/// `MoveDebounce`, but on its own token and a longer delay: a drag or live
+/// resize fires dozens of events, and the workspace file only needs the
+/// settled layout.
+#[derive(Default)]
+struct GeometryDebounce(Mutex<Option<std::time::Instant>>);
+
+/// Persist the window arrangement shortly after it stops changing, so moving,
+/// resizing or tiling windows survives a crash, a force-quit or an updater
+/// relaunch — not only a clean quit. Skipped while the app is quitting: the
+/// exit handler writes the final snapshot itself, and per-window teardown must
+/// not overwrite it with a shrinking set.
+fn schedule_workspace_snapshot(app: &tauri::AppHandle) {
+    const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
+    let app = app.clone();
+    let now = std::time::Instant::now();
+    *app.state::<GeometryDebounce>().0.lock().unwrap() = Some(now);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(SETTLE).await;
+        let latest = *app.state::<GeometryDebounce>().0.lock().unwrap() == Some(now);
+        let exiting = app.state::<AppExiting>().0.load(Ordering::SeqCst);
+        if latest && !exiting {
+            snapshot_workspace(&app);
+        }
+    });
+}
+
 /// Windows-only: per-window last-known minimized state. Used to detect the
 /// minimized→restored edge in `Resized` events (on Windows, minimize fires
 /// `Resized(0,0)` / `is_minimized()==true`, restore fires `Resized(real)` /
@@ -2057,8 +2084,15 @@ fn app_create_project(name: String) -> Result<serde_json::Value, String> {
 
 /// One saved window: its mode, cwd, an optional session file to resume, and
 /// optional last-known geometry (physical pixels).
+///
+/// `picker` marks a window that was still on the project picker. It carries no
+/// cwd, only geometry, so the window ARRANGEMENT survives a restart even before
+/// every tile has a project chosen (arrange into 4, pick one project, quit →
+/// four windows come back where they were, three of them on the picker).
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct WorkspaceEntry {
+    #[serde(default, skip_serializing_if = "is_false")]
+    picker: bool,
     #[serde(default)]
     mode: WorkspaceMode,
     #[serde(rename = "chatAgent", default)]
@@ -2085,6 +2119,10 @@ struct WorkspaceEntry {
 struct Workspace {
     #[serde(default)]
     windows: Vec<WorkspaceEntry>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Absolute path to ~/.gg/gg-app-workspace.json.
@@ -2119,15 +2157,43 @@ fn keep_for_snapshot(workspace_selected: bool, cwd: Option<&Path>) -> bool {
 }
 
 /// Pure: drop restore entries that can't be opened (empty cwd, or a cwd that no
-/// longer exists). `exists` is injected so this is testable without the fs.
+/// longer exists). Picker entries have no cwd and always survive — they only
+/// hold a tile of the arrangement. `exists` is injected so this is testable
+/// without the fs.
 fn filter_restorable<F: Fn(&str) -> bool>(
     windows: Vec<WorkspaceEntry>,
     exists: F,
 ) -> Vec<WorkspaceEntry> {
     windows
         .into_iter()
-        .filter(|w| !w.cwd.trim().is_empty() && exists(&w.cwd))
+        .filter(|w| w.picker || (!w.cwd.trim().is_empty() && exists(&w.cwd)))
         .collect()
+}
+
+/// Pure: whether a saved window rect `(x, y, width, height)` is still usable on
+/// the current displays. A monitor unplugged since the snapshot, a resolution
+/// change, or a Windows minimized window (parked at -32000,-32000) would
+/// otherwise restore a window the user cannot see or grab. The title-bar strip
+/// (top `GRAB_STRIP` px) must overlap some monitor by at least `MIN_GRAB` px in
+/// each direction, so the window can always be dragged back.
+fn rect_on_some_monitor(rect: (i32, i32, u32, u32), monitors: &[(i32, i32, u32, u32)]) -> bool {
+    const GRAB_STRIP: i64 = 40;
+    const MIN_GRAB: i64 = 80;
+    let (x, y, w, h) = (rect.0 as i64, rect.1 as i64, rect.2 as i64, rect.3 as i64);
+    if w < MIN_GRAB || h < GRAB_STRIP {
+        return false;
+    }
+    monitors.iter().any(|&(mx, my, mw, mh)| {
+        let (mx, my, mw, mh) = (mx as i64, my as i64, mw as i64, mh as i64);
+        let overlap_w = (x + w).min(mx + mw) - x.max(mx);
+        let overlap_h = (y + GRAB_STRIP).min(my + mh) - y.max(my);
+        overlap_w >= MIN_GRAB && overlap_h >= GRAB_STRIP.min(MIN_GRAB) / 2
+    })
+}
+
+/// Pure: the saved rect of an entry, if it carries complete geometry.
+fn entry_rect(entry: &WorkspaceEntry) -> Option<(i32, i32, u32, u32)> {
+    Some((entry.x?, entry.y?, entry.width?, entry.height?))
 }
 
 /// Walk every live window + its `Windows` session entry and write a fresh
@@ -2155,12 +2221,22 @@ fn snapshot_workspace(app: &tauri::AppHandle) {
     for label in &labels {
         let Some(inst) = map.get(label) else { continue };
         let cwd = inst.cwd.as_deref();
-        if !keep_for_snapshot(selected_labels.contains(label), cwd) {
-            continue;
-        }
-        let cwd = cwd.unwrap().to_string_lossy().to_string();
+        // A window still on the picker is saved as an arrangement tile only:
+        // geometry, no project, so it reopens on the picker in the same place.
+        let picker = !keep_for_snapshot(selected_labels.contains(label), cwd);
+        let cwd = if picker {
+            String::new()
+        } else {
+            cwd.unwrap().to_string_lossy().to_string()
+        };
         let (mut x, mut y, mut width, mut height) = (None, None, None, None);
-        if let Some(win) = windows.get(label) {
+        // A minimized window reports a parked position (Windows: -32000) and a
+        // zero size; saving that would restore an unreachable window, so its
+        // geometry is left empty and restore re-tiles instead.
+        if let Some(win) = windows
+            .get(label)
+            .filter(|w| !w.is_minimized().unwrap_or(false))
+        {
             if let Ok(pos) = win.outer_position() {
                 x = Some(pos.x);
                 y = Some(pos.y);
@@ -2171,10 +2247,15 @@ fn snapshot_workspace(app: &tauri::AppHandle) {
             }
         }
         entries.push(WorkspaceEntry {
+            picker,
             mode: inst.mode,
             chat_agent: inst.chat_agent,
             cwd,
-            session_path: inst.session_path.clone(),
+            session_path: if picker {
+                None
+            } else {
+                inst.session_path.clone()
+            },
             x,
             y,
             width,
@@ -2186,8 +2267,17 @@ fn snapshot_workspace(app: &tauri::AppHandle) {
 }
 
 /// Remove one window's entry from the snapshot (deliberate user close). Keyed by
-/// the window's recorded mode + cwd, since the snapshot has no labels.
-fn remove_window_from_workspace(app: &tauri::AppHandle, label: &str) {
+/// the window's recorded mode + cwd, since the snapshot has no labels. A window
+/// that was still on the picker (`was_selected == false`) drops one picker tile.
+fn remove_window_from_workspace(app: &tauri::AppHandle, label: &str, was_selected: bool) {
+    if !was_selected {
+        let mut ws = read_workspace();
+        if let Some(idx) = ws.windows.iter().position(|w| w.picker) {
+            ws.windows.remove(idx);
+            write_workspace(&ws);
+        }
+        return;
+    }
     let target = {
         let state: State<Windows> = app.state();
         let map = state.map.lock().unwrap();
@@ -2205,7 +2295,7 @@ fn remove_window_from_workspace(app: &tauri::AppHandle, label: &str) {
     if let Some(idx) = ws
         .windows
         .iter()
-        .position(|w| w.mode == mode && w.chat_agent == chat_agent && w.cwd == cwd)
+        .position(|w| !w.picker && w.mode == mode && w.chat_agent == chat_agent && w.cwd == cwd)
     {
         ws.windows.remove(idx);
         write_workspace(&ws);
@@ -3600,6 +3690,7 @@ async fn setup_windows(app: tauri::AppHandle, count: usize) -> Result<(), String
     }
     arrange_windows(&app, count);
     broadcast_window_order(&app);
+    schedule_workspace_snapshot(&app);
     Ok(())
 }
 
@@ -3623,6 +3714,7 @@ async fn new_window(app: tauri::AppHandle) -> Result<(), String> {
     );
     let _ = win.set_focus();
     broadcast_window_order(&app);
+    schedule_workspace_snapshot(&app);
     Ok(())
 }
 
@@ -3726,6 +3818,7 @@ async fn arrange_all(app: tauri::AppHandle) -> Result<(), String> {
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     }
     broadcast_window_order(&app);
+    schedule_workspace_snapshot(&app);
     Ok(())
 }
 
@@ -5126,7 +5219,21 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
     }
 
     let count = entries.len();
-    let mut any_geometry = false;
+    // Saved geometry is replayed only when EVERY window's rect still lands on a
+    // connected display; otherwise the whole set is re-tiled, so a half-restored
+    // arrangement never overlaps freshly tiled windows.
+    let monitors: Vec<(i32, i32, u32, u32)> = app
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| {
+            let (pos, size) = (m.position(), m.size());
+            (pos.x, pos.y, size.width, size.height)
+        })
+        .collect();
+    let use_saved_geometry = entries
+        .iter()
+        .all(|e| entry_rect(e).is_some_and(|r| rect_on_some_monitor(r, &monitors)));
     for (i, entry) in entries.into_iter().enumerate() {
         // First restored window reclaims `main`; the rest get project-N.
         let label = if i == 0 {
@@ -5135,8 +5242,9 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
             format!("project-{i}")
         };
         // Register the target before constructing the webview: even a hidden
-        // webview may execute immediately after build() returns.
-        {
+        // webview may execute immediately after build() returns. A picker tile
+        // registers none, so its webview shows the picker.
+        if !entry.picker {
             let state: State<RestoreTargets> = app.state();
             register_restore_target(
                 &mut state.map.lock().unwrap(),
@@ -5159,26 +5267,31 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
                 return Err(error);
             }
         };
-        start_window_session(
-            app.clone(),
-            label.clone(),
-            entry.mode,
-            entry.chat_agent,
-            PathBuf::from(&entry.cwd),
-            entry.session_path.clone(),
-        );
-        // Apply saved geometry when present; else we tile after the loop.
-        if let (Some(x), Some(y)) = (entry.x, entry.y) {
-            any_geometry = true;
-            let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+        if entry.picker {
+            start_window_session(
+                app.clone(),
+                label.clone(),
+                WorkspaceMode::Code,
+                ChatAgent::General,
+                default_cwd(),
+                None,
+            );
+        } else {
+            start_window_session(
+                app.clone(),
+                label.clone(),
+                entry.mode,
+                entry.chat_agent,
+                PathBuf::from(&entry.cwd),
+                entry.session_path.clone(),
+            );
         }
-        if let (Some(w), Some(h)) = (entry.width, entry.height) {
-            any_geometry = true;
-            let _ = win.set_size(tauri::PhysicalSize::new(w, h));
+        if let Some(rect) = entry_rect(&entry).filter(|_| use_saved_geometry) {
+            apply_tile(&win, rect);
         }
         let _ = win.show();
     }
-    if !any_geometry {
+    if !use_saved_geometry {
         arrange_windows(app, count);
     }
     broadcast_window_order(app);
@@ -5251,6 +5364,7 @@ pub fn run() {
         .manage(AppExiting::default())
         .manage(FocusedWindow::default())
         .manage(MoveDebounce::default())
+        .manage(GeometryDebounce::default())
         .manage(TrayState::default())
         .manage(TrayIntents::default())
         .manage(http_client)
@@ -5382,16 +5496,17 @@ pub fn run() {
             tauri::WindowEvent::Destroyed => {
                 let app = window.app_handle();
                 // A target can remain pending when a webview closes before mount.
-                remove_restore_target(
+                let was_selected = remove_restore_target(
                     &mut app.state::<RestoreTargets>().map.lock().unwrap(),
                     window.label(),
-                );
+                )
+                .is_some();
                 // A deliberate close (app NOT quitting) drops this window from the
                 // workspace so it doesn't reopen next launch. During quit the
                 // AppExiting flag is set, so the snapshot is preserved intact.
                 let exiting = app.state::<AppExiting>().0.load(Ordering::SeqCst);
                 if !exiting {
-                    remove_window_from_workspace(app, window.label());
+                    remove_window_from_workspace(app, window.label(), was_selected);
                 }
                 // Dispose only THIS window's session in the shared daemon so
                 // other projects keep running. The daemon process itself is
@@ -5427,9 +5542,10 @@ pub fn run() {
             // Windows-only: a single taskbar click un-minimizes just the picked
             // window. Cascade the restore to its siblings so the whole workspace
             // reopens together, like macOS. Compiled out on macOS (falls to `_`).
-            #[cfg(target_os = "windows")]
             tauri::WindowEvent::Resized(_) => {
+                #[cfg(target_os = "windows")]
                 restore_sibling_windows(window);
+                schedule_workspace_snapshot(window.app_handle());
             }
             // Debounced: native drag fires Moved per pixel. Only the last move's
             // deferred task fires (its captured Instant still matches), so peers
@@ -5452,6 +5568,7 @@ pub fn run() {
                         broadcast_window_order(&app);
                     }
                 });
+                schedule_workspace_snapshot(window.app_handle());
             }
             _ => {}
         })
@@ -5662,10 +5779,83 @@ mod tests {
     }
 
     #[test]
+    fn filter_restorable_keeps_picker_tiles_without_a_cwd() {
+        let windows = vec![
+            WorkspaceEntry {
+                cwd: "/exists/a".into(),
+                ..Default::default()
+            },
+            WorkspaceEntry {
+                picker: true,
+                ..Default::default()
+            },
+        ];
+        let kept = filter_restorable(windows, |c| c == "/exists/a");
+        assert_eq!(kept.len(), 2);
+        assert!(kept[1].picker);
+    }
+
+    #[test]
+    fn picker_tiles_roundtrip_and_legacy_entries_are_not_pickers() {
+        let ws = Workspace {
+            windows: vec![WorkspaceEntry {
+                picker: true,
+                x: Some(960),
+                y: Some(0),
+                width: Some(960),
+                height: Some(1080),
+                ..Default::default()
+            }],
+        };
+        let json = serde_json::to_string(&ws).unwrap();
+        assert!(json.contains(r#""picker":true"#));
+        assert_eq!(serde_json::from_str::<Workspace>(&json).unwrap(), ws);
+        let legacy: Workspace =
+            serde_json::from_str(r#"{ "windows": [{ "cwd": "/p/a" }] }"#).unwrap();
+        assert!(!legacy.windows[0].picker);
+        // A project entry never serializes the flag at all.
+        let project = serde_json::to_string(&legacy).unwrap();
+        assert!(!project.contains("picker"));
+    }
+
+    #[test]
+    fn entry_rect_requires_complete_geometry() {
+        let mut entry = WorkspaceEntry {
+            x: Some(10),
+            y: Some(20),
+            width: Some(800),
+            ..Default::default()
+        };
+        assert_eq!(entry_rect(&entry), None);
+        entry.height = Some(600);
+        assert_eq!(entry_rect(&entry), Some((10, 20, 800, 600)));
+    }
+
+    #[test]
+    fn rect_on_some_monitor_rejects_lost_displays_and_parked_windows() {
+        let laptop = (0, 0, 1728, 1117);
+        let external = (1728, 0, 2560, 1440);
+        let both = [laptop, external];
+        // A tile fully on a connected display is kept.
+        assert!(rect_on_some_monitor((1728, 25, 1280, 720), &both));
+        // The same tile after the external display is unplugged is rejected.
+        assert!(!rect_on_some_monitor((1728, 25, 1280, 720), &[laptop]));
+        // Windows parks minimized windows at -32000,-32000.
+        assert!(!rect_on_some_monitor((-32000, -32000, 160, 28), &both));
+        // A window whose title bar is above every display cannot be grabbed.
+        assert!(!rect_on_some_monitor((100, -900, 800, 600), &both));
+        // Partially off-screen but with a grabbable title strip is fine.
+        assert!(rect_on_some_monitor((1500, 100, 800, 600), &[laptop]));
+        // No monitor information at all → never trust saved geometry.
+        assert!(!rect_on_some_monitor((0, 0, 800, 600), &[]));
+    }
+
+    #[test]
     fn workspace_roundtrips_through_json() {
         let ws = Workspace {
             windows: vec![
                 WorkspaceEntry {
+                    picker: false,
                     mode: WorkspaceMode::Chat,
                     chat_agent: ChatAgent::Research,
                     cwd: "/p/a".into(),
