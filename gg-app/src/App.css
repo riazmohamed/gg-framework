@@ -88,23 +88,39 @@
   --shadow-md: 0 8px 28px rgba(0, 0, 0, 0.45);
   --shadow-lg: 0 16px 44px -12px rgba(0, 0, 0, 0.7);
 
-  /* Motion — colour-on-hover (no movement). Enter is quick so the control feels
-     responsive; exit is slower so it settles rather than snaps back. */
-  --t-fast: 0.15s ease;
-  --t-in: 0.12s cubic-bezier(0.32, 0, 0.24, 1);
-  --t-out: 0.24s cubic-bezier(0.32, 0, 0.24, 1);
-  /* Easing roles. Every entrance, exit and settle draws from these instead of
-     retyping a curve.
+  /* Motion. Every transition and entrance/exit draws its curve and length from
+     the tokens below; scripts/motion-tokens.test.mjs rejects a raw
+     cubic-bezier() outside :root, a timed transition without a token, and any
+     script timing (EXIT_MS and friends) that drifts from its token.
+
+     Easing roles (curves only):
      --ease-out     things arriving (menus, reveals, chips): quick start, soft land.
      --ease-expo    growth that should feel instant then settle (toasts, composer).
      --ease-in      things leaving: gathers speed on the way out.
      --ease-in-out  in-place changes (height, progress).
-     --ease-glow    the slow ambient window-glow crossfade. */
+     --ease-hover   colour-on-hover feedback (--t-in / --t-out).
+     --ease-pop     the critters' overshoot pop (bubbles, props, ticks).
+     --ease-glow    the slow ambient window-glow crossfade.
+     --ease-spring  the Settings tab bar's spring (with --duration-spring).
+
+     Colour feedback (duration + curve shorthands, no movement):
+     --t-fast       plain state changes (glass controls, switches, links).
+     --t-in/--t-out hover enter/exit: quick in so it feels responsive, slower
+                    out so it settles rather than snaps back.
+
+     Durations: --dur-press (press dips), --dur-enter/--dur-exit (surfaces),
+     --dur-row, --dur-dissolve, --dur-strip-*, --dur-toast-*,
+     --dur-enhance-dissolve, --dur-plan-out. */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-hover: cubic-bezier(0.32, 0, 0.24, 1);
+  --ease-pop: cubic-bezier(0.3, 1.6, 0.6, 1);
   --ease-glow: cubic-bezier(0.33, 0, 0.15, 1);
+  --t-fast: 0.15s ease;
+  --t-in: 0.12s var(--ease-hover);
+  --t-out: 0.24s var(--ease-hover);
   /* The Settings tab bar's spring, from yaatuber's tab bar (Glance's
      `.spring(response: 0.35, dampingFraction: 0.82)`) sampled into linear():
      it settles in 0.5s with a ~1% overshoot. SettingsTabBar.tsx reads both
@@ -137,6 +153,8 @@
     1.001,
     1
   );
+  /* A control dipping under the pointer (glass buttons, the volume thumb). */
+  --dur-press: 100ms;
   /* Surfaces that appear on demand (modals, menus, popovers) share one entrance. */
   --dur-enter: 160ms;
   /* Leaving is quicker than arriving: the user already decided, so get out of
@@ -147,6 +165,19 @@
   /* Things that resolve out of a blur (transcript rows, swapped labels, the
      tool panel): long enough that the blur reads as a dissolve, not a flicker. */
   --dur-dissolve: 340ms;
+  /* Composer strips and chip bars (attachments, mentions, queued message, cache
+     notice) growing open and folding shut. --dur-strip-out is mirrored by
+     EXIT_MS in AttachmentBar, ReferencedFiles, QueuedBar and CacheExpiryNotice. */
+  --dur-strip-in: 260ms;
+  --dur-strip-out: 220ms;
+  /* Toasts rising in and dropping out. --dur-toast-out is Toaster's EXIT_MS. */
+  --dur-toast-in: 320ms;
+  --dur-toast-out: 260ms;
+  /* The Enhance glyph dissolve; EnhanceDissolve's DISSOLVE_MS mirrors it. */
+  --dur-enhance-dissolve: 460ms;
+  /* The plan review dissolving out. PlanReviewModal's EXIT_FALLBACK_MS must
+     stay longer than this so `animationend` normally wins. */
+  --dur-plan-out: 300ms;
 
   /* Keyboard focus: one ring for every control, drawn with box-shadow so it
      follows the control's radius. :focus-visible means pointer clicks never
@@ -180,20 +211,87 @@
      Windows. Text renders in the same face the OS uses everywhere else. */
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  /* Type scale. Every font-size on a step uses these; odd one-off sizes
+     (10px, 13.5px, display sizes) and relative/computed sizes stay literal.
+     Named --fs-* because --text-* are ink colours. */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13px;
+  --fs-md: 14px;
+  --fs-lg: 15px;
+  --fs-xl: 16px;
+  --fs-2xl: 18px;
+  --fs-3xl: 20px;
+  --fs-4xl: 24px;
+  /* Spacing scale for padding, margin and gap: --space-N is N x 2px. Odd px
+     values, values above 24px and computed values stay literal. */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 10px;
+  --space-6: 12px;
+  --space-7: 14px;
+  --space-8: 16px;
+  --space-9: 18px;
+  --space-10: 20px;
+  --space-11: 22px;
+  --space-12: 24px;
   /* Bubble and input geometry, matching the reference app. */
   /* Composer growth. Expo-out, matching the reference app's panel curve. */
   --t-composer: 0.16s var(--ease-expo);
   /* Shared horizontal rail: transcript, composer, header and footer all align
      to this inset, so nothing steps in or out down the right edge. */
-  --rail: 16px;
+  --rail: var(--space-8);
   /* Width of the transcript's scrollbar, subtracted from its right padding so
      the scrolling column still aligns with the fixed surfaces above/below. */
   --scrollbar: 8px;
   /* Vertical padding of the bars hugging the composer (status row, footer).
      Each bar owns its whole band, so this value alone centres its text. */
-  --bar-pad: 14px;
+  --bar-pad: var(--space-7);
+  /* Side gutter of full-screen pages (Settings, the project picker header).
+     Wider than the chat --rail on purpose: a page frames cards, not a
+     transcript column. */
+  --page-pad: var(--space-10);
+  /* Inline padding inside the Settings card material (Settings cards, the
+     checklist screen's sections). */
+  --card-inset: var(--space-10);
   --radius-bubble: 18px;
   --radius-input: 22px;
+
+  /* Critter speech bubble — the white bubble critters talk in, and the ink
+     drawn on it (text and the typing cursor). */
+  --speech-bg: #ffffff;
+  --on-speech: var(--bg);
+
+  /* Shimmer highlight — the default moving bright spot of ShimmerText, a step
+     brighter than --text so the sweep reads. */
+  --shimmer-peak: #ffffff;
+
+  /* Decorative — gradients and ink for a few one-off flourishes (radio
+     volume, meters, update banner and progress, rank badges). Not semantic:
+     never reuse these for state or meaning. A decorative colour used twice in
+     one feature gets a token; single-use gradient stops stay literal. */
+  --fx-volume-from: #00f260;
+  --fx-volume-to: #0575e6;
+  --fx-update-from: #36c489;
+  --fx-update-to: #2dd4bf;
+  --on-fx-update: #04130d;
+  --fx-rank-violet: #b88cff;
+  --fx-rank-blue: #6ea8ff;
+  --fx-rank-cyan: #7df9ff;
+  --fx-rank-pink: #ff8bd2;
+  --fx-rank-gold: #ffe38a;
+  --fx-rank-gold-deep: #d9a441;
+  --fx-rank-iris: #a99cff;
+  --fx-rank-radiant: #eaf6ff;
+  /* Meter track (radio volume, title-bar usage meter). */
+  --fx-meter-edge: #313131;
+  --fx-meter-from: #1b2735;
+  --fx-meter-to: #090a0f;
+  /* Update download progress fill. */
+  --fx-update-fill-from: #8ff5c6;
+  --fx-update-fill-to: #a7f3e9;
 }
 
 /* ── Button system (shared) ───────────────────────────────────────────────
@@ -206,11 +304,11 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: var(--space-4);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-pill);
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 600;
   letter-spacing: -0.005em;
   /* The app body sets line-height 1.55; inheriting it here makes the label's
@@ -219,7 +317,7 @@
   line-height: 1;
   /* Optically centred: the cap band measured 0.98px HIGH, so the top carries
      half that correction. See the probe harness note in the repo history. */
-  padding: 8.5px 18px 9.5px;
+  padding: 8.5px var(--space-9) 9.5px;
   cursor: pointer;
   white-space: nowrap;
   /* Colour-on-hover — no movement, no scale. `background-color` and `color`
@@ -361,14 +459,14 @@
 
 /* Size modifiers. */
 .btn-sm {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   /* Cap band measured 1.21px HIGH; half the correction goes on top. */
-  padding: 3.4px 12px 4.6px;
-  gap: 6px;
+  padding: 3.4px var(--space-6) 4.6px;
+  gap: var(--space-3);
 }
 .btn-lg {
-  font-size: 15px;
-  padding: 13px 22px;
+  font-size: var(--fs-lg);
+  padding: 13px var(--space-11);
 }
 /* Icon-only — perfect circle, fixed square size, no rectangular padding. */
 .btn-icon {
@@ -414,7 +512,7 @@
   z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-5);
   align-items: flex-end;
   pointer-events: none;
 }
@@ -422,16 +520,16 @@
   pointer-events: auto;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-5);
   max-width: 360px;
-  padding: 11px 12px 11px 11px;
+  padding: 11px var(--space-6) 11px 11px;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   box-shadow: var(--shadow-lg);
-  font-size: 13px;
+  font-size: var(--fs-base);
   color: var(--text);
-  animation: toast-in 0.32s var(--ease-expo);
+  animation: toast-in var(--dur-toast-in) var(--ease-expo);
 }
 @keyframes toast-in {
   from {
@@ -445,7 +543,7 @@
 }
 /* Exit: slide straight down and fade out. Duration must match EXIT_MS. */
 .toast.leaving {
-  animation: toast-out 0.26s var(--ease-expo) forwards;
+  animation: toast-out var(--dur-toast-out) var(--ease-expo) forwards;
   pointer-events: none;
 }
 @keyframes toast-out {
@@ -523,9 +621,9 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-1);
   min-width: 116px;
-  padding: 18px 26px;
+  padding: var(--space-9) 26px;
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-card);
@@ -566,7 +664,7 @@
 }
 .zoom-overlay-label {
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -582,21 +680,23 @@
   height: 22px;
   border: 1px solid;
   border-radius: var(--radius-pill);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 700;
 }
 .toast-msg {
   flex: 1 1 auto;
   line-height: 1.4;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .toast-close {
   flex: 0 0 auto;
   background: transparent;
   border: none;
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   cursor: pointer;
-  padding: 2px;
+  padding: var(--space-1);
   transition: color var(--t-fast);
 }
 .toast-close:hover {
@@ -645,7 +745,7 @@ select {
      through #root/body/html (all 100%) and scales correctly with zoom. */
   height: 100%;
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1.55;
   letter-spacing: -0.011em;
   color: var(--text);
@@ -823,7 +923,7 @@ select {
   gap: 9px;
   color: var(--text-muted);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .app-restoring-dot {
@@ -867,7 +967,7 @@ select {
   left: 50%;
   z-index: calc(var(--z-overlay) + 1);
   transform: translate(-50%, -50%);
-  padding: 18px 26px;
+  padding: var(--space-9) 26px;
   border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--surface-2) 92%, var(--primary));
   color: var(--text);
@@ -884,18 +984,18 @@ select {
   align-items: center;
   justify-content: center;
   /* Native chrome (Windows/Linux): no overlay title bar to clear. */
-  padding: 10px var(--rail);
+  padding: var(--space-5) var(--rail);
   border-bottom: 1px solid var(--border);
   user-select: none;
 }
 /* macOS overlay title bar: top padding clears the traffic-light buttons so the
    action rows sit BELOW them (matching .picker-head), not crammed onto them. */
 .platform-macos .titlebar {
-  padding: 34px var(--rail) 10px;
+  padding: 34px var(--rail) var(--space-5);
 }
 
 .titlebar .title {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-muted);
   font-weight: 600;
 }
@@ -909,7 +1009,7 @@ select {
   justify-content: center;
   height: 100%;
   gap: 28px;
-  padding: 24px;
+  padding: var(--space-12);
   text-align: center;
   overflow: hidden;
 }
@@ -1094,9 +1194,9 @@ select {
   background: linear-gradient(
     100deg,
     #e4e6ee 0%,
-    #f2f3f8 25%,
+    var(--text) 25%,
     #ffffff 50%,
-    #f2f3f8 75%,
+    var(--text) 75%,
     #e4e6ee 100%
   );
   background-size: 220% 100%;
@@ -1119,7 +1219,7 @@ select {
      opt out and fill with the same white, so a tear shows as shape, not
      colour. */
   background: none;
-  color: #f2f3f8;
+  color: var(--text);
   -webkit-text-fill-color: currentColor;
 }
 .ascii-logo-glitch::before {
@@ -1250,7 +1350,7 @@ select {
   /* Mirror `.transcript`'s vertical padding so the line lands on exactly the
      same optical centre as the wake screen's, which centres inside that padded
      box — without it the banner sits ~6px lower than the line it replaces. */
-  padding: 4px 0 16px;
+  padding: var(--space-2) 0 var(--space-8);
   pointer-events: none;
 }
 /* The banner is only in the DOM while it plays, so this sibling selector is
@@ -1262,7 +1362,7 @@ select {
    flashes in and dissolves. */
 .ken-power-banner {
   font-family: var(--mono);
-  font-size: 18px;
+  font-size: var(--fs-2xl);
   letter-spacing: 0.02em;
   color: var(--text);
   text-shadow: 0 0 12px rgba(77, 157, 255, 0.35);
@@ -1271,7 +1371,7 @@ select {
   /* Ken's face (KenFace mood on/off) leads the words. */
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-6);
   animation: ken-power-flash 1150ms var(--ease-out) both;
 }
 .ken-power-banner .ken-face {
@@ -1316,15 +1416,15 @@ select {
 }
 .home-tagline {
   margin-top: -12px;
-  font-size: 15px;
+  font-size: var(--fs-lg);
   color: var(--text);
 }
 .home-byline {
   margin-top: -18px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 14px;
+  gap: var(--space-4);
+  font-size: var(--fs-md);
   color: var(--text);
 }
 .home-byline-sep {
@@ -1349,14 +1449,14 @@ select {
    a gear pinned to the bottom-right corner. */
 .home-actions {
   display: flex;
-  gap: 12px;
+  gap: var(--space-6);
 }
 .home-action {
-  gap: 8px;
+  gap: var(--space-4);
   min-width: 132px;
   height: 44px;
-  padding: 0 22px;
-  font-size: 15px;
+  padding: 0 var(--space-11);
+  font-size: var(--fs-lg);
 }
 /* A pill with a caption hung under it (Motion's "Still in process"). The
    caption is out of flow, so the three pills stay level and the home column
@@ -1370,12 +1470,12 @@ select {
   top: 100%;
   left: 0;
   right: 0;
-  margin-top: 8px;
+  margin-top: var(--space-4);
   /* Flex centring keeps an over-long caption centred instead of spilling right. */
   display: flex;
   justify-content: center;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1.3;
   /* Full-strength ink like the tagline and byline: dimmer text got lost over
      bright stretches of the waves. Size keeps it secondary. */
@@ -1405,22 +1505,22 @@ select {
   /* Full width, with the header's 20px side padding so the page's edges line
      up with the Back button and title above it. The bottom keeps the last row
      scrollable clear of the tab capsule. */
-  padding: 20px 20px 104px;
+  padding: var(--space-10) var(--page-pad) 104px;
 }
 /* A panel: what a dialog shows, drawn in page form (modal-embed.tsx). Its
    sections are cards, stacked with even gaps. */
 .settings-panel {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-8);
 }
 /* One card per section on every page: a head (title + one-line description),
    then its fields. Page buttons live in the header bar, not here. */
 .settings-card {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 18px 20px 20px;
+  gap: var(--space-7);
+  padding: var(--space-9) var(--card-inset) var(--space-10);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   background: var(--surface-1);
@@ -1428,18 +1528,18 @@ select {
 .settings-section-head {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
 }
 .settings-section-title {
   margin: 0;
   color: var(--text);
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
 }
 .settings-desc {
   margin: 0;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1.45;
 }
 /* Inside a card the card's own gap spaces fields, so the dialog margins go. */
@@ -1453,14 +1553,23 @@ select {
 .settings-card .login-grid {
   padding: 0;
 }
-/* Page arrival. The first page rises in like the other screens' rows
-   (reveal-up); switching tabs crossfades the new page in, as yaatuber's
-   settings do (Glance's page crossfade, 280ms ease-in-out). */
+/* Shared Settings/Checklist page arrival. A light defocus, no movement, and
+   a partially visible first frame avoid the full-page blank/reload flash. */
+@keyframes settings-page-dissolve {
+  from {
+    opacity: 0.35;
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    filter: none;
+  }
+}
 .settings-page.is-entering {
   animation: reveal-up var(--dur-row) var(--ease-out) both;
 }
 .settings-page.is-switching {
-  animation: fade-in 280ms ease-in-out both;
+  animation: settings-page-dissolve var(--dur-dissolve) var(--ease-out) both;
 }
 @media (prefers-reduced-motion: reduce) {
   .settings-page.is-entering,
@@ -1485,7 +1594,7 @@ select {
 .settings-page .settings-col {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-8);
   min-width: 0;
 }
 @media (min-width: 760px) {
@@ -1498,7 +1607,7 @@ select {
 .settings-head-status {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
 }
 .settings-head-status:empty {
   display: none;
@@ -1535,7 +1644,7 @@ select {
   display: flex;
   align-items: center;
   height: 54px;
-  padding: 0 6px;
+  padding: 0 var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   background: var(--surface-1);
@@ -1572,7 +1681,7 @@ select {
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 500;
   cursor: pointer;
   transition:
@@ -1586,7 +1695,7 @@ select {
   color: var(--text);
 }
 .settings-tab.is-active {
-  padding: 0 14px;
+  padding: 0 var(--space-7);
   color: var(--text);
 }
 .settings-tab-icon {
@@ -1646,10 +1755,10 @@ select {
 .login-grid {
   /* Full-width with the same 12px padding as .picker-list (session list) so
      page content edges align across screens. */
-  padding: 12px;
+  padding: var(--space-6);
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
+  gap: var(--space-5);
 }
 @media (min-width: 640px) {
   .login-grid {
@@ -1663,7 +1772,7 @@ select {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: var(--space-5);
   background: var(--gloss-neutral);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-card);
@@ -1701,14 +1810,14 @@ select {
   color: var(--text);
 }
 .login-tile-name {
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text);
   letter-spacing: -0.01em;
 }
 .login-tile-methods {
   display: flex;
-  gap: 4px;
+  gap: var(--space-2);
   flex-wrap: wrap;
   justify-content: center;
 }
@@ -1725,11 +1834,11 @@ select {
 /* Narrow windows (480-640px): tighter padding, slightly smaller logo. */
 @media (max-width: 639px) {
   .login-grid {
-    padding: 10px;
-    gap: 8px;
+    padding: var(--space-5);
+    gap: var(--space-4);
   }
   .login-tile {
-    gap: 8px;
+    gap: var(--space-4);
   }
   .login-tile-logo {
     width: 40px;
@@ -1740,24 +1849,24 @@ select {
     max-height: 40px;
   }
   .login-tile-name {
-    font-size: 12px;
+    font-size: var(--fs-sm);
   }
 }
 
 /* ── Provider login modal ── */
 .login-modal-desc {
-  font-size: 13px;
+  font-size: var(--fs-base);
   color: var(--text-muted);
-  margin-bottom: 14px;
+  margin-bottom: var(--space-7);
 }
 .login-method-row {
   display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
 }
 .login-status {
-  font-size: 13px;
-  margin-top: 12px;
+  font-size: var(--fs-base);
+  margin-top: var(--space-6);
   word-break: break-word;
 }
 .login-status a {
@@ -1769,7 +1878,7 @@ select {
 .login-method-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-5);
   /* Two explained methods can outgrow a short app window — scroll the list
      rather than pushing Connect/Close off screen. */
   max-height: min(46vh, 420px);
@@ -1779,41 +1888,41 @@ select {
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: var(--radius-card);
   background: rgba(255, 255, 255, 0.03);
-  padding: 12px 14px;
+  padding: var(--space-6) var(--space-7);
 }
 .login-method-card-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
 }
 .login-method-card-title {
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text);
 }
 .login-method-card-line {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-muted);
   line-height: 1.5;
 }
 .login-method-card-note {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-dim);
   line-height: 1.5;
-  margin-top: 4px;
+  margin-top: var(--space-2);
 }
 .login-method-card-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 10px;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
 }
 /* How the two methods interact once both are connected. */
 .login-method-note {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-dim);
   line-height: 1.5;
-  margin-top: 12px;
+  margin-top: var(--space-6);
 }
 
 /* ── Project picker (new-window / app-load project chooser) ── */
@@ -1827,27 +1936,27 @@ select {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: var(--space-7);
   /* When the window gets too narrow for back + title + search + actions to fit
      on one line, wrap the overflow onto a second row instead of letting flex
      squish the children (which made the title text reflow/wrap and the search
      box deform). row-gap spaces the wrapped rows. */
   flex-wrap: wrap;
-  row-gap: 8px;
+  row-gap: var(--space-4);
   /* Total header height is locked to the chat view's .chat-head (38px strip +
      42px nav row + 1px border = 81px) so navigating session ↔ picker never
      shifts the layout. With a 28px-tall control row + 1px border, that means
      40px top + 12px bottom padding. */
-  padding: 40px 20px 12px;
+  padding: 40px var(--page-pad) var(--space-6);
   border-bottom: 1px solid var(--border);
 }
 /* macOS overlay title bar: the 40px top padding also clears the traffic-light
    buttons (same role the .chat-head strip plays in the chat view). */
 .platform-macos .picker-head {
-  padding: 40px 20px 12px;
+  padding: 40px var(--page-pad) var(--space-6);
 }
 .picker-title {
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   letter-spacing: -0.02em;
   color: var(--text);
@@ -1893,7 +2002,7 @@ select {
 .chat-head-strip {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-6);
   /* Height matches the macOS traffic-light zone so align-items:center lines the
      title + toggle up with the lights' centerline (~19px from the window top). */
   height: 38px;
@@ -1928,7 +2037,7 @@ select {
      what's left.) */
   container: chat-head-title / inline-size;
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 500;
   color: var(--text);
 }
@@ -1942,7 +2051,7 @@ select {
 }
 .chat-head-sep {
   flex: none;
-  margin: 0 8px;
+  margin: 0 var(--space-4);
   color: var(--border);
 }
 .chat-head-branch {
@@ -2117,7 +2226,7 @@ select {
 .window-index {
   flex: 0 0 auto;
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 500;
   color: var(--text-muted);
   background: var(--surface-2);
@@ -2134,18 +2243,18 @@ select {
 .chat-head-nav {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: var(--space-7);
   /* Wrap the action cluster below the back button on narrow windows instead of
      letting the fixed-width buttons overflow / clip off the right edge. */
   flex-wrap: wrap;
-  row-gap: 8px;
-  padding: 2px var(--rail) 12px;
+  row-gap: var(--space-4);
+  padding: var(--space-1) var(--rail) var(--space-6);
 }
 .picker-head-actions {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
   /* Buttons keep their intrinsic size (never squish the action cluster), but
      the cluster as a whole may wrap to its own line when the bar is too tight.
      It must be allowed to SHRINK to the row (flex-shrink 1 + max-width) or its
@@ -2155,7 +2264,7 @@ select {
   min-width: 0;
   max-width: 100%;
   flex-wrap: wrap;
-  row-gap: 8px;
+  row-gap: var(--space-4);
   justify-content: flex-end;
 }
 /* Inline project filter, sits just right of the total-projects badge. Grows to
@@ -2170,8 +2279,8 @@ select {
   border-radius: var(--radius-button);
   color: var(--text);
   font-family: var(--sans);
-  font-size: 12px;
-  padding: 4px 10px;
+  font-size: var(--fs-sm);
+  padding: var(--space-2) var(--space-5);
   outline: none;
   transition:
     border-color var(--t-fast),
@@ -2198,7 +2307,7 @@ select {
   width: min(440px, 90vw);
   border: 1px solid;
   border-radius: var(--radius-card);
-  padding: 24px;
+  padding: var(--space-12);
   box-shadow: var(--shadow-lg);
   /* Modals can be mounted inside centered containers (e.g. `.home` is
      text-align: center). Pin left alignment so every modal's text matches
@@ -2259,15 +2368,27 @@ select {
 }
 
 /* ── Exits (View Transitions) ──
-   Each exiting surface carries its own transition name so its snapshot can
-   shrink away on its own while the rest of the window crossfades. Names must
-   be unique among rendered elements; only one modal and one dropdown are ever
-   open, and a clash just skips the animation (the UI still updates). */
+   Menus use unique local snapshots, never a conversation/root crossfade.
+   Dialogs retain their existing named dismissal snapshot. */
 .modal {
   view-transition-name: gg-modal;
 }
-.dropdown-menu {
-  view-transition-name: gg-dropdown;
+/* Only an exiting menu participates. The retained DOM is inert until the
+   browser captures it; the rest of its lifetime is a noninteractive snapshot. */
+.floating-surface {
+  display: contents;
+}
+.floating-surface[data-exiting] > * {
+  view-transition-name: var(--floating-name);
+  view-transition-class: gg-floating;
+  pointer-events: none;
+}
+:root[data-local-transitions],
+:root[data-local-transitions] .modal {
+  view-transition-name: none;
+}
+::view-transition {
+  pointer-events: none;
 }
 @keyframes surface-out {
   to {
@@ -2275,9 +2396,8 @@ select {
     transform: translateY(var(--exit-y, 4px)) scale(0.97);
   }
 }
-/* The root crossfade is what screen changes (home, picker, workspace) use.
-   When only a modal or dropdown closes, old and new root are identical, so
-   it runs but is invisible. */
+/* Screen changes (home, picker, workspace) use the root crossfade.
+   Local menu exits explicitly exclude the root above. */
 ::view-transition-group(root),
 ::view-transition-old(root),
 ::view-transition-new(root) {
@@ -2285,20 +2405,20 @@ select {
   animation-timing-function: var(--ease-out);
 }
 ::view-transition-old(gg-modal),
-::view-transition-old(gg-dropdown) {
+::view-transition-old(*.gg-floating) {
   animation: surface-out var(--dur-exit) var(--ease-in) both;
 }
-::view-transition-old(gg-dropdown) {
+::view-transition-old(*.gg-floating) {
   --exit-y: -4px;
 }
 /* Surfaces that close have no "new" state; anything unexpected there should
    appear instantly rather than morph. */
 ::view-transition-new(gg-modal),
-::view-transition-new(gg-dropdown) {
+::view-transition-new(*.gg-floating) {
   animation: none;
 }
 ::view-transition-group(gg-modal),
-::view-transition-group(gg-dropdown) {
+::view-transition-group(*.gg-floating) {
   animation-duration: var(--dur-exit);
 }
 
@@ -2316,12 +2436,12 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
+  gap: var(--space-8);
+  margin-bottom: var(--space-10);
 }
 .modal-title {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   letter-spacing: -0.02em;
 }
@@ -2338,7 +2458,7 @@ select {
   color: var(--text-dim);
   cursor: pointer;
   font-family: var(--sans);
-  font-size: 20px;
+  font-size: var(--fs-3xl);
   line-height: 1;
   padding: 0;
   transition:
@@ -2353,14 +2473,14 @@ select {
 }
 .modal-label {
   display: block;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
-  margin-top: 22px;
-  margin-bottom: 10px;
+  margin-top: var(--space-11);
+  margin-bottom: var(--space-5);
 }
 /* The first label shouldn't double up the title row's bottom margin. */
 .modal-head + .modal-label {
-  margin-top: 4px;
+  margin-top: var(--space-2);
 }
 .modal-input {
   width: 100%;
@@ -2371,9 +2491,9 @@ select {
   outline: none;
   border-radius: var(--radius-card);
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1.3;
-  padding: 10px 12px;
+  padding: var(--space-5) var(--space-6);
   transition: border-color var(--t-fast);
 }
 /* Text fields show focus on click too: that is where typing will land. Same
@@ -2383,9 +2503,9 @@ select {
 }
 .modal-row {
   display: flex;
-  gap: 10px;
+  gap: var(--space-5);
   align-items: center;
-  margin-top: 14px;
+  margin-top: var(--space-7);
 }
 .modal-row .modal-input {
   flex: 1 1 auto;
@@ -2394,9 +2514,9 @@ select {
   min-width: 0;
 }
 .modal-hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.55;
-  margin-top: 8px;
+  margin-top: var(--space-4);
   /* `break-all` breaks EVERY word at the box edge, so ordinary prose came out
      hyphen-less and mid-word ("conversat / ion"). Most hints are prose; only a
      few carry a URL or path. `anywhere` keeps word boundaries and breaks only
@@ -2406,18 +2526,18 @@ select {
 /* A hint sitting directly above an input needs breathing room below it,
    otherwise the field is flush against the description text. */
 .modal-hint + .modal-input {
-  margin-top: 10px;
+  margin-top: var(--space-5);
 }
 .modal-radio-group {
   display: flex;
-  gap: 18px;
+  gap: var(--space-9);
   align-items: center;
 }
 .modal-radio {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 14px;
+  gap: var(--space-3);
+  font-size: var(--fs-md);
   cursor: pointer;
 }
 /* Multi-select elicitation fields stack their checkboxes rather than sitting on
@@ -2425,26 +2545,26 @@ select {
 .mcp-elicit-choices {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 10px;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
 }
 /* A boolean field has no heading above it (the checkbox is its own label), so
    it needs the vertical rhythm .modal-label would have provided. */
 .mcp-elicit-boolean {
-  margin-top: 22px;
+  margin-top: var(--space-11);
 }
 .modal-radio input {
   cursor: pointer;
   accent-color: var(--primary);
 }
 .modal-error {
-  font-size: 12px;
-  margin-top: 8px;
+  font-size: var(--fs-sm);
+  margin-top: var(--space-4);
 }
 .modal-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 10px;
+  gap: var(--space-5);
   margin-top: 26px;
 }
 
@@ -2464,7 +2584,7 @@ select {
 .dropdown-trigger {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-5);
   width: 100%;
   padding: 11px 13px;
   border: 1px solid var(--border);
@@ -2472,7 +2592,7 @@ select {
   background: var(--surface-1);
   color: var(--text);
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: var(--fs-md);
   text-align: left;
   cursor: pointer;
   transition:
@@ -2514,7 +2634,7 @@ select {
   z-index: var(--z-dropdown);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
   max-height: 264px;
   overflow-y: auto;
   padding: 5px;
@@ -2527,12 +2647,12 @@ select {
 .dropdown-option {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-5);
   min-height: 34px;
-  padding: 7px 10px;
+  padding: 7px var(--space-5);
   border-radius: var(--radius-button);
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--fs-md);
   cursor: pointer;
   transition:
     color var(--t-fast),
@@ -2564,9 +2684,9 @@ select {
 /* Sits on --surface-3, where --text-dim falls below 4.5:1. */
 .dropdown-option-description {
   display: block;
-  margin-top: 2px;
+  margin-top: var(--space-1);
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2582,8 +2702,8 @@ select {
 .radio-player-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-top: 22px;
+  gap: var(--space-6);
+  margin-top: var(--space-11);
 }
 .radio-play-button {
   min-width: 104px;
@@ -2592,9 +2712,9 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 24px;
+  margin-top: var(--space-12);
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
 }
 .radio-volume-heading .modal-label {
@@ -2603,8 +2723,8 @@ select {
 .radio-volume-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 10px;
+  gap: var(--space-5);
+  margin-top: var(--space-5);
 }
 .radio-volume-slider {
   position: relative;
@@ -2615,19 +2735,19 @@ select {
   position: absolute;
   inset: 2px 0;
   overflow: hidden;
-  border: 1px solid #313131;
+  border: 1px solid var(--fx-meter-edge);
   border-radius: var(--radius-pill);
-  background: radial-gradient(circle, #1b2735, #090a0f);
+  background: radial-gradient(circle, var(--fx-meter-from), var(--fx-meter-to));
   box-shadow: var(--shadow-sm);
 }
 .radio-volume-fill {
   height: 100%;
   min-width: 1px;
   border-radius: inherit;
-  background: linear-gradient(90deg, #00f260, #0575e6);
+  background: linear-gradient(90deg, var(--fx-volume-from), var(--fx-volume-to));
   box-shadow:
-    0 0 5px #00f260,
-    0 0 9px #0575e6;
+    0 0 5px var(--fx-volume-from),
+    0 0 9px var(--fx-volume-to);
 }
 .radio-volume-input {
   appearance: none;
@@ -2654,8 +2774,8 @@ select {
     0 0 0 2px rgba(5, 117, 230, 0.4),
     0 2px 7px rgba(0, 0, 0, 0.65);
   transition:
-    transform 90ms ease,
-    box-shadow 90ms ease;
+    transform var(--dur-press) var(--ease-out),
+    box-shadow var(--dur-press) var(--ease-out);
 }
 
 .radio-volume-input:active::-webkit-slider-thumb {
@@ -2669,16 +2789,16 @@ select {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: var(--space-3);
   background: var(--gloss-neutral);
   color: var(--text-secondary);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-pill);
   box-shadow: var(--gloss-shadow-neutral);
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 600;
-  padding: 8px 16px;
+  padding: var(--space-4) var(--space-8);
   cursor: pointer;
   transition:
     filter var(--t-fast),
@@ -2714,9 +2834,9 @@ select {
   resize: none;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
-  padding: 14px 16px;
+  padding: var(--space-7) var(--space-8);
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1.6;
   outline: none;
   overflow-y: auto;
@@ -2748,7 +2868,7 @@ select {
   position: relative;
   width: 100vw;
   height: 100vh;
-  padding: 22px 24px;
+  padding: var(--space-11) var(--space-12);
   border-radius: var(--radius-card);
   /* Clip the confetti canvas to the rounded corners. */
   overflow: hidden;
@@ -2764,7 +2884,7 @@ select {
 .whatsnew-title {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: var(--space-7);
   min-width: 0;
 }
 .whatsnew-critter-lane {
@@ -2872,18 +2992,18 @@ select {
   min-height: 0;
   overflow-y: auto;
   /* Pad the right edge so the scrollbar never overlaps the text. */
-  padding-right: 8px;
+  padding-right: var(--space-4);
   margin-right: -4px;
 }
 .whatsnew-section {
-  margin-bottom: 22px;
+  margin-bottom: var(--space-11);
 }
 .whatsnew-section:last-child {
   margin-bottom: 0;
 }
 .whatsnew-section.latest {
-  margin-bottom: 20px;
-  padding: 16px 16px 18px;
+  margin-bottom: var(--space-10);
+  padding: var(--space-8) var(--space-8) var(--space-9);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-card);
   background: var(--surface-1);
@@ -2891,14 +3011,14 @@ select {
 .whatsnew-version {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 700;
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--text-dim);
-  margin-bottom: 12px;
+  margin-bottom: var(--space-6);
 }
 .whatsnew-section.latest .whatsnew-version {
   color: var(--text-secondary);
@@ -2906,11 +3026,11 @@ select {
 .whatsnew-history-divider {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 2px 0 18px;
+  gap: var(--space-5);
+  margin: var(--space-1) 0 var(--space-9);
   color: var(--text-muted);
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -2928,13 +3048,13 @@ select {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-6);
 }
 .whatsnew-item {
   position: relative;
-  padding-left: 18px;
+  padding-left: var(--space-9);
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1.55;
   color: var(--text);
 }
@@ -2954,14 +3074,14 @@ select {
 
 /* ── Tasks modal (project task list → run one / run all) ── */
 .tasks-empty {
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1.5;
-  padding: 8px 2px;
+  padding: var(--space-4) var(--space-1);
 }
 .tasks-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
   /* Cap height so a long list scrolls inside the modal instead of growing it
      past the viewport; the actions row stays pinned below. */
   max-height: min(48vh, 360px);
@@ -2970,8 +3090,8 @@ select {
      (run button / delete ×). `stable` keeps layout steady whether or not the
      list overflows. */
   scrollbar-gutter: stable;
-  padding-right: 4px;
-  margin: 2px 0 14px;
+  padding-right: var(--space-2);
+  margin: var(--space-1) 0 var(--space-7);
 }
 .tasks-list::-webkit-scrollbar {
   width: 8px;
@@ -2983,8 +3103,8 @@ select {
 .tasks-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 6px;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-3);
   border-radius: var(--radius-button);
   transition: background-color var(--t-fast);
 }
@@ -2993,14 +3113,14 @@ select {
 }
 .tasks-dot {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   width: 14px;
   text-align: center;
 }
 .tasks-title {
   flex: 1 1 auto;
   min-width: 0;
-  font-size: 13px;
+  font-size: var(--fs-base);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3008,7 +3128,7 @@ select {
 .tasks-status {
   flex: 0 0 auto;
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 .tasks-run-one {
   flex: 0 0 auto;
@@ -3017,10 +3137,10 @@ select {
   flex: 0 0 auto;
   background: transparent;
   border: none;
-  font-size: 16px;
+  font-size: var(--fs-xl);
   line-height: 1;
   cursor: pointer;
-  padding: 0 4px;
+  padding: 0 var(--space-2);
   transition: color var(--t-fast);
 }
 .tasks-delete:hover {
@@ -3029,13 +3149,13 @@ select {
 .tasks-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-4);
 }
 /* ── MCP server management modal (mirrors .tasks-*) ─────────────────── */
 .mcp-empty {
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1.5;
-  padding: 8px 2px;
+  padding: var(--space-4) var(--space-1);
 }
 /* One local model per row: elastic name, right-aligned figure. Informational
    only — models are selected in the footer picker. Capabilities live in the
@@ -3044,10 +3164,10 @@ select {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
   width: 100%;
-  padding: 3px 6px 3px 20px;
-  font-size: 12px;
+  padding: 3px var(--space-3) 3px var(--space-10);
+  font-size: var(--fs-sm);
   text-align: left;
 }
 .local-model-name {
@@ -3056,7 +3176,7 @@ select {
   white-space: nowrap;
 }
 .local-model-meta {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -3067,7 +3187,7 @@ select {
 }
 .hf-results {
   list-style: none;
-  margin: 8px 0 0;
+  margin: var(--space-4) 0 0;
   padding: 0;
   max-height: 240px;
   overflow-y: auto;
@@ -3076,12 +3196,12 @@ select {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  margin-bottom: 2px;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-1);
   border: 1px solid transparent;
   border-radius: var(--radius-button);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   cursor: pointer;
   /* HfPullModal sets the highlighted row's border colour inline. */
   transition: border-color var(--t-fast);
@@ -3092,28 +3212,28 @@ select {
   white-space: nowrap;
 }
 .hf-result-meta {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 .hf-empty {
-  padding: 14px 4px;
-  font-size: 12px;
+  padding: var(--space-7) var(--space-2);
+  font-size: var(--fs-sm);
 }
 .hf-install-name {
-  margin-top: 10px;
-  font-size: 13px;
+  margin-top: var(--space-5);
+  font-size: var(--fs-base);
   font-weight: 600;
   word-break: break-all;
 }
 .hf-install-sub {
-  margin-top: 2px;
-  font-size: 11px;
+  margin-top: var(--space-1);
+  font-size: var(--fs-xs);
 }
 .hf-progress {
   height: 8px;
   border-radius: var(--radius-sm);
-  margin-top: 12px;
+  margin-top: var(--space-6);
   overflow: hidden;
 }
 .hf-progress-fill {
@@ -3128,23 +3248,23 @@ select {
   }
 }
 .hf-progress-line {
-  margin-top: 6px;
-  font-size: 11px;
+  margin-top: var(--space-3);
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
   word-break: break-all;
 }
 .mcp-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
   max-height: min(44vh, 320px);
   overflow-y: auto;
   /* No rubber-band bounce at the ends, and no scroll chaining to whatever sits
      behind the modal. */
   overscroll-behavior: none;
   scrollbar-gutter: stable;
-  padding-right: 4px;
-  margin: 2px 0 14px;
+  padding-right: var(--space-2);
+  margin: var(--space-1) 0 var(--space-7);
 }
 .mcp-list::-webkit-scrollbar {
   width: 8px;
@@ -3156,8 +3276,8 @@ select {
 .mcp-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 6px;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-3);
   border-radius: var(--radius-button);
   transition:
     background-color var(--t-fast),
@@ -3177,7 +3297,7 @@ select {
 .mcp-name {
   flex: 1 1 auto;
   min-width: 0;
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3186,8 +3306,8 @@ select {
 .mcp-scope {
   flex: 0 0 auto;
   font-family: var(--sans);
-  font-size: 11px;
-  padding: 1px 6px;
+  font-size: var(--fs-xs);
+  padding: 1px var(--space-3);
   border-radius: var(--radius-button);
   background: var(--surface-1);
   border: 1px solid var(--border);
@@ -3195,17 +3315,17 @@ select {
 .mcp-meta {
   flex: 0 0 auto;
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.4;
 }
 .mcp-delete {
   flex: 0 0 auto;
   background: transparent;
   border: none;
-  font-size: 16px;
+  font-size: var(--fs-xl);
   line-height: 1;
   cursor: pointer;
-  padding: 0 4px;
+  padding: 0 var(--space-2);
   transition: color var(--t-fast);
 }
 .mcp-delete:hover {
@@ -3214,21 +3334,21 @@ select {
 /* Scope toggle on its own row (Global / Project). */
 .mcp-scope-toggle {
   display: flex;
-  gap: 10px;
-  margin-top: 10px;
+  gap: var(--space-5);
+  margin-top: var(--space-5);
 }
 /* In-transcript task header row (shown at the top of a task's session). */
 .task-row {
-  margin: 2px 0 6px;
+  margin: var(--space-1) 0 var(--space-3);
 }
 
 .picker-list {
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: 12px;
+  padding: var(--space-6);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
 }
 /* Empty/loading state: fill the list and center its content both axes, with a
    clear gap between the message and any action button. */
@@ -3238,16 +3358,54 @@ select {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 16px;
-  padding: 24px;
+  gap: var(--space-8);
+  padding: var(--space-12);
   text-align: center;
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1.5;
+}
+/* Full-window fallback when the app shell throws during render
+   (AppErrorBoundary). Draggable so the window can still be moved. */
+.app-crash {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-6);
+  padding: var(--space-12);
+  background: var(--bg);
+  color: var(--text);
+  text-align: center;
+}
+.app-crash-title {
+  margin: 0;
+  font-size: var(--fs-2xl);
+  font-weight: 600;
+}
+.app-crash-body {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+.app-crash-details {
+  max-width: min(560px, 100%);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.app-crash-details pre {
+  margin: var(--space-4) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
+  font-family: var(--mono);
 }
 .picker-error {
   flex: 0 0 auto;
-  margin-bottom: 8px;
-  padding: 10px 12px;
+  margin-bottom: var(--space-4);
+  padding: var(--space-5) var(--space-6);
   /* Ink and mark: readable ink on a neutral surface, with the error red
      carried by a solid leading rule and the border alone. */
   color: var(--text);
@@ -3255,7 +3413,7 @@ select {
   border: 1px solid color-mix(in srgb, var(--error) 35%, var(--border));
   box-shadow: inset 3px 0 0 var(--error);
   border-radius: var(--radius-button);
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1.45;
 }
 /* Row + its hover-revealed hide affordance. The hide control can't nest inside
@@ -3281,7 +3439,7 @@ select {
   background: transparent;
   color: var(--text-dim);
   font-family: var(--sans);
-  font-size: 15px;
+  font-size: var(--fs-lg);
   line-height: 1;
   cursor: pointer;
   opacity: 0;
@@ -3311,14 +3469,14 @@ select {
 .picker-item {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-3);
   width: 100%;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-button);
   font-family: var(--sans);
   text-align: left;
-  padding: 10px 12px;
+  padding: var(--space-5) var(--space-6);
   cursor: pointer;
   transition:
     color var(--t-fast),
@@ -3340,7 +3498,7 @@ select {
   background: none;
   box-shadow: none;
   font-weight: 500;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   transition: color var(--t-fast);
@@ -3352,30 +3510,34 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-5);
   /* Reserve the hide button's lane. It is absolutely positioned over the row,
      so without this the timestamp badge — pushed to the same right edge — sits
      underneath it. 24px control + 8px inset + 6px breathing room. */
   padding-right: 38px;
 }
 .picker-name {
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* A project's sources (gg-coder, Claude Code, Codex, Folder) as tinted pills
    in a row; a session from another tool leads its meta line with one. */
 .picker-sources {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-3);
   font-family: var(--sans);
 }
 .picker-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 /* ── Reusable pill badge ── */
@@ -3385,9 +3547,9 @@ select {
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-pill);
   /* Cap band measured 0.94px HIGH; half the correction sits on top. */
-  padding: 0.5px 8px 1.5px;
+  padding: 0.5px var(--space-4) 1.5px;
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   line-height: 1.5;
   white-space: nowrap;
@@ -3455,7 +3617,7 @@ select {
   display: flex;
   min-width: 150px;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
   padding: 5px;
   border: 1px solid;
   border-radius: var(--radius-card);
@@ -3465,13 +3627,13 @@ select {
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 6px 9px;
+  padding: var(--space-3) 9px;
   border: none;
   border-radius: var(--radius-button);
   background: transparent;
   color: var(--text);
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   text-align: left;
   cursor: pointer;
   transition: background-color var(--t-fast);
@@ -3482,7 +3644,7 @@ select {
 }
 .winlayout-divider {
   height: 1px;
-  margin: 4px 0;
+  margin: var(--space-2) 0;
   background: var(--border);
 }
 /* Hide/show toggle for the nav-button row. Lives at the right of the title
@@ -3496,7 +3658,7 @@ select {
   border: none;
   border-radius: var(--radius-button);
   color: var(--text-muted);
-  padding: 2px;
+  padding: var(--space-1);
   cursor: pointer;
   transition:
     color var(--t-fast),
@@ -3544,9 +3706,9 @@ select {
   z-index: 3;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
   /* 4 + 15 (12px × 1.25) + 4 + 2 border: 25px tall. */
-  padding: 4px 11px;
+  padding: var(--space-2) 11px;
   /* A lighter fill than the cards around it: --surface-2 sat at 1.19:1 on the
      window background and the controls vanished into it. 30% toward --text
      gives 3:1 against --bg with --text still 5.85:1 on top. */
@@ -3557,7 +3719,7 @@ select {
   color: var(--text);
   box-shadow: var(--shadow-sm);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.25;
   cursor: pointer;
   /* Hidden state: faded, nudged toward its edge, and untouchable. */
@@ -3675,7 +3837,7 @@ select {
      the gutter always (no shift when it appears) and subtract it back, so the
      content edge lands on the rail whether or not the transcript scrolls. */
   scrollbar-gutter: stable;
-  padding: 4px calc(var(--rail) - var(--scrollbar)) 16px var(--rail);
+  padding: var(--space-2) calc(var(--rail) - var(--scrollbar)) var(--space-8) var(--rail);
   white-space: pre-wrap;
   word-break: break-word;
   /* Fades out under the Ken power banner (see `.ken-power-overlay`). */
@@ -3691,33 +3853,8 @@ select {
    position. Plain rows render fine even in long sessions, so it's not worth the
    jank — leave it off. */
 
-/* ── Live transcript rows: one entrance ──
-   Only rows that arrive after the session hydrated get `.row-enter` (see
-   TranscriptRow), so restored history never replays. Every row dissolves in,
-   the same blur-to-sharp language as the streamed words and the plan pane: a
-   plain rise + fade was already 69% opaque on its first painted frame and read
-   as a pop next to them. Your own message rises from the composer below it;
-   replies, notices and cards settle in with less travel so a burst of rows
-   reads as calm, not bouncy. `backwards` so no filter or transform lingers
-   (either would re-parent fixed-position children). */
-@keyframes row-rise {
-  from {
-    opacity: 0;
-    filter: blur(8px);
-    transform: translateY(var(--row-y, 6px));
-  }
-}
-.row-enter {
-  animation: row-rise var(--dur-dissolve) var(--ease-out) backwards;
-}
-.row-enter[data-kind="user"] {
-  --row-y: 14px;
-}
-@media (prefers-reduced-motion: reduce) {
-  .row-enter {
-    animation-name: fade-in;
-  }
-}
+/* Live entrances are consumed and owned by transcript-motion.ts.
+   Opacity only: Activity reactivation never replays a permanent CSS class. */
 
 .transcript::-webkit-scrollbar {
   width: var(--scrollbar);
@@ -3774,11 +3911,11 @@ select {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-5);
   height: 38px;
   padding: 0 var(--rail);
   border-bottom: 1px solid var(--border);
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1.3;
   user-select: none;
 }
@@ -3802,8 +3939,8 @@ select {
   /* Mirrors `.transcript` so the plan's left edge, the critter gutter and the
      composer below share one rail. */
   scrollbar-gutter: stable;
-  padding: 16px calc(var(--rail) - var(--scrollbar)) 20px var(--rail);
-  font-size: 15px;
+  padding: var(--space-8) calc(var(--rail) - var(--scrollbar)) var(--space-10) var(--rail);
+  font-size: var(--fs-lg);
   outline: none;
 }
 .plan-review-body::-webkit-scrollbar {
@@ -3819,16 +3956,16 @@ select {
   box-shadow: inset 0 0 0 2px var(--primary);
 }
 .plan-review-intro {
-  margin-bottom: 10px;
+  margin-bottom: var(--space-5);
 }
 /* The plan reads in the assistant text column, right of the critter gutter. */
 .plan-review-doc {
-  padding-left: 22px;
+  padding-left: var(--space-11);
   max-width: 860px;
 }
 .plan-review .inputrow .input-stack {
   /* No paperclip here, so the field carries the gap the circle would leave. */
-  padding-left: 8px;
+  padding-left: var(--space-4);
 }
 .plan-review-accept {
   /* Same height as the Stop/Reject text so the row keeps --bar-pad rhythm. */
@@ -3887,7 +4024,7 @@ select {
 }
 .plan-review.leaving {
   pointer-events: none;
-  animation: plan-dissolve-out 300ms var(--ease-in) forwards;
+  animation: plan-dissolve-out var(--dur-plan-out) var(--ease-in) forwards;
 }
 .plan-review-body {
   animation: plan-band-in 420ms var(--ease-out) 120ms backwards;
@@ -3944,8 +4081,8 @@ select {
 /* ── Plan mode ASCII banner ──
    "Delta Corps Priest 1", the same FIGlet font as the home GG CODER banner. */
 .plan-logo {
-  margin: 10px 0;
-  padding-left: 2px;
+  margin: var(--space-5) 0;
+  padding-left: var(--space-1);
 }
 .plan-logo-art {
   font-family: var(--mono);
@@ -3993,14 +4130,14 @@ select {
 .plan-logo-reason {
   /* Back onto the rail (the banner's 2px optical inset), so the critter sits
      in the assistant-dot gutter like every other critter line. */
-  margin: 8px 0 0 -2px;
+  margin: var(--space-4) 0 0 -2px;
 }
 /* A reason can run long: wrap it rather than ellipsize the agent's words. */
 .plan-logo-reason .subagents-compact-text {
   white-space: normal;
 }
 
-/* ── User message chip (mirrors USER_MESSAGE_BACKGROUND in the TUI) ── */
+/* ── User message chip (the TUI's UserMessage bubble; fill is --user-bg) ── */
 .user-msg {
   /* Hug the text, but never span the whole pane: cap at a readable measure
      that scales down on narrow windows. Wraps once it would overflow the cap. */
@@ -4010,9 +4147,9 @@ select {
   background: var(--user-bg);
   color: var(--user-text);
   border-radius: var(--radius-bubble);
-  padding: 8px 12px;
-  margin: 8px 0 8px auto;
-  font-size: 15px;
+  padding: var(--space-4) var(--space-6);
+  margin: var(--space-4) 0 var(--space-4) auto;
+  font-size: var(--fs-lg);
   white-space: pre-wrap;
   word-break: break-word;
   /* Reserved, invisible border. The queued state only recolors it, so leaving
@@ -4048,7 +4185,7 @@ select {
   position: relative;
   opacity: 0.5;
   border-style: dashed;
-  border-color: var(--border, rgba(255, 255, 255, 0.18));
+  border-color: var(--border);
 }
 /* Queued → sent. The agent taking a message off the queue used to swap three
    things in a single frame (dim→solid, dashed→none, pill gone), which read as a
@@ -4067,7 +4204,7 @@ select {
   from {
     opacity: 0.5;
     filter: blur(3px);
-    border-color: var(--border, rgba(255, 255, 255, 0.18));
+    border-color: var(--border);
   }
   to {
     opacity: 1;
@@ -4078,7 +4215,7 @@ select {
 .queued-pill {
   display: block;
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   /* Explicit line-height so the collapse below starts at the pill's REAL height.
      `max-height: 2em` overshot the rendered 13.9px by 22%, and that slack is
      dead time: the label sits still through the first fifth of the beat, then
@@ -4088,7 +4225,7 @@ select {
   line-height: 1.28;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  margin-bottom: 6px;
+  margin-bottom: var(--space-3);
   /* Resting value under the pulse, so the label still reads as secondary when
      the animation is suppressed for reduced motion. */
   opacity: 0.52;
@@ -4107,7 +4244,7 @@ select {
        an amplitude rather than a jump to full brightness. */
     opacity: 0.52;
     max-height: 1.28em;
-    margin-bottom: 6px;
+    margin-bottom: var(--space-3);
   }
   to {
     opacity: 0;
@@ -4127,14 +4264,16 @@ select {
 
 /* ── Shimmer sweep: a bright spot rides across text (mirrors TUI ShimmerLabel).
    Drives both the workflow-command chip and footer "full power" labels (plan
-   mode, max-tier thinking) via two color vars. ── */
+   mode, max-tier thinking) via two color vars. The bright spot defaults to
+   --shimmer-peak; it is a fallback rather than a declaration on .shimmer-text
+   so a parent (.ask-answered-bubble) can still pass its own through. ── */
 .shimmer-text,
 .command-shimmer {
   background: linear-gradient(
     100deg,
     var(--shimmer-base) 0%,
     var(--shimmer-base) 38%,
-    var(--shimmer-bright) 50%,
+    var(--shimmer-bright, var(--shimmer-peak)) 50%,
     var(--shimmer-base) 62%,
     var(--shimmer-base) 100%
   );
@@ -4164,9 +4303,9 @@ select {
 }
 .command-shimmer {
   font-family: var(--sans);
-  /* Resting color comes from inline `color`; the bright spot is white. */
+  /* Resting color comes from inline `color`; the bright spot is the peak. */
   --shimmer-base: currentColor;
-  --shimmer-bright: #ffffff;
+  --shimmer-bright: var(--shimmer-peak);
 }
 
 /* Footer shimmer label (plan mode, max-power thinking). */
@@ -4184,15 +4323,15 @@ select {
   }
 }
 .footer-plan {
-  margin-left: 10px;
+  margin-left: var(--space-5);
   font-family: var(--sans);
 }
 
 /* ── Assistant message: blue dot + text ── */
 .assistant-msg {
   display: flex;
-  gap: 6px;
-  padding: 4px 0;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
   align-items: flex-start;
 }
 .assistant-dot {
@@ -4209,7 +4348,7 @@ select {
   color: var(--text);
   word-break: break-word;
   /* Match the user message / input size so both sides read uniformly. */
-  font-size: 15px;
+  font-size: var(--fs-lg);
 }
 
 /* ── Markdown rendering (assistant blocks) ── */
@@ -4221,18 +4360,23 @@ select {
   white-space: normal;
 }
 
-/* Streaming word reveal: each newly-arrived word mounts with a short
-   blur-to-sharp fade, which hides the moment a batch of tokens landed. The
-   spans exist ONLY while a row is streaming (see Markdown.tsx `animate`), so
-   finished prose keeps its plain DOM.
-   Plain inline (WebKit blurs inline boxes): the spans must not change where
+/* Streaming word reveal: opacity softens token batches without blurring
+   reading text. The spans exist ONLY while a row is streaming (see Markdown.tsx
+   `animate`), so finished prose keeps its plain DOM.
+   Plain inline: the spans must not change where
    lines break, because they come off when a block finishes. As inline-blocks
    they did: no break inside "newest-first", a break allowed between "ms" and
    ";", so every paragraph re-wrapped the instant it finished. That jump was
    the flicker. */
 .markdown .md-word {
-  animation: md-word-in var(--dur-row) var(--ease-out) both;
+  animation: md-word-fade var(--dur-row) var(--ease-out) both;
 }
+@keyframes md-word-fade {
+  from {
+    opacity: 0;
+  }
+}
+/* The unrelated local activity-label dissolve retains its existing treatment. */
 @keyframes md-word-in {
   from {
     opacity: 0;
@@ -4334,7 +4478,7 @@ select {
 }
 .markdown pre {
   margin: 0;
-  padding: 12px 36px 12px 14px;
+  padding: var(--space-6) 36px var(--space-6) var(--space-7);
   background: #0b0d11;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
@@ -4375,10 +4519,10 @@ select {
   right: 7px;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   padding: 3px 7px;
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   line-height: 1;
   color: var(--text-muted);
@@ -4408,7 +4552,7 @@ select {
    as accents. Still unmistakably Ken at a glance, without the colour wall.
    The runnable-prompt block keeps its own styling below. */
 .ken-msg .assistant-text {
-  padding-left: 10px;
+  padding-left: var(--space-5);
   border-left: 2px solid color-mix(in srgb, var(--ken) 55%, transparent);
 }
 .ken-msg .assistant-text .markdown :is(h1, h2, h3, h4, strong) {
@@ -4556,7 +4700,7 @@ select {
   top: -8px;
   right: -9px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   line-height: 1;
   color: var(--ken);
@@ -4642,7 +4786,7 @@ select {
 }
 .markdown .ken-prompt-body {
   margin: 0;
-  padding: 12px 14px;
+  padding: var(--space-6) var(--space-7);
   background: transparent;
   border: none;
   border-radius: 0;
@@ -4661,10 +4805,10 @@ select {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  margin: 0 14px 12px;
+  margin: 0 var(--space-7) var(--space-6);
   padding: 5px 11px;
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   line-height: 1;
   color: var(--ken);
@@ -4706,7 +4850,7 @@ select {
 .markdown th,
 .markdown td {
   border: 1px solid var(--border);
-  padding: 7px 12px;
+  padding: 7px var(--space-6);
   text-align: left;
   vertical-align: top;
   word-break: normal;
@@ -4757,7 +4901,7 @@ select {
 /* ── Tool rows (status dot + styled verb/detail/summary) ── */
 .tool-row {
   display: flex;
-  gap: 6px;
+  gap: var(--space-3);
   padding: 1px 0;
   align-items: baseline;
 }
@@ -4798,13 +4942,13 @@ select {
 /* ── Sub-agent in-chat line: the agents themselves walk on the critter floor,
    so the transcript keeps one short summary row. ── */
 .subagents {
-  margin: 6px 0 10px;
+  margin: var(--space-3) 0 var(--space-5);
 }
 .subagents-compact {
   display: flex;
   /* Same gutter + gap as `.assistant-msg`, so the critter sits in the assistant
      dot's column and the text starts where message text starts. */
-  gap: 6px;
+  gap: var(--space-3);
   align-items: center;
   min-width: 0;
   font-family: var(--sans);
@@ -4850,23 +4994,23 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   line-height: 1.55;
 }
 .subagents-head {
   display: flex;
-  gap: 6px;
+  gap: var(--space-3);
   align-items: baseline;
-  padding: 1px 0 4px;
+  padding: 1px 0 var(--space-2);
   font-family: var(--sans);
 }
 .subagents-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-3);
   /* Indent the agent list under the header dot. */
-  padding-left: 18px;
+  padding-left: var(--space-9);
   border-left: 1px solid var(--border);
   margin-left: 5px;
 }
@@ -4878,7 +5022,7 @@ select {
 }
 .subagent-row {
   display: flex;
-  gap: 6px;
+  gap: var(--space-3);
   align-items: baseline;
   font-family: var(--sans);
   min-width: 0;
@@ -4905,7 +5049,7 @@ select {
   display: flex;
   flex-direction: column;
   /* Align activity lines under the agent name (past the icon + gap). */
-  padding-left: 18px;
+  padding-left: var(--space-9);
   min-width: 0;
 }
 .subagent-activity {
@@ -4977,7 +5121,7 @@ select {
   /* Above the transcript so summon beams and bubbles may glow over it. */
   z-index: 2;
   height: 0;
-  transition: height 340ms var(--ease-out);
+  transition: height var(--dur-dissolve) var(--ease-out);
 }
 .critter-lane.open {
   height: calc(var(--critter-size) + 48px);
@@ -5107,7 +5251,7 @@ select {
   opacity: 1;
   transform: none;
   transition:
-    transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1) calc(220ms + var(--wave) * 360ms),
+    transform 420ms var(--ease-pop) calc(220ms + var(--wave) * 360ms),
     opacity 80ms linear calc(220ms + var(--wave) * 360ms);
 }
 .critter-lane.open:not(.closing) .terrain-prop.on-sky {
@@ -5503,7 +5647,7 @@ select {
 }
 .critter.fallen .critter-body {
   transform: rotate(-90deg) translateX(30%);
-  transition: transform 260ms cubic-bezier(0.5, 1.6, 0.6, 1);
+  transition: transform 260ms var(--ease-pop);
   filter: saturate(0.4) brightness(0.8);
 }
 .critter.fading {
@@ -5578,20 +5722,22 @@ select {
   transform: translateX(-50%);
   white-space: nowrap;
   pointer-events: none;
-  animation: critter-pop 180ms cubic-bezier(0.3, 1.6, 0.6, 1) both;
+  animation: critter-pop 180ms var(--ease-pop) both;
 }
 /* White speech bubble with dark ink, in the app font. Clipping lives on the
    inner text so the tail (::after) can sit outside the box. */
 .critter-bubble {
   bottom: calc(100% + 8px);
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 500;
   line-height: 1.35;
-  padding: 3px 8px;
-  border-radius: 8px;
-  background: #ffffff;
-  color: #0a0a0c;
+  padding: 3px var(--space-4);
+  border-radius: var(--radius-button);
+  background: var(--speech-bg);
+  color: var(--on-speech);
+  /* Bubble shadows scale with the bubble: 8px blur here (11px text), 10px on
+     the larger .wake-bubble (19px text). */
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
 }
 .critter-bubble-text {
@@ -5607,11 +5753,11 @@ select {
   left: 50%;
   margin-left: -4px;
   border: 4px solid transparent;
-  border-top-color: #ffffff;
+  border-top-color: var(--speech-bg);
 }
 .critter-badge {
   bottom: calc(100% + 2px);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 700;
   line-height: 1;
 }
@@ -5627,7 +5773,7 @@ select {
 }
 .critter-badge-yikes {
   color: var(--warning);
-  font-size: 13px;
+  font-size: var(--fs-base);
 }
 @keyframes critter-pop {
   from {
@@ -5644,8 +5790,8 @@ select {
   inset: 0;
   transform-origin: 50% 100%;
   transition:
-    opacity 240ms ease,
-    filter 240ms ease;
+    opacity var(--t-out),
+    filter var(--t-out);
 }
 .critter {
   z-index: 2;
@@ -5735,13 +5881,13 @@ select {
   bottom: calc(100% + 7px);
   left: 62%;
   display: flex;
-  gap: 2px;
-  padding: 4px 6px;
-  border-radius: 999px;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-pill);
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
   pointer-events: none;
-  animation: critter-pop-plain 200ms cubic-bezier(0.3, 1.6, 0.6, 1) both;
+  animation: critter-pop-plain 200ms var(--ease-pop) both;
 }
 .critter-thought::before,
 .critter-thought::after {
@@ -5982,13 +6128,13 @@ select {
   z-index: 3;
   min-width: 190px;
   max-width: 320px;
-  padding: 8px 10px;
+  padding: var(--space-4) var(--space-5);
   border-radius: var(--radius-sm);
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
   box-shadow: var(--shadow-md);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
   color: var(--text-muted);
   pointer-events: none;
@@ -5999,7 +6145,7 @@ select {
 .critter-tooltip-name {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
   font-weight: 600;
   color: var(--text);
 }
@@ -6014,11 +6160,11 @@ select {
   font-variant-numeric: tabular-nums;
 }
 .critter-tooltip-activity {
-  margin-top: 2px;
+  margin-top: var(--space-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-secondary);
 }
 @media (prefers-reduced-motion: reduce) {
@@ -6049,7 +6195,7 @@ select {
 }
 
 .livetoolpanel {
-  padding: 8px var(--rail) 4px;
+  padding: var(--space-4) var(--rail) var(--space-2);
   display: flex;
   flex-direction: column;
   /* Top border to frame the panel, matching the activity bar below it. */
@@ -6063,8 +6209,8 @@ select {
 .plan-step-done {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 0;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
 }
 .plan-step-check {
   flex: 0 0 auto;
@@ -6076,12 +6222,12 @@ select {
   border-radius: var(--radius-pill);
   background: var(--primary);
   color: var(--on-primary);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   line-height: 1;
 }
 .plan-step-label {
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
   color: var(--text);
 }
@@ -6098,7 +6244,7 @@ select {
      no vertical margin, precisely so this stays honest). */
   padding: var(--bar-pad) var(--rail);
   border-top: 1px solid var(--border);
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1.5;
   /* Fixed-width figures so the ticking timer / token count don't reflow the
      rest of the row as digits change (1 vs 8, etc.). */
@@ -6111,19 +6257,19 @@ select {
 .statusrow-ready {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 /* Plan-step progress badge in the activity bar (amber "Plan Steps n/total"). */
 .plan-steps-badge {
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 600;
   white-space: nowrap;
 }
 .plan-steps-running {
   margin-left: auto;
-  padding-left: 12px;
+  padding-left: var(--space-6);
   flex: 0 0 auto;
 }
 
@@ -6135,7 +6281,7 @@ select {
    so a widening timer/thinking label never nudges it. */
 .statusrow.running .cancel {
   margin-left: auto;
-  padding-left: 12px;
+  padding-left: var(--space-6);
   flex: 0 0 auto;
 }
 /* Right-side cluster (tool-panel toggle + cancel) in the running state. Pinned
@@ -6144,7 +6290,7 @@ select {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
   flex: 0 0 auto;
 }
 .statusrow.running .statusrow-right .cancel {
@@ -6166,7 +6312,7 @@ select {
   align-items: center;
   /* 6px gap matches the assistant row so the done/working label column lines up
      with the message text above (and spaces the spinner / "Working…" / meta). */
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 /* One compact rail: the status wins space over secondary usage metadata. */
@@ -6177,7 +6323,7 @@ select {
   display: flex;
   flex: 1;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
   min-width: 0;
 }
 .task-activity .statusrow-left {
@@ -6185,10 +6331,10 @@ select {
   overflow: hidden;
 }
 .task-activity .statusrow {
-  gap: 8px;
+  gap: var(--space-4);
   white-space: nowrap;
 }
-/* Reuse streaming text's dissolve without replaying on timer updates. */
+/* Local activity-label dissolve without replaying on timer updates. */
 .activity-label-reveal {
   display: inline-block;
   min-width: 0;
@@ -6222,7 +6368,7 @@ select {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-4);
   margin: 0 var(--rail);
   padding: 9px;
   background: var(--surface-1);
@@ -6288,13 +6434,13 @@ select {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-  padding: 0 2px;
+  gap: var(--space-3);
+  padding: 0 var(--space-1);
 }
 .inputactions-trailing {
   position: relative;
   display: flex;
-  gap: 6px;
+  gap: var(--space-3);
   /* Pin to the right edge once the field has taken the row above. */
   margin-left: auto;
 }
@@ -6418,7 +6564,7 @@ select {
   /* Match .input metrics EXACTLY so the overlay text lands under the textarea's
      own glyphs and caret 1:1. */
   font-family: var(--sans);
-  font-size: 15px;
+  font-size: var(--fs-lg);
   line-height: 1.5;
   box-sizing: border-box;
   padding: 4.5px 0;
@@ -6485,7 +6631,7 @@ select {
   pointer-events: none;
   /* Match .input exactly so the text wraps identically to the textarea. */
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1.5;
   padding: 0;
   margin: 0;
@@ -6518,9 +6664,9 @@ select {
   /* JS drives an explicit height tween here, so drop the shared one-line floor. */
   min-height: 0;
   transition:
-    opacity 460ms ease,
-    transform 460ms ease,
-    height 460ms var(--ease-in-out);
+    opacity var(--dur-enhance-dissolve) var(--ease-in-out),
+    transform var(--dur-enhance-dissolve) var(--ease-in-out),
+    height var(--dur-enhance-dissolve) var(--ease-in-out);
   will-change: opacity, transform, height;
 }
 .enh-diss-fade.dissolving {
@@ -6604,16 +6750,15 @@ select {
   transform: translate(-50%, -4px) scale(0.96);
   pointer-events: none;
   transition:
-    opacity var(--t-fast) ease,
-    transform var(--t-fast) ease,
-    filter var(--t-fast) ease;
+    opacity var(--t-fast),
+    transform var(--t-fast);
 }
 .enhance-pill {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   /* Cap band measured 2.10px HIGH; half the correction sits on top. */
-  padding: 0.95px 10px 3.05px;
+  padding: 0.95px var(--space-5) 3.05px;
   /* Plain fallback when Metal is inactive or WebGL is unavailable. */
   background: var(--primary);
   border: 1px solid transparent;
@@ -6621,7 +6766,7 @@ select {
   border-radius: var(--radius-pill);
   color: var(--on-primary);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   cursor: pointer;
 }
@@ -6674,7 +6819,7 @@ select {
   text-underline-offset: 3px;
   text-decoration-thickness: 1px;
   border-radius: var(--radius-sm);
-  padding: 0 2px;
+  padding: 0 var(--space-1);
   cursor: help;
   outline: none;
 }
@@ -6686,14 +6831,14 @@ select {
   position: fixed;
   z-index: var(--z-system);
   max-width: 280px;
-  padding: 6px 9px;
+  padding: var(--space-3) 9px;
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-button);
   box-shadow: var(--shadow-md);
   color: var(--text);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.4;
   text-align: left;
   /* Some hints are multi-line (model details); keep their breaks. */
@@ -6738,13 +6883,13 @@ select {
   gap: 3px;
   width: max-content;
   max-width: 280px;
-  padding: 7px 10px;
+  padding: 7px var(--space-5);
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-button);
   box-shadow: var(--shadow-md);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.4;
   white-space: normal;
   text-align: left;
@@ -6789,7 +6934,7 @@ select {
 .attach-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-4);
 }
 .attach-chip {
   /* Pinned: inheriting the app's 1.55 body line-height made the label's line
@@ -6797,14 +6942,14 @@ select {
   line-height: 1;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
   max-width: 220px;
   /* Cap band measured 0.94px HIGH; half the correction sits on top. */
-  padding: 3.5px 6px 4.5px 4px;
+  padding: 3.5px var(--space-3) 4.5px var(--space-2);
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-button);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .attach-thumb {
   width: 28px;
@@ -6852,7 +6997,7 @@ select {
   border: none;
   color: var(--text-dim);
   cursor: pointer;
-  padding: 2px;
+  padding: var(--space-1);
   border-radius: var(--radius-pill);
   transition:
     color var(--t-fast),
@@ -6867,8 +7012,8 @@ select {
 .user-img-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 6px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
 }
 /* Sent image: opens the image in the default viewer. */
 .user-img-open {
@@ -6899,8 +7044,8 @@ select {
 .user-files-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
 }
 .user-file-chip {
   /* Pinned: inheriting the app's 1.55 body line-height made the label's line
@@ -6908,13 +7053,13 @@ select {
   line-height: 1;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-button);
   /* Cap band measured 0.94px HIGH; half the correction sits on top. */
-  padding: 0.5px 6px 1.5px;
+  padding: 0.5px var(--space-3) 1.5px;
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   max-width: 280px;
 }
 .user-file-chip > span {
@@ -6927,8 +7072,8 @@ select {
 .img-grid {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  padding: 6px 0;
+  gap: var(--space-5);
+  padding: var(--space-3) 0;
 }
 .img-card {
   margin: 0;
@@ -6955,7 +7100,7 @@ select {
 .img-cap {
   padding: 5px 9px;
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   border-top: 1px solid var(--border);
   white-space: nowrap;
@@ -6968,12 +7113,12 @@ select {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-5);
   max-width: 240px;
 }
 .img-gen-label {
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   text-align: center;
 }
@@ -6986,29 +7131,29 @@ select {
   right: 0;
   border: 1px solid;
   border-radius: var(--radius-card);
-  padding: 6px;
+  padding: var(--space-3);
   box-shadow: var(--shadow-md);
   z-index: var(--z-popover);
   max-height: 44vh;
   overflow-y: auto;
 }
 .slash-menu-title {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  padding: 2px 8px 6px;
+  padding: var(--space-1) var(--space-4) var(--space-3);
 }
 .slash-item {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: var(--space-5);
   width: 100%;
   border: none;
   background: transparent;
   border-radius: var(--radius-button);
   font-family: var(--sans);
   text-align: left;
-  padding: 5px 8px;
+  padding: 5px var(--space-4);
   cursor: pointer;
   transition:
     color var(--t-fast),
@@ -7017,12 +7162,12 @@ select {
 }
 .slash-name {
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 600;
   flex: 0 0 auto;
 }
 .slash-desc {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -7031,7 +7176,7 @@ select {
 /* ── @-mention file picker (reuses .slash-menu chrome) ── */
 .mention-item {
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
 }
 .mention-icon {
   display: inline-flex;
@@ -7039,13 +7184,17 @@ select {
 }
 .mention-name {
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 600;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .mention-dir {
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -7057,7 +7206,7 @@ select {
 .mention-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-3);
   /* padding: see "Composer chip bars" below. */
 }
 .mention-chip {
@@ -7066,13 +7215,13 @@ select {
   line-height: 1;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   border: 1px solid;
   border-radius: var(--radius-button);
   /* Cap band measured 0.94px HIGH; half the correction sits on top. */
-  padding: 1.5px 4px 2.5px 6px;
+  padding: 1.5px var(--space-2) 2.5px var(--space-3);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   max-width: 280px;
 }
 .mention-chip-at {
@@ -7088,14 +7237,14 @@ select {
   align-items: center;
   border: none;
   background: transparent;
-  color: var(--text-dim, #5b6472);
+  color: var(--text-dim);
   cursor: pointer;
   padding: 0;
   flex: 0 0 auto;
   transition: color var(--t-fast);
 }
 .mention-chip-remove:hover {
-  color: var(--text, #f4f6f8);
+  color: var(--text);
 }
 
 /* ── Composer chip bars: enter / exit ──
@@ -7114,7 +7263,7 @@ select {
   box-sizing: border-box;
   overflow: hidden;
   margin: -3px;
-  animation: ggchipbarin 260ms var(--ease-out);
+  animation: ggchipbarin var(--dur-strip-in) var(--ease-out);
 }
 .attach-bar {
   padding: 3px;
@@ -7125,7 +7274,7 @@ select {
 }
 .attach-bar.leaving,
 .mention-bar.leaving {
-  animation: ggchipbarout 220ms var(--ease-in) forwards;
+  animation: ggchipbarout var(--dur-strip-out) var(--ease-in) forwards;
   pointer-events: none;
 }
 /* Collapsed state: no height, no padding, and a bottom margin that also soaks
@@ -7173,7 +7322,7 @@ select {
   box-sizing: border-box;
   overflow: hidden;
   pointer-events: none;
-  animation: ggchipout 220ms var(--ease-in) forwards;
+  animation: ggchipout var(--dur-strip-out) var(--ease-in) forwards;
 }
 @keyframes ggchipin {
   from {
@@ -7224,7 +7373,7 @@ select {
      prompt sits on the same baseline as the placeholder and typed text.
      The row is align-items:flex-start (pinned to the first line), so without
      this the chevron inherited the app's 14px / 1.55 and floated a hair high + small. */
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1.5;
 }
 
@@ -7237,7 +7386,7 @@ select {
   /* User's own text matches the user-message identity color (mirrors TUI). */
   color: var(--user-text);
   font-family: var(--sans);
-  font-size: 15px;
+  font-size: var(--fs-lg);
   /* Pin every text-metric property explicitly so the @Ken highlight overlay (a
      <div>) and this <textarea> compute IDENTICAL glyph advance. Browsers apply
      different UA defaults for kerning/ligatures/spacing to form controls vs
@@ -7294,7 +7443,7 @@ select {
   background: transparent;
   border: none;
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   cursor: pointer;
   padding: 0;
   /* Underline drawn clear at rest so hover fades it (see .home-link). */
@@ -7313,7 +7462,7 @@ select {
 
 /* App-update banner — its own row below the footer so it reads as a distinct,
    noticeable announcement. Same green gradient as the home-screen update pill
-   (#36c489 → #2dd4bf) with dark text; a light sweep draws the eye. The whole
+   (--fx-update-from → --fx-update-to) with dark text; a light sweep draws the eye. The whole
    row is the click target that downloads, installs, and restarts. */
 .update-banner {
   position: relative;
@@ -7323,12 +7472,12 @@ select {
   justify-content: center;
   gap: 9px;
   width: 100%;
-  padding: 8px var(--rail);
+  padding: var(--space-4) var(--rail);
   border: none;
-  background: linear-gradient(135deg, #36c489 0%, #2dd4bf 100%);
-  color: #04130d;
+  background: linear-gradient(135deg, var(--fx-update-from) 0%, var(--fx-update-to) 100%);
+  color: var(--on-fx-update);
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 600;
   cursor: pointer;
   overflow: hidden;
@@ -7383,7 +7532,7 @@ select {
   top: 0;
   bottom: 0;
   left: 0;
-  background: linear-gradient(135deg, #8ff5c6 0%, #a7f3e9 100%);
+  background: linear-gradient(135deg, var(--fx-update-fill-from) 0%, var(--fx-update-fill-to) 100%);
   /* Hairline dark leading edge so the fill boundary reads crisply. */
   box-shadow: 1px 0 0 rgba(4, 19, 13, 0.15);
   transition: width 180ms linear;
@@ -7397,7 +7546,7 @@ select {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #04130d;
+  background: var(--on-fx-update);
   box-shadow: 0 0 0 0 rgba(4, 19, 13, 0.55);
   animation: update-pulse 1.8s ease-out infinite;
 }
@@ -7429,16 +7578,16 @@ select {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: var(--space-3);
   align-self: center;
-  background: linear-gradient(135deg, #36c489 0%, #2dd4bf 100%);
-  color: #04130d;
+  background: linear-gradient(135deg, var(--fx-update-from) 0%, var(--fx-update-to) 100%);
+  color: var(--on-fx-update);
   border: none;
   border-radius: var(--radius-pill);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
-  padding: 5px 12px;
+  padding: 5px var(--space-6);
   cursor: pointer;
   box-shadow: 0 4px 14px color-mix(in srgb, var(--success) 35%, transparent);
   /* Colour-on-hover like every other control: no lift. */
@@ -7465,7 +7614,7 @@ select {
   bottom: 0;
   left: 0;
   height: 3px;
-  background: linear-gradient(90deg, #8ff5c6 0%, #a7f3e9 100%);
+  background: linear-gradient(90deg, var(--fx-update-fill-from) 0%, var(--fx-update-fill-to) 100%);
   transition: width 180ms linear;
   pointer-events: none;
 }
@@ -7479,7 +7628,7 @@ select {
   grid-area: 1 / 1;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   white-space: nowrap;
 }
 .home-update-hidden {
@@ -7499,11 +7648,11 @@ select {
   align-self: center;
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-5);
 }
 .home-version {
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 500;
   color: var(--text);
   letter-spacing: 0.02em;
@@ -7515,7 +7664,7 @@ select {
   border: none;
   padding: 0;
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
   color: var(--text);
   cursor: pointer;
@@ -7537,9 +7686,9 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-6);
   padding: var(--bar-pad) var(--rail);
-  font-size: 13px;
+  font-size: var(--fs-base);
   /* Reserve the bar's height before its contents hydrate so the input/
      transcript above never shift when the footer fills in (14+14 padding +
      ~20px line box). Matches .statusrow exactly, so the composer is framed by
@@ -7591,14 +7740,14 @@ select {
 .code-expand {
   display: block;
   width: 100%;
-  margin: 4px 0 0;
-  padding: 4px 10px;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-5);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   text-align: left;
-  color: var(--text-dim, #8b8b8b);
+  color: var(--text-dim);
   background: transparent;
-  border: 1px solid var(--border, #2a2a2a);
+  border: 1px solid var(--border);
   border-radius: var(--radius-button);
   cursor: pointer;
   opacity: 0.8;
@@ -7678,9 +7827,9 @@ select {
   height: 28px;
   margin-left: -14px;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   /* Pops in once the ground has risen (TERRAIN_LAND_MS). */
-  animation: wake-critter-in 420ms cubic-bezier(0.3, 1.5, 0.6, 1) 360ms backwards;
+  animation: wake-critter-in 420ms var(--ease-pop) 360ms backwards;
 }
 .wake-critter:focus-visible {
   outline: 1px solid var(--critter);
@@ -7695,7 +7844,7 @@ select {
 }
 .wake-critter-body.wake-hop {
   animation:
-    wake-hop 520ms cubic-bezier(0.3, 1.5, 0.6, 1),
+    wake-hop 520ms var(--ease-pop),
     wake-breathe 2.8s ease-in-out 520ms infinite;
 }
 .wake-critter-body img {
@@ -7750,10 +7899,10 @@ select {
   max-width: min(440px, 86vw);
   min-width: 44px;
   min-height: 1.4em;
-  padding: 8px 14px;
-  border-radius: 14px;
-  background: #ffffff;
-  color: #0a0a0c;
+  padding: var(--space-4) var(--space-7);
+  border-radius: var(--radius-card);
+  background: var(--speech-bg);
+  color: var(--on-speech);
   font-family: var(--sans);
   font-size: 19px;
   font-weight: 600;
@@ -7768,7 +7917,7 @@ select {
   left: 50%;
   margin-left: -7px;
   border: 7px solid transparent;
-  border-top-color: #ffffff;
+  border-top-color: var(--speech-bg);
 }
 .wake-bubble-text {
   white-space: pre-wrap;
@@ -7780,7 +7929,7 @@ select {
   margin-left: 3px;
   vertical-align: -0.17em;
   border-radius: 2px;
-  background: #0a0a0c;
+  background: var(--on-speech);
   animation: ggblink 1s step-end infinite;
 }
 
@@ -7875,12 +8024,12 @@ select {
 .motion-starters {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px var(--rail);
+  gap: var(--space-4);
+  padding: var(--space-4) var(--rail);
 }
 .motion-starter {
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--bg) 70%, transparent);
 }
 @media (prefers-reduced-motion: reduce) {
@@ -7921,12 +8070,12 @@ select {
 .transcript-skeleton {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 4px 0;
+  gap: var(--space-7);
+  padding: var(--space-2) 0;
 }
 .skeleton-msg {
   display: flex;
-  gap: 8px;
+  gap: var(--space-4);
   align-items: flex-start;
   animation: reveal-up var(--dur-row) var(--ease-out) both;
 }
@@ -7949,13 +8098,13 @@ select {
 .list-skeleton {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
 }
 .skeleton-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  padding: var(--space-7) var(--space-8);
   border-radius: var(--radius-card);
   animation: reveal-up var(--dur-row) var(--ease-out) both;
 }
@@ -7995,7 +8144,7 @@ select {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
   overflow: hidden;
   white-space: nowrap;
 }
@@ -8010,13 +8159,13 @@ select {
   flex: 0 1 auto;
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--space-8);
   min-width: 0;
   /* Narrow windows: controls wrap to a second line as whole units instead of
      breaking inside "Thinking medium" or a model name. */
   flex-wrap: wrap;
   justify-content: flex-end;
-  row-gap: 6px;
+  row-gap: var(--space-3);
   white-space: nowrap;
 }
 
@@ -8026,7 +8175,7 @@ select {
   background: transparent;
   border: none;
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   padding: 0;
   cursor: pointer;
   line-height: 1.55;
@@ -8049,7 +8198,7 @@ select {
 
 /* ── Footer: context percentage ── */
 .ctx-meter-pct {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-variant-numeric: tabular-nums;
 }
 
@@ -8069,8 +8218,8 @@ select {
   border-radius: var(--radius-pill);
   font-family: var(--sans);
   /* Same size as the rest of the footer's text. */
-  font-size: 13px;
-  padding: 0 8px;
+  font-size: var(--fs-base);
+  padding: 0 var(--space-4);
   cursor: pointer;
   line-height: 1.5;
   transition:
@@ -8090,27 +8239,27 @@ select {
   position: fixed;
   border: 1px solid;
   border-radius: var(--radius-card);
-  padding: 6px;
+  padding: var(--space-3);
   box-shadow: var(--shadow-md);
   z-index: var(--z-modal);
   min-width: 280px;
   max-width: min(440px, 90vw);
 }
 .bgtasks-empty {
-  padding: 6px;
-  font-size: 12px;
+  padding: var(--space-3);
+  font-size: var(--fs-sm);
 }
 .bgtasks-item {
   display: flex;
   align-items: baseline;
-  gap: 8px;
-  padding: 4px 6px;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-button);
-  font-size: 13px;
+  font-size: var(--fs-base);
 }
 .bgtasks-dot {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 .bgtasks-cmd {
   flex: 1 1 auto;
@@ -8122,14 +8271,14 @@ select {
 .bgtasks-status {
   flex: 0 0 auto;
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 .bgtasks-kill {
   flex: 0 0 auto;
   background: transparent;
   border: none;
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   cursor: pointer;
   padding: 0;
   transition: filter var(--t-fast);
@@ -8142,7 +8291,7 @@ select {
 .model-anchor {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
 }
 
 /* Static "GG" / "Ken" prefix — plain text, never clickable. Only the model
@@ -8155,7 +8304,7 @@ select {
   align-items: center;
   gap: 5px;
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1;
 }
 
@@ -8169,7 +8318,7 @@ select {
 }
 .model-select-text {
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1;
   transition:
     color var(--t-fast),
@@ -8205,7 +8354,7 @@ select {
   border: none;
   background: transparent;
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1;
   cursor: pointer;
   transition:
@@ -8228,25 +8377,25 @@ select {
   overflow-y: auto;
   /* No rubber-band bounce, and no scroll chaining to the transcript behind. */
   overscroll-behavior: none;
-  padding: 8px;
+  padding: var(--space-4);
   border: 1px solid;
   border-radius: var(--radius-card);
   box-shadow: var(--shadow-md);
 }
 .model-menu-title {
-  padding: 2px 6px 6px;
-  font-size: 11px;
+  padding: var(--space-1) var(--space-3) var(--space-3);
+  font-size: var(--fs-xs);
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 /* Per-provider group heading. Quieter than the menu title so the hierarchy
    reads title > provider > model. */
 .model-menu-section + .model-menu-section {
-  margin-top: 6px;
+  margin-top: var(--space-3);
 }
 .model-menu-subtitle {
-  padding: 2px 6px 3px;
-  font-size: 11px;
+  padding: var(--space-1) var(--space-3) 3px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.07em;
   text-transform: uppercase;
@@ -8254,21 +8403,21 @@ select {
 .model-menu-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 2px 8px;
+  gap: var(--space-1) var(--space-4);
 }
 .model-menu-follow {
   display: block;
   width: 100%;
-  margin-bottom: 6px;
+  margin-bottom: var(--space-3);
 }
 .model-menu-item {
-  padding: 4px 8px;
+  padding: var(--space-2) var(--space-4);
   overflow: hidden;
   border: none;
   border-radius: var(--radius-button);
   background: transparent;
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -8304,7 +8453,7 @@ select {
 .platform-linux .gaze-frame {
   inset: 1px;
   /* Matches the OS window corner, not the component scale. */
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 .gaze-frame-hover {
   border-color: color-mix(in oklch, var(--warning) 60%, transparent);
@@ -8328,10 +8477,10 @@ select {
   z-index: calc(var(--z-system) - 10);
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-5);
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   background: var(--surface-2);
   border: 1px solid var(--border);
@@ -8352,7 +8501,7 @@ select {
 .autopilot-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
   flex: 0 0 auto;
   /* Match the sibling .btn-sm height (25px) and reset the inherited 1.55
      line-height so the label's tall line box can't push the nav row taller than
@@ -8362,7 +8511,7 @@ select {
   line-height: 1;
 }
 .autopilot-label {
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1;
   color: var(--text-muted);
   user-select: none;
@@ -8410,23 +8559,23 @@ select {
   transform: scale(1);
   pointer-events: none;
   transition:
-    opacity 0.3s 0.1s,
-    transform 0.2s 0.1s;
+    opacity 0.3s var(--ease-out) 0.1s,
+    transform 0.2s var(--ease-out) 0.1s;
 }
 /* Track */
 .cl-switch > span::before {
   content: "";
   float: right;
   display: inline-block;
-  margin: 5px 0 5px 10px;
+  margin: 5px 0 5px var(--space-5);
   border-radius: 7px;
   width: 36px;
   height: 14px;
   background-color: var(--border-strong);
   vertical-align: top;
   transition:
-    background-color 0.2s,
-    opacity 0.2s;
+    background-color var(--t-fast),
+    opacity var(--t-fast);
 }
 /* Thumb */
 .cl-switch > span::after {
@@ -8443,8 +8592,8 @@ select {
     0 2px 2px 0 rgba(0, 0, 0, 0.14),
     0 1px 5px 0 rgba(0, 0, 0, 0.12);
   transition:
-    background-color 0.2s,
-    transform 0.2s;
+    background-color var(--t-fast),
+    transform var(--t-fast);
 }
 /* Checked */
 .cl-switch > input:checked {
@@ -8516,18 +8665,18 @@ select {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: var(--space-3);
   min-width: 0;
   max-width: 160px;
   height: 26px;
-  padding: 4px 11px;
+  padding: var(--space-2) 11px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-pill);
   background: var(--gloss-neutral);
   color: var(--text-secondary);
   box-shadow: var(--gloss-shadow-neutral);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   letter-spacing: -0.005em;
   /* Fixed height + flex centring set the box; 1.25 just gives the label its
@@ -8563,7 +8712,7 @@ select {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 3px 8px;
+  padding: 3px var(--space-4);
   border: 0;
   border-radius: var(--radius-pill);
   /* Neutral raised chip; the success green lives only in the ink. A green
@@ -8574,7 +8723,7 @@ select {
     0 1px 2px rgba(0, 0, 0, 0.3),
     inset 0 1px 0 rgba(255, 255, 255, 0.14);
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   line-height: 1.25;
   white-space: nowrap;
@@ -8668,10 +8817,15 @@ select {
   -webkit-background-clip: text;
 }
 .rank-fx-gradient {
-  background-image: linear-gradient(90deg, #b88cff, #6ea8ff);
+  background-image: linear-gradient(90deg, var(--fx-rank-violet), var(--fx-rank-blue));
 }
 .rank-fx-gradient-glow {
-  background-image: linear-gradient(90deg, #b88cff, #6ea8ff, #7df9ff);
+  background-image: linear-gradient(
+    90deg,
+    var(--fx-rank-violet),
+    var(--fx-rank-blue),
+    var(--fx-rank-cyan)
+  );
   text-shadow: 0 0 14px rgba(126, 170, 255, 0.25);
 }
 .rank-fx-animated {
@@ -8679,14 +8833,14 @@ select {
   text-shadow: 0 0 12px rgba(96, 165, 250, 0.2);
 }
 .rank-fx-gold {
-  background-image: linear-gradient(90deg, #b78b2d, #ffe38a, #d9a441);
+  background-image: linear-gradient(90deg, #b78b2d, var(--fx-rank-gold), var(--fx-rank-gold-deep));
 }
 .rank-fx-gold-shimmer {
-  color: #ffe38a;
+  color: var(--fx-rank-gold);
   text-shadow: 0 0 12px rgba(255, 227, 138, 0.2);
 }
 .rank-fx-iridescent {
-  color: #a99cff;
+  color: var(--fx-rank-iris);
   text-shadow: 0 0 12px rgba(125, 249, 255, 0.2);
 }
 /* Past the Singularity (levels 51+): one look per two tiers, ending on Origin. */
@@ -8708,7 +8862,13 @@ select {
   text-shadow: 0 0 12px rgba(125, 249, 255, 0.22);
 }
 .rank-fx-prism {
-  background-image: linear-gradient(90deg, #ff8bd2, #ffe38a, #7df9ff, #b88cff);
+  background-image: linear-gradient(
+    90deg,
+    var(--fx-rank-pink),
+    var(--fx-rank-gold),
+    var(--fx-rank-cyan),
+    var(--fx-rank-violet)
+  );
 }
 .rank-fx-eternal {
   background-image: linear-gradient(90deg, #ffd77a, #fff8e6, #ffc861);
@@ -8717,7 +8877,7 @@ select {
   background-image: linear-gradient(90deg, #c9d6e6, #ffffff, #a9b8cc);
 }
 .rank-fx-radiant {
-  color: #eaf6ff;
+  color: var(--fx-rank-radiant);
   text-shadow: 0 0 14px rgba(165, 243, 255, 0.34);
 }
 .rank-fx-omega {
@@ -8863,7 +9023,7 @@ select {
 @keyframes rankGoldShift {
   0%,
   100% {
-    color: #d9a441;
+    color: var(--fx-rank-gold-deep);
   }
   50% {
     color: #fff3bf;
@@ -8872,19 +9032,19 @@ select {
 @keyframes rankIridescentShift {
   0%,
   100% {
-    color: #a99cff;
+    color: var(--fx-rank-iris);
   }
   33% {
-    color: #7df9ff;
+    color: var(--fx-rank-cyan);
   }
   66% {
-    color: #ff8bd2;
+    color: var(--fx-rank-pink);
   }
 }
 @keyframes rankRadiantShift {
   0%,
   100% {
-    color: #eaf6ff;
+    color: var(--fx-rank-radiant);
   }
   50% {
     color: #a5f3ff;
@@ -8896,7 +9056,7 @@ select {
     color: #d7ccff;
   }
   25% {
-    color: #7df9ff;
+    color: var(--fx-rank-cyan);
   }
   50% {
     color: #ffe9b0;
@@ -8914,29 +9074,29 @@ select {
 .scorecard {
   display: flex;
   flex-direction: column;
-  padding: 0 2px 2px;
+  padding: 0 var(--space-1) var(--space-1);
   text-align: left;
 }
 .scorecard-modal .modal-head {
-  margin-bottom: 2px;
+  margin-bottom: var(--space-1);
 }
 .scorecard-rank {
-  font-size: 24px;
+  font-size: var(--fs-4xl);
   font-weight: 800;
   letter-spacing: -0.04em;
   line-height: 1.15;
 }
 .scorecard-tier {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   letter-spacing: 0.02em;
 }
 .scorecard-level {
   display: flex;
   align-items: stretch;
-  gap: 14px;
-  margin-top: 18px;
+  gap: var(--space-7);
+  margin-top: var(--space-9);
 }
 .scorecard-level-num {
   color: var(--text);
@@ -8960,13 +9120,13 @@ select {
   align-items: baseline;
   justify-content: space-between;
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 700;
 }
 .scorecard-level-row span:last-child {
   color: var(--text-muted);
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 500;
 }
 .scorecard-bar {
@@ -8984,23 +9144,23 @@ select {
 }
 .scorecard-divider {
   height: 1px;
-  margin: 16px 0 14px;
+  margin: var(--space-8) 0 var(--space-7);
   background: var(--border);
 }
 .scorecard-stats {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-5);
 }
 .scorecard-stat {
   display: grid;
   grid-template-columns: 92px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-6);
 }
 .scorecard-stat-label {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 500;
 }
 .scorecard-stat-bar {
@@ -9019,16 +9179,16 @@ select {
 .scorecard-stat b {
   min-width: 44px;
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
 /* The milestone the bar is filling toward — present but never louder than the count. */
 .scorecard-stat-goal {
-  margin-left: 4px;
+  margin-left: var(--space-2);
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-style: normal;
   font-weight: 500;
 }
@@ -9036,8 +9196,8 @@ select {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  margin-top: 16px;
-  font-size: 11px;
+  margin-top: var(--space-8);
+  font-size: var(--fs-xs);
 }
 .scorecard-footer span {
   color: var(--text-dim);
@@ -9056,13 +9216,13 @@ select {
   gap: 5px;
   flex: 0 0 auto;
   min-width: 0;
-  padding: 2px 6px;
+  padding: var(--space-1) var(--space-3);
   border: 1px solid transparent;
   border-radius: var(--radius-button);
   background: transparent;
   color: var(--text-muted);
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
   /* The 14px track sets the row height; 1.25 only gives labels descender room. */
   line-height: 1.25;
@@ -9094,9 +9254,9 @@ select {
   height: 12px;
   flex: 0 0 auto;
   overflow: hidden;
-  border: 1px solid #313131;
+  border: 1px solid var(--fx-meter-edge);
   border-radius: var(--radius-pill);
-  background: radial-gradient(circle, #1b2735, #090a0f);
+  background: radial-gradient(circle, var(--fx-meter-from), var(--fx-meter-to));
   box-shadow: var(--shadow-sm);
 }
 .title-usage-fill {
@@ -9104,10 +9264,10 @@ select {
   inset: 0 auto 0 0;
   min-width: 1px;
   border-radius: inherit;
-  background: linear-gradient(90deg, #00f260, #0575e6);
+  background: linear-gradient(90deg, var(--fx-volume-from), var(--fx-volume-to));
   box-shadow:
-    0 0 4px #00f260,
-    0 0 7px #0575e6;
+    0 0 4px var(--fx-volume-from),
+    0 0 7px var(--fx-volume-to);
   transition: width 0.45s var(--ease-out);
 }
 .title-usage-fill::before {
@@ -9205,36 +9365,36 @@ select {
 /* ── Durable chat memories ── */
 .memory-modal {
   width: min(780px, 92vw);
-  padding: 20px;
+  padding: var(--space-10);
 }
 .memory-modal .modal-head {
-  margin-bottom: 6px;
+  margin-bottom: var(--space-3);
 }
 .memory-modal-title {
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-4);
 }
 .brain-tabs {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  padding: 2px;
+  gap: var(--space-1);
+  padding: var(--space-1);
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   background: var(--surface-1);
 }
 .brain-tabs button {
   min-height: 24px;
-  padding: 2px 8px;
+  padding: var(--space-1) var(--space-4);
   border: 0;
   border-radius: var(--radius-pill);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   line-height: 1.3;
   transition:
@@ -9263,24 +9423,24 @@ select {
   width: 100%;
   border-collapse: collapse;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .memory-table th {
   position: sticky;
   top: 0;
   z-index: 1;
-  padding: 9px 10px;
+  padding: 9px var(--space-5);
   border-bottom: 1px solid var(--border);
   background: var(--surface-1);
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-align: left;
   text-transform: uppercase;
 }
 .memory-table td {
-  padding: 10px;
+  padding: var(--space-5);
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
@@ -9294,11 +9454,11 @@ select {
 }
 .memory-category {
   display: inline-block;
-  padding: 2px 6px;
+  padding: var(--space-1) var(--space-3);
   border-radius: var(--radius-pill);
   background: var(--surface-1);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   text-transform: capitalize;
 }
 .memory-importance,
@@ -9337,9 +9497,9 @@ select {
   opacity: 0.35;
 }
 .memory-modal-state {
-  padding: 44px 20px;
+  padding: 44px var(--space-10);
   color: var(--text-dim);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   text-align: center;
 }
 .memory-modal-error {
@@ -9361,8 +9521,8 @@ select {
 .schedule-hint {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 8px;
+  gap: var(--space-4);
+  padding: var(--space-4);
 }
 /* The signature line: `/schedule <prompt> | <every> | [times]`. Wraps rather
    than clipping so the grammar stays fully readable in a narrow window. */
@@ -9370,10 +9530,10 @@ select {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 6px;
+  gap: var(--space-3);
   font-family: var(--sans);
-  font-size: 13px;
-  padding: 0 2px;
+  font-size: var(--fs-base);
+  padding: 0 var(--space-1);
 }
 .schedule-sig-cmd {
   font-weight: 600;
@@ -9381,7 +9541,7 @@ select {
 .schedule-sig-slot {
   display: inline-flex;
   align-items: baseline;
-  gap: 6px;
+  gap: var(--space-3);
 }
 .schedule-sig-bar {
   opacity: 0.7;
@@ -9389,7 +9549,7 @@ select {
 /* Active slot is marked by weight + an underline, never by color alone —
    color-only state fails for low-vision and monochrome users. */
 .schedule-slot {
-  padding: 1px 4px;
+  padding: 1px var(--space-2);
   border-radius: var(--radius-button);
   transition:
     color var(--t-fast),
@@ -9402,13 +9562,13 @@ select {
   text-underline-offset: 3px;
 }
 .schedule-status {
-  padding: 0 2px;
+  padding: 0 var(--space-1);
 }
 /* Echo of the user's text with the rejected span underlined in place. Wraps and
    breaks so a long prompt can't force the popover wider than the composer. */
 .schedule-echo {
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -9420,7 +9580,7 @@ select {
   font-weight: 600;
 }
 .schedule-msg {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -9429,13 +9589,13 @@ select {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-  padding: 2px 2px 0;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-1) 0;
   border-top: 1px solid var(--border);
-  padding-top: 8px;
+  padding-top: var(--space-4);
 }
 .schedule-presets-label {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -9444,7 +9604,7 @@ select {
   border: 1px solid;
   border-radius: var(--radius-pill);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   padding: 1px 9px;
   cursor: pointer;
   transition:
@@ -9469,7 +9629,7 @@ select {
 }
 .schedules-cadence {
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
   flex: 0 0 auto;
 }
@@ -9480,13 +9640,13 @@ select {
    so the controls are allowed to shrink and the left cluster yields first. */
 @media (max-width: 900px) {
   .footer {
-    gap: 8px;
+    gap: var(--space-4);
     /* Tighten the gap between clusters, never the rail — the footer has to keep
        lining up with the composer and transcript above it at every width. */
   }
   .footer-right {
     flex: 0 1 auto;
-    gap: 10px;
+    gap: var(--space-5);
     overflow: hidden;
   }
   .footer-left {
@@ -9502,7 +9662,7 @@ select {
 @media (max-width: 620px) {
   .footer:has(.footer-left > *) {
     flex-wrap: wrap;
-    row-gap: 6px;
+    row-gap: var(--space-3);
   }
   .footer:has(.footer-left > *) .footer-left {
     flex: 1 1 100%;
@@ -9519,8 +9679,8 @@ select {
     justify-content: flex-end;
   }
   .footer-right {
-    gap: 8px;
-    font-size: 12px;
+    gap: var(--space-4);
+    font-size: var(--fs-sm);
   }
   .schedules-menu {
     min-width: 0;
@@ -9536,21 +9696,30 @@ select {
    Note the wording: these land at the next TURN boundary, not after the run. */
 .queued-bar {
   border: 1px solid;
-  /* Pill-round, matching the composer shell it sits inside. */
   border-radius: var(--radius-pill);
-  padding: 6px 12px;
-  margin-bottom: 6px;
-  font-size: 12px;
+  padding: var(--space-3) var(--space-6);
+  margin-bottom: var(--space-3);
+  font-size: var(--fs-sm);
   overflow: hidden;
   /* Enter: slide up from under the composer and settle. Animating max-height
      alongside opacity means the composer is pushed smoothly rather than
      jumping the moment a message queues. */
-  animation: ggqueuedin 260ms var(--ease-out);
+  animation: ggqueuedin var(--dur-strip-in) var(--ease-out);
+}
+/* Chat queue insertion joins App's layout transaction. Its final space lands
+   once; an independent max-height entrance would fight transcript following.
+   Other strips sharing the generic queued styles keep their existing motion. */
+/* A fixed composer corner keeps expanded-list controls inside the pointer clip. */
+.chat-queue {
+  border-radius: var(--radius-input);
+}
+.chat-queue:not(.leaving) {
+  animation: fade-in var(--dur-row) var(--ease-out);
 }
 /* Exit: reverse, and collapse the box so the composer glides back down instead
    of snapping. Held on screen for EXIT_MS by QueuedBar before it unmounts. */
 .queued-bar.leaving {
-  animation: ggqueuedout 220ms var(--ease-in) forwards;
+  animation: ggqueuedout var(--dur-strip-out) var(--ease-in) forwards;
   pointer-events: none;
 }
 /* Collapsed state: no height, padding or border, and a bottom margin that also
@@ -9573,9 +9742,9 @@ select {
     opacity: 1;
     transform: translateY(0);
     max-height: calc(var(--pin-h, 206px) + 14px);
-    margin-bottom: 6px;
-    padding-top: 6px;
-    padding-bottom: 6px;
+    margin-bottom: var(--space-3);
+    padding-top: var(--space-3);
+    padding-bottom: var(--space-3);
   }
 }
 @keyframes ggqueuedout {
@@ -9597,7 +9766,7 @@ select {
 .queued-bar-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
   min-width: 0;
 }
 .queued-dot {
@@ -9617,7 +9786,7 @@ select {
 }
 .queued-bar-when {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   opacity: 0.7;
 }
 .queued-toggle,
@@ -9627,7 +9796,7 @@ select {
   border: none;
   cursor: pointer;
   /* Cap band measured 0.80px LOW; the box grows below to lift it to centre. */
-  padding: 0 2px 0.8px;
+  padding: 0 var(--space-1) 0.8px;
   font-family: var(--sans);
   /* Pinned: inheriting the app's 1.55 body line-height made the label's line
      box taller than its glyphs, which reads as vertically off-centre. */
@@ -9635,75 +9804,55 @@ select {
   transition: color var(--t-fast);
 }
 .queued-toggle {
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 /* Generous hit target: this is a destructive control on a small glyph. */
 .queued-cancel {
-  font-size: 15px;
+  font-size: var(--fs-lg);
   line-height: 1;
-  padding: 2px 6px;
+  padding: var(--space-1) var(--space-3);
 }
 .queued-toggle:hover,
 .queued-cancel:hover {
   color: var(--error);
 }
+.queued-list-shell {
+  display: flow-root;
+  overflow: hidden;
+}
 .queued-list {
-  margin-top: 6px;
-  padding-top: 6px;
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
   border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  animation: ggqueuedlist 200ms var(--ease-out);
+  gap: var(--space-1);
+  animation: fade-in var(--dur-row) var(--ease-out) both;
 }
-@keyframes ggqueuedlist {
+.queued-list.leaving {
+  animation: queued-list-out var(--dur-row) var(--ease-in) both;
+}
+@keyframes queued-list-out {
   from {
-    opacity: 0;
-    max-height: 0;
-    margin-top: 0;
-    padding-top: 0;
+    opacity: 1;
   }
   to {
-    opacity: 1;
-    max-height: 180px;
-    margin-top: 6px;
-    padding-top: 6px;
+    opacity: 0;
   }
 }
-/* Rows fade in with a short stagger so the list reads as unfolding rather than
-   appearing all at once. Capped at 4 — beyond that the wait to see the last row
-   would be more annoying than the effect is pleasant. */
+/* The measured shell owns disclosure motion; rows do not compete with it. */
 .queued-list-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
   min-width: 0;
-  animation: ggqueuedrow 220ms var(--ease-out) backwards;
-}
-.queued-list-item:nth-child(2) {
-  animation-delay: 40ms;
-}
-.queued-list-item:nth-child(3) {
-  animation-delay: 80ms;
-}
-.queued-list-item:nth-child(n + 4) {
-  animation-delay: 120ms;
-}
-@keyframes ggqueuedrow {
-  from {
-    opacity: 0;
-    transform: translateX(-4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
 }
 /* Respect reduced-motion: keep the state changes, drop the movement. */
 @media (prefers-reduced-motion: reduce) {
   .queued-bar,
   .queued-bar.leaving,
   .queued-list,
+  .queued-list.leaving,
   .queued-list-item,
   .user-msg.promoted,
   .queued-pill {
@@ -9723,7 +9872,7 @@ select {
 .queued-index {
   flex: 0 0 auto;
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   width: 12px;
 }
 .queued-list-text {
@@ -9750,9 +9899,9 @@ select {
   /* It belongs to the reply above it, so it starts on the reply's text column
      (the 16px dot gutter + 6px gap of .assistant-msg), like a table or code
      block does, instead of poking out to the dot. */
-  margin: 8px 0 6px 22px;
+  margin: var(--space-4) 0 var(--space-3) var(--space-11);
   max-width: calc(100% - 22px);
-  padding: 14px 16px;
+  padding: var(--space-7) var(--space-8);
   /* A step above the transcript, plus a hairline: at --surface-1 the band was
      the same value as the canvas behind it and simply dissolved into it. */
   background: var(--surface-2);
@@ -9795,7 +9944,7 @@ select {
   animation: ggshimmer 2.4s linear 2;
 }
 .ask-closed {
-  font-size: 13px;
+  font-size: var(--fs-base);
   /* Dim measured 3.37:1 on the bare transcript canvas this line sits on, under
      the 4.5:1 floor. Muted clears it and still reads as the quietest row. */
   color: var(--text-muted);
@@ -9804,14 +9953,14 @@ select {
    chat's own size (15px, like the reply above it); at 13px it read as a form
    label smaller than the sentence that introduced it. */
 .ask-subq-q {
-  margin: 0 0 8px;
-  font-size: 15px;
+  margin: 0 0 var(--space-4);
+  font-size: var(--fs-lg);
   font-weight: 600;
   line-height: 1.4;
   color: var(--text);
 }
 .ask-detail {
-  margin: -4px 0 10px;
+  margin: -4px 0 var(--space-5);
   font-size: 13.5px;
   line-height: 1.5;
   /* Secondary, not muted: this sits on a raised surface, and muted grey on grey
@@ -9825,17 +9974,17 @@ select {
 .ask-deferred-note {
   width: 0;
   min-width: 100%;
-  margin: 0 0 10px;
-  padding-bottom: 8px;
+  margin: 0 0 var(--space-5);
+  padding-bottom: var(--space-4);
   border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.45;
   color: var(--text-secondary);
 }
 .ask-subq-num {
-  margin-right: 8px;
+  margin-right: var(--space-4);
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 500;
   /* Dim measured 2.84:1 on the band's surface. These numbers are permanent now
      that answered questions stay on screen, so they have to clear 4.5:1. */
@@ -9846,8 +9995,8 @@ select {
    band's raised surface, so this needs its own stronger value to actually read
    as a division. */
 .ask-subq + .ask-subq {
-  margin-top: 14px;
-  padding-top: 14px;
+  margin-top: var(--space-7);
+  padding-top: var(--space-7);
   border-top: 1px solid var(--border-strong);
 }
 
@@ -9860,7 +10009,7 @@ select {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 6px;
+  gap: var(--space-3);
   /* Inside a fit-content band the rows still align to each other, so the band
      sizes to the LONGEST row rather than each row sizing independently. */
   min-width: 100%;
@@ -9886,13 +10035,13 @@ select {
   overflow-wrap: anywhere;
   /* Chat-sized and medium weight: 12px bold read as a button caption, not as
      an answer you would say. */
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 500;
   line-height: 1.35;
-  gap: 10px;
+  gap: var(--space-5);
   max-width: 100%;
   border-radius: var(--radius-button);
-  padding: 9px 12px;
+  padding: 9px var(--space-6);
   background: var(--surface-3);
   border-color: var(--border-strong);
   transition:
@@ -9950,12 +10099,12 @@ select {
    line runs long the badge is pushed back until just the button's own 8px gap
    is left, and the two read as one run of text — so reserve the rest here. */
 .ask-options .ask-row-main {
-  padding-inline-end: 14px;
+  padding-inline-end: var(--space-7);
 }
 .ask-row-main {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
   min-width: 0;
   flex: 1 1 auto;
 }
@@ -9966,7 +10115,7 @@ select {
   flex: 1 1 auto;
 }
 .ask-row-hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 400;
   line-height: 1.4;
   /* On the pill's own gradient, --text-dim measured ~2.2:1 — under the 4.5:1
@@ -9988,7 +10137,7 @@ select {
   border: 1px solid var(--border-strong);
   border-radius: 5px;
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   line-height: 1;
   color: var(--text-muted);
@@ -10021,8 +10170,8 @@ select {
 .ask-hint {
   width: 0;
   min-width: 100%;
-  margin: 12px 0 0;
-  font-size: 12px;
+  margin: var(--space-6) 0 0;
+  font-size: var(--fs-sm);
   line-height: 1.45;
   /* Muted on the band's raised surface: quiet, and still above 4.5:1. */
   color: var(--text-muted);
@@ -10032,7 +10181,7 @@ select {
    gone — the options are the whole interface. */
 .ask-foot {
   display: flex;
-  margin-top: 12px;
+  margin-top: var(--space-6);
 }
 @media (prefers-reduced-motion: reduce) {
   .ask-answered-bubble.is-live .shimmer-text {

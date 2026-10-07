@@ -38,6 +38,8 @@ export function McpModal({ onClose }: Props): React.ReactElement {
   const embedded = useModalEmbedState() === "embed";
   const [servers, setServers] = useState<McpServerRow[]>([]);
   const [loading, setLoading] = useState(true);
+  // The last list request failed; shown instead of "No MCP's configured".
+  const [loadError, setLoadError] = useState(false);
   const [line, setLine] = useState("");
   const [scope, setScope] = useState<"global" | "project">("global");
   const [projects, setProjects] = useState<DiscoveredProject[]>([]);
@@ -54,6 +56,10 @@ export function McpModal({ onClose }: Props): React.ReactElement {
     setListCwd(cwd);
     try {
       setServers(await listMcpServers(cwd));
+      setLoadError(false);
+    } catch (e) {
+      setLoadError(true);
+      throw e;
     } finally {
       setLoading(false);
     }
@@ -189,6 +195,17 @@ export function McpModal({ onClose }: Props): React.ReactElement {
     <>
       {loading ? (
         <ListSkeleton rows={3} />
+      ) : loadError ? (
+        <div className="picker-empty" role="alert">
+          <span style={{ color: theme.textMuted }}>Couldn't reach the agent to list servers.</span>
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            onClick={() => void refresh(listCwd).catch(() => {})}
+          >
+            Try again
+          </button>
+        </div>
       ) : visible.length === 0 ? (
         <div className="mcp-empty" style={{ color: theme.textMuted }}>
           No MCP’s configured.
@@ -226,7 +243,7 @@ export function McpModal({ onClose }: Props): React.ReactElement {
               {s.requiresAuth && !s.ok && (
                 <button
                   className="modal-btn primary"
-                  style={{ padding: "2px 12px", fontSize: 12 }}
+                  style={{ padding: "var(--space-1) var(--space-6)", fontSize: "var(--fs-sm)" }}
                   disabled={loggingIn === s.name}
                   title={`Sign in to "${s.name}"`}
                   onClick={() => void signIn(s.name, s.scope)}
@@ -305,7 +322,7 @@ export function McpModal({ onClose }: Props): React.ReactElement {
                     color: projectPath ? theme.text : theme.textMuted,
                     background: theme.inputBackground,
                     width: "100%",
-                    marginTop: 10,
+                    marginTop: "var(--space-5)",
                   }}
                   value={projectPath}
                   placeholder="Type a project path or pick below…"
@@ -325,7 +342,10 @@ export function McpModal({ onClose }: Props): React.ReactElement {
 
           {/* On the page the section description already says this. */}
           {!embedded && (
-            <div className="modal-hint" style={{ color: theme.textDim, marginTop: 12 }}>
+            <div
+              className="modal-hint"
+              style={{ color: theme.textDim, marginTop: "var(--space-6)" }}
+            >
               New servers load on next app restart.
             </div>
           )}

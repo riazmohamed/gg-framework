@@ -2,10 +2,39 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Modal } from "./Modal";
+import { ModalDismissButton } from "./modal-embed";
+import { withViewTransition } from "./view-transition";
 
-afterEach(cleanup);
+vi.mock("./view-transition", () => ({
+  withViewTransition: vi.fn((update: () => void) => update()),
+}));
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 describe("Modal", () => {
+  it.each(["Escape", "Close", "Cancel", "backdrop"])(
+    "uses one dismissal transition for %s",
+    (path) => {
+      const onClose = vi.fn();
+      render(
+        <Modal title="Evidence" onClose={onClose}>
+          <ModalDismissButton onClick={onClose}>Cancel</ModalDismissButton>
+        </Modal>,
+      );
+      if (path === "Escape") fireEvent.keyDown(document, { key: "Escape" });
+      else if (path === "backdrop") {
+        const backdrop = document.querySelector(".modal-backdrop");
+        if (!backdrop) throw new Error("Missing backdrop");
+        fireEvent.mouseDown(backdrop);
+      } else fireEvent.click(screen.getByRole("button", { name: path }));
+      expect(onClose).toHaveBeenCalledOnce();
+      expect(withViewTransition).toHaveBeenCalledOnce();
+    },
+  );
+
   it("exposes dialog semantics, closes on Escape, and returns focus", () => {
     const onClose = vi.fn();
     const opener = document.createElement("button");

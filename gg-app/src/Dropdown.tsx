@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { CheckIcon, CaretDownIcon } from "@phosphor-icons/react";
-import { withViewTransition } from "./view-transition";
+import { FloatingSurface } from "./FloatingSurface";
 
 export interface DropdownOption {
   value: string;
@@ -21,6 +21,10 @@ interface Props {
   placeholder?: string;
   /** Extra class on the wrapper (width overrides etc.). */
   className?: string;
+  /** Id for the trigger, so a form `<label htmlFor>` can point at it. */
+  id?: string;
+  /** Id(s) of help text describing the field, set as the trigger's `aria-describedby`. */
+  describedBy?: string;
 }
 
 /**
@@ -44,6 +48,8 @@ export function Dropdown({
   disabled,
   placeholder = "Select\u2026",
   className,
+  id,
+  describedBy,
 }: Props): React.ReactElement {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -58,6 +64,10 @@ export function Dropdown({
   const selected = selectedIndex >= 0 ? options[selectedIndex] : undefined;
   const unavailable = Boolean(disabled) || options.length === 0;
 
+  useEffect(() => {
+    if (unavailable) setOpen(false);
+  }, [unavailable]);
+
   function openList(): void {
     if (unavailable) return;
     // Start on the current value so arrowing moves relative to what's playing,
@@ -68,8 +78,8 @@ export function Dropdown({
 
   function closeList(returnFocus = true): void {
     // The list folds back up into the trigger (see "Exits" in App.css).
-    withViewTransition(() => setOpen(false));
-    if (returnFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+    setOpen(false);
+    if (returnFocus) triggerRef.current?.focus();
   }
 
   function commit(index: number): void {
@@ -101,7 +111,7 @@ export function Dropdown({
     // the next tick so the click that opened it doesn't immediately close it.
     const closeOnOutsidePress = (event: MouseEvent): void => {
       if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
-        withViewTransition(() => setOpen(false));
+        setOpen(false);
       }
     };
     const listenerId = window.setTimeout(
@@ -164,6 +174,7 @@ export function Dropdown({
     <div className={className ? `dropdown ${className}` : "dropdown"} ref={rootRef}>
       <button
         ref={triggerRef}
+        id={id}
         type="button"
         className="dropdown-trigger"
         disabled={unavailable}
@@ -171,47 +182,50 @@ export function Dropdown({
         aria-expanded={open}
         aria-controls={open ? listId : undefined}
         aria-label={label}
+        aria-describedby={describedBy}
         onClick={() => (open ? closeList(false) : openList())}
         onKeyDown={onTriggerKeyDown}
       >
         <span className="dropdown-value">{selected?.label ?? placeholder}</span>
         <CaretDownIcon className="dropdown-chevron" size={16} aria-hidden="true" />
       </button>
-      {open && (
-        <div
-          ref={listRef}
-          id={listId}
-          className="dropdown-menu"
-          role="listbox"
-          aria-label={label}
-          aria-activedescendant={optionId(activeIndex)}
-          tabIndex={-1}
-          onKeyDown={onListKeyDown}
-        >
-          {options.map((option, index) => (
-            <div
-              key={option.value}
-              id={optionId(index)}
-              className={`dropdown-option${index === activeIndex ? " active" : ""}`}
-              role="option"
-              aria-selected={option.value === value}
-              aria-disabled={option.disabled || undefined}
-              onMouseEnter={() => !option.disabled && setActiveIndex(index)}
-              onClick={() => commit(index)}
-            >
-              <span className="dropdown-option-text">
-                <span className="dropdown-option-label">{option.label}</span>
-                {option.description && (
-                  <span className="dropdown-option-description">{option.description}</span>
+      <FloatingSurface>
+        {open && !unavailable && (
+          <div
+            ref={listRef}
+            id={listId}
+            className="dropdown-menu"
+            role="listbox"
+            aria-label={label}
+            aria-activedescendant={optionId(activeIndex)}
+            tabIndex={-1}
+            onKeyDown={onListKeyDown}
+          >
+            {options.map((option, index) => (
+              <div
+                key={option.value}
+                id={optionId(index)}
+                className={`dropdown-option${index === activeIndex ? " active" : ""}`}
+                role="option"
+                aria-selected={option.value === value}
+                aria-disabled={option.disabled || undefined}
+                onMouseEnter={() => !option.disabled && setActiveIndex(index)}
+                onClick={() => commit(index)}
+              >
+                <span className="dropdown-option-text">
+                  <span className="dropdown-option-label">{option.label}</span>
+                  {option.description && (
+                    <span className="dropdown-option-description">{option.description}</span>
+                  )}
+                </span>
+                {option.value === value && (
+                  <CheckIcon className="dropdown-option-check" size={14} aria-hidden="true" />
                 )}
-              </span>
-              {option.value === value && (
-                <CheckIcon className="dropdown-option-check" size={14} aria-hidden="true" />
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+              </div>
+            ))}
+          </div>
+        )}
+      </FloatingSurface>
     </div>
   );
 }

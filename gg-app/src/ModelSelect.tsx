@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { theme } from "./theme";
+import { FloatingSurface } from "./FloatingSurface";
 import { modelDisplayName } from "./model-name";
 import { groupByProvider } from "./provider-labels";
 import { supportsNativeSelectPopup } from "./platform";
@@ -12,12 +13,17 @@ interface Props {
   disabled?: boolean;
   /** Tooltip + accessible name (e.g. "Switch GG Coder's model"). */
   title: string;
+  /** Optional compact action copy; the menu still selects the current model. */
+  label?: string;
   /** Accent color for the closed control (GG = text, Ken = ken). */
   color?: string;
   /** When set, adds a "Follow GG Coder" choice (Ken's picker) — selecting it
    *  clears the pin. `followActive` makes it the selected value. */
   onSelectFollow?: () => void;
   followActive?: boolean;
+  /** The model list failed to load. With no models, the locked picker says
+   *  so instead of claiming it is still connecting. */
+  loadFailed?: boolean;
 }
 
 const FOLLOW_VALUE = "__follow__";
@@ -63,16 +69,21 @@ export async function loadModelsWithRetry(
  * land after the new one's and leave the picker showing models that belong to a
  * project the user already left. `apply` is skipped entirely on failure, so the
  * picker keeps whatever it already had.
+ *
+ * Resolves `false` only when every attempt failed, so the caller can show a
+ * failed-load state; `true` when the list was applied or the load went stale.
  */
 export async function loadModelsInto(
   fetchModels: () => Promise<ModelOption[] | null>,
   apply: (models: ModelOption[]) => void,
   isStale: () => boolean,
   sleep?: (ms: number) => Promise<void>,
-): Promise<void> {
+): Promise<boolean> {
   const models = await loadModelsWithRetry(fetchModels, sleep);
-  if (!models || isStale()) return;
+  if (!models) return false;
+  if (isStale()) return true;
   apply(models);
+  return true;
 }
 
 /**
@@ -86,9 +97,11 @@ export function ModelSelect({
   onSelect,
   disabled,
   title,
+  label,
   color,
   onSelectFollow,
   followActive,
+  loadFailed,
 }: Props): React.ReactElement {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLSpanElement>(null);
@@ -107,7 +120,9 @@ export function ModelSelect({
   const unavailableReason = disabled
     ? "Can't switch models while the agent is running — cancel the run or wait for it to finish"
     : models.length === 0
-      ? "No models available yet — still connecting to the agent"
+      ? loadFailed
+        ? "Couldn't load models from the agent. Reopen the project to try again."
+        : "No models available yet — still connecting to the agent"
       : null;
   // One group per provider company, in registry order, with Local pinned last
   // (it's the user's own machine, not an account, and its length depends on what
@@ -126,6 +141,10 @@ export function ModelSelect({
   // #fff with no visible change. Callers passing their own `color` (Ken's picker)
   // are mid-range already and keep it.
   const controlColor = unavailable ? theme.textDim : (color ?? theme.textSecondary);
+
+  useEffect(() => {
+    if (unavailable) setOpen(false);
+  }, [unavailable]);
 
   useEffect(() => {
     if (!open) return;
@@ -157,13 +176,13 @@ export function ModelSelect({
   function chooseModel(modelId: string): void {
     setOpen(false);
     onSelect(modelId);
-    requestAnimationFrame(() => triggerRef.current?.focus());
+    triggerRef.current?.focus();
   }
 
   function chooseFollow(): void {
     setOpen(false);
     onSelectFollow?.();
-    requestAnimationFrame(() => triggerRef.current?.focus());
+    triggerRef.current?.focus();
   }
 
   function moveMenuFocus(event: React.KeyboardEvent<HTMLDivElement>): void {
@@ -217,7 +236,7 @@ export function ModelSelect({
     return (
       <span className="model-picker model-picker-native" style={{ color: controlColor }}>
         <span className="model-select-text" aria-hidden="true">
-          {modelDisplayName(models, currentModel)}
+          {label ?? modelDisplayName(models, currentModel)}
         </span>
         <select
           className="model-select"
@@ -275,51 +294,53 @@ export function ModelSelect({
         aria-controls={open ? menuId : undefined}
         onClick={() => setOpen((current) => !current)}
       >
-        {modelDisplayName(models, currentModel)}
+        {label ?? modelDisplayName(models, currentModel)}
       </button>
-      {open && (
-        <div
-          id={menuId}
-          className="model-menu"
-          role="menu"
-          aria-label={title}
-          onKeyDown={moveMenuFocus}
-          style={{ background: theme.surface2, borderColor: theme.border }}
-        >
-          <div className="model-menu-title" style={{ color: theme.textMuted }} aria-hidden="true">
-            {title}
-          </div>
-          {onSelectFollow && (
-            <button
-              className="model-menu-item model-menu-follow"
-              role="menuitemradio"
-              aria-checked={following}
-              style={{
-                color: following ? theme.primary : theme.text,
-                background: following ? theme.surface2 : "transparent",
-              }}
-              onClick={chooseFollow}
-              title="Ken adopts whatever model GG Coder is using"
-            >
-              Follow GG Coder
-            </button>
-          )}
-          {groups.map((group) => (
-            <div key={group.provider} className="model-menu-section">
-              <div
-                className="model-menu-subtitle"
-                style={{ color: theme.textMuted }}
-                aria-hidden="true"
-              >
-                {group.label}
-              </div>
-              <div className="model-menu-grid" role="group" aria-label={group.label}>
-                {group.models.map((model) => renderItem(model))}
-              </div>
+      <FloatingSurface>
+        {open && !unavailable && (
+          <div
+            id={menuId}
+            className="model-menu"
+            role="menu"
+            aria-label={title}
+            onKeyDown={moveMenuFocus}
+            style={{ background: theme.surface2, borderColor: theme.border }}
+          >
+            <div className="model-menu-title" style={{ color: theme.textMuted }} aria-hidden="true">
+              {title}
             </div>
-          ))}
-        </div>
-      )}
+            {onSelectFollow && (
+              <button
+                className="model-menu-item model-menu-follow"
+                role="menuitemradio"
+                aria-checked={following}
+                style={{
+                  color: following ? theme.primary : theme.text,
+                  background: following ? theme.surface2 : "transparent",
+                }}
+                onClick={chooseFollow}
+                title="Ken adopts whatever model GG Coder is using"
+              >
+                Follow GG Coder
+              </button>
+            )}
+            {groups.map((group) => (
+              <div key={group.provider} className="model-menu-section">
+                <div
+                  className="model-menu-subtitle"
+                  style={{ color: theme.textMuted }}
+                  aria-hidden="true"
+                >
+                  {group.label}
+                </div>
+                <div className="model-menu-grid" role="group" aria-label={group.label}>
+                  {group.models.map((model) => renderItem(model))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </FloatingSurface>
     </span>
   );
 }

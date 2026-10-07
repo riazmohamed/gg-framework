@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 import { GearSixIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import { killTask, type BackgroundTask } from "./agent";
+import { toast } from "./toast";
+import { FloatingSurface } from "./FloatingSurface";
 
 /**
  * Footer indicator for background tasks (bash run_in_background) — mirrors the
@@ -58,71 +60,99 @@ export function BackgroundTasksButton({ tasks }: { tasks: BackgroundTask[] }): R
   }, [open]);
 
   const runningCount = tasks.filter((t) => t.exitCode === null).length;
+  useEffect(() => {
+    if (runningCount === 0) setOpen(false);
+  }, [runningCount]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setOpen(false);
+      buttonRef.current?.focus();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open]);
+
   // Spinner color while anything runs; muted once all have exited.
   const accent = runningCount > 0 ? theme.warning : theme.textMuted;
 
   return (
-    <span className="bgtasks" ref={ref}>
-      <button
-        ref={buttonRef}
-        className="bgtasks-button"
-        style={{ color: accent, borderColor: theme.border }}
-        title="Background tasks"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <GearSixIcon className="bgtasks-icon" size={13} weight="bold" aria-hidden="true" />
-        {runningCount} background task{runningCount === 1 ? "" : "s"}
-      </button>
-      {open &&
-        createPortal(
-          <div
-            ref={menuRef}
-            className="bgtasks-menu"
-            style={{
-              background: theme.surface2,
-              borderColor: theme.border,
-              left: pos?.left ?? 0,
-              bottom: pos?.bottom ?? 0,
-              visibility: pos ? "visible" : "hidden",
-            }}
+    <>
+      {runningCount > 0 && (
+        <span className="bgtasks" ref={ref}>
+          <button
+            ref={buttonRef}
+            className="bgtasks-button"
+            style={{ color: accent, borderColor: theme.border }}
+            title="Background tasks"
+            aria-expanded={open}
+            onClick={() => setOpen((o) => !o)}
           >
-            {tasks.length === 0 && (
-              <div className="bgtasks-empty" style={{ color: theme.textDim }}>
-                no background tasks
-              </div>
-            )}
-            {tasks.map((t) => {
-              const running = t.exitCode === null;
-              return (
-                <div key={t.id} className="bgtasks-item">
-                  <span
-                    className="bgtasks-dot"
-                    style={{ color: running ? theme.warning : theme.textDim }}
-                  >
-                    {"\u23FA"}
-                  </span>
-                  <span className="bgtasks-cmd" style={{ color: theme.text }} title={t.command}>
-                    {shortCommand(t.command)}
-                  </span>
-                  <span className="bgtasks-status" style={{ color: theme.textDim }}>
-                    {running ? `pid ${t.pid}` : `exit ${t.exitCode}`}
-                  </span>
-                  {running && (
-                    <button
-                      className="bgtasks-kill"
-                      style={{ color: theme.error }}
-                      title="Stop task"
-                      onClick={() => void killTask(t.id)}
-                    >
-                      kill
-                    </button>
-                  )}
+            <GearSixIcon className="bgtasks-icon" size={13} weight="bold" aria-hidden="true" />
+            {runningCount} background task{runningCount === 1 ? "" : "s"}
+          </button>
+        </span>
+      )}
+      {createPortal(
+        <FloatingSurface>
+          {open && runningCount > 0 && (
+            <div
+              ref={menuRef}
+              className="bgtasks-menu"
+              style={{
+                background: theme.surface2,
+                borderColor: theme.border,
+                left: pos?.left ?? 0,
+                bottom: pos?.bottom ?? 0,
+                visibility: pos ? "visible" : "hidden",
+              }}
+            >
+              {tasks.length === 0 && (
+                <div className="bgtasks-empty" style={{ color: theme.textDim }}>
+                  no background tasks
                 </div>
-              );
-            })}
-          </div>,
-          document.body,
-        )}
-    </span>
+              )}
+              {tasks.map((t) => {
+                const running = t.exitCode === null;
+                return (
+                  <div key={t.id} className="bgtasks-item">
+                    <span
+                      className="bgtasks-dot"
+                      style={{ color: running ? theme.warning : theme.textDim }}
+                    >
+                      {"\u23FA"}
+                    </span>
+                    <span className="bgtasks-cmd" style={{ color: theme.text }} title={t.command}>
+                      {shortCommand(t.command)}
+                    </span>
+                    <span className="bgtasks-status" style={{ color: theme.textDim }}>
+                      {running ? `pid ${t.pid}` : `exit ${t.exitCode}`}
+                    </span>
+                    {running && (
+                      <button
+                        className="bgtasks-kill"
+                        style={{ color: theme.error }}
+                        title="Stop task"
+                        onClick={() =>
+                          void killTask(t.id).then((res) => {
+                            if (!res.ok) toast(`Couldn't stop the task: ${res.error}`, "error");
+                          })
+                        }
+                      >
+                        kill
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </FloatingSurface>,
+        document.body,
+      )}
+    </>
   );
 }

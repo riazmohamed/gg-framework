@@ -113,6 +113,10 @@ describe("useKenMentor", () => {
           headline: "Anthropic usage limit reached.",
           message: "Your Anthropic usage is finished. It resets at 12:50 PM.",
           guidance: "Try again once it's back. Your conversation is preserved.",
+          reason: "usage_limit",
+          resetsAt: 1_800_000_000,
+          occurredAt: 1_799_000_000_000,
+          provider: "anthropic",
         }),
       );
     });
@@ -123,6 +127,10 @@ describe("useKenMentor", () => {
       headline: "Ken: Anthropic usage limit reached.",
       message: "Your Anthropic usage is finished. It resets at 12:50 PM.",
       guidance: "Try again once it's back. Your conversation is preserved.",
+      reason: "usage_limit",
+      resetsAt: 1_800_000_000,
+      occurredAt: 1_799_000_000_000,
+      provider: "anthropic",
     });
     expect(hook.result.current.kenRunning).toBe(false);
   });

@@ -87,6 +87,13 @@ afterEach(async () => {
 });
 
 describe("buildSystemPrompt", () => {
+  it("steers verification into fail-fast checks", async () => {
+    const prompt = await buildSystemPrompt(await makeProject());
+    expect(prompt).toContain("Run checks standalone or chain only checks with `&&`");
+    expect(prompt).toContain("If verification evidence is rejected, correct the command");
+    expect(prompt).toContain("use bash's review:true for final checks");
+  });
+
   it("tells the model instruction files are preloaded, whether or not any exist", async () => {
     const empty = await buildSystemPrompt(await makeProject());
     const withFile = await buildSystemPrompt(await makeProject({ "AGENTS.md": "Use tabs." }));
@@ -630,9 +637,13 @@ describe("buildSystemPrompt", () => {
     // in the Codex head-to-head, unbounded in a large home directory).
     // +200 each again for the Codex-style bug-fix line (fix + regression test
     // in one response when the cause is clear; 7/8 in replay vs 0/8 before).
-    expect(measurements.normal.characters).toBeLessThan(7_000);
-    expect(measurements.planMode.characters).toBeLessThan(8_400); // +400: preloaded-instructions note, bug-fix line
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(10_600);
+    // +100 each for "When the user names the checks, run only those." (GLM-5.3
+    // vs Dirac head-to-head: GG invented extra lint standards the prompt never
+    // asked for; bench/h2h/DIRAC-FINDINGS.md). Deferring steroids+subagent
+    // removed ~5.4k chars of schemas from the same prefix.
+    expect(measurements.normal.characters).toBeLessThan(7_100);
+    expect(measurements.planMode.characters).toBeLessThan(8_500); // +500: preloaded-instructions note, bug-fix line, named-checks line
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(10_700);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,
@@ -668,9 +679,9 @@ describe("buildSystemPrompt", () => {
     console.info(`system prompt audit: ${JSON.stringify(audit)}`);
 
     expect(audit.flags).toEqual([]);
-    // Branch budget: main's limit is 10_000, but this branch's identity line
+    // Branch budget: main's limit is 10_100, but this branch's identity line
     // ("OG Coder by Abu Khaled") is 3 characters longer than main's.
-    expect(audit.size.characters).toBeLessThan(10_010);
+    expect(audit.size.characters).toBeLessThan(10_110); // +100: named-checks line (see sizes test)
     expect(prompt.match(/^## .+$/gm)).toEqual([
       "## How to Talk",
       "## How to Work",

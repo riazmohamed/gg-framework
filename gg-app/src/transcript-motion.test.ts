@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { dissolveInAbove, teleport } from "./transcript-motion";
+import {
+  createEntranceLifetime,
+  enterTranscriptRow,
+  dissolveInAbove,
+  teleport,
+} from "./transcript-motion";
 
 interface FakeAnimation {
   keyframes: Keyframe[];
@@ -23,6 +28,29 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   document.body.replaceChildren();
+});
+
+describe("entrance lifetime", () => {
+  it("consumes before playback and never replays cancelled or paged rows", () => {
+    const lifetime = createEntranceLifetime(10);
+    expect(lifetime.consume(9)).toBe(false);
+    expect(lifetime.consume(10)).toBe(true);
+    expect(lifetime.consume(10)).toBe(false);
+    lifetime.settle(14); // messages committed while chat is hidden
+    expect(lifetime.consume(12)).toBe(false);
+    expect(lifetime.consume(14)).toBe(false);
+    expect(lifetime.consume(15)).toBe(true);
+    expect(createEntranceLifetime(100).consume(100)).toBe(true);
+  });
+
+  it("uses opacity alone and cancels on deactivation", () => {
+    const row = document.createElement("div");
+    const animations = stubAnimate(row);
+    const cancel = enterTranscriptRow(row);
+    expect(animations[0]?.keyframes).toEqual([{ opacity: 0 }, { opacity: 1 }]);
+    cancel();
+    expect(animations[0]?.cancel).toHaveBeenCalledOnce();
+  });
 });
 
 describe("teleport", () => {

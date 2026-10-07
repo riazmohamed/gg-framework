@@ -21,11 +21,16 @@ import { parseArgs } from "node:util";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
   environmentSecrets,
-  formatError,
+  formatChatError,
   redactValue,
   type ToolResultContent,
 } from "@abukhaled/gg-ai";
 import type { AddressInfo } from "node:net";
+import {
+  createAppErrorPayload,
+  restoreAppErrorPayload,
+  type AppErrorPayload,
+} from "./app-error.js";
 import { runJsonMode } from "./modes/json-mode.js";
 import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { MessageProvenance, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
@@ -172,6 +177,7 @@ import {
   getNextPendingTask,
   markTaskInProgress,
 } from "./core/tasks-store.js";
+import { readChecklistSnapshot } from "./core/checklist-snapshot.js";
 import { initLogger, log } from "./core/logger.js";
 import { installTerminationHandlers } from "./core/shutdown.js";
 import { KeepAwake } from "./core/keep-awake.js";
@@ -460,7 +466,7 @@ interface HistoryEntryForWire {
   /** Error row (headline/message/guidance), persisted by broadcastError.
    *  `scope` selects the live prefix (ken_error → "Ken: ", autopilot_error →
    *  "Autopilot: "). */
-  error?: { scope: string; headline: string; message?: string; guidance?: string };
+  error?: AppErrorPayload;
   /** Webview-copy info row marker (e.g. the video-capability warning). */
   infoKind?: "video_warning";
   toolImages?: Array<{ src: string; path?: string }>;
@@ -1758,35 +1764,26 @@ async function createSession(
     logLabel: string,
     err: unknown,
   ): void {
-    const f = formatError(err);
+    const f = formatChatError(err);
     const message = f.message ? desktopGuidance(f.message) : undefined;
     const guidance = localNetworkGuidance(f.source) ?? desktopGuidance(f.guidance);
+    const payload = createAppErrorPayload(
+      { ...f, ...(message ? { message } : {}), guidance },
+      type,
+      Date.now(),
+      environmentSecrets(process.env),
+    );
     log("ERROR", "app-sidecar", logLabel, {
-      headline: f.headline,
+      headline: payload.headline,
       source: f.source,
-      ...(message ? { message } : {}),
-      ...(f.provider ? { provider: f.provider } : {}),
-      ...(f.statusCode != null ? { statusCode: String(f.statusCode) } : {}),
-      ...(f.requestId ? { requestId: f.requestId } : {}),
+      ...(payload.message ? { message: payload.message } : {}),
+      ...(payload.provider ? { provider: payload.provider } : {}),
+      ...(payload.statusCode != null ? { statusCode: String(payload.statusCode) } : {}),
+      ...(payload.requestId ? { requestId: payload.requestId } : {}),
     });
-    broadcast(type, {
-      headline: f.headline,
-      ...(message ? { message } : {}),
-      guidance,
-      ...(f.provider ? { provider: f.provider } : {}),
-      ...(f.statusCode != null ? { statusCode: f.statusCode } : {}),
-      ...(f.resetsAt != null ? { resetsAt: f.resetsAt } : {}),
-    });
-    // Persist the error row (display-only marker) so a resumed session shows
-    // the same headline/message/guidance the live run did. Best-effort.
-    void session
-      .persistAppMarker("error", {
-        scope: type,
-        headline: f.headline,
-        ...(message ? { message } : {}),
-        guidance,
-      })
-      .catch(() => {});
+    broadcast(type, payload);
+    // Same sanitized snapshot for live and restored rows, including reset metadata.
+    void session.persistAppMarker("error", payload).catch(() => {});
   }
 
   // ── MCP elicitation bridge ─────────────────────────────────
@@ -4008,16 +4005,8 @@ async function createSession(
                 task: { title: typeof d.title === "string" ? d.title : "" },
               });
             } else if (marker.kind === "error" && typeof d.headline === "string") {
-              history.push({
-                role: "assistant",
-                text: "",
-                error: {
-                  scope: typeof d.scope === "string" ? d.scope : "error",
-                  headline: d.headline,
-                  ...(typeof d.message === "string" ? { message: d.message } : {}),
-                  ...(typeof d.guidance === "string" ? { guidance: d.guidance } : {}),
-                },
-              });
+              const error = restoreAppErrorPayload(d);
+              if (error) history.push({ role: "assistant", text: "", error });
             } else if (marker.kind === "interrupted_run") {
               // Rendered as an error row: the run's tools already changed the
               // repo, so the user needs to see it and decide what to do. We
@@ -4611,6 +4600,27 @@ async function createSession(
 
     if (method === "GET" && url === "/tasks") {
       json(res, 200, { tasks: pruneDoneTasksSync(cwd) });
+      return;
+    }
+
+    if (method === "GET" && url === "/checklist") {
+      const controller = new AbortController();
+      res.once("close", () => controller.abort());
+      void (async () => {
+        try {
+          const result = await readChecklistSnapshot(cwd, new Date(), controller.signal);
+          if (res.destroyed) return;
+          if (!result.ok) {
+            log("WARN", "app-sidecar", "checklist read failed", { error: result.error });
+            json(res, 500, { error: result.error });
+            return;
+          }
+          json(res, 200, result.value);
+        } catch (error) {
+          log("WARN", "app-sidecar", "checklist snapshot failed", { error: String(error) });
+          if (!res.destroyed) json(res, 500, { error: "Could not read the project checklist" });
+        }
+      })();
       return;
     }
 

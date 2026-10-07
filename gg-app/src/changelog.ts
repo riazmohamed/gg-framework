@@ -22,6 +22,45 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.82.3",
+    date: "2026-10-07",
+    items: [
+      "Your workspace just got a smoother rhythm. I cleaned up the jumps when you hit `Send`, open details or close menus and dialogs, and coming back from `Checklist` no longer replays the chat you've already read. Less motion in your way, more flow.",
+      "See your project's health at a glance. I gave `Checklist` clearer colors and distinct icons, so you can spot what's passed, what's due and what needs attention without reading every line.",
+    ],
+  },
+  {
+    version: "0.82.2",
+    date: "2026-10-07",
+    items: [
+      "No more mystery empty lists. When your `projects`, sessions or `MCP` servers fail to load, I now tell you what went wrong and give you a way to retry, instead of pretending there is nothing there.",
+      "A crash can no longer leave you staring at a blank window. If something breaks, you get a calm screen with the details and a `Reload window` button, and your chats stay safe.",
+      "The whole app moves as one now. I rebuilt colors, spacing and animations on a single shared system, so every panel, menu and notice looks and feels consistent.",
+      "Your agent got leaner and more focused. I trimmed what it carries on every request, so replies start faster and cost less, and when you name the checks you want, it runs `only those`.",
+    ],
+  },
+  {
+    version: "0.82.1",
+    date: "2026-10-06",
+    items: [
+      "`Ultra` on OpenAI now thinks the way Codex does. I matched its reasoning on `GPT-6.1 Sol` and `GPT-6 Astra`, and your helper agents now inherit the effort level you picked instead of quietly dropping to the lowest one. Deeper thinking, all the way down.",
+      "Attachments land every time. `Send` now waits until your files finish loading, so nothing gets left behind, and anything that fails to load tells you instead of quietly vanishing.",
+      "Error notices got friendlier. All `15` critters now take turns showing up, each one stays put when you reopen a chat, and the details toggle opens and closes smoothly.",
+      "Fresh starts feel fresh. A new session now opens straight to the welcome screen instead of showing the last run's `cancelled` status.",
+    ],
+  },
+  {
+    version: "0.82.0",
+    date: "2026-10-06",
+    items: [
+      "I built you a project health hub. Open `Checklist` to work through setup, tests, security and shipping one check at a time, with saved results and a nudge when a check is due again.",
+      "When a chat hits a snag, I make the next step clearer. Usage limits, sign-in trouble and unavailable models now get their own helpful notices, with `reset times`, expandable details and a `model picker` when switching can help.",
+      "Your plans now wait for you, not the other way around. I fixed `plan review` so the agent stops cleanly when it hands over a plan, instead of burning extra turns while you decide.",
+      "I tightened the rules behind `checks passed`. Mixed shell commands no longer get mistaken for fresh verification, and the agent gets a clear way to run its checks and inspect the diff without hiding a failure.",
+      "I made `Find references` reach further in JavaScript projects without a config file. It now includes callers in unopened files and tells the agent when coverage is incomplete, so it knows when to look further.",
+    ],
+  },
+  {
     version: "0.81.0",
     date: "2026-10-05",
     items: [

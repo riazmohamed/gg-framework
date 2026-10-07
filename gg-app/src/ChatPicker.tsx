@@ -58,6 +58,10 @@ export function ChatPicker({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Bumped by "Try again" to re-run the session load.
+  const [reloadNonce, setReloadNonce] = useState(0);
+  // Opening a chat failed; shown above the list so the click isn't silent.
+  const [chooseError, setChooseError] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -102,14 +106,19 @@ export function ChatPicker({
     return () => {
       cancelled = true;
     };
-  }, [copy, mode]);
+  }, [copy, mode, reloadNonce]);
 
   function choose(session?: RecentSession): void {
     if (busy || !projectsRoot) return;
     setBusy(true);
+    setChooseError(null);
     void selectWorkspace(mode, projectsRoot, session?.path, session?.chatAgent ?? initialAgent)
       .then(() => onChosen(projectsRoot))
-      .catch(() => setBusy(false));
+      .catch((reason: unknown) => {
+        const message = reason instanceof Error ? reason.message : String(reason);
+        setChooseError(`Couldn't open that: ${message}`);
+        setBusy(false);
+      });
   }
 
   return (
@@ -134,9 +143,24 @@ export function ChatPicker({
 
       <div className="picker-list">
         {loading && <ListSkeleton rows={5} />}
+        {chooseError && (
+          <div className="picker-error" role="alert">
+            {chooseError}
+          </div>
+        )}
         {!loading && error && (
-          <div className="picker-empty" style={{ color: theme.textMuted }}>
-            {error}
+          <div className="picker-empty" role="alert">
+            <span style={{ color: theme.textMuted }}>{error}</span>
+            {/* No projects folder is a settings problem, so retrying can't fix it. */}
+            {error !== copy.noRoot && (
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => setReloadNonce((n) => n + 1)}
+              >
+                Try again
+              </button>
+            )}
           </div>
         )}
         {!loading && !error && sessions.length === 0 && (

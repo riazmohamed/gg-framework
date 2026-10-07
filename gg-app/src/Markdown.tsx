@@ -29,6 +29,8 @@ interface Props {
    * again once the stream settles, so finished prose carries no extra DOM.
    */
   animate?: boolean;
+  /** Lets streaming content settle existing word effects on Activity return. */
+  contentRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 function isExternalHref(href: string): boolean {
@@ -248,13 +250,13 @@ function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactEle
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const blockRef = useRef<HTMLDivElement>(null);
-  const captureHeight = useAnimatedHeight(blockRef, expanded);
 
   // Raw text drives both the copy fallback and the fold decision. The rendered
   // `children` is the highlighted tree; while folded we deliberately do NOT
   // mount it, so a thousand-line dump costs seven lines of DOM instead of a
   // thousand highlighted spans. That withheld markup is the memory win.
   const text = codeNodeText(children);
+  const captureHeight = useAnimatedHeight(blockRef, expanded, expanded ? text : undefined);
   const collapsible = shouldCollapseCode(text);
   const folded = collapsible && !expanded;
   const { preview, hiddenLines } = collapsedCode(text);
@@ -395,11 +397,13 @@ const MemoizedMarkdownBlock = memo(
 export const Markdown = memo(function Markdown({
   children,
   animate = false,
+  contentRef,
 }: Props): React.ReactElement {
   const blocks = useMemo(() => parseMarkdownIntoBlocks(children), [children]);
   const [rowExpanded, setRowExpanded] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const captureHeight = useAnimatedHeight(rootRef, rowExpanded);
+  const ownRootRef = useRef<HTMLDivElement>(null);
+  const rootRef = contentRef ?? ownRootRef;
+  const captureHeight = useAnimatedHeight(rootRef, rowExpanded, rowExpanded ? children : undefined);
   // Oversized content mounts only its leading blocks. Fenced-code folding above
   // handles one huge block; this handles the other shape, hundreds of ordinary
   // blocks in a single row, which no per-block rule would catch.

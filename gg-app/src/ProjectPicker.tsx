@@ -60,9 +60,15 @@ export function ProjectPicker({
   const windowFocused = useWindowFocused();
   const [projects, setProjects] = useState<DiscoveredProject[]>([]);
   const [loading, setLoading] = useState(true);
+  // Project discovery failed; shown instead of "No projects yet".
+  const [loadError, setLoadError] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [selected, setSelected] = useState<DiscoveredProject | null>(null);
   const [sessions, setSessions] = useState<RecentSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  // Listing the selected project's sessions failed; shown instead of
+  // "No previous sessions".
+  const [sessionsError, setSessionsError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [projectsRoot, setProjectsRoot] = useState("");
@@ -107,6 +113,8 @@ export function ProjectPicker({
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setLoadError(false);
     // The window's sidecar serves project discovery; wait for it before asking.
     void waitForReady()
       .then(() => listProjects())
@@ -121,13 +129,15 @@ export function ProjectPicker({
         }
       })
       .catch(() => {
-        if (!cancelled) setLoading(false);
+        if (cancelled) return;
+        setLoadError(true);
+        setLoading(false);
       });
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [reloadNonce]);
 
   /**
    * Drop a project from the list and persist the decision. Removed optimistically
@@ -158,11 +168,17 @@ export function ProjectPicker({
     setSelected(project);
     setSessions([]);
     setResumeError(null);
+    setSessionsError(false);
     setSessionsLoading(true);
-    void listSessions(project.path).then((s) => {
-      setSessions(s);
-      setSessionsLoading(false);
-    });
+    void listSessions(project.path)
+      .then((s) => {
+        setSessions(s);
+        setSessionsLoading(false);
+      })
+      .catch(() => {
+        setSessionsError(true);
+        setSessionsLoading(false);
+      });
   }
 
   function choose(cwd: string, sessionPath?: string): void {
@@ -244,7 +260,7 @@ export function ProjectPicker({
           <BackButton label="Back" onClick={onClose} />
         ) : null}
         <span className="picker-title">{selected ? selected.name : "Choose a project"}</span>
-        {!selected && !loading && <Badge>{projects.length}</Badge>}
+        {!selected && !loading && !loadError && <Badge>{projects.length}</Badge>}
         {!selected && !loading && projects.length > 0 && (
           <input
             className="picker-search"
@@ -292,10 +308,22 @@ export function ProjectPicker({
       {!selected ? (
         <div className="picker-list">
           {loading && <ListSkeleton rows={6} />}
-          {!loading && projects.length === 0 && (
+          {!loading && loadError && (
+            <div className="picker-empty" role="alert">
+              <span style={{ color: theme.textMuted }}>Couldn't load your projects.</span>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => setReloadNonce((n) => n + 1)}
+              >
+                Try again
+              </button>
+            </div>
+          )}
+          {!loading && !loadError && projects.length === 0 && (
             <div className="picker-empty">
               <span style={{ color: theme.textMuted }}>No projects yet.</span>
-              <span style={{ display: "flex", gap: 8 }}>
+              <span style={{ display: "flex", gap: "var(--space-4)" }}>
                 <button
                   className="btn btn-ghost btn-sm"
                   disabled={busy}
@@ -364,8 +392,20 @@ export function ProjectPicker({
               {resumeError}
             </div>
           )}
+          {sessionsError && (
+            <div className="picker-error" role="alert">
+              <span>Couldn't load this project's sessions.</span>{" "}
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => openProject(selected)}
+              >
+                Try again
+              </button>
+            </div>
+          )}
           {sessionsLoading && <ListSkeleton rows={4} />}
-          {!sessionsLoading && sessions.length === 0 && (
+          {!sessionsLoading && !sessionsError && sessions.length === 0 && (
             <div className="picker-empty">
               <span style={{ color: theme.textMuted }}>No previous sessions yet.</span>
               <MetalButton

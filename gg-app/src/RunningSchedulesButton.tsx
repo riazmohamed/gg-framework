@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { theme } from "./theme";
+import { FloatingSurface } from "./FloatingSurface";
 import { nextRunLabel } from "./schedule-labels";
 import { describeSchedule, type ParsedSchedule } from "./scheduleCommand";
 
@@ -106,66 +107,76 @@ export function RunningSchedulesButton({ schedules, onStop }: Props): React.Reac
   }, [open]);
 
   const count = schedules.length;
+  useEffect(() => {
+    if (count === 0) setOpen(false);
+  }, [count]);
 
   return (
-    <span className="bgtasks schedules" ref={ref}>
-      <button
-        ref={buttonRef}
-        className="bgtasks-button"
-        style={{ color: theme.secondary, borderColor: theme.border }}
-        title="Active schedules — run only while this window is open"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-      >
-        {"\u25F7 "}
-        {count} schedule{count === 1 ? "" : "s"}
-      </button>
-      {open &&
-        createPortal(
-          <div
-            ref={menuRef}
-            className="bgtasks-menu schedules-menu"
-            style={{
-              background: theme.surface2,
-              borderColor: theme.border,
-              left: pos?.left ?? 0,
-              bottom: pos?.bottom ?? 0,
-              visibility: pos ? "visible" : "hidden",
-            }}
+    <>
+      {count > 0 && (
+        <span className="bgtasks schedules" ref={ref}>
+          <button
+            ref={buttonRef}
+            className="bgtasks-button"
+            style={{ color: theme.secondary, borderColor: theme.border }}
+            title="Active schedules — run only while this window is open"
+            aria-expanded={open}
+            onClick={() => setOpen((o) => !o)}
           >
-            {schedules.length === 0 && (
-              <div className="bgtasks-empty" style={{ color: theme.textDim }}>
-                no active schedules
-              </div>
-            )}
-            {schedules.map((s) => (
-              <div key={s.id} className="bgtasks-item schedules-item">
-                <span className="bgtasks-dot" style={{ color: theme.secondary }}>
-                  {"\u23FA"}
-                </span>
-                <span className="bgtasks-cmd" style={{ color: theme.text }} title={s.prompt}>
-                  {shortPrompt(s.prompt)}
-                </span>
-                <span className="schedules-cadence" style={{ color: theme.textMuted }}>
-                  {describeSchedule(s)}
-                  {s.runCount !== null && ` \u00b7 ${s.runsCompleted}/${s.runCount}`}
-                </span>
-                <span className="bgtasks-status" style={{ color: theme.textDim }}>
-                  {nextRunLabel(s.nextRunAt, now)}
-                </span>
-                <button
-                  className="bgtasks-kill"
-                  style={{ color: theme.error }}
-                  title="Stop this schedule"
-                  onClick={() => onStop(s.id)}
-                >
-                  stop
-                </button>
-              </div>
-            ))}
-          </div>,
-          document.body,
-        )}
-    </span>
+            {"\u25F7 "}
+            {count} schedule{count === 1 ? "" : "s"}
+          </button>
+        </span>
+      )}
+      {createPortal(
+        <FloatingSurface>
+          {open && count > 0 && (
+            <div
+              ref={menuRef}
+              className="bgtasks-menu schedules-menu"
+              style={{
+                background: theme.surface2,
+                borderColor: theme.border,
+                left: pos?.left ?? 0,
+                bottom: pos?.bottom ?? 0,
+                visibility: pos ? "visible" : "hidden",
+              }}
+            >
+              {schedules.length === 0 && (
+                <div className="bgtasks-empty" style={{ color: theme.textDim }}>
+                  no active schedules
+                </div>
+              )}
+              {schedules.map((s) => (
+                <div key={s.id} className="bgtasks-item schedules-item">
+                  <span className="bgtasks-dot" style={{ color: theme.secondary }}>
+                    {"\u23FA"}
+                  </span>
+                  <span className="bgtasks-cmd" style={{ color: theme.text }} title={s.prompt}>
+                    {shortPrompt(s.prompt)}
+                  </span>
+                  <span className="schedules-cadence" style={{ color: theme.textMuted }}>
+                    {describeSchedule(s)}
+                    {s.runCount !== null && ` \u00b7 ${s.runsCompleted}/${s.runCount}`}
+                  </span>
+                  <span className="bgtasks-status" style={{ color: theme.textDim }}>
+                    {nextRunLabel(s.nextRunAt, now)}
+                  </span>
+                  <button
+                    className="bgtasks-kill"
+                    style={{ color: theme.error }}
+                    title="Stop this schedule"
+                    onClick={() => onStop(s.id)}
+                  >
+                    stop
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </FloatingSurface>,
+        document.body,
+      )}
+    </>
   );
 }

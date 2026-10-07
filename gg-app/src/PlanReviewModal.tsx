@@ -25,7 +25,8 @@ interface Props {
   random?: () => number;
 }
 
-/** Longest the exit dissolve may hold a decision if `animationend` never fires. */
+/** Longest the exit dissolve may hold a decision if `animationend` never fires.
+ *  Must stay longer than `--dur-plan-out` in App.css; scripts/motion-tokens.test.mjs enforces it. */
 const EXIT_FALLBACK_MS = 420;
 
 const INTRO_LINES = [

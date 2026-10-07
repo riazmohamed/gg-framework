@@ -4,6 +4,7 @@
 //   - invoke("agent_state" | "agent_prompt" | "agent_cancel")
 //   - listen("agent-event")  ← forwarded SSE frames
 import { invoke } from "@tauri-apps/api/core";
+import type { ChatErrorData } from "./chat-error";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 
@@ -254,6 +255,114 @@ export async function deleteTask(id: string): Promise<ProjectTask[]> {
   } catch (e) {
     await logError(`agent_delete_task failed: ${String(e)}`);
     return [];
+  }
+}
+
+/** Mirrors ggcoder `core/checklist-store.ts` ChecklistStatus. */
+export type ChecklistStatus = "not-run" | "not-applicable" | "due" | "passed" | "needs-work";
+
+/** One project health-checklist item joined with its recorded result (ChecklistRow). */
+export interface ChecklistEntry {
+  id: string;
+  group: string;
+  title: string;
+  description: string;
+  check: string;
+  skill: string | null;
+  setupCommand: string | null;
+  status: ChecklistStatus;
+  checkedAt: string | null;
+  commit: string | null;
+  uncommittedChanges: boolean;
+  result: "pass" | "issues" | "not-applicable" | null;
+  summary: string | null;
+  findings: string[];
+  evidence: string[];
+  /** Read-only setup observations, not an audit result. */
+  detection?: { summary: string; facts: string[] } | null;
+  /** The instructions Check sends to the agent (built by the sidecar from the item). */
+  runPrompt: string | null;
+}
+
+export interface ChecklistSnapshot {
+  staleAfterDays: number;
+  items: ChecklistEntry[];
+  detectionWarnings?: string[];
+}
+
+function checklistObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function checklistStrings(value: unknown, maxLength: number): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 10 &&
+    value.every((line) => typeof line === "string" && line.length <= maxLength)
+  );
+}
+function checklistEntry(value: unknown): value is ChecklistEntry {
+  if (!checklistObject(value)) return false;
+  const text = (key: string, max: number): boolean =>
+    typeof value[key] === "string" && value[key].length <= max;
+  const nullable = (key: string, max: number): boolean => value[key] === null || text(key, max);
+  const detection = value.detection;
+  return (
+    text("id", 80) &&
+    /^[a-z0-9-]+$/.test(String(value.id)) &&
+    text("group", 100) &&
+    text("title", 200) &&
+    text("description", 2000) &&
+    text("check", 5000) &&
+    nullable("skill", 100) &&
+    nullable("setupCommand", 100) &&
+    nullable("runPrompt", 16000) &&
+    ["not-run", "not-applicable", "due", "passed", "needs-work"].includes(String(value.status)) &&
+    [null, "pass", "issues", "not-applicable"].includes(value.result as string | null) &&
+    (value.checkedAt === null ||
+      (text("checkedAt", 40) && Number.isFinite(Date.parse(String(value.checkedAt))))) &&
+    (value.commit === null ||
+      (text("commit", 64) && /^[0-9a-f]{4,64}$/i.test(String(value.commit)))) &&
+    typeof value.uncommittedChanges === "boolean" &&
+    nullable("summary", 300) &&
+    checklistStrings(value.findings, 300) &&
+    checklistStrings(value.evidence, 200) &&
+    (detection === undefined ||
+      detection === null ||
+      (checklistObject(detection) &&
+        typeof detection.summary === "string" &&
+        detection.summary.length <= 300 &&
+        checklistStrings(detection.facts, 300)))
+  );
+}
+
+/** Read the project health checklist. `null` when it can't be read. */
+export async function getChecklist(): Promise<ChecklistSnapshot | null> {
+  try {
+    await waitForReady();
+    const res: unknown = await invoke("agent_checklist");
+    if (
+      !checklistObject(res) ||
+      typeof res.staleAfterDays !== "number" ||
+      !Number.isFinite(res.staleAfterDays) ||
+      res.staleAfterDays < 1 ||
+      !Array.isArray(res.items) ||
+      res.items.length === 0 ||
+      res.items.length > 64 ||
+      !res.items.every(checklistEntry) ||
+      new Set(res.items.map((item) => item.id)).size !== res.items.length ||
+      (res.detectionWarnings !== undefined && !checklistStrings(res.detectionWarnings, 300))
+    ) {
+      await logError("agent_checklist returned an invalid snapshot");
+      return null;
+    }
+    return {
+      staleAfterDays: res.staleAfterDays,
+      items: res.items,
+      detectionWarnings: res.detectionWarnings ?? [],
+    };
+  } catch (e) {
+    await logError(`agent_checklist failed: ${String(e)}`);
+    return null;
   }
 }
 
@@ -789,7 +898,7 @@ export interface HistoryEntry {
   task?: { title: string };
   /** Error row persisted by the sidecar's broadcastError. `scope` selects the
    *  live headline prefix (ken_error → "Ken: ", autopilot_error → "Autopilot: "). */
-  error?: { scope: string; headline: string; message?: string; guidance?: string };
+  error?: ChatErrorData & { scope: string; headline: string };
   /** Webview-copy info row marker (e.g. the video-capability warning). */
   infoKind?: "video_warning";
   /** Tool-produced images rendered inline (same as live `images` items),
@@ -1077,14 +1186,17 @@ export async function cancelQueued(id: string): Promise<boolean | null> {
   }
 }
 
-/** Stop a background task by id. Returns the sidecar's status message, if any. */
-export async function killTask(id: string): Promise<string | null> {
+/** Outcome of {@link killTask}: the sidecar's status message, or why it failed. */
+export type KillTaskResult = { ok: true; message: string | null } | { ok: false; error: string };
+
+/** Stop a background task by id. */
+export async function killTask(id: string): Promise<KillTaskResult> {
   try {
     const res = await invoke<{ message?: string }>("agent_kill_task", { id });
-    return res.message ?? null;
+    return { ok: true, message: res.message ?? null };
   } catch (e) {
     await logError(`agent_kill_task failed: ${String(e)}`);
-    return null;
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -1325,14 +1437,17 @@ export async function createProject(name: string): Promise<string> {
   return res.path;
 }
 
-/** Discover known projects (ggcoder + Claude Code + Codex), most recent first. */
+/**
+ * Discover known projects (ggcoder + Claude Code + Codex), most recent first.
+ * Throws on failure, so a failed load is never mistaken for "no projects".
+ */
 export async function listProjects(): Promise<DiscoveredProject[]> {
   try {
     const res = await invoke<{ projects: DiscoveredProject[] }>("agent_projects");
     return res.projects ?? [];
   } catch (e) {
     await logError(`agent_projects failed: ${String(e)}`);
-    return [];
+    throw e;
   }
 }
 
@@ -1371,7 +1486,8 @@ export async function searchFiles(query: string): Promise<FileHit[]> {
 
 /**
  * List the latest sessions for a project, one chat agent, every chat agent
- * (`"all"`), or GG Motion (`"motion"`).
+ * (`"all"`), or GG Motion (`"motion"`). Throws on failure, so a failed load
+ * is never mistaken for "no sessions".
  */
 export async function listSessions(
   cwd: string,
@@ -1385,7 +1501,7 @@ export async function listSessions(
     return res.sessions ?? [];
   } catch (e) {
     await logError(`agent_sessions failed: ${String(e)}`);
-    return [];
+    throw e;
   }
 }
 
@@ -1638,7 +1754,7 @@ function unwrapLocalState(res: LocalModelsState & { error?: string }): LocalMode
   return { endpoints: res.endpoints ?? [] };
 }
 
-/** Last scan's endpoints + models. Cheap — does not probe. */
+/** Last scan's endpoints + models. Cheap — does not probe. Throws on failure. */
 export async function getLocalModels(): Promise<LocalModelsState> {
   try {
     await waitForReady();
@@ -1646,7 +1762,7 @@ export async function getLocalModels(): Promise<LocalModelsState> {
     return unwrapLocalState(res);
   } catch (e) {
     await logError(`agent_local failed: ${String(e)}`);
-    return { endpoints: [] };
+    throw e;
   }
 }
 
@@ -1873,7 +1989,7 @@ export interface AddMcpResult {
 
 /** List configured MCP servers with live connection status + tool counts.
  *  `cwd` scopes the project servers to a specific project path (global servers
- *  always show); omit for the window's current project. */
+ *  always show); omit for the window's current project. Throws on failure. */
 export async function listMcpServers(cwd?: string): Promise<McpServerRow[]> {
   try {
     await waitForReady();
@@ -1883,7 +1999,7 @@ export async function listMcpServers(cwd?: string): Promise<McpServerRow[]> {
     return res.servers ?? [];
   } catch (e) {
     await logError(`agent_mcp_list failed: ${String(e)}`);
-    return [];
+    throw e;
   }
 }
 

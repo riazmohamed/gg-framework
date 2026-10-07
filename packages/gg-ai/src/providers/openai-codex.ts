@@ -27,6 +27,7 @@ import { normalizePromptCacheKey } from "./prompt-cache-key.js";
 import {
   downgradeUnsupportedImages,
   downgradeUnsupportedVideos,
+  toCodexReasoningEffort,
   toolResultText,
 } from "./transform.js";
 import { parseToolArguments } from "../utils/json.js";
@@ -187,8 +188,11 @@ async function* runStream(
     // GPT-5.6/6 require at least low; older models still support thinking off.
     // Apply the floor here for every caller, including one-off prompt rewrites.
     // `ultra` is a client orchestration preset, not a Codex API effort.
-    effort:
-      options.thinking === "ultra" ? "max" : (options.thinking ?? (responsesLite ? "low" : "none")),
+    effort: options.thinking
+      ? toCodexReasoningEffort(options.thinking, options.model)
+      : responsesLite
+        ? "low"
+        : "none",
     summary: "auto",
     ...(liteShape ? { context: "all_turns" } : {}),
   };
@@ -298,11 +302,11 @@ async function* runStream(
     ) {
       hint =
         "This model is not available through your ChatGPT account. " +
-        "Switch to a model listed for OpenAI via the model selector, or check your ChatGPT usage limits.";
+        "Choose another available model using the model selector.";
     } else if (response.status === 404 && text.includes("does not exist")) {
       hint =
         "This model is not in OpenAI's current catalog for your ChatGPT account. " +
-        "Switch to GPT-6 Astra, GPT-6.1 Sol, or GPT-6 Luna via the model selector.";
+        "Choose another available model using the model selector.";
     }
 
     throw new ProviderError("openai", message, {
@@ -1015,6 +1019,7 @@ function codexUsageLimitError(
   if (!isHardUsage && !(isRateOr429 && resetsAt != null)) return null;
 
   return new ProviderError("openai", "ChatGPT usage limit reached", {
+    cause: errorObj,
     statusCode: statusCode ?? 429,
     ...(requestId ? { requestId } : {}),
     ...(resetsAt ? { resetsAt } : {}),

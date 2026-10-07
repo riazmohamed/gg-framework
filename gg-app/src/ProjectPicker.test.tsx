@@ -122,6 +122,42 @@ describe("ProjectPicker hide", () => {
   });
 });
 
+describe("ProjectPicker load failures", () => {
+  it("says the project list failed to load and retries, not 'No projects yet'", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listProjectsMock.mockRejectedValueOnce(new Error("daemon down")).mockResolvedValue([PROJECT]);
+
+    render(<ProjectPicker onChosen={vi.fn()} />);
+
+    expect(await screen.findByText("Couldn't load your projects.")).toBeTruthy();
+    expect(screen.queryByText("No projects yet.")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText(PROJECT.name)).toBeTruthy();
+    expect(screen.queryByText("Couldn't load your projects.")).toBeNull();
+  });
+
+  it("says a project's sessions failed to load instead of an endless skeleton", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listProjectsMock.mockResolvedValue([PROJECT]);
+    listSessionsMock.mockRejectedValueOnce(new Error("daemon down"));
+
+    render(<ProjectPicker onChosen={vi.fn()} initialProjectPath={PROJECT.path} />);
+
+    expect(await screen.findByText("Couldn't load this project's sessions.")).toBeTruthy();
+    expect(screen.queryByText("No previous sessions yet.")).toBeNull();
+    expect(document.querySelector(".list-skeleton")).toBeNull();
+
+    listSessionsMock.mockResolvedValue([NATIVE_SESSION]);
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText(NATIVE_SESSION.preview)).toBeTruthy();
+  });
+});
+
 describe("ProjectPicker session list", () => {
   it("badges a Claude Code session with its source", async () => {
     await renderSessionList([NATIVE_SESSION, FOREIGN_SESSION]);

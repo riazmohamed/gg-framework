@@ -37,6 +37,8 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "only (background: task_output wait_ms).",
   list_agents: "List child agent IDs, states, turns and token totals.",
   interrupt_agent: "Interrupt a child agent's current turn, keeping its context for a follow-up.",
+  checklist:
+    "Read/record completed project checks, including chat, with evidence and scope. No unasked audits.",
   tasks:
     "Manage the project task list. Never proactively — only on explicit request, or at a slash-command's task-handoff step.",
   ask_user:
@@ -56,7 +58,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
   generate_image:
     "OpenAI image generation/editing: only on explicit user request, never proactively. Pass `image` to edit.",
   steroids:
-    "Local corpus of real, current open-source repos. `search` (regex, NOT semantic) for how projects do X, `define` for where a symbol lives, `show` to read the file. Topic not covered = corpus gap: run `discover`, don't retry variants.",
+    "Local corpus of real, current open-source repos: how projects do X, where a symbol lives.",
 };
 
 /**
@@ -114,6 +116,7 @@ export function buildToolSteering(activeTools: readonly string[]): string {
 export const BUILTIN_TOOL_NAMES: readonly string[] = [
   "ask_user",
   "bash",
+  "checklist",
   "code_nav",
   "code_search",
   "debug",

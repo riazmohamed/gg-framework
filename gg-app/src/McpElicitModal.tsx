@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { ModalDismissButton } from "./modal-embed";
+import { withViewTransition } from "./view-transition";
+import { Dropdown } from "./Dropdown";
 import { mcpElicit, subscribe, type McpElicitAction, type SidecarEvent } from "./agent";
 
 /** One `mcp_elicit` SSE frame: a server asking for input mid tool call. */
@@ -160,15 +163,20 @@ export function McpElicitModal(): React.ReactElement | null {
       setError(null);
       try {
         await mcpElicit(current.id, action, content);
-        setQueue((prev) => prev.filter((r) => r.id !== current.id));
       } catch (e) {
         // The sidecar 409s once a request has timed out or been cancelled by an
         // abort. Either way this one is finished — drop it rather than trapping
         // the user in a dialog nothing is listening to.
         setError(e instanceof Error ? e.message : String(e));
-        setQueue((prev) => prev.filter((r) => r.id !== current.id));
       } finally {
-        setBusy(false);
+        const dismiss = (): void => {
+          setQueue((prev) => prev.filter((r) => r.id !== current.id));
+          setBusy(false);
+        };
+        // Send the answer immediately; only its eventual removal is animated.
+        // Keep busy until that update commits so a second cancel cannot race it.
+        if (action === "cancel") withViewTransition(dismiss);
+        else dismiss();
       }
     },
     [current, busy],
@@ -187,7 +195,11 @@ export function McpElicitModal(): React.ReactElement | null {
     setValues((prev) => ({ ...prev, [name]: value }));
 
   return (
-    <Modal title={`${current.server} needs your input`} onClose={() => void answer("cancel")}>
+    <Modal
+      title={`${current.server} needs your input`}
+      onClose={() => void answer("cancel")}
+      animateDismiss={false}
+    >
       <div className="login-modal-desc">{current.message}</div>
 
       {fields.length === 0 && (
@@ -265,22 +277,17 @@ export function McpElicitModal(): React.ReactElement | null {
             )}
 
             {choices && !isBoolean && !isMultiSelect(field) && (
-              <select
+              // Not a native <select>: on Windows/Linux the webview's popup can
+              // open but not commit a choice (see supportsNativeSelectPopup).
+              <Dropdown
                 id={fieldId}
-                className="modal-input"
-                style={{ color: theme.text, background: theme.inputBackground }}
+                describedBy={describedBy}
+                label={`${label}${suffix}`}
+                options={[{ value: "", label: "Select…" }, ...choices]}
                 value={typeof value === "string" ? value : ""}
                 disabled={busy}
-                aria-describedby={describedBy}
-                onChange={(e) => setValue(name, e.target.value)}
-              >
-                <option value="">Select…</option>
-                {choices.map((choice) => (
-                  <option key={choice.value} value={choice.value}>
-                    {choice.label}
-                  </option>
-                ))}
-              </select>
+                onChange={(next) => setValue(name, next)}
+              />
             )}
 
             {!choices && !isBoolean && (
@@ -323,9 +330,13 @@ export function McpElicitModal(): React.ReactElement | null {
         <button className="modal-btn" disabled={busy} onClick={() => void answer("decline")}>
           Decline
         </button>
-        <button className="modal-btn" disabled={busy} onClick={() => void answer("cancel")}>
+        <ModalDismissButton
+          disabled={busy}
+          animateDismiss={false}
+          onClick={() => void answer("cancel")}
+        >
           Cancel
-        </button>
+        </ModalDismissButton>
         <button
           className="modal-btn primary"
           disabled={busy || !complete}

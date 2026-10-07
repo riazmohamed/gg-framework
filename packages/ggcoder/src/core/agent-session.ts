@@ -6,6 +6,7 @@ import {
   type AgentEvent,
   type AgentTool,
   type AgentTurnEndEvent,
+  type ToolExecuteResult,
 } from "@abukhaled/gg-agent";
 import {
   ProviderError,
@@ -97,7 +98,7 @@ import {
 import { partitionToolsByTier } from "../tools/tool-tiers.js";
 import type { BackgroundProcess } from "./process-manager.js";
 import type { DebugManager } from "../tools/debug.js";
-import { autoBackgroundedId } from "../tools/bash.js";
+import { autoBackgroundedId, REVIEW_REJECTED_BEFORE_START } from "../tools/bash.js";
 import { buildProcessCompletionFollowUp } from "./process-gate.js";
 import { buildSubAgentCompletionFollowUp, type SubAgentManager } from "./subagent-manager.js";
 import { applyAsyncSubagentPolicy } from "./subagent-policy.js";
@@ -316,7 +317,7 @@ export interface AgentSessionOptions {
    * UI. Omitted by callers that don't want plan mode (CLI wires its own).
    */
   onEnterPlan?: (reason?: string) => void | Promise<void>;
-  onExitPlan?: (planPath: string) => Promise<string>;
+  onExitPlan?: (planPath: string) => Promise<ToolExecuteResult>;
   /**
    * If provided, the session's tool set is filtered to ONLY these tool names
    * after `createTools()` runs, and the system prompt's Tools section lists only
@@ -824,6 +825,7 @@ export class AgentSession {
       // sub-agent spawns read the current parent state at execution time.
       getProvider: () => this.provider,
       getModel: () => this.model,
+      getThinkingLevel: () => this.thinkingLevel,
       getBaseUrl: () => this.baseUrl,
       getCacheKey: () => this.getPromptCacheKey(),
       getMaxPerModel: () => this.settingsManager.get("subagentMaxPerModel"),
@@ -1654,7 +1656,14 @@ export class AgentSession {
         if (args && call && name === "bash") {
           const command = typeof args.command === "string" ? args.command : "";
           const classification = classifyVerificationCommand(command);
-          if (classification.accepted || classification.snapshotEligible) {
+          if (args.review === true && event.result === REVIEW_REJECTED_BEFORE_START) {
+            // The core tool rejected its arguments BEFORE spawning. Never mint
+            // a pass, or poison the failed-check ledger with an unexecuted check.
+            // A child's output cannot match: bash always prefixes it with Exit code.
+            this.verificationGate.recordRejectedCheck(command, REVIEW_REJECTED_BEFORE_START);
+            delete call.sourceSnapshot;
+            verificationChanged = true;
+          } else if (classification.accepted || classification.snapshotEligible) {
             // A foreground check that outlived the default budget was moved to
             // the background, not failed: track it to its real exit the same way.
             const autoBackgroundId = event.isError ? undefined : autoBackgroundedId(event.result);

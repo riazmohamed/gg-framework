@@ -1,5 +1,35 @@
 # @kenkaiiii/ggcoder
 
+## 5.74.2
+
+### Patch Changes
+
+- Skip verification feedback on exploration commands, accept harmless stderr redirects and `python -m ruff/mypy/pyright` as checks, defer `steroids`/`subagent` tools to cut the per-request prefix, and run only user-named checks
+  - @kenkaiiii/gg-ai@5.74.2
+  - @kenkaiiii/gg-agent@5.74.2
+  - @kenkaiiii/gg-core@5.74.2
+
+## 5.74.1
+
+### Patch Changes
+
+- Align OpenAI Ultra with Codex: Astra/Sol send `xhigh` effort for Ultra, OpenAI sub-agents inherit the parent's thinking level (capped to the child model's ladder), and the live system prompt's delegation policy refreshes when effort or model changes.
+  - @kenkaiiii/gg-ai@5.74.1
+  - @kenkaiiii/gg-agent@5.74.1
+  - @kenkaiiii/gg-core@5.74.1
+
+## 5.74.0
+
+### Minor Changes
+
+- Add a persistent project health checklist, clearer chat errors and recovery guidance, reliable plan-review handoffs, fail-fast verification feedback, and reference lookup for configless JavaScript projects.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.74.0
+- @kenkaiiii/gg-agent@5.74.0
+- @kenkaiiii/gg-core@5.74.0
+
 ## 5.73.0
 
 ### Minor Changes
