@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import { readFile } from "node:fs/promises";
 import { SessionManager, type SessionInfo } from "../core/session-manager.js";
+import { listForeignSessions, type ProjectSource } from "../core/project-discovery.js";
 import { renderLogoBlock } from "../cli/shared.js";
 
 const PRIMARY = "#a78bfa";
@@ -12,8 +13,32 @@ let _version = "";
 const MAX_PROMPT_LEN = 40;
 
 interface SessionDisplay {
-  info: SessionInfo;
+  path: string;
   firstPrompt: string;
+  /** "12 msgs · 3h ago" */
+  meta: string;
+  /** Set for another tool's transcript, imported when picked. */
+  source?: ProjectSource;
+}
+
+/** What the picker returns: a session to resume, or a foreign one to import first. */
+export interface PickedSession {
+  path: string;
+  source?: ProjectSource;
+}
+
+const SOURCE_LABEL: Partial<Record<ProjectSource, string>> = {
+  "claude-code": "Claude Code",
+  codex: "Codex",
+};
+
+function msgs(count: number): string {
+  return `${count} msg${count !== 1 ? "s" : ""}`;
+}
+
+function shorten(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > MAX_PROMPT_LEN ? flat.slice(0, MAX_PROMPT_LEN) + "..." : flat || "(empty)";
 }
 
 function formatRelativeTime(isoTimestamp: string): string {
@@ -91,10 +116,12 @@ function renderScreen(sessions: SessionDisplay[], selectedIndex: number): string
       const selected = i === selectedIndex;
       const marker = selected ? "❯ " : "  ";
       const labelColor = selected ? PRIMARY : TEXT;
-      const time = formatRelativeTime(s.info.timestamp);
-      const msgs = `${s.info.messageCount} msg${s.info.messageCount !== 1 ? "s" : ""}`;
+      const tag = s.source ? chalk.hex("#d97757")(`[${SOURCE_LABEL[s.source] ?? s.source}] `) : "";
       lines.push(
-        chalk.hex(labelColor)(marker + s.firstPrompt) + chalk.hex(TEXT_DIM)(` — ${msgs} · ${time}`),
+        chalk.hex(labelColor)(marker) +
+          tag +
+          chalk.hex(labelColor)(s.firstPrompt) +
+          chalk.hex(TEXT_DIM)(` — ${s.meta}`),
       );
     }
   }
@@ -105,28 +132,49 @@ function renderScreen(sessions: SessionDisplay[], selectedIndex: number): string
   return lines.join("\n");
 }
 
+/**
+ * The picker's rows: this project's newest OG Coder sessions, then its newest
+ * Claude Code / Codex transcripts (the desktop picker shows both), tagged by
+ * source. Picking a foreign row imports it before resuming.
+ */
+export async function loadSessionRows(
+  sessionsDir: string,
+  cwd: string,
+  listForeign: typeof listForeignSessions = listForeignSessions,
+): Promise<SessionDisplay[]> {
+  const manager = new SessionManager(sessionsDir);
+  const [own, foreign] = await Promise.all([
+    manager.list(cwd).then((all: SessionInfo[]) => all.slice(0, 5)),
+    listForeign(cwd, 5).catch(() => []),
+  ]);
+  const ownRows = await Promise.all(
+    own.map(async (info) => ({
+      path: info.path,
+      firstPrompt: await extractFirstPrompt(info.path),
+      meta: `${msgs(info.messageCount)} · ${formatRelativeTime(info.timestamp)}`,
+    })),
+  );
+  const foreignRows = foreign.map((session) => ({
+    path: session.path,
+    firstPrompt: shorten(session.preview),
+    meta: `${msgs(session.messageCount)} · ${session.lastActiveDisplay}`,
+    ...(session.source ? { source: session.source } : {}),
+  }));
+  return [...ownRows, ...foreignRows];
+}
+
 export async function renderSessionSelector(
   sessionsDir: string,
   cwd: string,
   version?: string,
-): Promise<string | null> {
+): Promise<PickedSession | null> {
   _version = version ?? "";
-  const manager = new SessionManager(sessionsDir);
-  const allSessions = await manager.list(cwd);
-  const top5 = allSessions.slice(0, 5);
+  const sessions = await loadSessionRows(sessionsDir, cwd);
 
-  if (top5.length === 0) {
+  if (sessions.length === 0) {
     console.log(chalk.hex(TEXT_DIM)("No sessions found for this directory."));
     return null;
   }
-
-  // Load first prompt for each session
-  const sessions: SessionDisplay[] = await Promise.all(
-    top5.map(async (info) => ({
-      info,
-      firstPrompt: await extractFirstPrompt(info.path),
-    })),
-  );
 
   return new Promise((resolve) => {
     let selectedIndex = 0;
@@ -185,7 +233,8 @@ export async function renderSessionSelector(
       // Enter → select
       if (key === "\r" || key === "\n") {
         cleanup();
-        resolve(sessions[selectedIndex]!.info.path);
+        const picked = sessions[selectedIndex]!;
+        resolve({ path: picked.path, ...(picked.source ? { source: picked.source } : {}) });
         return;
       }
 

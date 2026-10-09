@@ -71,6 +71,7 @@ import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { ThemeName } from "./ui/theme/theme.js";
 import { AuthStorage, readStoredBaseUrlSync } from "./core/auth-storage.js";
 import { SessionManager, type TurnMetricPayload } from "./core/session-manager.js";
+import { importForeignSession } from "./core/foreign-session-import.js";
 import { ensureAppDirs, getAppPaths, loadSavedSettings, projectScopeAllowed } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
 import { setStreamDiagnostic } from "@abukhaled/gg-agent";
@@ -1031,9 +1032,9 @@ async function runSessions(): Promise<void> {
   log("INFO", "session", "Sessions selector started");
 
   const cwd = process.cwd();
-  const selectedPath = await renderSessionSelector(paths.sessionsDir, cwd, CLI_VERSION);
+  const picked = await renderSessionSelector(paths.sessionsDir, cwd, CLI_VERSION);
 
-  if (!selectedPath) {
+  if (!picked) {
     console.log(chalk.hex("#6b7280")("No session selected."));
     closeLogger();
     process.exit(0);
@@ -1063,6 +1064,34 @@ async function runSessions(): Promise<void> {
         baseUrl: readStoredBaseUrlSync(paths.authFile, provider),
       }))
     : undefined;
+
+  // A Claude Code / Codex transcript is imported as an OG Coder session first
+  // (lossy by nature; the import notes what it dropped), then resumed.
+  let selectedPath = picked.path;
+  if (picked.source && picked.source !== "ggcoder") {
+    try {
+      const imported = await importForeignSession({
+        filePath: picked.path,
+        sessionManager: new SessionManager(paths.sessionsDir),
+        provider,
+        model,
+        cwd,
+      });
+      selectedPath = imported.sessionPath;
+      log("INFO", "import", "Imported foreign session", {
+        format: imported.format,
+        messages: String(imported.messageCount),
+      });
+    } catch (err) {
+      console.error(
+        chalk.hex("#f87171")(
+          `Could not import that session: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+      closeLogger();
+      process.exit(1);
+    }
+  }
 
   closeLogger();
 
