@@ -29,6 +29,13 @@ afterEach(() => {
 });
 
 describe("loadSavedSettings", () => {
+  it("keeps the computer awake by default and honours keepAwake: false", () => {
+    expect(loadSavedSettings(tempSettingsPath()).keepAwake).toBe(true);
+    const settingsPath = tempSettingsPath();
+    fs.writeFileSync(settingsPath, JSON.stringify({ keepAwake: false }), "utf-8");
+    expect(loadSavedSettings(settingsPath).keepAwake).toBe(false);
+  });
+
   it("defaults trustedProjects to an empty array", () => {
     const settings = loadSavedSettings(tempSettingsPath());
     expect(settings.trustedProjects).toEqual([]);

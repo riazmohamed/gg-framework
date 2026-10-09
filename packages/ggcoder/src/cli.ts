@@ -120,6 +120,7 @@ import { checkAndAutoUpdate } from "./core/auto-update.js";
 import { routeCliCommandInput, type CliSubcommandName } from "./cli/command-routing.js";
 import { parseThinkingLevel } from "./cli/thinking-arg.js";
 import { createTuiAskUserHost } from "./ui/ask-user-host.js";
+import { KeepAwake } from "./core/keep-awake.js";
 import { createAskUserTool } from "./tools/ask-user.js";
 
 function printHelp(): void {
@@ -691,6 +692,8 @@ async function runInkTUI(opts: {
 
   // ask_user: the terminal renders it as a keyboard picker (AskUserPanel).
   const askUserHost = createTuiAskUserHost();
+  // Hold off idle system sleep while a run is in flight (`keepAwake` setting).
+  const keepAwake = new KeepAwake({ enabled: savedSettings.keepAwake });
   tools.push(createAskUserTool(askUserHost.bridge.park));
 
   const toolNames = tools.map((tool) => tool.name);
@@ -997,6 +1000,7 @@ async function runInkTUI(opts: {
     checkpointStore: checkpointRef.current ?? undefined,
     additionalRoots,
     askUserHost,
+    keepAwake,
     idealReviewEnabled: opts.idealReviewEnabled,
     rebuildReadTool,
     clearReadTracker,

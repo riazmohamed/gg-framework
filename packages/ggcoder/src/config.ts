@@ -47,6 +47,8 @@ export interface SavedSettings {
   /** Repo paths individually trusted for project-scope MCP (the per-repo
    *  complement to the global `trustProjectMcpServers`). */
   trustedProjects: string[];
+  /** Hold off idle system sleep while the agent works. Default true. */
+  keepAwake: boolean;
   /** Max concurrent subagents per resolved child model (1–4). Unset = global limit only. */
   subagentMaxPerModel?: number;
   /** Days to keep session transcripts before startup pruning. 0 disables. */
@@ -91,6 +93,7 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
     sessionRetentionDays: 30,
     trustProjectMcpServers: false,
     trustedProjects: [],
+    keepAwake: true,
   };
   try {
     const raw = JSON.parse(fsSync.readFileSync(filePath, "utf-8"));
@@ -104,6 +107,7 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
       if (typeof raw.defaultModel === "string") result.model = raw.defaultModel;
     }
     if (raw.autoCompact === false) result.autoCompact = false;
+    if (raw.keepAwake === false) result.keepAwake = false;
     if (
       typeof raw.compactThreshold === "number" &&
       Number.isFinite(raw.compactThreshold) &&

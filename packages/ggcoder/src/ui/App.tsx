@@ -123,6 +123,7 @@ import {
   cacheTouchFor,
 } from "./cache-expiry-gate.js";
 import type { CacheTouch } from "../core/cache-expiry.js";
+import type { KeepAwake } from "../core/keep-awake.js";
 import { createUsageCommand } from "./tui-usage.js";
 import { createUsageService } from "../app-sidecar/usage.js";
 import { useRepoStatus } from "./hooks/useRepoStatus.js";
@@ -275,6 +276,8 @@ export interface AppProps {
   additionalRoots?: string[];
   /** Open `ask_user` questions (the terminal's keyboard picker). */
   askUserHost?: TuiAskUserHost;
+  /** Idle-sleep guard held while a run is in flight. */
+  keepAwake?: KeepAwake;
   /** Rebuild the `read` tool for a model (reuses the read tracker). Used on
    *  model switch so the tool's video capability tracks the active model. */
   rebuildReadTool?: (model: string) => AgentTool;
@@ -2292,6 +2295,7 @@ export function App(props: AppProps) {
             const sm = new SettingsManager(props.settingsFile);
             await sm.load();
             await sm.set(key as keyof Settings, value as never);
+            if (key === "keepAwake") props.keepAwake?.setEnabled(sm.get("keepAwake"));
             settingsSnapshotRef.current = sm.getAll() as unknown as Record<string, unknown>;
           },
           getModelList: () =>
@@ -2478,6 +2482,7 @@ export function App(props: AppProps) {
       props.sessionsDir,
       props.settingsFile,
       props.additionalRoots,
+      props.keepAwake,
       tuiSlashRegistry,
       refreshSettingsSnapshot,
       props.sessionStore,
@@ -2514,6 +2519,13 @@ export function App(props: AppProps) {
   useEffect(() => {
     if (agentLoop.isRunning) runStartIndexRef.current = messagesRef.current.length;
   }, [agentLoop.isRunning]);
+
+  // Keep the computer from idle-sleeping mid-run (the desktop's keep-awake).
+  const keepAwake = props.keepAwake;
+  useEffect(() => {
+    if (!agentLoop.isRunning || !keepAwake) return;
+    return keepAwake.acquire("run");
+  }, [agentLoop.isRunning, keepAwake]);
 
   const handleAbort = useCallback(() => {
     props.askUserHost?.cancelAll();

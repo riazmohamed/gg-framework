@@ -2,6 +2,7 @@ import React from "react";
 import wrapAnsi from "wrap-ansi";
 import type { TuiAskUserHost } from "./ask-user-host.js";
 import type { CacheTouch } from "../core/cache-expiry.js";
+import type { KeepAwake } from "../core/keep-awake.js";
 import { log } from "@abukhaled/gg-core";
 import { render, type Instance as InkInstance } from "ink";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
@@ -80,6 +81,8 @@ export interface RenderAppConfig {
   additionalRoots?: string[];
   /** Open `ask_user` questions; outlives remounts like `additionalRoots`. */
   askUserHost?: TuiAskUserHost;
+  /** Idle-sleep guard held while a run is in flight. */
+  keepAwake?: KeepAwake;
   rebuildReadTool?: (model: string) => AgentTool;
   /** Forgets every file read; run when a reset replaces the conversation. */
   clearReadTracker?: () => void;
@@ -605,6 +608,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             checkpointStore: config.checkpointStore,
             additionalRoots: config.additionalRoots,
             askUserHost: config.askUserHost,
+            keepAwake: config.keepAwake,
             rebuildReadTool: config.rebuildReadTool,
             connectInitialMcpTools: config.connectInitialMcpTools,
             planCallbacks: config.planCallbacks,
