@@ -115,6 +115,7 @@ import type { SlashCommandContext } from "../core/slash-commands.js";
 import { addWorkspaceRoot, removeWorkspaceRoot } from "../core/workspace-roots.js";
 import type { TuiAskUserHost } from "./ask-user-host.js";
 import { createExportCommand } from "./tui-export.js";
+import { createChecklistCommand, createHealthCommand, type SendPrompt } from "./tui-health.js";
 import { AskUserPanel } from "./components/AskUserPanel.js";
 import { buildLoopBreakMessage, evaluateLoopBreak } from "../core/loop-breaker.js";
 import { buildRegroundingMessage } from "../core/regrounding.js";
@@ -1996,6 +1997,9 @@ export function App(props: AppProps) {
   }, [askUserHost]);
 
   // The shared slash-command registry, minus what this UI handles itself.
+  // Commands that hand work to the agent (/health review, /checklist run):
+  // show the short command in the transcript, send the full prompt.
+  const sendPromptRef = useRef<SendPrompt>(async () => null);
   const sessionIdForExportRef = useRef<string | undefined>(undefined);
   sessionIdForExportRef.current = props.sessionStore?.sessionId ?? props.sessionId;
   const tuiSlashRegistry = useMemo(
@@ -2008,6 +2012,14 @@ export function App(props: AppProps) {
           sessionId: sessionIdForExportRef.current,
           messages: messagesRef.current,
         })),
+        createHealthCommand({
+          cwd: () => cwdRef.current,
+          sendPrompt: (display, prompt) => sendPromptRef.current(display, prompt),
+        }),
+        createChecklistCommand({
+          cwd: () => cwdRef.current,
+          sendPrompt: (display, prompt) => sendPromptRef.current(display, prompt),
+        }),
       ]),
     [],
   );
@@ -2397,6 +2409,26 @@ export function App(props: AppProps) {
     ],
   );
   handleSubmitRef.current = (input) => handleSubmit(input);
+  sendPromptRef.current = async (display, prompt) => {
+    if (agentLoop.isRunning) return "A turn is still running. Try again when it finishes.";
+    setLastUserMessage(display);
+    setDoneStatus(null);
+    finalizeSubmittedUserItem({ kind: "user", text: display, id: getId() }, liveItems);
+    try {
+      await agentLoop.run(prompt);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log("ERROR", "error", msg);
+      if (agentLoop.isRunning) agentLoop.reset();
+      setLiveItems((prev) => [
+        ...prev,
+        msg.includes("abort")
+          ? { kind: "stopped", text: "Request was stopped.", id: getId() }
+          : toErrorItem(err, getId()),
+      ]);
+    }
+    return null;
+  };
 
   const handleDoubleExit = useDoublePress(setExitPending, showSessionSummaryAndExit);
 

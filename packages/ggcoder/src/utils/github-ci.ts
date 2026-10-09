@@ -105,6 +105,22 @@ async function context(cwd: string): Promise<{ slug: string; sha: string } | nul
   return slug && head ? { slug, sha: head.stdout.trim() } : null;
 }
 
+/**
+ * One-shot CI status for the current HEAD; null when there is no GitHub remote,
+ * no commit, no `gh`, or no runs. Never throws. Never verification evidence.
+ */
+export async function getCurrentGitHubCI(
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<GitHubCI | null> {
+  try {
+    const ctx = await context(cwd);
+    return ctx ? await getGitHubCI(ctx.slug, ctx.sha, signal) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** One in-flight poll per session, slower while idle, stopped with the session. */
 export function startGitHubCIPoll(cwd: string, onChange: (ci: GitHubCI | null) => void) {
   const abort = new AbortController();
