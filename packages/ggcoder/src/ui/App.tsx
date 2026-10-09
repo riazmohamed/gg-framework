@@ -114,6 +114,7 @@ import {
 import type { SlashCommandContext } from "../core/slash-commands.js";
 import { addWorkspaceRoot, removeWorkspaceRoot } from "../core/workspace-roots.js";
 import type { TuiAskUserHost } from "./ask-user-host.js";
+import { createExportCommand } from "./tui-export.js";
 import { AskUserPanel } from "./components/AskUserPanel.js";
 import { buildLoopBreakMessage, evaluateLoopBreak } from "../core/loop-breaker.js";
 import { buildRegroundingMessage } from "../core/regrounding.js";
@@ -1995,7 +1996,21 @@ export function App(props: AppProps) {
   }, [askUserHost]);
 
   // The shared slash-command registry, minus what this UI handles itself.
-  const tuiSlashRegistry = useMemo(() => createTuiSlashRegistry(), []);
+  const sessionIdForExportRef = useRef<string | undefined>(undefined);
+  sessionIdForExportRef.current = props.sessionStore?.sessionId ?? props.sessionId;
+  const tuiSlashRegistry = useMemo(
+    () =>
+      createTuiSlashRegistry([
+        createExportCommand(() => ({
+          cwd: cwdRef.current,
+          provider: currentProviderRef.current,
+          model: currentModelRef.current,
+          sessionId: sessionIdForExportRef.current,
+          messages: messagesRef.current,
+        })),
+      ]),
+    [],
+  );
   // handleModelSelect is declared below handleSubmit; reach it through a ref.
   const handleModelSelectRef = useRef<(value: string) => void>(() => {});
   const settingsSnapshotRef = useRef<Record<string, unknown>>({});
