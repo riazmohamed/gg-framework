@@ -115,6 +115,7 @@ import type { SlashCommandContext } from "../core/slash-commands.js";
 import { addWorkspaceRoot, removeWorkspaceRoot } from "../core/workspace-roots.js";
 import type { TuiAskUserHost } from "./ask-user-host.js";
 import { createExportCommand } from "./tui-export.js";
+import { summarizeRunVerification } from "./run-verification.js";
 import { createUsageCommand } from "./tui-usage.js";
 import { createUsageService } from "../app-sidecar/usage.js";
 import { useRepoStatus } from "./hooks/useRepoStatus.js";
@@ -535,6 +536,8 @@ export function App(props: AppProps) {
   thinkingLevelRef.current = thinkingLevel;
   const [renderMarkdown, setRenderMarkdown] = useState(true);
   const messagesRef = useRef<Message[]>(props.sessionStore?.messages ?? props.messages);
+  // Where the current run's messages start, for its verification summary.
+  const runStartIndexRef = useRef(0);
   const [planAutoExpand, setPlanAutoExpand] = useState(props.sessionStore?.planAutoExpand ?? false);
   const approvedPlanPathRef = useRef<string | undefined>(props.sessionStore?.approvedPlanPath);
   const planStepsRef = useRef<PlanStep[]>(props.sessionStore?.planSteps ?? []);
@@ -1701,6 +1704,17 @@ export function App(props: AppProps) {
               tokens: runStats?.tokens,
             });
             playNotificationSound();
+            // Host-observed verification for this run (as the desktop activity
+            // line): checks after the last edit and how they exited.
+            const verification = summarizeRunVerification(
+              messagesRef.current.slice(runStartIndexRef.current),
+            );
+            if (verification) {
+              setLiveItems((prev) => [
+                ...prev,
+                { kind: "info", text: verification.text, id: getId() },
+              ]);
+            }
           }
           // Keep the final assistant response mounted in the live frame after a
           // normal chat turn finishes. Moving a large final response to terminal
@@ -2451,6 +2465,10 @@ export function App(props: AppProps) {
   };
 
   const handleDoubleExit = useDoublePress(setExitPending, showSessionSummaryAndExit);
+
+  useEffect(() => {
+    if (agentLoop.isRunning) runStartIndexRef.current = messagesRef.current.length;
+  }, [agentLoop.isRunning]);
 
   const handleAbort = useCallback(() => {
     props.askUserHost?.cancelAll();
