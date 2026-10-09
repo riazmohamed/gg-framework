@@ -115,6 +115,8 @@ import type { SlashCommandContext } from "../core/slash-commands.js";
 import { addWorkspaceRoot, removeWorkspaceRoot } from "../core/workspace-roots.js";
 import type { TuiAskUserHost } from "./ask-user-host.js";
 import { createExportCommand } from "./tui-export.js";
+import { createUsageCommand } from "./tui-usage.js";
+import { createUsageService } from "../app-sidecar/usage.js";
 import { useRepoStatus } from "./hooks/useRepoStatus.js";
 import type { RepoStatusTone } from "./repo-status.js";
 import { createChecklistCommand, createHealthCommand, type SendPrompt } from "./tui-health.js";
@@ -2012,6 +2014,11 @@ export function App(props: AppProps) {
   // Commands that hand work to the agent (/health review, /checklist run):
   // show the short command in the transcript, send the full prompt.
   const sendPromptRef = useRef<SendPrompt>(async () => null);
+  // Plan usage, with the sidecar's caching, 429 backoff and token refresh.
+  const usageServiceRef = useRef<ReturnType<typeof createUsageService> | null>(null);
+  if (!usageServiceRef.current && props.authStorage) {
+    usageServiceRef.current = createUsageService(props.authStorage);
+  }
   const sessionIdForExportRef = useRef<string | undefined>(undefined);
   sessionIdForExportRef.current = props.sessionStore?.sessionId ?? props.sessionId;
   const tuiSlashRegistry = useMemo(
@@ -2032,6 +2039,7 @@ export function App(props: AppProps) {
           cwd: () => cwdRef.current,
           sendPrompt: (display, prompt) => sendPromptRef.current(display, prompt),
         }),
+        createUsageCommand(() => usageServiceRef.current?.subscriptionUsage ?? null),
       ]),
     [],
   );
