@@ -195,16 +195,20 @@ function printHelp(): void {
   // Interactive commands
   console.log(primary("Interactive commands") + dim(" (inside the chat):"));
   const slashCmds: [string, string][] = [
-    ["/help", "Show available slash commands"],
-    ["/model", "Switch AI model"],
-    ["/compact", "Compact conversation context"],
-    ["/session", "Switch or create sessions"],
-    ["/new", "Start a new session"],
-    ["/settings", "Open settings"],
-    ["/quit", "Exit ggcoder"],
+    ["/help", "All commands and keyboard shortcuts"],
+    ["/model [provider:model]", "Switch AI model"],
+    ["/compact [focus]", "Compact conversation context"],
+    ["/session, /new", "List sessions / start a new one"],
+    ["/settings [key] [value]", "Show or change settings"],
+    ["/add-dir, /remove-dir", "Add or remove workspace folders"],
+    ["/health, /checklist", "Project health score and checklist"],
+    ["/usage", "Subscription plan usage"],
+    ["/enhance <draft>", "Rewrite a draft prompt"],
+    ["/export, /import", "Save the chat as Markdown / import another tool's chat"],
+    ["/quit", "Exit ogcoder"],
   ];
   for (const [name, desc] of slashCmds) {
-    console.log(`  ${accent(name.padEnd(20))} ${dim(desc)}`);
+    console.log(`  ${accent(name.padEnd(26))} ${dim(desc)}`);
   }
   console.log();
 
