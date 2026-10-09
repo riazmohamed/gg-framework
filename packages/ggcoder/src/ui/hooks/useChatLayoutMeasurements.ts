@@ -28,6 +28,8 @@ interface UseChatLayoutMeasurementsOptions {
   displayedCwd: string;
   gitBranch?: string | null;
   githubAccount?: string | null;
+  /** The footer's repo segment (CI, changed files, PRs), when shown. */
+  footerStatusLabel?: string;
   thinkingLevel?: ThinkingLevel;
   exitPending: boolean;
   taskBarExpanded: boolean;
@@ -68,6 +70,7 @@ export function useChatLayoutMeasurements({
   displayedCwd,
   gitBranch,
   githubAccount,
+  footerStatusLabel,
   thinkingLevel,
   exitPending,
   taskBarExpanded,
@@ -119,6 +122,7 @@ export function useChatLayoutMeasurements({
     cwd: displayedCwd,
     gitBranch,
     githubAccount,
+    statusLabel: footerStatusLabel,
     thinkingLevel,
   });
   const chatControlsLayout = getChatControlsLayoutDecision({

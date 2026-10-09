@@ -169,6 +169,7 @@ export function doesFooterFitOnOneLine({
   cwd,
   gitBranch,
   githubAccount,
+  statusLabel,
   thinkingLevel,
   planMode = false,
   statusBelow,
@@ -181,6 +182,7 @@ export function doesFooterFitOnOneLine({
   cwd: string;
   gitBranch?: string | null;
   githubAccount?: string | null;
+  statusLabel?: string;
   thinkingLevel?: ThinkingLevel;
   planMode?: boolean;
   statusBelow?: boolean;
@@ -198,7 +200,9 @@ export function doesFooterFitOnOneLine({
     2 +
     (gitBranch ? gitBranch.length + 5 : 0) +
     // " │ @account"
-    (githubAccount ? githubAccount.length + 4 : 0);
+    (githubAccount ? githubAccount.length + 4 : 0) +
+    // " │ status"
+    (statusLabel ? statusLabel.length + 3 : 0);
   const rightLen = getFooterRightLength({
     barWidth: 8,
     contextPct,
@@ -295,6 +299,7 @@ export function Footer({
     cwd,
     gitBranch,
     githubAccount,
+    statusLabel,
     thinkingLevel,
     planMode,
     statusBelow,

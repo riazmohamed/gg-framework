@@ -111,6 +111,7 @@ interface ChatScreenProps {
   gitBranch?: string | null;
   githubAccount?: string | null;
   githubAccountMismatch?: boolean;
+  repoStatus?: { label: string; color: string };
   planMode: boolean;
   exitPending: boolean;
   footerStatusLayout: FooterStatusLayoutDecision;
@@ -183,6 +184,7 @@ export function ChatScreen({
   gitBranch,
   githubAccount,
   githubAccountMismatch,
+  repoStatus,
   planMode,
   exitPending,
   footerStatusLayout,
@@ -287,6 +289,7 @@ export function ChatScreen({
           gitBranch={gitBranch}
           githubAccount={githubAccount}
           githubAccountMismatch={githubAccountMismatch}
+          repoStatus={repoStatus}
           thinkingLevel={thinkingLevel}
           planMode={planMode}
           exitPending={exitPending}

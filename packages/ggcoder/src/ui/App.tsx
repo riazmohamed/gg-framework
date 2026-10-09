@@ -115,6 +115,8 @@ import type { SlashCommandContext } from "../core/slash-commands.js";
 import { addWorkspaceRoot, removeWorkspaceRoot } from "../core/workspace-roots.js";
 import type { TuiAskUserHost } from "./ask-user-host.js";
 import { createExportCommand } from "./tui-export.js";
+import { useRepoStatus } from "./hooks/useRepoStatus.js";
+import type { RepoStatusTone } from "./repo-status.js";
 import { createChecklistCommand, createHealthCommand, type SendPrompt } from "./tui-health.js";
 import { AskUserPanel } from "./components/AskUserPanel.js";
 import { buildLoopBreakMessage, evaluateLoopBreak } from "../core/loop-breaker.js";
@@ -212,6 +214,16 @@ const RUNNING_INDICATOR_ANIMATION_MS = 1_200;
 // ── App Props ──────────────────────────────────────────────
 
 const noopSubscribe = () => () => {};
+
+function repoStatusColor(
+  tone: RepoStatusTone,
+  theme: { error: string; warning: string; success: string; textMuted: string },
+): string {
+  if (tone === "failed") return theme.error;
+  if (tone === "running") return theme.warning;
+  if (tone === "passed") return theme.success;
+  return theme.textMuted;
+}
 const noAsk = () => null;
 
 export interface AppProps {
@@ -2877,6 +2889,8 @@ export function App(props: AppProps) {
 
   const isSkillsView = overlay === "skills";
   const isPlanView = overlay === "plan";
+  // Footer repo segment: CI for HEAD, changed files, open PRs/issues.
+  const repoStatus = useRepoStatus(props.cwd);
   const {
     footerStatusLayout,
     activityVisible,
@@ -2886,6 +2900,7 @@ export function App(props: AppProps) {
     measuredLiveAreaRows,
     viewportRows,
   } = useChatLayoutMeasurements({
+    footerStatusLabel: repoStatus?.label,
     rows,
     columns,
     backgroundTaskCount: bgTasks.length,
@@ -3476,6 +3491,11 @@ export function App(props: AppProps) {
           gitBranch={gitBranch}
           githubAccount={githubAccount}
           githubAccountMismatch={githubIdentity?.mismatch}
+          repoStatus={
+            repoStatus
+              ? { label: repoStatus.label, color: repoStatusColor(repoStatus.tone, theme) }
+              : undefined
+          }
           planMode={planMode}
           exitPending={exitPending}
           footerStatusLayout={footerStatusLayout}

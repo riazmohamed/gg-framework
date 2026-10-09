@@ -22,6 +22,7 @@ interface ChatFooterPaneProps {
   gitBranch?: string | null;
   githubAccount?: string | null;
   githubAccountMismatch?: boolean;
+  repoStatus?: { label: string; color: string };
   thinkingLevel?: ThinkingLevel;
   planMode: boolean;
   exitPending: boolean;
@@ -44,6 +45,7 @@ export function ChatFooterPane({
   gitBranch,
   githubAccount,
   githubAccountMismatch,
+  repoStatus,
   thinkingLevel,
   planMode,
   exitPending,
@@ -80,6 +82,8 @@ export function ChatFooterPane({
       gitBranch={gitBranch}
       githubAccount={githubAccount}
       githubAccountMismatch={githubAccountMismatch}
+      statusLabel={repoStatus?.label}
+      statusColor={repoStatus?.color}
       thinkingLevel={thinkingLevel}
       planMode={planMode}
       exitPending={exitPending}
