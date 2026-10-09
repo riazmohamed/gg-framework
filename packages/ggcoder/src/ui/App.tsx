@@ -125,6 +125,7 @@ import {
 import type { CacheTouch } from "../core/cache-expiry.js";
 import type { KeepAwake } from "../core/keep-awake.js";
 import { createUsageCommand } from "./tui-usage.js";
+import { createEnhanceCommand, type EnhanceRoute } from "./tui-enhance.js";
 import { createUsageService } from "../app-sidecar/usage.js";
 import { useRepoStatus } from "./hooks/useRepoStatus.js";
 import type { RepoStatusTone } from "./repo-status.js";
@@ -554,6 +555,13 @@ export function App(props: AppProps) {
   const lastCacheTouchRef = useRef<CacheTouch | null>(props.sessionStore?.cacheTouch ?? null);
   const cacheWarnedKeyRef = useRef<string | null>(null);
   const cacheRouteRef = useRef<{ baseUrl?: string; accountId?: string }>({});
+  // Model, credentials and stack for /enhance, refreshed every render.
+  const enhanceRouteRef = useRef<EnhanceRoute>({
+    provider: props.provider,
+    model: props.model,
+    maxTokens: props.maxTokens,
+    cwd: props.cwd,
+  });
   const [planAutoExpand, setPlanAutoExpand] = useState(props.sessionStore?.planAutoExpand ?? false);
   const approvedPlanPathRef = useRef<string | undefined>(props.sessionStore?.approvedPlanPath);
   const planStepsRef = useRef<PlanStep[]>(props.sessionStore?.planSteps ?? []);
@@ -749,6 +757,15 @@ export function App(props: AppProps) {
   const activeBaseUrl =
     currentProvider === "gemini" ? undefined : currentCreds ? currentCreds.baseUrl : props.baseUrl;
   cacheRouteRef.current = { baseUrl: activeBaseUrl, accountId: activeAccountId };
+  enhanceRouteRef.current = {
+    provider: currentProvider,
+    model: currentModel,
+    thinking: thinkingLevel,
+    maxTokens: props.maxTokens,
+    baseUrl: activeBaseUrl,
+    cwd: props.cwd,
+    authStorage: props.authStorage,
+  };
   const contextWindowOptions = useMemo(
     () => ({ provider: currentProvider, accountId: activeAccountId }),
     [currentProvider, activeAccountId],
@@ -2080,6 +2097,10 @@ export function App(props: AppProps) {
           sendPrompt: (display, prompt) => sendPromptRef.current(display, prompt),
         }),
         createUsageCommand(() => usageServiceRef.current?.subscriptionUsage ?? null),
+        createEnhanceCommand({
+          route: () => enhanceRouteRef.current,
+          putInComposer: (text) => setComposerInject({ text, nonce: nextIdRef.current++ }),
+        }),
       ]),
     [],
   );
