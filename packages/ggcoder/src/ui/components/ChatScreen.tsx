@@ -93,6 +93,8 @@ interface ChatScreenProps {
   planTotal: number;
   formatDuration: (durationMs: number) => string;
   inputControls: ChatInputControls;
+  /** An open `ask_user` question, rendered above the input in its place. */
+  askPanel?: React.ReactNode;
   taskPicker: TaskPickerControls;
   overlay: string | null;
   onModelSelect: (modelId: string) => void;
@@ -164,6 +166,7 @@ export function ChatScreen({
   planTotal,
   formatDuration,
   inputControls,
+  askPanel,
   taskPicker,
   overlay,
   onModelSelect,
@@ -245,6 +248,7 @@ export function ChatScreen({
           renderMarkdown={renderMarkdown}
           formatDuration={formatDuration}
         />
+        {askPanel}
         <InputArea
           onSubmit={inputControls.onSubmit}
           onAbort={inputControls.onAbort}

@@ -76,9 +76,10 @@ function normalize(question: z.infer<typeof Question>): AskQuestion {
 /**
  * Ask the user a question and block the turn until they answer.
  *
- * Registered only by hosts that can actually render it (the gg-app sidecar).
- * A subagent, a headless run or the TUI has nobody to answer, so the tool is
- * simply absent there and the agent falls back to asking in prose.
+ * Registered only by hosts that can actually render it: the gg-app sidecar
+ * (clickable band) and the terminal app (keyboard picker, `AskUserPanel`). A
+ * subagent or a headless run has nobody to answer, so the tool is simply
+ * absent there and the agent falls back to asking in prose.
  */
 export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUserParams> {
   return {

@@ -1,4 +1,11 @@
-import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import React, {
+  useState,
+  useRef,
+  useCallback,
+  useEffect,
+  useMemo,
+  useSyncExternalStore,
+} from "react";
 import { Box, useStdout } from "ink";
 import { useTerminalSize } from "./hooks/useTerminalSize.js";
 import { useChatLayoutMeasurements } from "./hooks/useChatLayoutMeasurements.js";
@@ -106,6 +113,8 @@ import {
 } from "./tui-slash-commands.js";
 import type { SlashCommandContext } from "../core/slash-commands.js";
 import { addWorkspaceRoot, removeWorkspaceRoot } from "../core/workspace-roots.js";
+import type { TuiAskUserHost } from "./ask-user-host.js";
+import { AskUserPanel } from "./components/AskUserPanel.js";
 import { buildLoopBreakMessage, evaluateLoopBreak } from "../core/loop-breaker.js";
 import { buildRegroundingMessage } from "../core/regrounding.js";
 import { getNextThinkingLevel, isThinkingLevelSupported } from "./thinking-level.js";
@@ -200,6 +209,9 @@ const RUNNING_INDICATOR_ANIMATION_MS = 1_200;
 
 // ── App Props ──────────────────────────────────────────────
 
+const noopSubscribe = () => () => {};
+const noAsk = () => null;
+
 export interface AppProps {
   provider: Provider;
   model: string;
@@ -237,6 +249,8 @@ export interface AppProps {
   checkpointStore?: CheckpointStore;
   /** Extra workspace roots from `/add-dir`, shared with the write guard. */
   additionalRoots?: string[];
+  /** Open `ask_user` questions (the terminal's keyboard picker). */
+  askUserHost?: TuiAskUserHost;
   /** Rebuild the `read` tool for a model (reuses the read tracker). Used on
    *  model switch so the tool's video capability tracks the active model. */
   rebuildReadTool?: (model: string) => AgentTool;
@@ -1964,6 +1978,22 @@ export function App(props: AppProps) {
     // Intentional one-shot: run once on mount, never re-fire on re-render.
   }, []);
 
+  // ask_user: one open question at a time, owned by the host so it survives
+  // remounts. A late answer (after the soft deadline) goes in as a message.
+  const askUserHost = props.askUserHost;
+  const openAsk = useSyncExternalStore(
+    askUserHost?.subscribe ?? noopSubscribe,
+    askUserHost?.current ?? noAsk,
+  );
+  const handleSubmitRef = useRef<(input: string) => Promise<void>>(async () => {});
+  useEffect(() => {
+    if (!askUserHost) return;
+    askUserHost.onLateAnswer = (text) => void handleSubmitRef.current(text);
+    return () => {
+      askUserHost.onLateAnswer = null;
+    };
+  }, [askUserHost]);
+
   // The shared slash-command registry, minus what this UI handles itself.
   const tuiSlashRegistry = useMemo(() => createTuiSlashRegistry(), []);
   // handleModelSelect is declared below handleSubmit; reach it through a ref.
@@ -2351,10 +2381,12 @@ export function App(props: AppProps) {
       replaceSystemPrompt,
     ],
   );
+  handleSubmitRef.current = (input) => handleSubmit(input);
 
   const handleDoubleExit = useDoublePress(setExitPending, showSessionSummaryAndExit);
 
   const handleAbort = useCallback(() => {
+    props.askUserHost?.cancelAll();
     if (agentLoop.isRunning) {
       // Restore any unsent queued messages to the composer instead of dropping
       // them, so an interrupt never silently discards what the user typed.
@@ -2376,7 +2408,7 @@ export function App(props: AppProps) {
     } else {
       handleDoubleExit();
     }
-  }, [agentLoop, handleDoubleExit, props.subAgentManager, setLiveItems]);
+  }, [agentLoop, handleDoubleExit, props.askUserHost, props.subAgentManager, setLiveItems]);
 
   const handleToggleThinking = useCallback(() => {
     setThinkingLevel((prev) => {
@@ -3348,11 +3380,22 @@ export function App(props: AppProps) {
           planDone={planSteps.filter((s) => s.completed).length}
           planTotal={planSteps.length}
           formatDuration={formatDuration}
+          askPanel={
+            openAsk && askUserHost ? (
+              <AskUserPanel
+                prompt={openAsk.prompt}
+                deferred={openAsk.deferred}
+                width={columns}
+                onAnswer={askUserHost.answer}
+                onDismiss={askUserHost.dismiss}
+              />
+            ) : undefined
+          }
           inputControls={{
             onSubmit: handleSubmit,
             onAbort: handleAbort,
             injectText: composerInject,
-            inputActive: !taskBarFocused && !overlay,
+            inputActive: !taskBarFocused && !overlay && !openAsk,
             onDownAtEnd: handleFocusTaskBar,
             onShiftTab: handleToggleThinking,
             onToggleTasks: handleToggleTasks,

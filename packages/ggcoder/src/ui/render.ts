@@ -1,5 +1,6 @@
 import React from "react";
 import wrapAnsi from "wrap-ansi";
+import type { TuiAskUserHost } from "./ask-user-host.js";
 import { log } from "@abukhaled/gg-core";
 import { render, type Instance as InkInstance } from "ink";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
@@ -76,6 +77,8 @@ export interface RenderAppConfig {
   /** Extra workspace roots from `/add-dir`. One array shared with the write
    *  guard, mutated in place, so it survives every remount. */
   additionalRoots?: string[];
+  /** Open `ask_user` questions; outlives remounts like `additionalRoots`. */
+  askUserHost?: TuiAskUserHost;
   rebuildReadTool?: (model: string) => AgentTool;
   /** Forgets every file read; run when a reset replaces the conversation. */
   clearReadTracker?: () => void;
@@ -598,6 +601,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             skills: config.skills,
             checkpointStore: config.checkpointStore,
             additionalRoots: config.additionalRoots,
+            askUserHost: config.askUserHost,
             rebuildReadTool: config.rebuildReadTool,
             connectInitialMcpTools: config.connectInitialMcpTools,
             planCallbacks: config.planCallbacks,

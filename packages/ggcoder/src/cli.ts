@@ -119,6 +119,8 @@ import { checkAndAutoUpdate } from "./core/auto-update.js";
 
 import { routeCliCommandInput, type CliSubcommandName } from "./cli/command-routing.js";
 import { parseThinkingLevel } from "./cli/thinking-arg.js";
+import { createTuiAskUserHost } from "./ui/ask-user-host.js";
+import { createAskUserTool } from "./tools/ask-user.js";
 
 function printHelp(): void {
   // Clear the visible viewport for a clean look without erasing scrollback.
@@ -687,6 +689,10 @@ async function runInkTUI(opts: {
     return initialMcpConnectPromise;
   };
 
+  // ask_user: the terminal renders it as a keyboard picker (AskUserPanel).
+  const askUserHost = createTuiAskUserHost();
+  tools.push(createAskUserTool(askUserHost.bridge.park));
+
   const toolNames = tools.map((tool) => tool.name);
   const systemPrompt = applyAsyncSubagentPolicy(
     await buildSystemPrompt(
@@ -990,6 +996,7 @@ async function runInkTUI(opts: {
     skills,
     checkpointStore: checkpointRef.current ?? undefined,
     additionalRoots,
+    askUserHost,
     idealReviewEnabled: opts.idealReviewEnabled,
     rebuildReadTool,
     clearReadTracker,
