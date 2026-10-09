@@ -45,7 +45,12 @@ interface UseContextCompactionOptions {
 
 export interface ContextCompaction {
   compactionAbortRef: MutableRefObject<AbortController | null>;
-  compactConversation: (messages: Message[], signal?: AbortSignal) => Promise<Message[]>;
+  /** `focus` is the user's `/compact <focus>` text, preserved verbatim. */
+  compactConversation: (
+    messages: Message[],
+    signal?: AbortSignal,
+    focus?: string,
+  ) => Promise<Message[]>;
   transformContext: (messages: Message[], options: TransformContextOptions) => Promise<Message[]>;
   recordProviderUsage: (usage: Usage, messages: Message[]) => void;
 }
@@ -107,7 +112,7 @@ export function useContextCompaction({
   }, []);
 
   const compactConversation = useCallback(
-    async (messages: Message[], signal?: AbortSignal): Promise<Message[]> => {
+    async (messages: Message[], signal?: AbortSignal, focus?: string): Promise<Message[]> => {
       const contextWindow = getContextWindow(currentModel, contextWindowOptions);
       const tokensBefore = estimateConversationTokens(messages);
       const spinId = getId();
@@ -150,6 +155,7 @@ export function useContextCompaction({
           contextWindow,
           signal: compactionSignal,
           approvedPlanPath: approvedPlanPathRef.current,
+          focus,
         });
 
         if (result.result.compacted) {

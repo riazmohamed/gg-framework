@@ -69,6 +69,11 @@ import { getHistoryMessageVisibility } from "./session-history.js";
 import { sourceFingerprint as computeSourceFingerprint } from "./session-compaction.js";
 import { getAuthStorageKeys, getContextWindow, getModel, MODELS } from "./model-registry.js";
 import type { RouterMode } from "./model-router.js";
+import {
+  addWorkspaceRoot,
+  removeWorkspaceRoot,
+  type WorkspaceRootResult,
+} from "./workspace-roots.js";
 import { discoverSkills, type Skill } from "./skills.js";
 import { ensureAppDirs } from "../config.js";
 import {
@@ -157,8 +162,6 @@ import { normalizeMessageImages } from "./message-images.js";
 import { loadStreamRules } from "./stream-rules.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
-import type { Stats } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
   resolveSessionToolResultCharLimit,
@@ -3261,47 +3264,17 @@ export class AgentSession {
    *
    * @returns the resolved root, or an error message for the user.
    */
-  async addDirectory(
-    dir: string,
-  ): Promise<{ ok: true; root: string } | { ok: false; error: string }> {
-    const resolved = path.resolve(this.cwd, dir.replace(/^~(?=[/\\]|$)/, os.homedir()));
-    let stat: Stats;
-    try {
-      stat = await fs.stat(resolved);
-    } catch {
-      return { ok: false, error: `Not found: ${resolved}` };
-    }
-    if (!stat.isDirectory()) return { ok: false, error: `Not a directory: ${resolved}` };
-
-    const covered = [this.cwd, ...this.additionalRoots].some((root) => {
-      const relative = path.relative(path.resolve(root), resolved);
-      return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-    });
-    if (covered) return { ok: false, error: `Already in the workspace: ${resolved}` };
-
-    // Drop roots the new one subsumes so the list stays minimal.
-    this.additionalRoots = this.additionalRoots.filter((root) => {
-      const relative = path.relative(resolved, path.resolve(root));
-      return relative.startsWith("..") || path.isAbsolute(relative);
-    });
-    this.additionalRoots.push(resolved);
-    await this.rebuildSystemPromptInPlace();
-    return { ok: true, root: resolved };
+  async addDirectory(dir: string): Promise<WorkspaceRootResult> {
+    const result = await addWorkspaceRoot(this.cwd, this.additionalRoots, dir);
+    if (result.ok) await this.rebuildSystemPromptInPlace();
+    return result;
   }
 
   /** Remove an exact root previously added with `/add-dir`. */
-  async removeDirectory(
-    dir: string,
-  ): Promise<{ ok: true; root: string } | { ok: false; error: string }> {
-    const resolved = path.resolve(this.cwd, dir.replace(/^~(?=[/\\]|$)/, os.homedir()));
-    const index = this.additionalRoots.findIndex((root) => path.resolve(root) === resolved);
-    if (index === -1) {
-      return { ok: false, error: `Not an additional workspace root: ${resolved}` };
-    }
-
-    this.additionalRoots.splice(index, 1);
-    await this.rebuildSystemPromptInPlace();
-    return { ok: true, root: resolved };
+  async removeDirectory(dir: string): Promise<WorkspaceRootResult> {
+    const result = removeWorkspaceRoot(this.cwd, this.additionalRoots, dir);
+    if (result.ok) await this.rebuildSystemPromptInPlace();
+    return result;
   }
 
   /**

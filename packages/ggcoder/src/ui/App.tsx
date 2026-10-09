@@ -53,7 +53,7 @@ import {
   formatGitHubIdentity,
   type GitHubIdentity,
 } from "../utils/github-identity.js";
-import { getAuthStorageKeys, getModel, getVideoByteLimit } from "../core/model-registry.js";
+import { getAuthStorageKeys, getModel, getVideoByteLimit, MODELS } from "../core/model-registry.js";
 import { SessionManager, type TurnMetricPayload } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
 import {
@@ -98,6 +98,14 @@ import type { TerminalHistoryPrinter } from "./terminal-history.js";
 import { buildUserContentWithAttachments } from "./prompt-routing.js";
 import { submitPromptCommand } from "./submit-prompt-command.js";
 import { handleUiSlashCommand } from "./submit-slash-commands.js";
+import {
+  createTuiSlashRegistry,
+  formatTuiHelp,
+  isRegistryCommand,
+  resolveModelTarget,
+} from "./tui-slash-commands.js";
+import type { SlashCommandContext } from "../core/slash-commands.js";
+import { addWorkspaceRoot, removeWorkspaceRoot } from "../core/workspace-roots.js";
 import { buildLoopBreakMessage, evaluateLoopBreak } from "../core/loop-breaker.js";
 import { buildRegroundingMessage } from "../core/regrounding.js";
 import { getNextThinkingLevel, isThinkingLevelSupported } from "./thinking-level.js";
@@ -227,6 +235,8 @@ export interface AppProps {
   skills?: Skill[];
   /** Per-session file checkpoint store backing the /rewind command. */
   checkpointStore?: CheckpointStore;
+  /** Extra workspace roots from `/add-dir`, shared with the write guard. */
+  additionalRoots?: string[];
   /** Rebuild the `read` tool for a model (reuses the read tracker). Used on
    *  model switch so the tool's video capability tracks the active model. */
   rebuildReadTool?: (model: string) => AgentTool;
@@ -586,6 +596,7 @@ export function App(props: AppProps) {
       approvedPlanPathRef,
       injectedLanguagesRef,
       messagesRef,
+      additionalRoots: props.additionalRoots,
     },
   );
 
@@ -1953,6 +1964,18 @@ export function App(props: AppProps) {
     // Intentional one-shot: run once on mount, never re-fire on re-render.
   }, []);
 
+  // The shared slash-command registry, minus what this UI handles itself.
+  const tuiSlashRegistry = useMemo(() => createTuiSlashRegistry(), []);
+  // handleModelSelect is declared below handleSubmit; reach it through a ref.
+  const handleModelSelectRef = useRef<(value: string) => void>(() => {});
+  const settingsSnapshotRef = useRef<Record<string, unknown>>({});
+  const refreshSettingsSnapshot = useCallback(async () => {
+    if (!props.settingsFile) return;
+    const sm = new SettingsManager(props.settingsFile);
+    await sm.load();
+    settingsSnapshotRef.current = sm.getAll() as unknown as Record<string, unknown>;
+  }, [props.settingsFile]);
+
   const handleSubmit = useCallback(
     async (input: string, inputImages: ImageAttachment[] = [], pasteInfo?: PasteInfo) => {
       const trimmed = input.trim();
@@ -2020,13 +2043,48 @@ export function App(props: AppProps) {
         return;
       }
 
+      const clearSession = () => {
+        if (props.resetUI) {
+          void (async () => {
+            const newPrompt = await rebuildSystemPrompt({ clearApprovedPlan: true });
+            props.resetUI?.({
+              wipeSession: true,
+              messages: [{ role: "system" as const, content: newPrompt }],
+            });
+          })();
+          return;
+        }
+        clearPendingHistory();
+        setHistory([{ kind: "banner", id: "banner" }]);
+        setLiveItems([]);
+        setDoneStatus(null);
+        approvedPlanPathRef.current = undefined;
+        planStepsRef.current = [];
+        setPlanSteps([]);
+        void (async () => {
+          const newPrompt = await rebuildSystemPrompt({ clearApprovedPlan: true });
+          messagesRef.current = [{ role: "system" as const, content: newPrompt }];
+          persistedIndexRef.current = messagesRef.current.length;
+        })();
+        agentLoop.reset();
+        setLiveItems([{ kind: "info", text: "Session cleared.", id: getId() }]);
+      };
+
       if (
         await handleUiSlashCommand(trimmed, {
           openModelSelector: () => setOverlay("model"),
-          compactConversation: async () => {
+          switchModel: (target) => {
+            const value = resolveModelTarget(target, MODELS);
+            if (!value) return `Unknown model: ${target}. Use /model to pick one.`;
+            handleModelSelectRef.current(value);
+            return null;
+          },
+          showInfo: (text) =>
+            setLiveItems((prev) => [...prev, { kind: "info", text, id: getId() }]),
+          compactConversation: async (focus) => {
             const ac = new AbortController();
             compactionAbortRef.current = ac;
-            const compacted = await compactConversation(messagesRef.current, ac.signal);
+            const compacted = await compactConversation(messagesRef.current, ac.signal, focus);
             if (!ac.signal.aborted && compacted !== messagesRef.current) {
               messagesRef.current = compacted;
               await persistCompactedSession(compacted);
@@ -2034,32 +2092,7 @@ export function App(props: AppProps) {
             if (compactionAbortRef.current === ac) compactionAbortRef.current = null;
           },
           quit: showSessionSummaryAndExit,
-          clearSession: () => {
-            if (props.resetUI) {
-              void (async () => {
-                const newPrompt = await rebuildSystemPrompt({ clearApprovedPlan: true });
-                props.resetUI?.({
-                  wipeSession: true,
-                  messages: [{ role: "system" as const, content: newPrompt }],
-                });
-              })();
-              return;
-            }
-            clearPendingHistory();
-            setHistory([{ kind: "banner", id: "banner" }]);
-            setLiveItems([]);
-            setDoneStatus(null);
-            approvedPlanPathRef.current = undefined;
-            planStepsRef.current = [];
-            setPlanSteps([]);
-            void (async () => {
-              const newPrompt = await rebuildSystemPrompt({ clearApprovedPlan: true });
-              messagesRef.current = [{ role: "system" as const, content: newPrompt }];
-              persistedIndexRef.current = messagesRef.current.length;
-            })();
-            agentLoop.reset();
-            setLiveItems([{ kind: "info", text: "Session cleared.", id: getId() }]);
-          },
+          clearSession,
           openThemeSelector: () => setOverlay("theme"),
           toggleMarkdown: () => {
             setRenderMarkdown((prev) => {
@@ -2102,6 +2135,79 @@ export function App(props: AppProps) {
           reloadCustomCommands,
         })
       ) {
+        return;
+      }
+
+      // Shared registry commands (settings, sessions, workspace roots, …) and
+      // /help. Runs after prompt + custom commands, so a user's own command of
+      // the same name still wins, matching the desktop app.
+      if (trimmed === "/help" || trimmed === "/h" || trimmed === "/?") {
+        setLiveItems((prev) => [
+          ...prev,
+          {
+            kind: "info",
+            text: formatTuiHelp(tuiSlashRegistry, PROMPT_COMMANDS, latestCustomCommands),
+            id: getId(),
+          },
+        ]);
+        return;
+      }
+      if (isRegistryCommand(tuiSlashRegistry, trimmed)) {
+        const context: SlashCommandContext = {
+          switchModel: async (provider, model) => {
+            const value = resolveModelTarget(provider ? `${provider}:${model}` : model, MODELS);
+            if (!value) throw new Error(`Unknown model: ${model}`);
+            handleModelSelectRef.current(value);
+          },
+          compact: async () => {},
+          newSession: async () => clearSession(),
+          listSessions: async () => {
+            if (!props.sessionsDir) return "Sessions are not saved in this mode.";
+            const sessions = await new SessionManager(props.sessionsDir).list(props.cwd);
+            if (sessions.length === 0) return "No sessions found.";
+            return (
+              sessions
+                .slice(0, 20)
+                .map((s) => `  ${s.id} — ${s.timestamp} (${s.messageCount} messages)`)
+                .join("\n") + "\n\nResume one with: ogcoder --resume <id>"
+            );
+          },
+          getSettings: () => settingsSnapshotRef.current,
+          setSetting: async (key, value) => {
+            if (!props.settingsFile) throw new Error("No settings file in this mode.");
+            const sm = new SettingsManager(props.settingsFile);
+            await sm.load();
+            await sm.set(key as keyof Settings, value as never);
+            settingsSnapshotRef.current = sm.getAll() as unknown as Record<string, unknown>;
+          },
+          getModelList: () =>
+            `Current: ${currentProviderRef.current}:${currentModelRef.current}\n\nAvailable models:\n` +
+            MODELS.map((m) => `  ${m.provider}:${m.id} — ${m.name} (${m.costTier})`).join("\n"),
+          quit: showSessionSummaryAndExit,
+          branch: async () => "Use /rewind to go back to an earlier point.",
+          listBranches: async () => "Use /rewind to go back to an earlier point.",
+          addDirectory: async (dir) => {
+            if (!props.additionalRoots) return { ok: false, error: "Not available in this mode." };
+            const result = await addWorkspaceRoot(props.cwd, props.additionalRoots, dir);
+            if (result.ok) await replaceSystemPrompt();
+            return result;
+          },
+          removeDirectory: async (dir) => {
+            if (!props.additionalRoots) return { ok: false, error: "Not available in this mode." };
+            const result = removeWorkspaceRoot(props.cwd, props.additionalRoots, dir);
+            if (result.ok) await replaceSystemPrompt();
+            return result;
+          },
+          getAdditionalRoots: () => [...(props.additionalRoots ?? [])],
+        };
+        if (/^\/(?:settings|config)\b/.test(trimmed)) await refreshSettingsSnapshot();
+        let text: string;
+        try {
+          text = (await tuiSlashRegistry.execute(trimmed, context)) ?? "";
+        } catch (err) {
+          text = err instanceof Error ? err.message : String(err);
+        }
+        if (text) setLiveItems((prev) => [...prev, { kind: "info", text, id: getId() }]);
         return;
       }
 
@@ -2233,6 +2339,11 @@ export function App(props: AppProps) {
       props.cwd,
       props.onSlashCommand,
       props.resetUI,
+      props.sessionsDir,
+      props.settingsFile,
+      props.additionalRoots,
+      tuiSlashRegistry,
+      refreshSettingsSnapshot,
       props.sessionStore,
       rebuildSystemPrompt,
       showSessionSummaryAndExit,
@@ -2435,6 +2546,7 @@ export function App(props: AppProps) {
       replaceSystemPrompt,
     ],
   );
+  handleModelSelectRef.current = handleModelSelect;
 
   const handleThemeSelect = useCallback(
     (name: ThemeName) => {
@@ -2510,6 +2622,18 @@ export function App(props: AppProps) {
         description: "Restore files/conversation to a checkpoint",
         sectionTitle: "built-in",
       },
+      {
+        name: "help",
+        aliases: ["h"],
+        description: "Commands and shortcuts",
+        sectionTitle: "built-in",
+      },
+      ...tuiSlashRegistry.getAll().map((c) => ({
+        name: c.name,
+        aliases: c.aliases,
+        description: c.description,
+        sectionTitle: "built-in",
+      })),
       ...orderedPromptCommands,
       ...remainingPromptCommands,
       // A custom command whose name collides with a built-in prompt command is
@@ -2533,7 +2657,7 @@ export function App(props: AppProps) {
         sectionTitle: "built-in",
       },
     ];
-  }, [customCommands, idealReviewEnabled]);
+  }, [customCommands, idealReviewEnabled, tuiSlashRegistry]);
 
   const renderItem = (item: CompletedItem, index: number, items: CompletedItem[]) =>
     renderTranscriptItem({

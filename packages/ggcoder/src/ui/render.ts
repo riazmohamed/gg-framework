@@ -73,6 +73,9 @@ export interface RenderAppConfig {
   planModeRef?: { current: boolean };
   skills?: Skill[];
   checkpointStore?: CheckpointStore;
+  /** Extra workspace roots from `/add-dir`. One array shared with the write
+   *  guard, mutated in place, so it survives every remount. */
+  additionalRoots?: string[];
   rebuildReadTool?: (model: string) => AgentTool;
   /** Forgets every file read; run when a reset replaces the conversation. */
   clearReadTracker?: () => void;
@@ -594,6 +597,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             planModeRef: config.planModeRef,
             skills: config.skills,
             checkpointStore: config.checkpointStore,
+            additionalRoots: config.additionalRoots,
             rebuildReadTool: config.rebuildReadTool,
             connectInitialMcpTools: config.connectInitialMcpTools,
             planCallbacks: config.planCallbacks,

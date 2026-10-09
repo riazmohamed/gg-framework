@@ -633,6 +633,9 @@ async function runInkTUI(opts: {
   let activeProvider = provider;
   let activeModel = model;
   let activeThinkingLevel = opts.thinkingLevel;
+  // `/add-dir` roots: one array shared by the write guard and the TUI's prompt
+  // builder, mutated in place so both always agree.
+  const additionalRoots: string[] = [];
 
   const {
     tools,
@@ -652,6 +655,7 @@ async function runInkTUI(opts: {
     lspDiagnostics: opts.lspDiagnostics,
     getWriteGuardSettings: () => ({
       allowOutsideWorkspaceWrites: opts.allowOutsideWorkspaceWrites ?? false,
+      additionalRoots,
     }),
     authStorage,
     onEnterPlan: (reason) => planToolCallbacks.onEnterPlan?.(reason),
@@ -985,6 +989,7 @@ async function runInkTUI(opts: {
     planModeRef,
     skills,
     checkpointStore: checkpointRef.current ?? undefined,
+    additionalRoots,
     idealReviewEnabled: opts.idealReviewEnabled,
     rebuildReadTool,
     clearReadTracker,

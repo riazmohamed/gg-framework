@@ -36,6 +36,8 @@ interface UseModeStateOptions {
   approvedPlanPathRef: MutableRefObject<string | undefined>;
   injectedLanguagesRef: MutableRefObject<Set<LanguageId>>;
   messagesRef: MutableRefObject<Message[]>;
+  /** Extra workspace roots from `/add-dir`. Shared array, mutated in place. */
+  additionalRoots?: readonly string[];
 }
 
 export interface ModeState {
@@ -64,6 +66,7 @@ export function useModeState({
   approvedPlanPathRef,
   injectedLanguagesRef,
   messagesRef,
+  additionalRoots,
 }: UseModeStateOptions): ModeState {
   const [planMode, setPlanMode] = useState(initialPlanMode);
   const planModeStateRef = useRef(planMode);
@@ -109,6 +112,7 @@ export function useModeState({
           toolNames,
           options?.activeLanguages ?? injectedLanguagesRef.current,
           providerRef.current,
+          additionalRoots && additionalRoots.length > 0 ? { additionalRoots } : undefined,
         ),
         providerRef.current,
         modelRef.current,
@@ -125,6 +129,7 @@ export function useModeState({
       modelRef,
       thinkingLevelRef,
       injectedLanguagesRef,
+      additionalRoots,
     ],
   );
 
