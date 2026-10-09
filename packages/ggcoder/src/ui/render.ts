@@ -1,6 +1,7 @@
 import React from "react";
 import wrapAnsi from "wrap-ansi";
 import type { TuiAskUserHost } from "./ask-user-host.js";
+import type { TuiElicitHost } from "./mcp-elicit-host.js";
 import type { CacheTouch } from "../core/cache-expiry.js";
 import type { KeepAwake } from "../core/keep-awake.js";
 import { log } from "@abukhaled/gg-core";
@@ -81,6 +82,8 @@ export interface RenderAppConfig {
   additionalRoots?: string[];
   /** Open `ask_user` questions; outlives remounts like `additionalRoots`. */
   askUserHost?: TuiAskUserHost;
+  /** Open MCP elicitation forms; outlives remounts. */
+  elicitHost?: TuiElicitHost;
   /** Idle-sleep guard held while a run is in flight. */
   keepAwake?: KeepAwake;
   rebuildReadTool?: (model: string) => AgentTool;
@@ -608,6 +611,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             checkpointStore: config.checkpointStore,
             additionalRoots: config.additionalRoots,
             askUserHost: config.askUserHost,
+            elicitHost: config.elicitHost,
             keepAwake: config.keepAwake,
             rebuildReadTool: config.rebuildReadTool,
             connectInitialMcpTools: config.connectInitialMcpTools,

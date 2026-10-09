@@ -15,6 +15,10 @@ interface AskUserPanelProps {
   /** The soft deadline passed: the agent moved on, an answer arrives late. */
   deferred?: boolean;
   width: number;
+  /** Shown above the question (an MCP server's request message). */
+  heading?: string;
+  /** Why the last answer was refused; the form starts again below it. */
+  error?: string;
   onAnswer: (answers: Record<string, string | string[]>) => void;
   onDismiss: () => void;
 }
@@ -24,7 +28,15 @@ interface AskUserPanelProps {
  * clickable band as a keyboard picker. ↑↓ or a number picks, space checks on
  * multi-select, Enter confirms, Esc dismisses.
  */
-export function AskUserPanel({ prompt, deferred, width, onAnswer, onDismiss }: AskUserPanelProps) {
+export function AskUserPanel({
+  prompt,
+  deferred,
+  width,
+  heading,
+  error,
+  onAnswer,
+  onDismiss,
+}: AskUserPanelProps) {
   const theme = useTheme();
   const [state, setState] = useState(() => createAskPickerState(prompt.questions));
 
@@ -75,6 +87,8 @@ export function AskUserPanel({ prompt, deferred, width, onAnswer, onDismiss }: A
       width={width}
       flexShrink={0}
     >
+      {heading && <Text color={theme.text}>{heading}</Text>}
+      {error && <Text color={theme.error}>{error}</Text>}
       <Text color={theme.accent} bold>
         ? {question.question}
         <Text color={theme.textDim}>{counter}</Text>

@@ -120,6 +120,7 @@ import { checkAndAutoUpdate } from "./core/auto-update.js";
 import { routeCliCommandInput, type CliSubcommandName } from "./cli/command-routing.js";
 import { parseThinkingLevel } from "./cli/thinking-arg.js";
 import { createTuiAskUserHost } from "./ui/ask-user-host.js";
+import { createTuiElicitHost } from "./ui/mcp-elicit-host.js";
 import { KeepAwake } from "./core/keep-awake.js";
 import { createAskUserTool } from "./tools/ask-user.js";
 
@@ -672,7 +673,9 @@ async function runInkTUI(opts: {
 
   // MCP startup can involve `npx` installing/booting servers. Do it after the
   // TUI paints so a slow network or npm cache never looks like "nothing happens".
-  const mcpManager = new MCPClientManager();
+  // MCP servers that ask for input get the same keyboard picker as ask_user.
+  const elicitHost = createTuiElicitHost();
+  const mcpManager = new MCPClientManager({ onElicit: elicitHost.bridge.onElicit });
   let initialMcpConnectPromise: Promise<AgentTool[]> | undefined;
   const connectInitialMcpTools = async (): Promise<AgentTool[]> => {
     initialMcpConnectPromise ??= (async () => {
@@ -1000,6 +1003,7 @@ async function runInkTUI(opts: {
     checkpointStore: checkpointRef.current ?? undefined,
     additionalRoots,
     askUserHost,
+    elicitHost,
     keepAwake,
     idealReviewEnabled: opts.idealReviewEnabled,
     rebuildReadTool,

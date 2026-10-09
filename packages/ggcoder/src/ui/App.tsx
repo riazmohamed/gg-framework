@@ -114,6 +114,7 @@ import {
 import type { SlashCommandContext } from "../core/slash-commands.js";
 import { addWorkspaceRoot, removeWorkspaceRoot } from "../core/workspace-roots.js";
 import type { TuiAskUserHost } from "./ask-user-host.js";
+import type { TuiElicitHost } from "./mcp-elicit-host.js";
 import { createExportCommand } from "./tui-export.js";
 import { summarizeRunVerification } from "./run-verification.js";
 import {
@@ -277,6 +278,8 @@ export interface AppProps {
   additionalRoots?: string[];
   /** Open `ask_user` questions (the terminal's keyboard picker). */
   askUserHost?: TuiAskUserHost;
+  /** Open MCP elicitation forms (same picker). */
+  elicitHost?: TuiElicitHost;
   /** Idle-sleep guard held while a run is in flight. */
   keepAwake?: KeepAwake;
   /** Rebuild the `read` tool for a model (reuses the read tracker). Used on
@@ -2058,6 +2061,11 @@ export function App(props: AppProps) {
     askUserHost?.subscribe ?? noopSubscribe,
     askUserHost?.current ?? noAsk,
   );
+  const elicitHost = props.elicitHost;
+  const openElicit = useSyncExternalStore(
+    elicitHost?.subscribe ?? noopSubscribe,
+    elicitHost?.current ?? noAsk,
+  );
   const handleSubmitRef = useRef<(input: string) => Promise<void>>(async () => {});
   useEffect(() => {
     if (!askUserHost) return;
@@ -2550,6 +2558,7 @@ export function App(props: AppProps) {
 
   const handleAbort = useCallback(() => {
     props.askUserHost?.cancelAll();
+    props.elicitHost?.cancelAll();
     if (agentLoop.isRunning) {
       // Restore any unsent queued messages to the composer instead of dropping
       // them, so an interrupt never silently discards what the user typed.
@@ -2571,7 +2580,14 @@ export function App(props: AppProps) {
     } else {
       handleDoubleExit();
     }
-  }, [agentLoop, handleDoubleExit, props.askUserHost, props.subAgentManager, setLiveItems]);
+  }, [
+    agentLoop,
+    handleDoubleExit,
+    props.askUserHost,
+    props.elicitHost,
+    props.subAgentManager,
+    setLiveItems,
+  ]);
 
   const handleToggleThinking = useCallback(() => {
     setThinkingLevel((prev) => {
@@ -3555,13 +3571,22 @@ export function App(props: AppProps) {
                 onAnswer={askUserHost.answer}
                 onDismiss={askUserHost.dismiss}
               />
+            ) : openElicit && elicitHost ? (
+              <AskUserPanel
+                prompt={openElicit.prompt}
+                width={columns}
+                heading={`MCP server "${openElicit.request.server}" asks: ${openElicit.request.message}`}
+                error={openElicit.error}
+                onAnswer={elicitHost.submit}
+                onDismiss={elicitHost.decline}
+              />
             ) : undefined
           }
           inputControls={{
             onSubmit: handleSubmit,
             onAbort: handleAbort,
             injectText: composerInject,
-            inputActive: !taskBarFocused && !overlay && !openAsk,
+            inputActive: !taskBarFocused && !overlay && !openAsk && !openElicit,
             onDownAtEnd: handleFocusTaskBar,
             onShiftTab: handleToggleThinking,
             onToggleTasks: handleToggleTasks,
