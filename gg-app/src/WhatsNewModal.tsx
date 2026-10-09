@@ -15,7 +15,8 @@ import { windowLabel, openWhatsNewWindow } from "./agent";
  * the running version (`getVersion`):
  *   - no record yet (fresh install) → remember silently, DON'T open.
  *   - same version → nothing new, stay quiet.
- *   - version changed (the updater downloaded + relaunched) → open once.
+ *   - version changed (the updater downloaded + relaunched) → open once, in
+ *     the `hype` mood (the home screen's button opens the calm one).
  * The seen-version is written the moment we decide, so a relaunch only ever
  * shows the notes a single time.
  */
@@ -33,7 +34,7 @@ export function WhatsNewModal(): null {
     if (windowLabel !== "main") return;
 
     if (import.meta.env.DEV && DEV_FORCE_WHATSNEW) {
-      void openWhatsNewWindow().catch(() => {});
+      void openWhatsNewWindow("hype").catch(() => {});
       return;
     }
 
@@ -51,7 +52,7 @@ export function WhatsNewModal(): null {
         }
         // Persist before opening so a re-check never re-opens it.
         localStorage.setItem(STORAGE_KEY, version);
-        if (seen !== null) void openWhatsNewWindow().catch(() => {});
+        if (seen !== null) void openWhatsNewWindow("hype").catch(() => {});
       })
       .catch((e) => logError(`What's-new version check failed: ${String(e)}`));
     return () => {

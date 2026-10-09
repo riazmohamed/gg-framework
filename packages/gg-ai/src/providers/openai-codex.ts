@@ -35,15 +35,15 @@ import { readSseStream } from "../utils/sse.js";
 import { extractRequestIdFromMessage } from "../utils/request-id.js";
 
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
-// Advertised Codex client version. The ChatGPT backend gates models on the
-// catalog's `minimal_client_version` (GPT-6 Luna needs >= 0.155.0) and
-// rejects older clients with "requires a newer version of Codex". The catalog
-// can also hide a model entirely below an unadvertised floor: gpt-6.1-sol
-// declares >= 0.153.0 yet only appears for clients >= 0.159.0, and requests
-// from older clients fail with "not supported when using Codex with a ChatGPT
-// account". Track the latest openai/codex `rust-v*` release when adding a
-// model, and check `/codex/models?client_version=` actually lists it.
-const CODEX_CLIENT_VERSION = "0.159.2";
+// Advertised Codex client version. The ChatGPT backend gates models on it, and
+// the live gate can be stricter than the bundled catalog's
+// `minimal_client_version`: GPT-6.1 Sol is listed at 0.153.0 there, but the
+// server only serves it from 0.159.0 (GET /codex/models?client_version=...,
+// 2026-09-30). Below the gate it answers "The '<model>' model is not supported
+// when using Codex with a ChatGPT account". Track the latest openai/codex
+// `rust-v*` release when adding a model, and check that model's live listing.
+// 0.161.0 = latest `rust-v0.161.0` release (2026-10-07).
+const CODEX_CLIENT_VERSION = "0.161.0";
 // OpenAI's Codex CLI enables zstd request compression by default. Keep tiny
 // synthetic/API requests readable, but compress real agent payloads before they
 // hit the backend's finite Envoy retry buffer.
@@ -348,6 +348,9 @@ async function* runStream(
   let outputTokens = 0;
   let cacheRead = 0;
   let cacheWrite = 0;
+  // Whether any visible reasoning text has streamed yet — a section break is
+  // only needed between sections, never before the first one.
+  let thinkingTextEmitted = false;
 
   // ── Diagnostic: log the first occurrence of each raw SSE event type with
   // timing, so we can see what Codex sends during the pre-reasoning window
@@ -463,6 +466,16 @@ async function* runStream(
       }
     }
 
+    // Each reasoning summary section (Codex sends a short bold headline per
+    // section) arrives as its own part with no separator in the text. Without a
+    // break they render glued together — "**A****B**" — which also breaks the
+    // markdown bold. Mirror the Codex CLI: a blank line between sections.
+    if (type === "response.reasoning_summary_part.added") {
+      if (options.thinking && thinkingTextEmitted) {
+        yield { type: "thinking_delta", text: "\n\n" };
+      }
+    }
+
     // Thinking delta
     if (
       type === "response.reasoning_summary_text.delta" ||
@@ -471,7 +484,10 @@ async function* runStream(
       type === "response.reasoning.delta"
     ) {
       const delta = event.delta as string;
-      if (options.thinking) yield { type: "thinking_delta", text: delta };
+      if (options.thinking && delta) {
+        thinkingTextEmitted = true;
+        yield { type: "thinking_delta", text: delta };
+      }
     }
 
     // Reasoning item started — the model has begun reasoning on the server.

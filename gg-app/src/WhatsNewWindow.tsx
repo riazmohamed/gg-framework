@@ -1,150 +1,120 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { error as logError } from "@tauri-apps/plugin-log";
 import { XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import { recentChangelog } from "./changelog";
-import { Confetti } from "./Confetti";
-import { ShimmerText } from "./ShimmerText";
-import { Badge } from "./Badge";
-import { WhatsNewCritter } from "./WhatsNewCritter";
+import type { WhatsNewMode } from "./whatsnew-content";
+import { WhatsNewCampfire } from "./WhatsNewCampfire";
+import "./WhatsNew.css";
 
 /**
  * Body of the dedicated, screen-centered "What's new" window (the borderless
  * Tauri window built by Rust `open_whatsnew_window`, reached via the
- * `?whatsnew=1` flag in main.tsx). Renders the most recent changelog bullets
- * (capped at 50, see `recentChangelog`) inside a scroll container that only
- * engages on overflow. Closing — Escape, the × button, or "Got it" — closes the
- * whole window.
+ * `?whatsnew=1` flag in main.tsx). Two moods share one window:
+ *   - `hype`: the one-time show right after an update relaunch.
+ *   - `calm`: the same campfire, settled, for the home screen's button.
+ * The window owns opening and closing (Escape, ×, the footer button); the
+ * campfire design owns the banner, the new features and the history.
+ *
+ * Opening: Rust builds the window hidden. Once this has rendered, it asks Rust
+ * to show it, then fades the card in, so there's never an empty or
+ * half-styled frame. Closing fades the card out before the window goes.
  */
-const HIGHLIGHT_TERMS = [
-  "MiMo-V2.5-Pro-UltraSpeed",
-  "GPT-6 Astra",
-  "GPT-6.1 Sol",
-  "GPT-6 Sol",
-  "GPT-6 Luna",
-  "GPT-5.6 Ultra",
-  "GPT-5.6",
-  "GPT-5.5",
-  "GPT-5.4 Mini",
-  "GPT-5.4",
-  "GPT-5.3 Codex",
-  "Gemini 3.5 Flash",
-  "Gemini 3.1 Pro",
-  "Claude Sonnet 5",
-  "Claude Fable 5.1",
-  "Claude Fable 5",
-  "Sakana Fugu",
-  "Fugu Ultra",
-  "Radio Paradise",
-  "Steroids",
-  "Prompt Enhancer",
-  "Send to GG Coder",
-  "Grant Permissions",
-  "Autopilot",
-  "Scorecard",
-  "Enhance",
-  "@Ken",
-  "Radio",
-  "Windows",
-  "Notes",
-  "MCP",
-] as const;
+type Phase = "hidden" | "open" | "closing";
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Matches `.whatsnew-window[data-phase="closing"]` in WhatsNew.css. */
+const CLOSE_MS = 160;
+
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
 }
 
-const highlightPattern = new RegExp(
-  `\`([^\`]+)\`|(${HIGHLIGHT_TERMS.map(escapeRegex).join("|")})|\\b(\\d+(?:\\.\\d+)?(?:K|M| MB| tokens?| minutes?| hour| updates?))\\b`,
-  "g",
-);
-
-export function releaseText(text: string): React.ReactNode[] {
-  const nodes: React.ReactNode[] = [];
-  let cursor = 0;
-  for (const match of text.matchAll(highlightPattern)) {
-    const index = match.index ?? 0;
-    if (index > cursor) nodes.push(text.slice(cursor, index));
-    const value = match[1] ?? match[2] ?? match[3] ?? match[0];
-    nodes.push(
-      <strong className="whatsnew-highlight" key={`${index}-${value}`}>
-        {value}
-      </strong>,
-    );
-    cursor = index + match[0].length;
-  }
-  if (cursor < text.length) nodes.push(text.slice(cursor));
-  return nodes;
-}
-
-function closeSelf(): void {
+function closeWindow(): void {
   void getCurrentWebviewWindow()
     .close()
     .catch(() => {});
 }
 
-export function WhatsNewWindow(): React.ReactElement {
+export function WhatsNewWindow({
+  mode = "calm",
+  random = Math.random,
+}: {
+  mode?: WhatsNewMode;
+  /** Picks this opening's critters; injectable for tests. */
+  random?: () => number;
+}): React.ReactElement | null {
+  const [phase, setPhase] = useState<Phase>("hidden");
+  const closing = useRef(false);
+
+  // Effects run once React has committed the first frame, so the window is
+  // shown with that frame already in it; then the card fades in. No timer:
+  // a hidden window's timers can be throttled to once a second.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        await invoke("reveal_whatsnew_window");
+      } catch (e) {
+        await logError(`reveal_whatsnew_window failed: ${String(e)}`);
+      }
+      if (!cancelled) setPhase((current) => (current === "hidden" ? "open" : current));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const close = useCallback((): void => {
+    if (closing.current) return;
+    closing.current = true;
+    if (prefersReducedMotion()) {
+      closeWindow();
+      return;
+    }
+    setPhase("closing");
+    window.setTimeout(closeWindow, CLOSE_MS);
+  }, []);
+
   // Escape closes the window (the borderless window has no native chrome).
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") closeSelf();
+      if (e.key === "Escape") close();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, []);
+  }, [close]);
 
-  const sections = recentChangelog(50);
+  const [latest, ...earlier] = recentChangelog(50);
+  if (!latest) return null;
 
   return (
-    <div className="whatsnew-window" style={{ background: theme.surface2 }}>
-      <Confetti />
-      <div className="modal-head">
-        <div className="modal-title whatsnew-title">
-          <ShimmerText base={theme.primary} bright={theme.secondary}>
-            What&apos;s new with GG Coder
-          </ShimmerText>
-          <WhatsNewCritter />
-        </div>
-        <button
-          className="modal-close"
-          type="button"
-          aria-label="Close"
-          title="Close"
-          onClick={closeSelf}
-        >
-          <XIcon size={14} weight="bold" aria-hidden="true" />
-        </button>
-      </div>
-      <div className="whatsnew-scroll">
-        {sections.map((section, sectionIndex) => (
-          <div
-            key={section.version}
-            className={`whatsnew-section${sectionIndex === 0 ? " latest" : ""}`}
-          >
-            {sectionIndex === 1 && (
-              <div className="whatsnew-history-divider">
-                <span>Previous updates</span>
-              </div>
-            )}
-            <div className="whatsnew-version">
-              <span>{`v${section.version}`}</span>
-              {sectionIndex === 0 && <Badge>Latest</Badge>}
-            </div>
-            <ul className="whatsnew-list">
-              {section.items.map((item, i) => (
-                <li key={i} className="whatsnew-item">
-                  {releaseText(item)}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      </div>
-      <div className="modal-actions">
-        <button className="modal-btn primary" type="button" onClick={closeSelf}>
-          Got it
-        </button>
-      </div>
+    <div
+      className="whatsnew-window"
+      data-mode={mode}
+      data-phase={phase}
+      style={{ background: theme.surface2 }}
+    >
+      <WhatsNewCampfire
+        latest={latest}
+        earlier={earlier}
+        mode={mode}
+        random={random}
+        onClose={close}
+      />
+      <button
+        className="modal-close wn-close"
+        type="button"
+        aria-label="Close"
+        title="Close"
+        onClick={close}
+      >
+        <XIcon size={14} weight="bold" aria-hidden="true" />
+      </button>
     </div>
   );
 }

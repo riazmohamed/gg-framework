@@ -128,7 +128,7 @@ providerRegistry.register("huggingface", {
   // Hugging Face Inference Providers router — one HF token (hf.co/settings/tokens,
   // "Make calls to Inference Providers" permission) routes to whichever hosted
   // backend serves each open model. Chat Completions-compatible; model ids are
-  // Hub repo paths ("Qwen/Qwen3-Coder-480B-A35B-Instruct"), optionally with an
+  // Hub repo paths ("moonshotai/Kimi-K2.7-Code"), optionally with an
   // ":auto"/":fastest"/":cheapest" provider-selection suffix. Billing follows
   // each backend's per-token rates on the HF account (small free tier).
   stream: (options) =>

@@ -22,6 +22,43 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.84.0",
+    date: "2026-10-09",
+    items: [
+      "Meet `Project Health`, a live score from `0` to `100` sitting right in your workspace header. My little owl inspects your repo for giant files, messy hygiene, missing safety nets and leaked secrets, shows you the worst offenders, and one click on `Review` hands any of it to your agent to sort out.",
+      "Your checklist finally respects your judgment. When you decide a finding is fine as is, choose `Accept these findings as is` and the item counts as reviewed without nagging you about it ever again. Plus checklist saves on Windows no longer trip over themselves.",
+      "Every popover got a glow up. `Background tasks` and `Schedules` now open in a sleek glassy panel with tiny pixel critters that hop, doze or tip over to show you what each job is up to at a glance. The model picker, slash commands and file mentions got matching polish, and your chat gently dissolves into view when it loads.",
+    ],
+  },
+  {
+    version: "0.83.1",
+    date: "2026-10-08",
+    items: [
+      "Run as many windows as you like and your Mac barely notices. Any window you're not looking at now rests: critters, spinners and sparkles hold still and pick up right where they left off when you come back. Windows on the same repo also share `one` set of git and GitHub checks instead of each running their own.",
+      "`Claude Haiku 5.5` just got a turbo boost. It now writes about `25%` faster, and when it fumbles an edit I quietly catch the slip and land the change instead of letting your run fail.",
+      "Links behave perfectly now. Every link you click in chat, settings or sign-in opens straight in your default app, `mailto:` and `tel:` links included, and nothing gets left running in the background afterwards.",
+    ],
+  },
+  {
+    version: "0.83.0",
+    date: "2026-10-08",
+    items: [
+      "Meet `Claude Haiku 5.5`, the new speed demon in your model picker. It replaces Haiku 4.5 with a massive `1M` token memory, room for `128K` tokens of output and the full thinking range from low all the way to max. Fast, cheap and smarter than any Haiku before it. Plus `Kimi K2.7 Code HighSpeed` lands on Moonshot, and Hugging Face gets Kimi K2.7 Code and DeepSeek V4.1 Flash for fast, affordable coding.",
+      "Your agent got a serious diet. I cut the hidden instructions it reads every turn by about `70%` and taught it to load rarely used tools only the moment it actually reaches for them. Every reply starts faster, every chat costs less and you get more room to work before anything needs compacting.",
+      "You can finally watch Claude think again. Newer Claude models were quietly hiding their reasoning, so I switched it back on as clean, readable summaries, and `Codex` thoughts now land in tidy separate sections instead of one long wall of text.",
+      "Ask the new `Don't embarrass me` checklist to look at your project the way a seasoned developer would on day one. It catches the rookie tells before anyone else does, and every checklist result now warns you with `Code changed since` when your code has moved on, so you never trust a stale verdict.",
+      "This very window got a glow-up. What's new is now a cozy campfire scene where a crew of pixel critters gathers round the fire and every update is a story told in its light. Under the hood I rebuilt big chunks of the app into cleaner pieces, so fixes and new features reach you faster.",
+    ],
+  },
+  {
+    version: "0.82.4",
+    date: "2026-10-07",
+    items: [
+      "Plans never get stuck in limbo again. Whether `Autopilot` approves, hands a plan back to you or hits a snag, the `Accept` box now shows up the moment the plan is truly yours, and it even comes back after a reload. If an accept can't go through, I tell you why and let you try again instead of silently doing nothing.",
+      "Planning got sharper and safer. If your agent drafts a plan but forgets to submit it, I nudge it to finish the job, and when you or Ken send feedback it revises in `read-only` mode, so no code gets touched until you approve.",
+    ],
+  },
+  {
     version: "0.82.3",
     date: "2026-10-07",
     items: [

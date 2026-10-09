@@ -56,9 +56,14 @@ function statusText(item: ChecklistEntry): string {
   if (item.status === "not-applicable") return "Not applicable";
   if (item.status === "due")
     return `Review due${item.result === "issues" ? " · Findings reported" : ""}`;
-  if (item.result === "issues")
-    return `${item.findings.length || "Some"} finding${item.findings.length === 1 ? "" : "s"} reported`;
-  if (item.checkedAt) return `Checked ${checkedDate(item.checkedAt)}`;
+  if (item.result === "issues") {
+    const count = `${item.findings.length || "Some"} finding${item.findings.length === 1 ? "" : "s"} reported`;
+    return item.changedSinceCheck ? `${count} · Code changed since, check again` : count;
+  }
+  if (item.checkedAt) {
+    const accepted = item.accepted?.length ?? 0;
+    return `Checked ${checkedDate(item.checkedAt)}${accepted > 0 ? ` · ${accepted} accepted as is` : ""}`;
+  }
   return item.detection ? `${item.detection.summary} · Not reviewed` : "Not reviewed";
 }
 
@@ -193,7 +198,7 @@ export function ChecklistScreen({
                                   ? "The agent is busy"
                                   : item.id === "agent-setup"
                                     ? "Run /init to create or update project instructions"
-                                    : "Check and report only"
+                                    : "Check and report, then choose what to fix"
                               }
                               onClick={() => {
                                 if (running || item.runPrompt === null) return;

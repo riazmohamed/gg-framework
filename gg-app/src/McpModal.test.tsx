@@ -5,6 +5,7 @@ import { listMcpServers, listProjects, type McpServerRow } from "./agent";
 import { McpModal } from "./McpModal";
 
 vi.mock("./agent", () => ({
+  openUrl: vi.fn(),
   addMcpServer: vi.fn(),
   listMcpServers: vi.fn(),
   listProjects: vi.fn(),
@@ -12,7 +13,6 @@ vi.mock("./agent", () => ({
   removeMcpServer: vi.fn(),
   subscribe: vi.fn(() => () => {}),
 }));
-vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("./toast", () => ({ toast: vi.fn() }));
 
 const listMcpServersMock = vi.mocked(listMcpServers);

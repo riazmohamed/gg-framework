@@ -10,20 +10,16 @@
     "lint:fix": "eslint 'packages/*/src/**/*.{ts,tsx}' --fix && pnpm --dir Matey lint:fix && pnpm --filter gg-app lint:fix",
     "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}' && pnpm --dir Matey format && pnpm --filter gg-app format",
     "format:check": "prettier --check 'packages/*/src/**/*.{ts,tsx}' && pnpm --dir Matey format:check && pnpm --filter gg-app format:check",
-    "test": "pnpm -r test && pnpm --dir Matey test",
-    "prepare": "pnpm build"
+    "test": "pnpm -r test && pnpm --dir Matey test"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",
     "@eslint/js": "^10.0.1",
     "eslint": "^10.10.0",
     "eslint-config-prettier": "^10.1.8",
+    "playwright": "^1.63.0",
     "prettier": "^3.9.6",
     "tsup": "^8.5.1",
     "typescript-eslint": "^8.70.0"
-  },
-  "dependencies": {
-    "marked": "^15.0.12",
-    "playwright": "^1.63.0"
   }
 }

@@ -43,7 +43,7 @@ Want the engine without the desktop app? Use the same packages in your own apps.
 
 - [**@abukhaled/gg-ai**](packages/gg-ai/README.md): Connect to AI providers and stream responses.
 - [**@abukhaled/gg-agent**](packages/gg-agent/README.md): Build agents that use your tools and work through tasks.
-- [**@abukhaled/gg-core**](https://www.npmjs.com/package/@abukhaled/gg-core): Model selection, authentication, and local model discovery.
+- [**@abukhaled/gg-core**](packages/gg-core/README.md): Model selection, authentication, and local model discovery.
 - [**@abukhaled/ogcoder**](packages/ggcoder/README.md): The coding agent, sessions, and tools behind the app and CLI.
 
 For your own agent, start here:

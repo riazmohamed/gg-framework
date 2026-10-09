@@ -50,6 +50,7 @@ describe("release-notes trigger", () => {
     localStorage.setItem(key, "0.61.0");
     const view = render(<WhatsNewModal />);
     await waitFor(() => expect(openWhatsNewWindow).toHaveBeenCalledTimes(1));
+    expect(openWhatsNewWindow).toHaveBeenCalledWith("hype");
     expect(localStorage.getItem(key)).toBe("0.62.0");
     view.unmount();
     await act(async () => {

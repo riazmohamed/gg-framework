@@ -30,6 +30,7 @@
 }
 .chat-error-blink.is-animated {
   animation: chat-error-blink 3.2s step-end infinite;
+  animation-play-state: var(--loop-play-state, running);
 }
 @keyframes chat-error-blink {
   0%,
@@ -43,7 +44,8 @@
     opacity: 1;
   }
 }
-.app:not(.window-focused) .chat-error-blink {
+/* Background windows rest with the eyes open rather than freezing mid-blink. */
+:root:is([data-motion="still"], [data-motion="off"]) .chat-error-blink {
   animation: none;
   opacity: 0;
 }

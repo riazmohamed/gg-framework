@@ -62,6 +62,24 @@ describe("createEditTool", () => {
     const content = (result: unknown): string =>
       typeof result === "string" ? result : (result as { content: string }).content;
 
+    it.each([
+      [
+        "the files shape sent under `edits`",
+        { edits: [{ file_path: "a.js", edits: [{ old_text: "a = 1", new_text: "a = 2" }] }] },
+      ],
+      [
+        "a single file's edits wrapped in an extra `edits` level",
+        { file_path: "a.js", edits: [{ edits: [{ old_text: "a = 1", new_text: "a = 2" }] }] },
+      ],
+    ])("recovers %s instead of failing the call", async (_label, args) => {
+      await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\n");
+      const tool = createEditTool(tmpDir);
+
+      await tool.execute(tool.parameters.parse(args), ctx);
+
+      expect(await fs.readFile(path.join(tmpDir, "a.js"), "utf-8")).toBe("const a = 2;\n");
+    });
+
     it("edits every listed file in one call and returns each diff", async () => {
       await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\n");
       await fs.writeFile(path.join(tmpDir, "b.js"), "const b = 1;\n");
@@ -1838,6 +1856,41 @@ describe("edit stringified `edits` handling", () => {
     expect(message).toContain("split the work");
     // The unactionable stock message is what caused the retry loop.
     expect(message).not.toContain("expected array, received string");
+  });
+
+  // Verbatim shape from bench/h2h (Haiku 5.5): the `edits` string ends where
+  // old_text should, and new_text lands at the top level.
+  it("recovers old_text cut off into the edits string with new_text at the top level", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "edit-split-"));
+    try {
+      const source =
+        'const q = "x";\nconst totalPages = Math.floor(n / per);\nconst start = page * per;\n';
+      await fs.writeFile(path.join(dir, "p.js"), source);
+      const tool = createEditTool(dir);
+      const args = tool.parameters.parse({
+        file_path: "p.js",
+        edits: '[{"old_text">const totalPages = Math.floor(n / per);\nconst start = page * per;',
+        new_text: "const totalPages = Math.ceil(n / per);\nconst start = (page - 1) * per;",
+      });
+
+      await tool.execute(args, { signal: new AbortController().signal, toolCallId: "split" });
+
+      expect(await fs.readFile(path.join(dir, "p.js"), "utf-8")).toBe(
+        'const q = "x";\nconst totalPages = Math.ceil(n / per);\nconst start = (page - 1) * per;\n',
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not recover the split shape when extra keys make it ambiguous", () => {
+    const result = createEditTool(os.tmpdir()).parameters.safeParse({
+      file_path: "a.ts",
+      edits: '[{"old_text">a',
+      new_text: "b",
+      old_text: "c",
+    });
+    expect(result.success).toBe(false);
   });
 
   it("leaves non-string type errors on their default message", () => {

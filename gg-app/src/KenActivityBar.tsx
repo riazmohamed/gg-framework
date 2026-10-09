@@ -3,6 +3,7 @@ import { ThinkingOrb } from "thinking-orbs";
 import { theme } from "./theme";
 import { formatTokenCount } from "./ActivityBar";
 import { ShimmerText } from "./ShimmerText";
+import { useMotionLevel } from "./window-motion";
 
 function formatElapsed(ms: number): string {
   const s = Math.round(ms / 1000);
@@ -46,13 +47,17 @@ export function KenActivityBar({
   // it + the start timestamps, mirroring the ActivityBar's live-tick approach
   // without reading a ref during render.
   const [now, setNow] = useState(() => Date.now());
+  const motion = useMotionLevel();
 
+  // Hidden windows skip the ticks and catch up the moment they're shown.
   useEffect(() => {
+    if (motion === "off") return;
+    setNow(Date.now());
     const tick = setInterval(() => setNow(Date.now()), 250);
     return () => {
       clearInterval(tick);
     };
-  }, []);
+  }, [motion]);
 
   const elapsed = runStartTs ? now - runStartTs : 0;
   const liveThinkingDelta = isThinking && thinkingStartTs ? now - thinkingStartTs : 0;
@@ -86,6 +91,7 @@ export function KenActivityBar({
           state="listening"
           size={20}
           theme="dark"
+          paused={motion !== "full"}
           aria-hidden="true"
           style={{ flexShrink: 0, filter: `url(#${orbTintId})` }}
         />

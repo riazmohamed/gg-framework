@@ -417,6 +417,20 @@ describe("verification gate flow", () => {
     expect(internal.getVerificationProblem()).toContain("Unverified");
   });
 
+  it("does not count a code write refused in plan mode as an unverified change", async () => {
+    const { internal } = await makeSession();
+    await session?.setPlanMode(true);
+
+    await simulateToolCall(
+      internal,
+      "write",
+      { file_path: "src/a.ts" },
+      "Error: write is restricted in plan mode. You can only write to .gg/plans/. Got: src/a.ts",
+    );
+
+    expect(internal.getVerificationProblem()).toBeNull();
+  });
+
   it("tracks every file of a multi-file edit as needing verification", async () => {
     const { internal } = await makeSession();
 

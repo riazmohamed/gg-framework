@@ -177,6 +177,9 @@ export interface AgentState {
   gitHubRepoUrl?: string | null;
   /** GitHub Actions for the current commit; null when no runs are available. */
   gitHubCI?: GitHubCI | null;
+  /** Raw Project Health from the sidecar (code mode); validate with
+   *  `parseProjectHealth` before use. null until the first scan lands. */
+  projectHealth?: unknown;
   /** Extra workspace roots added with /add-dir. Absent on older sidecars. */
   additionalRoots?: string[];
   /** True when the active model can accept native video input. */
@@ -277,11 +280,15 @@ export interface ChecklistEntry {
   result: "pass" | "issues" | "not-applicable" | null;
   summary: string | null;
   findings: string[];
+  /** Findings the owner chose to leave as is; they don't block a pass. */
+  accepted?: string[];
   evidence: string[];
   /** Read-only setup observations, not an audit result. */
   detection?: { summary: string; facts: string[] } | null;
   /** The instructions Check sends to the agent (built by the sidecar from the item). */
   runPrompt: string | null;
+  /** The project's commit or working tree changed after this result was recorded. */
+  changedSinceCheck?: boolean;
 }
 
 export interface ChecklistSnapshot {
@@ -323,8 +330,10 @@ function checklistEntry(value: unknown): value is ChecklistEntry {
     (value.commit === null ||
       (text("commit", 64) && /^[0-9a-f]{4,64}$/i.test(String(value.commit)))) &&
     typeof value.uncommittedChanges === "boolean" &&
+    (value.changedSinceCheck === undefined || typeof value.changedSinceCheck === "boolean") &&
     nullable("summary", 300) &&
     checklistStrings(value.findings, 300) &&
+    (value.accepted === undefined || checklistStrings(value.accepted, 300)) &&
     checklistStrings(value.evidence, 200) &&
     (detection === undefined ||
       detection === null ||
@@ -712,6 +721,9 @@ export interface PromptMeta {
   /** Fired by a `/schedule` timer, not typed — the sidecar uses the short
    *  unattended ask_user deadline for this run. */
   scheduled?: boolean;
+  /** Plan feedback from the review box: the sidecar revises the plan back in
+   *  read-only plan mode instead of with full write access. */
+  planRevision?: boolean;
 }
 
 export async function sendPrompt(
@@ -848,11 +860,15 @@ export async function setAutopilot(enabled: boolean): Promise<boolean> {
  * activity bar's "Plan Steps n/total" widget reads). Call this BEFORE sending
  * the "implement it now" prompt. `planPath` comes from the `plan_exit` event.
  */
+/** Accept the pending plan. Rejects when the sidecar refused it (a run still
+ *  finishing, or the plan couldn't be activated) — the caller must NOT send
+ *  the "implement it now" prompt then. */
 export async function acceptPlan(planPath: string | null): Promise<void> {
   try {
     await invoke("agent_accept_plan", { planPath });
   } catch (e) {
     await logError(`agent_accept_plan failed: ${String(e)}`);
+    throw e;
   }
 }
 
@@ -1566,49 +1582,15 @@ export async function setupWindows(count: number): Promise<void> {
 }
 
 /** Open the dedicated, screen-centered "What's new" window (or refocus it if it's
- *  already open). Only the main window calls this, exactly once per update — see
- *  WhatsNewTrigger. */
-export async function openWhatsNewWindow(): Promise<void> {
+ *  already open). `hype` is the one-time post-update show (the main window's
+ *  WhatsNewModal trigger); `calm` is the home screen's "What's new" button. */
+export async function openWhatsNewWindow(mode: "hype" | "calm"): Promise<void> {
   try {
-    await invoke("open_whatsnew_window");
+    await invoke("open_whatsnew_window", { mode });
   } catch (e) {
     await logError(`open_whatsnew_window failed: ${String(e)}`);
     throw e;
   }
-}
-
-// ── Gaze focus (webcam eye/head tracking → window focus) ───────────
-
-/** Payload of the `gaze-target` event broadcast to every window. `target` is the
- *  window the gaze currently rests on (null off any window); `committed` is the
- *  window that currently holds focus. Each window paints a solid ring when it's
- *  `committed`, a soft highlight when it's the (un-committed) `target`. */
-export interface GazeTargetEvent {
-  target: string | null;
-  committed: string | null;
-}
-
-/** Map a normalized monitor point to a window. With `commit`, commit OS focus to
- *  the hit window. `committed` is the currently-focused window so the broadcast
- *  border persists. Always broadcasts `gaze-target`. Returns the hit label. */
-export async function gazeFocus(
-  nx: number,
-  ny: number,
-  commit: boolean,
-  committed: string | null,
-): Promise<string | null> {
-  try {
-    return await invoke<string | null>("gaze_focus", { nx, ny, commit, committed });
-  } catch (e) {
-    await logError(`gaze_focus failed: ${String(e)}`);
-    return null;
-  }
-}
-
-/** Subscribe THIS window to gaze-target broadcasts. Returns an unlisten fn. */
-export async function onGazeTarget(cb: (e: GazeTargetEvent) => void): Promise<() => void> {
-  const un = await appWindow.listen<GazeTargetEvent>("gaze-target", (e) => cb(e.payload));
-  return un;
 }
 
 // ── macOS menu-bar tray ────────────────────────────────────────────────────

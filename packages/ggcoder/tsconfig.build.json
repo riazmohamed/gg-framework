@@ -14,5 +14,11 @@
   "compilerOptions": {
     "declarationMap": false
   },
-  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/**/__fixtures__/**"]
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/**/__fixtures__/**",
+    // Dev-only benchmarks, run from source via tsx (`pnpm bench:*`).
+    "src/**/*-benchmark.ts"
+  ]
 }
