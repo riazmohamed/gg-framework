@@ -1,6 +1,7 @@
 import React from "react";
 import wrapAnsi from "wrap-ansi";
 import type { TuiAskUserHost } from "./ask-user-host.js";
+import type { CacheTouch } from "../core/cache-expiry.js";
 import { log } from "@abukhaled/gg-core";
 import { render, type Instance as InkInstance } from "ink";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
@@ -164,6 +165,8 @@ export interface SessionStore {
   planMode?: boolean;
   /** Whether pre-final ideal review is enabled for this UI session. */
   idealReviewEnabled?: boolean;
+  /** Last cache-warming request, for the cold-cache warning (survives remounts). */
+  cacheTouch?: CacheTouch | null;
 }
 
 export interface ResetUIOptions {

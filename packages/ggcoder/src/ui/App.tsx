@@ -116,6 +116,13 @@ import { addWorkspaceRoot, removeWorkspaceRoot } from "../core/workspace-roots.j
 import type { TuiAskUserHost } from "./ask-user-host.js";
 import { createExportCommand } from "./tui-export.js";
 import { summarizeRunVerification } from "./run-verification.js";
+import {
+  assessTuiCacheExpiry,
+  cacheExpiryKey,
+  cacheExpiryWarning,
+  cacheTouchFor,
+} from "./cache-expiry-gate.js";
+import type { CacheTouch } from "../core/cache-expiry.js";
 import { createUsageCommand } from "./tui-usage.js";
 import { createUsageService } from "../app-sidecar/usage.js";
 import { useRepoStatus } from "./hooks/useRepoStatus.js";
@@ -366,6 +373,7 @@ export interface AppProps {
     planMode?: boolean;
     sessionStats?: SessionStats;
     idealReviewEnabled?: boolean;
+    cacheTouch?: CacheTouch | null;
   };
 }
 
@@ -538,6 +546,11 @@ export function App(props: AppProps) {
   const messagesRef = useRef<Message[]>(props.sessionStore?.messages ?? props.messages);
   // Where the current run's messages start, for its verification summary.
   const runStartIndexRef = useRef(0);
+  // Cold-prompt-cache warning: the last successful request, and the lapse the
+  // user already saw a warning for (a second Enter then sends).
+  const lastCacheTouchRef = useRef<CacheTouch | null>(props.sessionStore?.cacheTouch ?? null);
+  const cacheWarnedKeyRef = useRef<string | null>(null);
+  const cacheRouteRef = useRef<{ baseUrl?: string; accountId?: string }>({});
   const [planAutoExpand, setPlanAutoExpand] = useState(props.sessionStore?.planAutoExpand ?? false);
   const approvedPlanPathRef = useRef<string | undefined>(props.sessionStore?.approvedPlanPath);
   const planStepsRef = useRef<PlanStep[]>(props.sessionStore?.planSteps ?? []);
@@ -732,6 +745,7 @@ export function App(props: AppProps) {
   const activeProjectId = currentCreds ? currentCreds.projectId : props.projectId;
   const activeBaseUrl =
     currentProvider === "gemini" ? undefined : currentCreds ? currentCreds.baseUrl : props.baseUrl;
+  cacheRouteRef.current = { baseUrl: activeBaseUrl, accountId: activeAccountId };
   const contextWindowOptions = useMemo(
     () => ({ provider: currentProvider, accountId: activeAccountId }),
     [currentProvider, activeAccountId],
@@ -1636,6 +1650,15 @@ export function App(props: AppProps) {
           timing: AgentTurnTiming,
         ) => {
           recordProviderUsage(usage, messagesRef.current);
+          lastCacheTouchRef.current = cacheTouchFor(
+            {
+              provider: currentProviderRef.current,
+              model: currentModelRef.current,
+              ...cacheRouteRef.current,
+            },
+            Date.now(),
+          );
+          if (sessionStore) sessionStore.cacheTouch = lastCacheTouchRef.current;
           recordTurnEnd(sessionStatsRef.current, usage);
           const metric: TurnMetricPayload = {
             version: 1,
@@ -2325,6 +2348,28 @@ export function App(props: AppProps) {
         modelSupportsVideo,
         modelInfo?.provider,
       );
+
+      // Cold prompt cache: warn once per lapse before a big full-price re-read.
+      if (!agentLoop.isRunning && inputImages.length === 0) {
+        const expiry = assessTuiCacheExpiry(
+          {
+            provider: currentProviderRef.current,
+            model: currentModelRef.current,
+            ...cacheRouteRef.current,
+          },
+          lastCacheTouchRef.current,
+          agentLoop.contextUsed,
+          messagesRef.current.some((m) => m.role === "user"),
+          Date.now(),
+        );
+        const warning = cacheExpiryWarning(expiry, Date.now());
+        if (expiry && warning && cacheWarnedKeyRef.current !== cacheExpiryKey(expiry)) {
+          cacheWarnedKeyRef.current = cacheExpiryKey(expiry);
+          setLiveItems((prev) => [...prev, { kind: "info", text: warning, id: getId() }]);
+          setComposerInject({ text: input, nonce: nextIdRef.current++ });
+          return;
+        }
+      }
 
       // ── Queue message if agent is already running ──
       if (agentLoop.isRunning) {
