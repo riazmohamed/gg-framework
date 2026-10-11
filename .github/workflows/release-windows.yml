@@ -1,0 +1,123 @@
+name: Release (fork, Windows)
+
+# Fork-only. Builds the OG fork's Windows installer on an `og-v*` tag pushed to
+# the `windows` branch, signs the updater artifacts with the fork's own key, and
+# publishes them plus `latest.json` to this repo's GitHub releases. Installed
+# fork apps poll that `latest.json` (see gg-app/src-tauri/tauri.fork-release.conf.json),
+# so they update themselves from here and never from upstream's feed.
+#
+# Upstream's release.yml triggers on `v*` tags and needs Apple secrets; the fork
+# never pushes `v*` tags, so it never runs here. Keeping this in its own file
+# (and the fork config in its own JSON) means upstream merges do not conflict.
+#
+# Version: the tag minus `og-v` (e.g. og-v0.86.1 -> 0.86.1). Scheme: keep
+# upstream's major.minor and use patch = upstream_patch * 100 + fork_build, so a
+# fork build always sorts above the upstream version it is based on and below
+# the next one (upstream 0.86.0 -> 0.86.1, 0.86.2...; upstream 0.86.1 -> 0.86.101).
+#
+# Required repository secrets:
+#   TAURI_SIGNING_PRIVATE_KEY           — fork updater private key (~/.gg-signing)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  — its password
+
+on:
+  push:
+    tags:
+      - "og-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag and signing secrets
+        id: version
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^og-v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || {
+            echo "Tag must look like og-v0.86.1" >&2
+            exit 1
+          }
+          version="${BASH_REMATCH[1]}"
+          git fetch --no-tags origin windows:refs/remotes/origin/windows
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/windows || {
+            echo "Release tag must point to a commit on origin/windows" >&2
+            exit 1
+          }
+          for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            [[ -n "${!name:-}" ]] || { echo "Missing release secret: $name" >&2; exit 1; }
+          done
+          # A file, not inline JSON: tauri-action splits `args` on spaces and
+          # its quoting would mangle a JSON string.
+          printf '{"version":"%s"}\n' "$version" > gg-app/src-tauri/tauri.release-version.conf.json
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # pnpm version comes from package.json's packageManager field.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.x
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gg-app/src-tauri
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # shell: bash so a failing intermediate build fails the step (PowerShell
+      # only reports the last command's status — see upstream release.yml).
+      - name: Build framework packages
+        shell: bash
+        run: |
+          pnpm --filter @abukhaled/gg-core build
+          pnpm --filter @abukhaled/gg-ai build
+          pnpm --filter @abukhaled/gg-agent build
+          pnpm --filter @abukhaled/ggcoder-eyes build
+          pnpm --filter @abukhaled/ogcoder build
+
+      - name: Stage node runtime, bundle sidecar, installer art
+        shell: bash
+        run: |
+          pnpm --filter gg-app stage:node
+          pnpm --filter gg-app bundle:sidecar
+          pnpm --filter gg-app installer:art
+
+      - name: Sidecar smoke (bundled runtime + bundle)
+        shell: bash
+        run: node gg-app/scripts/smoke-sidecar.mjs
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: gg-app
+          tagName: ${{ github.ref_name }}
+          releaseName: "OG Coder (fork) ${{ github.ref_name }}"
+          releaseBody: "Fork build of upstream GG Coder for Windows. Installed fork apps update to this automatically."
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: true
+          args: >-
+            --bundles nsis
+            --config src-tauri/tauri.fork-release.conf.json
+            --config src-tauri/tauri.release-version.conf.json
