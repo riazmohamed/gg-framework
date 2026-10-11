@@ -95,7 +95,11 @@ jobs:
       - name: Lint + format check
         if: runner.os == 'Linux'
         shell: bash
+        # Matey is a standalone pnpm project (own lockfile, outside the root
+        # workspace), so the root install above never gives it node_modules —
+        # yet root `pnpm lint`/`format:check` run its ESLint and Prettier.
         run: |
+          pnpm --dir Matey install --frozen-lockfile
           pnpm lint
           pnpm format:check
 

@@ -214,7 +214,10 @@ function isOutsideWorkspace(
   const resolved = realResolve(resolveTarget(target, runCwd));
   const roots = [
     ...workspaceRootsFor(workspace, settings),
-    ...CONVENTIONAL_TEMP_ROOTS.map((root) => realResolve(root)),
+    // Against `runCwd`, like the target: on Windows `/tmp` is drive-relative, so
+    // resolving it against the process cwd's drive (D:\tmp on CI runners) never
+    // matches a target resolved on the command's drive (C:\tmp).
+    ...CONVENTIONAL_TEMP_ROOTS.map((root) => realResolve(path.resolve(runCwd, root))),
   ];
   return !roots.some((root) => isWithin(root, resolved));
 }
