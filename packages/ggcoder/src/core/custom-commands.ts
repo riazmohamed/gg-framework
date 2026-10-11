@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { getAppPaths } from "../config.js";
 import { parseSkillFile } from "./skills.js";
 
 export interface CustomCommand {
@@ -10,12 +11,25 @@ export interface CustomCommand {
 }
 
 /**
- * Load custom slash commands from {cwd}/.gg/commands/*.md
- * Each .md file becomes a slash command. Frontmatter provides name/description,
- * and the body becomes the prompt injected into the agent.
+ * Load custom slash commands from the global `~/.gg/commands/*.md` and the
+ * project's `{cwd}/.gg/commands/*.md`. Each .md file becomes a slash command.
+ * Frontmatter provides name/description, and the body becomes the prompt
+ * injected into the agent. A project command overrides a global one with the
+ * same name, matching how skills and agents merge.
  */
-export async function loadCustomCommands(cwd: string): Promise<CustomCommand[]> {
-  const commandsDir = path.join(cwd, ".gg", "commands");
+export async function loadCustomCommands(
+  cwd: string,
+  globalCommandsDir: string = path.join(getAppPaths().agentDir, "commands"),
+): Promise<CustomCommand[]> {
+  const byName = new Map<string, CustomCommand>();
+  const projectDir = path.join(cwd, ".gg", "commands");
+  for (const dir of [globalCommandsDir, projectDir]) {
+    for (const command of await loadCommandsFromDir(dir)) byName.set(command.name, command);
+  }
+  return [...byName.values()];
+}
+
+async function loadCommandsFromDir(commandsDir: string): Promise<CustomCommand[]> {
   const commands: CustomCommand[] = [];
 
   let files: string[];
@@ -35,7 +49,7 @@ export async function loadCustomCommands(cwd: string): Promise<CustomCommand[]> 
       const name = parsed.name || path.basename(file, ".md");
       commands.push({
         name,
-        description: parsed.description || `Custom command from .gg/commands/${file}`,
+        description: parsed.description || `Custom command from ${file}`,
         prompt: parsed.content,
         filePath,
       });
