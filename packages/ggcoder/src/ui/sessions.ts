@@ -1,5 +1,4 @@
 import chalk from "chalk";
-import { readFile } from "node:fs/promises";
 import { SessionManager, type SessionInfo } from "../core/session-manager.js";
 import { listForeignSessions, type ProjectSource } from "../core/project-discovery.js";
 import { renderLogoBlock } from "../cli/shared.js";
@@ -52,45 +51,6 @@ function formatRelativeTime(isoTimestamp: string): string {
   if (days === 1) return "yesterday";
   if (days < 7) return `${days}d ago`;
   return new Date(isoTimestamp).toLocaleDateString();
-}
-
-/** Extract first user prompt from a session JSONL file */
-async function extractFirstPrompt(sessionPath: string): Promise<string> {
-  try {
-    const content = await readFile(sessionPath, "utf-8");
-    const lines = content.split("\n");
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const entry = JSON.parse(line) as {
-          type: string;
-          message?: { role: string; content: string | { type: string; text?: string }[] };
-        };
-        if (entry.type === "message" && entry.message?.role === "user") {
-          const c = entry.message.content;
-          let text: string;
-          if (typeof c === "string") {
-            text = c;
-          } else if (Array.isArray(c)) {
-            text = c.flatMap((b) => (b.type === "text" && b.text ? [b.text] : [])).join(" ") || "";
-          } else {
-            continue;
-          }
-          // Collapse whitespace and truncate
-          text = text.replace(/\s+/g, " ").trim();
-          if (text.length > MAX_PROMPT_LEN) {
-            text = text.slice(0, MAX_PROMPT_LEN) + "...";
-          }
-          return text || "(empty)";
-        }
-      } catch {
-        // Skip unparseable lines
-      }
-    }
-  } catch {
-    // File read error
-  }
-  return "(no prompt)";
 }
 
 function renderScreen(sessions: SessionDisplay[], selectedIndex: number): string {
@@ -147,13 +107,13 @@ export async function loadSessionRows(
     manager.list(cwd).then((all: SessionInfo[]) => all.slice(0, 5)),
     listForeign(cwd, 5).catch(() => []),
   ]);
-  const ownRows = await Promise.all(
-    own.map(async (info) => ({
-      path: info.path,
-      firstPrompt: await extractFirstPrompt(info.path),
-      meta: `${msgs(info.messageCount)} · ${formatRelativeTime(info.timestamp)}`,
-    })),
-  );
+  // `list()` already read each file (gzipped cold sessions included) and kept
+  // the first prompt the user typed, skipping compaction summaries.
+  const ownRows = own.map((info) => ({
+    path: info.path,
+    firstPrompt: info.preview ? shorten(info.preview) : "(no prompt)",
+    meta: `${msgs(info.messageCount)} · ${formatRelativeTime(info.timestamp)}`,
+  }));
   const foreignRows = foreign.map((session) => ({
     path: session.path,
     firstPrompt: shorten(session.preview),

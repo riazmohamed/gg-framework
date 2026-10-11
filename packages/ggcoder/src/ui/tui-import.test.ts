@@ -70,4 +70,21 @@ describe("ogcoder sessions rows", () => {
       },
     ]);
   });
+
+  it("titles own sessions by the prompt the user typed, not a compaction summary", async () => {
+    const sessionsDir = await mkdtemp(path.join(os.tmpdir(), "tui-rows-"));
+    const manager = new SessionManager(sessionsDir);
+    const { path: sessionPath } = await manager.create("/p", "anthropic", "claude-opus-5-5", {
+      preview: "Fix the login flow",
+    });
+    await manager.appendEntry(sessionPath, {
+      type: "message",
+      id: "m1",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      message: { role: "user", content: "[Previous conversation summary] ### Next steps" },
+    });
+    const rows = await loadSessionRows(sessionsDir, "/p", async () => []);
+    expect(rows.map((row) => row.firstPrompt)).toEqual(["Fix the login flow"]);
+  });
 });
