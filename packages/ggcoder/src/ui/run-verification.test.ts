@@ -27,11 +27,9 @@ describe("summarizeRunVerification", () => {
     ).toEqual({ text: "✓ 2 checks passed after the last edit", tone: "passed" });
   });
 
-  it("does not credit a check that ran before the last edit", () => {
-    expect(summarizeRunVerification([user, ...bash("pnpm test", 0), ...edit()])).toEqual({
-      text: "! Files changed, but no check ran after the last edit",
-      tone: "warning",
-    });
+  it("does not credit a check that ran before the last edit, and stays quiet", () => {
+    // Unchecked edits are left to /commit, not reported as a warning.
+    expect(summarizeRunVerification([user, ...bash("pnpm test", 0), ...edit()])).toBeNull();
   });
 
   it("reports a failing check with its command", () => {
@@ -50,6 +48,6 @@ describe("summarizeRunVerification", () => {
       { command: "pnpm test", run_in_background: true },
       "Started background task",
     );
-    expect(summarizeRunVerification([user, ...edit(), ...background])?.tone).toBe("warning");
+    expect(summarizeRunVerification([user, ...edit(), ...background])).toBeNull();
   });
 });

@@ -7,7 +7,7 @@ const MUTATING_TOOLS = new Set(["write", "edit", "ui_adopt"]);
 
 export interface RunVerificationLine {
   text: string;
-  tone: "passed" | "failed" | "warning";
+  tone: "passed" | "failed";
 }
 
 /**
@@ -15,6 +15,9 @@ export interface RunVerificationLine {
  * only (never from what the assistant says): which bounded checks ran after
  * the run's last file edit, and how they exited. Null for runs that neither
  * edited files nor ran a check, so a plain question gets no status line.
+ * Also null when files changed but no check ran after the last edit: a reply
+ * leaves checks to `/commit`, so unchecked edits are saved work, not a
+ * warning (as the desktop app since v0.86.0).
  */
 export function summarizeRunVerification(
   runMessages: readonly Message[],
@@ -56,5 +59,5 @@ export function summarizeRunVerification(
       tone: "passed",
     };
   }
-  return { text: "! Files changed, but no check ran after the last edit", tone: "warning" };
+  return null;
 }
