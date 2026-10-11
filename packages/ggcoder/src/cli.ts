@@ -104,6 +104,9 @@ import {
 import { MCPClientManager, getAllMcpServers } from "./core/mcp/index.js";
 import { runLogin, runLogout, runDoctor } from "./cli/auth.js";
 import { runMcp } from "./cli/mcp.js";
+import { runLocal } from "./cli/local.js";
+import { runSteroids } from "./cli/steroids.js";
+import { runHf } from "./cli/hf.js";
 import { scanLocalModels } from "./core/local-scan.js";
 import {
   CLI_VERSION,
@@ -138,7 +141,7 @@ function printHelp(): void {
   // Banner — matches the interactive TUI banner layout
   console.log();
   for (const row of renderLogoBlock([
-    primary.bold("GG Coder") + dim(` v${CLI_VERSION}`) + dim(" · By ") + bold("Ken Kai"),
+    primary.bold("OG Coder") + dim(` v${CLI_VERSION}`) + dim(" · By ") + bold("Abu Khaled"),
     dim("AI coding agent"),
   ])) {
     console.log(row);
@@ -146,7 +149,7 @@ function printHelp(): void {
   console.log();
 
   // Usage
-  console.log(primary("Usage:") + "  ggcoder " + dim("[options]") + " " + dim("[prompt]"));
+  console.log(primary("Usage:") + "  ogcoder " + dim("[options]") + " " + dim("[prompt]"));
   console.log();
 
   // Commands
@@ -163,6 +166,9 @@ function printHelp(): void {
     ["agent-home-login", "Configure Agent Home relay connection"],
     ["agent-home", "Connect to Agent Home as a remote agent"],
     ["mcp", "Add and manage MCP servers"],
+    ["local", "Local model servers (Ollama, LM Studio, …)"],
+    ["hf", "Search and pull Hugging Face models into Ollama"],
+    ["steroids", "Install Agent Steroids (local code corpus)"],
   ];
   for (const [name, desc] of cmds) {
     console.log(`  ${accent(name.padEnd(20))} ${dim(desc)}`);
@@ -256,6 +262,9 @@ function createCliSubcommandHandlers(): Record<CliSubcommandName, () => void> {
     },
     "agent-home-login": () => runWithStandardErrorHandling(runAgentHomeLogin),
     "agent-home": () => runWithStandardErrorHandling(runAgentHome),
+    local: () => runWithStandardErrorHandling(runLocal),
+    steroids: () => runWithStandardErrorHandling(runSteroids),
+    hf: () => runWithStandardErrorHandling(runHf),
   };
 }
 
