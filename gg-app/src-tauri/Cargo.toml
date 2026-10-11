@@ -60,3 +60,8 @@ libc = "0.2"
 # plugin's detached spawn leaves a zombie per opened link (process.rs).
 open = "=5.3.5"
 
+# Job Object containment for the daemon's process tree (daemon_job.rs). Pinned
+# to the version tauri already pulls in, so this adds no crates to the build.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "=0.61.3", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"] }
+

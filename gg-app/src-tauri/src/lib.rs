@@ -50,6 +50,7 @@ use tauri::{
 mod auth;
 mod commands;
 mod daemon;
+mod daemon_job;
 mod events;
 mod paths;
 mod process;

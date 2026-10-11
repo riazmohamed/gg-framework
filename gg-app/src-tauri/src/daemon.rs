@@ -118,6 +118,22 @@ pub(crate) fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         }
     };
 
+    // Contain the daemon before it can start agent tools: it spawns nothing
+    // until its HTTP server accepts a session, which is far later than this.
+    // Containment is cleanup, not startup, so a failure is logged loudly and
+    // the daemon still runs (the orphan sweep remains as the fallback).
+    #[cfg(windows)]
+    {
+        let job = match crate::daemon_job::DaemonJob::contain(&child) {
+            Ok(job) => Some(job),
+            Err(message) => {
+                log::warn!("{message}; agent tool processes may outlive the app");
+                None
+            }
+        };
+        *app.state::<Daemon>().job.lock_or_recover() = job;
+    }
+
     // Publish the child before starting pipe readers. A process can fail before
     // the reader thread starts; storing first guarantees the crash handler can
     // still take and reap that exact child instead of leaving a zombie behind.
@@ -169,6 +185,10 @@ pub(crate) fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                         _ => terminate_child(old_child),
                     }
                 }
+                // The daemon is gone; end any tool processes it left running
+                // now, even if the respawn circuit breaker keeps it down.
+                #[cfg(windows)]
+                drop(daemon.job.lock_or_recover().take());
                 let mut attempts = daemon.respawn_attempts.lock_or_recover();
                 if started_at.elapsed() >= DAEMON_STABLE_UPTIME {
                     *attempts = 0;

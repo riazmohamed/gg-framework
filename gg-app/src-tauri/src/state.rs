@@ -21,6 +21,10 @@ pub(crate) struct Daemon {
     /// attached by the shared reqwest client's default headers — without it
     /// any local process could drive the agent through the loopback port.
     pub(crate) token: String,
+    /// Kill-on-close job holding the current daemon and every descendant.
+    /// Replacing or dropping it terminates leftovers of that daemon generation.
+    #[cfg(windows)]
+    pub(crate) job: Mutex<Option<crate::daemon_job::DaemonJob>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
