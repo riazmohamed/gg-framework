@@ -22,6 +22,22 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.86.0",
+    date: "2026-10-10",
+    items: [
+      "Meet the built-in `/commit`, in every project. One command runs your checks and tests, reviews the change, then commits and pushes it. Because the commit is now where your work gets proven, plain replies stop nagging you with `Unverified` badges.",
+      "Claude just got a lot cheaper and quicker in GG Coder. I rebuilt the caching and handed Claude a simpler edit tool, so long agent runs reuse more and break fewer edits. In my benchmarks, Sonnet runs cost up to `45%` less.",
+      "Fewer runs die on a bad network day. When a provider hiccups with a Cloudflare `520` to `524` error, I now retry it for you automatically instead of stopping your task cold.",
+    ],
+  },
+  {
+    version: "0.85.0",
+    date: "2026-10-09",
+    items: [
+      "The engine under GG Coder just learned to search by meaning. I built `embeddings` and `reranking` right into it, working across OpenAI, OpenRouter, Gemini and your own local models, so it now has the foundation for smarter, privacy-first retrieval without a single extra moving part on your machine.",
+    ],
+  },
+  {
     version: "0.84.0",
     date: "2026-10-09",
     items: [
