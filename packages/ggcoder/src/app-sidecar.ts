@@ -44,15 +44,17 @@ import { AuthStorage } from "./core/auth-storage.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
 import {
   dualAuthProvider,
-  discoverLocalModels,
-  formatLocalModelId,
   parseLocalModelId,
   probeEndpoint,
   toModelInfo as localModelInfo,
-  type LocalEndpoint,
   type LocalEndpointProbe,
 } from "@abukhaled/gg-core";
-import { listAllEndpoints, syncEndpointCredentials } from "./core/local-endpoint-store.js";
+import { listAllEndpoints } from "./core/local-endpoint-store.js";
+import {
+  localStatePayload as localStatePayloadFor,
+  scanLocalModels as scanLocal,
+  type LocalStatePayload,
+} from "./core/local-scan.js";
 import type { OAuthLoginCallbacks } from "./core/oauth/types.js";
 import {
   AUTH_PROVIDERS,
@@ -68,7 +70,6 @@ import {
   getModel,
   getDefaultThinkingLevel,
   getContextWindow,
-  clearRuntimeModels,
   registerRuntimeModels,
 } from "./core/model-registry.js";
 import { resolveStartOrFallback } from "./core/resolve-start.js";
@@ -831,66 +832,18 @@ async function createSession(
   let localProbes: LocalEndpointProbe[] = [];
 
   async function scanLocalModels(force: boolean): Promise<LocalEndpointProbe[]> {
-    const endpoints = await listAllEndpoints();
-    const { probes, models } = await discoverLocalModels(endpoints, { force });
+    const probes = await scanLocal(force);
     localProbes = probes;
-    // Only endpoints that answered get a credential: writing one for a server
-    // that isn't running would make `hasProviderAuth("local")` true forever.
-    await syncEndpointCredentials(
-      probes.filter((probe) => probe.reachable).map((probe) => probe.endpoint),
-    );
-    clearRuntimeModels((m) => m.provider === "local");
-    registerRuntimeModels(models);
     log("INFO", "app-sidecar", "local model scan", {
       reachable: probes.filter((p) => p.reachable).length + "/" + probes.length,
-      models: String(models.length),
+      models: String(probes.reduce((n, p) => n + p.models.length, 0)),
     });
     return probes;
   }
 
   /** Endpoint rows + models, in the shape the Local models UI renders. */
-  function localStatePayload(): {
-    endpoints: {
-      id: string;
-      label: string;
-      baseUrl: string;
-      kind: LocalEndpoint["kind"];
-      custom: boolean;
-      reachable: boolean;
-      reason?: string;
-      models: {
-        id: string;
-        rawId: string;
-        contextWindow: number;
-        contextWindowKnown: boolean;
-        supportsTools: boolean;
-        supportsImages: boolean;
-        supportsThinking: boolean;
-        loaded?: boolean;
-      }[];
-    }[];
-  } {
-    return {
-      endpoints: localProbes.map((probe) => ({
-        id: probe.endpoint.id,
-        label: probe.endpoint.label,
-        baseUrl: probe.endpoint.baseUrl,
-        kind: probe.endpoint.kind,
-        custom: probe.endpoint.custom === true,
-        reachable: probe.reachable,
-        ...(probe.reason ? { reason: probe.reason } : {}),
-        models: probe.models.map((m) => ({
-          id: formatLocalModelId(probe.endpoint.id, m.rawId),
-          rawId: m.rawId,
-          contextWindow: m.contextWindow,
-          contextWindowKnown: m.contextWindowKnown,
-          supportsTools: m.supportsTools,
-          supportsImages: m.supportsImages,
-          supportsThinking: m.supportsThinking,
-          ...(m.loaded === undefined ? {} : { loaded: m.loaded }),
-        })),
-      })),
-    };
+  function localStatePayload(): LocalStatePayload {
+    return localStatePayloadFor(localProbes);
   }
 
   // ── Hugging Face → Ollama pulls (see app-sidecar/hf-pull-manager.ts) ──

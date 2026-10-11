@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import type { Provider } from "@abukhaled/gg-ai";
-import { MODELS } from "../../core/model-registry.js";
+import { getAllModels } from "../../core/model-registry.js";
 import { SlashStyledSelectList } from "./SlashStyledSelectList.js";
 
 interface ModelSelectorProps {
@@ -26,6 +26,7 @@ const PROVIDER_LABEL: Record<string, string> = {
   huggingface: "Hugging Face",
   sakana: "Sakana",
   xai: "xAI",
+  local: "Local",
 };
 
 export function ModelSelector({
@@ -39,15 +40,17 @@ export function ModelSelector({
 
   const items = useMemo(
     () =>
-      MODELS.filter((m) => loggedInProviders.includes(m.provider)).map((m) => {
-        const value = `${m.provider}:${m.id}`;
-        const isCurrent = value === currentValue;
-        return {
-          label: `${isCurrent ? "* " : "  "}${m.id}`,
-          value,
-          description: PROVIDER_LABEL[m.provider] ?? m.provider,
-        };
-      }),
+      getAllModels()
+        .filter((m) => loggedInProviders.includes(m.provider))
+        .map((m) => {
+          const value = `${m.provider}:${m.id}`;
+          const isCurrent = value === currentValue;
+          return {
+            label: `${isCurrent ? "* " : "  "}${m.id}`,
+            value,
+            description: PROVIDER_LABEL[m.provider] ?? m.provider,
+          };
+        }),
     [currentValue, loggedInProviders],
   );
 

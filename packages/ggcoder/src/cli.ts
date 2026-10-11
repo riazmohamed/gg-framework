@@ -104,6 +104,7 @@ import {
 import { MCPClientManager, getAllMcpServers } from "./core/mcp/index.js";
 import { runLogin, runLogout, runDoctor } from "./cli/auth.js";
 import { runMcp } from "./cli/mcp.js";
+import { scanLocalModels } from "./core/local-scan.js";
 import {
   CLI_VERSION,
   clearVisibleScreen,
@@ -354,23 +355,31 @@ function main(): void {
       : [];
     const allowedMcpServers = parsedMcpServers.length > 0 ? parsedMcpServers : undefined;
     const cwd = process.cwd();
-    runJsonMode({
-      message,
-      provider: jsonProvider,
-      model: jsonModel,
-      cwd,
-      systemPrompt,
-      agentPrompt,
-      agentContext,
-      maxTurns,
-      allowedTools,
-      allowedMcpServers,
-      promptCacheKey,
-      thinkingLevel,
-    }).catch((err: unknown) => {
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
+    // A sub-agent child of a parent on a local model: the model, and the
+    // credential carrying its server's address, only exist after a scan.
+    const localReady =
+      jsonProvider === "local" ? scanLocalModels(false).catch(() => []) : Promise.resolve([]);
+    void localReady
+      .then(() =>
+        runJsonMode({
+          message,
+          provider: jsonProvider,
+          model: jsonModel,
+          cwd,
+          systemPrompt,
+          agentPrompt,
+          agentContext,
+          maxTurns,
+          allowedTools,
+          allowedMcpServers,
+          promptCacheKey,
+          thinkingLevel,
+        }),
+      )
+      .catch((err: unknown) => {
+        process.stderr.write(formatUserError(err) + "\n");
+        process.exit(1);
+      });
     return;
   }
 
@@ -488,6 +497,19 @@ async function runInkTUI(opts: {
   const authStorage = new AuthStorage(paths.authFile);
   await authStorage.load();
 
+  // Local models (Ollama, LM Studio, …) only exist after a scan. Starting on
+  // one waits for it, since the model and its server's address must be known
+  // before the first prompt; otherwise it runs in the background and adds
+  // them to /model when it lands (see below).
+  const startsLocal = opts.provider === "local";
+  const localScan = scanLocalModels(false).catch((err: unknown) => {
+    log("WARN", "local", "local model scan failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  });
+  if (startsLocal) await localScan;
+
   const {
     provider: preferredProvider,
     model: preferredModel,
@@ -506,7 +528,8 @@ async function runInkTUI(opts: {
     { accessToken: string; accountId?: string; projectId?: string; baseUrl?: string }
   > = {};
   const expiredProviders: Provider[] = [];
-  for (const p of loggedInProviders) {
+  /** Resolve every storage key `p`'s models use; false when none resolved. */
+  const preloadCredentials = async (p: Provider): Promise<boolean> => {
     // Every distinct storage key any of this provider's models might need —
     // almost always just `[p]`; only providers with model-specific
     // `authStorageKeys` (Xiaomi) contribute extra keys.
@@ -530,10 +553,25 @@ async function runInkTUI(opts: {
         // is dead) — other keys for this provider may still resolve.
       }
     }
+    return resolvedAny;
+  };
+  for (const p of loggedInProviders) {
+    // Local credentials are loaded once the background scan lands.
+    if (p === "local" && !startsLocal) continue;
     // Refresh failed for every key (resolveCredentials wipes bad OAuth creds
     // when the refresh token is dead). Track so we can warn the user, and
     // fall back to another working provider below.
-    if (!resolvedAny) expiredProviders.push(p);
+    if (!(await preloadCredentials(p))) expiredProviders.push(p);
+  }
+  if (!startsLocal) {
+    // Background scan landed: make the servers that answered selectable in
+    // /model, with their credentials (which carry each server's address).
+    void localScan.then(async () => {
+      if (getModelsForProvider("local").length === 0) return;
+      if ((await preloadCredentials("local")) && !loggedInProviders.includes("local")) {
+        loggedInProviders.push("local");
+      }
+    });
   }
 
   // The model a provider should actually boot with, given which storage keys
@@ -1554,6 +1592,8 @@ async function resolveActiveProvider(
     "openrouter",
     "sakana",
     "xai",
+    // Counts once a scan has given a running local server a credential.
+    "local",
   ];
   const loggedInProviders: Provider[] = [];
   for (const p of allProviders) {
