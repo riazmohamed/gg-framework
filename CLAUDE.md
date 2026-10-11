@@ -28,6 +28,15 @@ installer hashes: NSIS `bc75e6f9…d0f420d3`, MSI `be22ebc4…d77bf4e1`. Windows
 stable-msvc, pnpm 10.33 pinned). Helper scripts from that build live in
 `C:\Users\riaza\AppData\Local\Temp\` (`gg-app-stage.cmd`, `gg-app-tauri-build.cmd`,
 `steroids-cargo.ps1`, `gg-reinstall.cmd`) — disposable, not tracked.
+**Desktop updates (2026-10-11):** the installed fork app self-updates from this fork's GitHub
+releases, not upstream's (`tauri.fork-release.conf.json`, signed with the fork key in
+`~/.gg-signing`). Ship one with: `/app-update` → push → tag `og-v<x.y.(patch*100+n)>` on
+`windows` → `release-windows.yml` builds + publishes → apps update. Details in
+`gg-app/DISTRIBUTION.md` "Fork release feed". Upstream is fetched directly via the `upstream`
+remote (`git -c credential.helper= fetch upstream` while the gh token is expired).
+The app daemon's process tree is held in a kill-on-close Windows Job Object
+(`src-tauri/src/daemon_job.rs`, ported from creativeprofit22's fork), so agent-started dev
+servers/browsers die with the app.
 One sidecar per app, one OS: nothing bridges `\\wsl.localhost` and `/mnt/c`, and `~/.gg`
 (auth, sessions) is separate per OS.
 

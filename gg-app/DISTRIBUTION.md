@@ -182,6 +182,22 @@ which only upstream holds — with it `true`, `tauri build` writes both installe
 exits non-zero on the signing step. To re-enable: publish a release feed for this fork, generate
 a fork minisign keypair, and set both `endpoints` and `pubkey`.
 
+**Fork release feed (2026-10-11).** Done the separate-file way, so `tauri.conf.json` stays
+upstream's and merges stay clean: `src-tauri/tauri.fork-release.conf.json` carries the fork
+`pubkey`, the endpoint `https://github.com/riazmohamed/gg-framework/releases/latest/download/latest.json`
+and `createUpdaterArtifacts: true`. Every fork build that should self-update must pass
+`--config src-tauri/tauri.fork-release.conf.json` with `TAURI_SIGNING_PRIVATE_KEY` (path or
+contents) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` set. The private key + password live in
+`~/.gg-signing/` (WSL) and `C:\Users\riaza\.gg-signing\` (Windows), never in git, and as the
+two repo secrets. **Losing the key strands installed apps** — they will only trust updates
+signed by it; recovery is a manual reinstall of a build with a new pubkey.
+
+Releasing: `.github/workflows/release-windows.yml` runs on an `og-v<version>` tag that points at
+`windows` (upstream's `release.yml` only fires on `v*`, so it never runs here). Version scheme:
+upstream major.minor, patch = upstream_patch × 100 + fork build (upstream 0.86.0 → fork
+0.86.1, 0.86.2…; upstream 0.86.1 → 0.86.101), so a fork build always sorts above the upstream
+version it is based on. The local `0.86.0` install on 2026-10-11 is fork build 0 of 0.86.0.
+
 Build on the Windows side (`C:\Users\riaza\gg-framework`, a checkout of this branch) — the
 staged Node runtime and the `sharp` binary are chosen by the _build_ platform. Prerequisites
 there: VS 2022 with the **"Desktop development with C++" workload** (MSVC + Windows SDK —
