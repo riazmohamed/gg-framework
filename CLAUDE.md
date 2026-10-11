@@ -33,12 +33,21 @@ One sidecar per app, one OS: nothing bridges `\\wsl.localhost` and `/mnt/c`, and
 
 **Dependency chain**: `gg-core` → `gg-ai` → `gg-agent` → `ogcoder` (uses `ggcoder-eyes` for perception)
 
-Current published version: **5.58.0** (last app-update sync: 2026-09-07).
+Current published version: **5.78.0** (last app-update sync: 2026-10-11; gg-app upstream v0.86.0).
 
 Sync history note: the previous `origin/windows` had independently synced upstream to 4.5.0
 (2026-06-04) with 42 fork-only commits on top. The 2026-09-07 sync merged upstream 5.58.0 first,
 then reconciled that remote branch into it — every upstream commit the remote carried was
 already inside 5.58.0, so only the fork-only work was ported.
+
+The 2026-10-11 sync (258 upstream commits, 5.58.0 → 5.78.0) changed these fork touch points:
+upstream deleted ideal-review, `core/file-lock.ts`, `core/oauth/pkce.ts` and
+`ui/hooks/useSessionManager.ts` (deletions accepted); gg-core replaced `getFastModel` with the
+compaction-tuned `getSummaryModel`; pnpm `overrides`/`onlyBuiltDependencies` moved from
+`package.json` to `pnpm-workspace.yaml`; TypeScript is now 6.x, so ogcoder's `tsup.config.ts`
+passes `ignoreDeprecations: "6.0"` to the dts step (as gg-ai/gg-agent do). New upstream
+`@kenkaiiii/gg-*` imports arrive in every sync. Rebrand them, then confirm
+`git grep -E "@kenkaiiii/(gg-core|gg-ai|gg-agent|ggcoder)"` returns nothing outside docs.
 
 This is a rebranded fork of upstream `kenkaiiii/gg-framework`. Every workspace package is
 renamed `@kenkaiiii/*` → `@abukhaled/*`, `ggcoder` → `ogcoder` (binary, package name, and
@@ -174,7 +183,7 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 - **Sessions** (`core/session-manager.ts`): Append-only JSONL with DAG structure (leafId for branching). Streams line-by-line for large files. `repairToolPairs()` fixes interrupted sessions on restore.
 - **Auth**: OAuth PKCE for Anthropic, OpenAI, Gemini, Kimi and xAI; static API keys for GLM, Moonshot, Xiaomi, MiniMax, DeepSeek, OpenRouter, HuggingFace and Sakana. Credentials live in `~/.gg/auth.json` (mode `0o600`, atomic write under a file lock — `gg-core`'s `auth-storage`). Xiaomi keys are **region-scoped**: a key issued for `ams` returns 401 on `sgp`. `runLogin()` in `cli/auth.ts` therefore runs the Ink region selector **before** `readline.createInterface()` — a raw-mode Ink selector (`ui/login.tsx`) cannot coexist with an active readline interface. Xiaomi's API-Credits endpoint (`XIAOMI_CREDITS_KEY`) is a single global URL and skips region selection.
   - Known gap: the desktop app's provider descriptor (`core/auth-providers.ts` → `app-sidecar.ts`) still hardcodes the `sgp` Token Plan URL, so a desktop login with an `ams` key will 401. The CLI path is region-correct.
-- **Models**: The registry lives in `@abukhaled/gg-core` (`gg-core/src/model-registry.ts`); `ggcoder/src/core/model-registry.ts` is a re-export shim that additionally defines the fork's routing helpers — `getVisionModel`, `getVideoCapableModel`, `getDocumentCapableModel`, and `getExecutorModel` (an alias for gg-core's `getFastModel`). gg-core's `ModelInfo` has no `supportsDocuments` flag, so documents ride the image/multimodal path.
+- **Models**: The registry lives in `@abukhaled/gg-core` (`gg-core/src/model-registry.ts`); `ggcoder/src/core/model-registry.ts` is a re-export shim that additionally defines the fork's routing helpers — `getVisionModel`, `getVideoCapableModel`, `getDocumentCapableModel`, and `getExecutorModel` (first low-tier model for the provider, else the current model — implemented locally since gg-core dropped `getFastModel`). gg-core's `ModelInfo` has no `supportsDocuments` flag, so documents ride the image/multimodal path.
 - **Eyes (`packages/ggcoder-eyes`)**: Perception probes the agent invokes via the `ogcoder eyes ...` passthrough in `cli.ts`. Driven by the `/setup-eyes` and `/eyes-improve` prompt commands in `core/prompt-commands.ts`. Probes live in `probes/<name>/impl/*.sh`, with `detect.sh`, `install.sh`, and `test.sh` per probe. The agent reads `isEyesActive`/`journalCount`/`readJournal` from `@abukhaled/ggcoder-eyes`; `EyesOverlay.tsx` renders the live journal in the TUI.
 - **Startup** (`cli.ts`): Optimized for fast time-to-interactive. Key patterns:
   - Auto-update check is fire-and-forget (never blocks)
@@ -184,6 +193,9 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 - **Radio**: `core/radio.ts` plays streams via PowerShell on WSL2 rather than `mpv`.
   `core/radio.test.ts` asserts the `mpv` path, so **2 radio tests fail when the suite is run
   under WSL** — expected, and unrelated to any change you just made.
+  Also expected under WSL: the `motion-agent/*` media tests (~44) fail without `ffmpeg` on PATH,
+  and `agent-session-diagnostics.test.ts` fails because corepack cannot fetch pnpm inside its
+  sandboxed HOME.
 - **Tasks**: `core/tasks-store.ts` (upstream) owns `~/.gg-tasks/projects/<sha256(cwd)[:16]>/tasks.json`
   and drives the run-all loop in `App.tsx`. `ui/components/TaskOverlay.tsx` (fork) still carries its
   own inline read/write of the *same* file — identical path logic, so the data is shared, but the
@@ -221,7 +233,15 @@ All three systems discover markdown files with YAML frontmatter from two locatio
 
 **Skills** (`core/skills.ts`): Frontmatter: `name`, `description`. Body is injected into context by the `skill` tool when the agent invokes it by name.
 
-**Custom Commands** (`core/custom-commands.ts`): User-defined slash commands loaded alongside built-ins. Frontmatter: `name`, `description`. Body defines behavior.
+**Custom Commands** (`core/custom-commands.ts`): User-defined slash commands loaded alongside built-ins from `~/.gg/commands/*.md` (global, fork addition 2026-10-11) and `{cwd}/.gg/commands/*.md` (project wins on a name clash). Frontmatter: `name`, `description`. Body defines behavior; `$ARGUMENTS` is substituted. A custom command named like a built-in (`commit`, `nuclear-commit`, …) is shadowed by it.
+
+**Personal commands (riaz-skills)**: the source of truth is the private repo
+`git@github.com:riazmohamed/riaz-skills.git` (`commands/` plus `plugins/{gg-framework,minimal-claude}/`).
+On 2026-10-11 its 26 non-colliding commands were copied into the Windows global
+`C:\Users\riaza\.gg\commands\` (plain copies, because Windows does not follow the repo's
+symlinks), and `C:\Users\riaza\.gg\mcp.json` gained the keyless `grep` MCP
+(`https://mcp.grep.app`) that `readme-convention`, `worktrees` and others call. Re-copy after
+changing the repo. Global commands need a sidecar built from this branch or later.
 
 ### Slash Commands
 
