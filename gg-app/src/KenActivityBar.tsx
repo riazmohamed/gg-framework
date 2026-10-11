@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { ThinkingOrb } from "thinking-orbs";
 import { theme } from "./theme";
-import { SPINNER_FRAMES, SPINNER_FRAME_MS, formatTokenCount } from "./ActivityBar";
+import { formatTokenCount } from "./ActivityBar";
+import { ShimmerText } from "./ShimmerText";
+import { useMotionLevel } from "./window-motion";
 
 function formatElapsed(ms: number): string {
   const s = Math.round(ms / 1000);
@@ -26,7 +29,7 @@ interface Props {
 
 /**
  * Ken Kai's activity bar. A 1:1 mirror of the GG Coder ActivityBar's running row
- * — same braille spinner, same `(elapsed · ↓ N tokens · thinking for Xs)` meta,
+ * — same listening orb, same `(elapsed · ↓ N tokens · thinking for Xs)` meta,
  * same statusrow layout + esc-to-cancel — just tinted to Ken and labelled "Ken
  * is thinking…". Stacks above the main bar while Ken runs concurrently, so its
  * own top border is dropped (the main bar keeps the divider).
@@ -39,23 +42,22 @@ export function KenActivityBar({
   thinkingAccumMs,
   onCancel,
 }: Props): React.ReactElement {
-  const [frame, setFrame] = useState(0);
+  const orbTintId = useId();
   // `now` is bumped every 250ms; the elapsed + thinking timers are derived from
   // it + the start timestamps, mirroring the ActivityBar's live-tick approach
   // without reading a ref during render.
   const [now, setNow] = useState(() => Date.now());
+  const motion = useMotionLevel();
 
+  // Hidden windows skip the ticks and catch up the moment they're shown.
   useEffect(() => {
-    const spin = setInterval(
-      () => setFrame((f) => (f + 1) % SPINNER_FRAMES.length),
-      SPINNER_FRAME_MS,
-    );
+    if (motion === "off") return;
+    setNow(Date.now());
     const tick = setInterval(() => setNow(Date.now()), 250);
     return () => {
-      clearInterval(spin);
       clearInterval(tick);
     };
-  }, []);
+  }, [motion]);
 
   const elapsed = runStartTs ? now - runStartTs : 0;
   const liveThinkingDelta = isThinking && thinkingStartTs ? now - thinkingStartTs : 0;
@@ -73,13 +75,30 @@ export function KenActivityBar({
   if (thinkingLabel) meta.push({ text: thinkingLabel, thinking: true });
 
   return (
-    <div className="statusrow running ken-statusrow" style={{ color: theme.textMuted }}>
+    <div className="statusrow running ken-statusrow dissolve-in" style={{ color: theme.textMuted }}>
       <span className="statusrow-left">
-        <span className="statusrow-icon spinner ken-spinner" style={{ color: theme.ken }}>
-          {SPINNER_FRAMES[frame]}
-        </span>
-        <span className="working" style={{ color: theme.ken }}>
-          {"Ken is thinking\u2026"}
+        {/* Tint the canvas alpha with Ken's existing color; the package has no color prop. */}
+        <svg width="0" height="0" aria-hidden="true" style={{ position: "absolute" }}>
+          <defs>
+            <filter id={orbTintId} colorInterpolationFilters="sRGB">
+              {/* In `style`, not the attribute: presentation attributes don't resolve var(). */}
+              <feFlood style={{ floodColor: theme.ken }} />
+              <feComposite in2="SourceAlpha" operator="in" />
+            </filter>
+          </defs>
+        </svg>
+        <ThinkingOrb
+          state="listening"
+          size={20}
+          theme="dark"
+          paused={motion !== "full"}
+          aria-hidden="true"
+          style={{ flexShrink: 0, filter: `url(#${orbTintId})` }}
+        />
+        <span style={{ color: theme.ken }}>
+          <ShimmerText base={theme.ken} bright={theme.text}>
+            {"Ken is thinking…"}
+          </ShimmerText>
         </span>
         <span style={{ color: theme.textMuted }}>
           {"("}

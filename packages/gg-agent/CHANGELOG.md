@@ -1,5 +1,311 @@
 # @abukhaled/gg-agent
 
+## 5.78.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.78.0
+
+## 5.77.0
+
+### Minor Changes
+
+- 60a2495: gg-ai can now make embeddings and rerank documents. `embed()` and `rerank()` work through the same provider registry as `stream()`, so apps doing retrieval no longer need their own HTTP calls. `embed()` batches long inputs at each provider's limit and returns one vector per input in input order. It throws instead of padding when the count or `dimensions` don't match, and `normalize: true` L2-normalizes the output. `rerank()` returns `{ index, score }` sorted best-first and checks every index. Embeddings are available for OpenAI, OpenRouter, Gemini (native API with an AI Studio key) and local servers. Reranking is available for OpenRouter and local llama.cpp/vLLM servers. The `palsu` fake provider gets deterministic embed and rerank fakes for tests. Custom providers can add `embed`/`rerank` next to `stream`, and `providerRegistry.supports(name, "embed")` reports what a provider offers. Calling either API on a provider without it (such as Anthropic) throws a `"capability"` error. A new `providerOptions` field passes provider-specific body fields, such as OpenRouter's `provider: { zdr: true }`, to `stream()`, `embed()` and `rerank()` without overriding fields gg-ai sets. gg-agent now forwards `providerOptions` and `fetch` to every model request.
+
+### Patch Changes
+
+- Updated dependencies [60a2495]
+  - @abukhaled/gg-ai@5.77.0
+
+## 5.76.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.76.0
+
+## 5.75.1
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.75.1
+
+## 5.75.0
+
+### Patch Changes
+
+- 4f763ed: Packages now declare Node.js 22 or newer as their supported runtime, matching what CI tests. `ggcoder` no longer ships its internal benchmark scripts in the npm tarball, and `gg-core` now has a README covering the model registry, auth storage and local-model discovery.
+- Updated dependencies [4f763ed]
+  - @abukhaled/gg-ai@5.75.0
+
+## 5.74.3
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.74.3
+
+## 5.74.2
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.74.2
+
+## 5.74.1
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.74.1
+
+## 5.74.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.74.0
+
+## 5.73.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.73.0
+
+## 5.72.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.72.0
+
+## 5.71.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.71.0
+
+## 5.70.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.70.0
+
+## 5.69.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.69.0
+
+## 5.68.1
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.68.1
+
+## 5.68.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.68.0
+
+## 5.67.1
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.67.1
+
+## 5.67.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.67.0
+
+## 5.66.4
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.66.4
+
+## 5.66.3
+
+### Patch Changes
+
+- Updated dependencies [946c459]
+  - @abukhaled/gg-ai@5.66.3
+
+## 5.66.2
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.66.2
+
+## 5.66.1
+
+### Patch Changes
+
+- Updated dependencies [7dd643f]
+  - @abukhaled/gg-ai@5.66.1
+
+## 5.66.0
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [331e868]
+  - @abukhaled/gg-ai@5.66.0
+
+## 5.65.1
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.65.1
+
+## 5.65.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.65.0
+
+## 5.64.3
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.64.3
+
+## 5.64.2
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.64.2
+
+## 5.64.1
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.64.1
+
+## 5.64.0
+
+### Patch Changes
+
+- Updated dependencies [4800b0f]
+  - @abukhaled/gg-ai@5.64.0
+
+## 5.63.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.63.0
+
+## 5.62.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.62.0
+
+## 5.61.1
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.61.1
+
+## 5.61.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.61.0
+
+## 5.60.9
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.60.9
+
+## 5.60.8
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.60.8
+
+## 5.60.7
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.60.7
+
+## 5.60.6
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.60.6
+
+## 5.60.5
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.60.5
+
+## 5.60.4
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.60.4
+
+## 5.60.3
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.60.3
+
+## 5.60.2
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.60.2
+
+## 5.60.1
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.60.1
+
+## 5.60.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.60.0
+
+## 5.59.4
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.59.4
+
+## 5.59.3
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.59.3
+
+## 5.59.2
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.59.2
+
+## 5.59.1
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.59.1
+
+## 5.59.0
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.59.0
+
+## 5.58.1
+
+### Patch Changes
+
+- @abukhaled/gg-ai@5.58.1
+
 ## 5.58.0
 
 ### Patch Changes

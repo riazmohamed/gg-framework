@@ -6,6 +6,7 @@ import type {
   KenTurnPayload,
 } from "./session-manager.js";
 import { STEERING_PREFIX, NOTIFICATION_PREFIX } from "./steering.js";
+import { matchPromptCommand } from "./prompt-command-expansion.js";
 import { AUTOPILOT_INJECTION_PREAMBLE } from "./autopilot-cycle.js";
 
 export type HistoryMessageVisibility = "transcript" | "hidden" | "summary";
@@ -439,10 +440,6 @@ export function restoreUserRow(
 // A `/name` command is expanded before it reaches the model, so the persisted
 // user message is the FULL template body — not the short chip the user saw.
 
-/** Separator AgentSession.prompt() inserts between a command's prompt body and
- *  the user's trailing args. Must stay in sync with the expansion there. */
-const COMMAND_ARGS_SEP = "\n\n## User Instructions\n\n";
-
 /**
  * Reverse a prompt-template command's expansion by matching the restored body
  * against the known templates.
@@ -457,15 +454,9 @@ export function detectPromptCommand(
   text: string,
   candidates: ReadonlyArray<{ name: string; prompt: string }>,
 ): string | null {
-  for (const c of candidates) {
-    if (!c.prompt) continue;
-    if (text === c.prompt) return `/${c.name}`;
-    if (text.startsWith(c.prompt + COMMAND_ARGS_SEP)) {
-      const args = text.slice(c.prompt.length + COMMAND_ARGS_SEP.length).trim();
-      return args ? `/${c.name} ${args}` : `/${c.name}`;
-    }
-  }
-  return null;
+  const match = matchPromptCommand(text, candidates);
+  if (!match) return null;
+  return `/${match.command.name}${match.args ? ` ${match.args}` : ""}`;
 }
 
 /**
@@ -486,6 +477,30 @@ export function resolveRestoredCommand(
     return persistedCommand.trim();
   }
   return detectPromptCommand(text, candidates);
+}
+
+/**
+ * Recover the on-disk paths of tool-produced images from the tool result's
+ * text block. Live SSE carries them in `details.imagePreviews`, but that is
+ * never persisted — on resume this text is the only source, and without a
+ * path a restored image isn't clickable. Formats (paths may contain spaces):
+ *   read:           "Read image file <path> [<mediaType>]..."
+ *   screenshot:     "Captured <url> → <path> [<mediaType>] (...)"
+ *   generate_image: "Generated image → <path>"
+ *                   "Generated N images → <path>, <path>" (first = primary;
+ *                   only the primary's pixels are persisted)
+ */
+export function extractToolImagePaths(text: string): string[] {
+  const read = /^Read image file (.+?) \[[^\]\s]+\]/.exec(text);
+  if (read?.[1]) return [read[1]];
+  const captured = /^Captured .* → (.+?) \[[^\]\s]+\]/.exec(text);
+  if (captured?.[1]) return [captured[1]];
+  const trimmed = text.trim();
+  const single = /^Generated image → (.+)$/.exec(trimmed);
+  if (single?.[1]) return [single[1]];
+  const multiple = /^Generated \d+ images → (.+)$/.exec(trimmed);
+  if (multiple?.[1]) return multiple[1].split(", ").filter((p) => p.length > 0);
+  return [];
 }
 
 /**

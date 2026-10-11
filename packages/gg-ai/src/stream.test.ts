@@ -13,7 +13,7 @@ describe("localWireModelId", () => {
 
   it("leaves non-local ids untouched", () => {
     expect(localWireModelId("claude-sonnet-5")).toBe("claude-sonnet-5");
-    expect(localWireModelId("qwen/qwen3.6-plus")).toBe("qwen/qwen3.6-plus");
+    expect(localWireModelId("qwen/qwen3.8-max")).toBe("qwen/qwen3.8-max");
   });
 });
 
@@ -123,6 +123,57 @@ describe("provider wire boundary", () => {
       const tool = captured?.messages[1] as { content: { content: string }[] } | undefined;
       expect(user?.content).toBe("read a file \uFFFD");
       expect(tool?.content[0]?.content).toBe("\uFFFD output");
+    } finally {
+      providerRegistry.unregister("wire-capture");
+    }
+  });
+
+  it("drops a malformed tool call and its result before provider dispatch", () => {
+    let captured: StreamOptions | undefined;
+    const sentinel = new Error("captured");
+    providerRegistry.register("wire-capture", {
+      stream: (options) => {
+        captured = options;
+        throw sentinel;
+      },
+    });
+
+    try {
+      expect(() =>
+        stream({
+          provider: "wire-capture" as StreamOptions["provider"],
+          model: "test",
+          messages: [
+            { role: "user", content: "go" },
+            {
+              role: "assistant",
+              content: [
+                { type: "text", text: "calling" },
+                { type: "tool_call", id: "bad", name: 'bash {"cmd":"ls"}', args: {} },
+                { type: "tool_call", id: "ok", name: "read", args: {} },
+              ],
+            },
+            {
+              role: "tool",
+              content: [
+                { type: "tool_result", toolCallId: "bad", content: "x" },
+                { type: "tool_result", toolCallId: "ok", content: "y" },
+              ],
+            },
+          ],
+        }),
+      ).toThrow(sentinel);
+      expect(captured?.messages).toEqual([
+        { role: "user", content: "go" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "calling" },
+            { type: "tool_call", id: "ok", name: "read", args: {} },
+          ],
+        },
+        { role: "tool", content: [{ type: "tool_result", toolCallId: "ok", content: "y" }] },
+      ]);
     } finally {
       providerRegistry.unregister("wire-capture");
     }

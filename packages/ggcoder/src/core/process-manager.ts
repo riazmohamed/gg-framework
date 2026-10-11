@@ -18,6 +18,8 @@ export interface BackgroundProcess {
   startedAt: number;
   exitCode: number | null;
   lastReadOffset: number;
+  /** Unread one-shot wake, retained even if it fired before task_output waited. */
+  wakeReason?: "pattern" | "silence";
   /**
    * Last known size of `logFile` in bytes. Kept current by the progress
    * watcher, the exit handler and every `readOutput`, so consumers (notably
@@ -62,7 +64,7 @@ const BG_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const WATCH_INTERVAL_MS = 5_000;
 /** Tick for model-declared wake rules (match/silence). Cheap: one stat + a
  * bounded tail read, so a flat interval (no backoff) is fine. */
-const WAKE_INTERVAL_MS = 5_000;
+const WAKE_INTERVAL_MS = 500;
 /** Ceiling on the progress interval as it backs off between reports. */
 const WATCH_INTERVAL_MAX_MS = 120_000;
 /**
@@ -93,9 +95,12 @@ const WATCH_INTERVAL_MAX_MS = 120_000;
 const WATCH_MAX_REPORTS = 3;
 /** Chars of log tail carried in a progress checkpoint. */
 const CHECKPOINT_TAIL_CHARS = 320;
-/** Ceiling on a single blocking `waitForExit`, so one wedged process cannot
+/** Ceiling on a single blocking `waitForExitOrWake`, so one wedged process cannot
  *  hold the agent loop indefinitely; callers re-wait if they still want to. */
 export const MAX_PROCESS_WAIT_MS = 600_000;
+/** Output a foreground command produced before {@link ProcessManager.adopt} that
+ *  is kept in its log; the rest was already shown to nobody and only costs disk. */
+const ADOPTED_PRIOR_OUTPUT_BYTES = 1024 * 1024;
 /** Chars of the matched log line carried in a pattern-wake notification. */
 const WAKE_LINE_CHARS = 200;
 
@@ -181,6 +186,9 @@ export interface ProcessManagerOps {
 }
 
 function stopProcessTree(pid: number, ops: ProcessManagerOps = {}): void {
+  // pid 0 marks a child that never spawned. Signalling 0 (or -0) would hit
+  // this host's own process group.
+  if (pid <= 0) return;
   if (ops.killProcessTree) {
     ops.killProcessTree(pid);
     return;
@@ -275,7 +283,9 @@ export class ProcessManager {
     // otherwise emit an unhandled 'error' and crash the host.
     child.stdin?.on("error", () => {});
 
-    const pid = child.pid!;
+    // No pid means the spawn failed. 'error' then 'close' still fire, and track()
+    // records the exit, so register it with pid 0, which every kill path skips.
+    const pid = child.pid ?? 0;
     child.unref();
 
     const proc: BackgroundProcess = {
@@ -288,7 +298,70 @@ export class ProcessManager {
       lastReadOffset: 0,
       logSize: 0,
     };
+    return this.track(child, proc, wake);
+  }
 
+  /**
+   * Take over a foreground command that is still running, so the caller can
+   * return without killing it. Output captured so far seeds the log (its last
+   * {@link ADOPTED_PRIOR_OUTPUT_BYTES} only); later stdout/stderr is appended
+   * as it arrives. The process keeps its cwd and environment because it is the
+   * same process. Its stdin was never a pipe, so `sendInput` reports it closed.
+   *
+   * Synchronous on purpose: the caller hands over a live child whose 'close'
+   * has not fired yet, and an `await` here could let it fire unobserved.
+   */
+  adopt(child: ChildProcess, command: string, startedAt: number, priorOutput: Buffer): StartResult {
+    fs.mkdirSync(this.bgDir, { recursive: true });
+    void this.pruneOldLogs();
+
+    const id = crypto.randomUUID().slice(0, 8);
+    const logFile = path.join(this.bgDir, `${id}.log`);
+    const prior =
+      priorOutput.length > ADOPTED_PRIOR_OUTPUT_BYTES
+        ? Buffer.concat([
+            Buffer.from(
+              `[earlier output dropped; last ${ADOPTED_PRIOR_OUTPUT_BYTES / 1024 / 1024} MiB kept]\n`,
+            ),
+            priorOutput.subarray(priorOutput.length - ADOPTED_PRIOR_OUTPUT_BYTES),
+          ])
+        : priorOutput;
+    const fd = fs.openSync(logFile, "w");
+    fs.writeSync(fd, prior);
+    // Synchronous appends keep the log ordered and complete by the time
+    // 'close' fires, which the exit bookkeeping and waiters rely on.
+    const append = (data: Buffer): void => {
+      try {
+        fs.writeSync(fd, data);
+      } catch {
+        // Disk full or log removed: drop output rather than crash the host.
+      }
+    };
+    child.stdout?.on("data", append);
+    child.stderr?.on("data", append);
+    child.once("close", () => fs.closeSync(fd));
+    // Never hold the host's event loop open for a process it no longer awaits.
+    child.unref();
+    for (const stream of [child.stdout, child.stderr]) {
+      (stream as { unref?: () => void } | null)?.unref?.();
+    }
+
+    const proc: BackgroundProcess = {
+      id,
+      pid: child.pid ?? 0,
+      command,
+      logFile,
+      startedAt,
+      exitCode: null,
+      lastReadOffset: 0,
+      logSize: prior.length,
+    };
+    return this.track(child, proc);
+  }
+
+  /** Register a running child and arm its exit bookkeeping and watchers. */
+  private track(child: ChildProcess, proc: BackgroundProcess, wake?: WakeRules): StartResult {
+    const { id, pid, logFile } = proc;
     this.processes.set(id, proc);
     this.children.set(id, child);
 
@@ -355,9 +428,9 @@ export class ProcessManager {
           // and disposeWatcher may already have cleared this entry.
           if (proc.exitCode !== null || !this.watchers.has(proc.id)) return;
           if (emitted && ++reports >= WATCH_MAX_REPORTS) {
-            // Budget spent: stop watching for good. `task_output` remains the
-            // way to inspect this process, and its exit still notifies.
-            this.disposeWatcher(proc.id);
+            // Retire generic progress only; declared readiness must still fire
+            // if a slow server finishes starting after this budget is spent.
+            this.disposeProgressWatcher(proc.id);
             return;
           }
           // Back off only on an actual report. A process that goes quiet must
@@ -528,6 +601,7 @@ export class ProcessManager {
     if (pattern && !state.matched && size > state.scanOffset) {
       const start = Math.max(0, state.scanOffset - overlap);
       const chunk = await this.readRange(proc.logFile, start, size);
+      if (proc.exitCode !== null || !this.wakeStates.has(proc.id)) return;
       state.scanOffset = size;
       const match = pattern.exec(chunk);
       if (match) {
@@ -548,6 +622,8 @@ export class ProcessManager {
             `pattern /${pattern.source}/: ${boundedLine(line)}. Still running — ` +
             `task_output id="${proc.id}" for full context.`,
         );
+        proc.wakeReason = "pattern";
+        this.children.get(proc.id)?.emit("gg:wake", proc.wakeReason);
       }
     }
 
@@ -560,6 +636,7 @@ export class ProcessManager {
       state.silenceFired = true;
       this.disposeProgressWatcher(proc.id);
       const tail = await this.readTail(proc.logFile, size);
+      if (proc.exitCode !== null || !this.wakeStates.has(proc.id)) return;
       queue.enqueue(
         "process",
         proc.id,
@@ -568,6 +645,8 @@ export class ProcessManager {
           `${tail ? `. Last output: ${tail}` : " (no output so far)"}. ` +
           `Check task_output id="${proc.id}" and decide whether to wait, send input, or stop it.`,
       );
+      proc.wakeReason = "silence";
+      this.children.get(proc.id)?.emit("gg:wake", proc.wakeReason);
     }
   }
 
@@ -604,7 +683,9 @@ export class ProcessManager {
   }
 
   /**
-   * Block until a background process exits, bounded by `timeoutMs`.
+   * Block until a process exits or a declared wake fires, bounded by `timeoutMs`.
+   * Steering notifications cannot interrupt a tool call; the wake must also
+   * release this wait directly so a ready dev server doesn't wait for shutdown.
    *
    * Without this, "wait for the build" can only be expressed as a guessed
    * `sleep N`: too short burns a turn, too long burns wall-clock, and neither
@@ -613,34 +694,38 @@ export class ProcessManager {
    * loop step to be delivered, which is exactly what an agent with nothing
    * else to do does not have.
    */
-  async waitForExit(
+  async waitForExitOrWake(
     id: string,
     timeoutMs: number,
     signal?: AbortSignal,
-  ): Promise<"exited" | "timeout" | "unknown"> {
+  ): Promise<"exited" | "timeout" | "unknown" | "pattern" | "silence"> {
     const proc = this.processes.get(id);
     if (!proc) return "unknown";
     const child = this.children.get(id);
     // Already terminal (or no live child tracked): nothing to wait on.
     if (!child || proc.exitCode !== null) return "exited";
     if (signal?.aborted) return "timeout";
+    if (proc.wakeReason) return proc.wakeReason;
     const bounded = Math.min(Math.max(timeoutMs, 0), MAX_PROCESS_WAIT_MS);
     return await new Promise((resolve) => {
-      const settle = (outcome: "exited" | "timeout"): void => {
+      const settle = (outcome: "exited" | "timeout" | "pattern" | "silence"): void => {
         clearTimeout(timer);
         child.off("close", onClose);
+        child.off("gg:wake", onWake);
         signal?.removeEventListener("abort", onAbort);
         resolve(outcome);
       };
       // Registered after start()'s own 'close' handler, so `exitCode` is
       // already set by the time this resolves.
       const onClose = (): void => settle("exited");
+      const onWake = (reason: "pattern" | "silence"): void => settle(reason);
       // Give up the wait when the caller is cancelled; the process itself is
       // left running — this only ends our observation of it.
       const onAbort = (): void => settle("timeout");
       const timer = setTimeout(() => settle("timeout"), bounded);
       timer.unref?.();
       child.once("close", onClose);
+      child.once("gg:wake", onWake);
       signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
@@ -656,6 +741,7 @@ export class ProcessManager {
       };
     }
 
+    delete proc.wakeReason;
     const offset = fromStart ? 0 : proc.lastReadOffset;
     let output = "";
 
@@ -732,6 +818,7 @@ export class ProcessManager {
     if (!child || proc.exitCode !== null) {
       return `Process ${id} already exited (code ${proc.exitCode})`;
     }
+    if (proc.pid <= 0) return `Process ${id} failed to start`;
 
     const isWindows = (this.ops.platform ?? process.platform) === "win32";
     if (isWindows) {

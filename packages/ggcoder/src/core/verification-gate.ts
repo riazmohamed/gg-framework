@@ -15,24 +15,10 @@
  * Authoritative success uses the stricter verification-evidence classifier
  * plus host-observed exit status and the revision captured at command start.
  * Missing or rejected evidence cannot clear outstanding verification.
- *
- * Second gate — TAMPER DISCLOSURE. A passing check only proves something if the
- * check itself was not the thing that changed. Editing a test, a test runner's
- * config, or adding a suppression pragma makes a red suite go green without
- * fixing anything, and the resulting transcript is byte-for-byte the shape of a
- * real fix: mutation, then `pnpm test`, then exit 0. So mutations that alter
- * what the check ASSERTS are recorded separately from ordinary code mutations,
- * and survive the verification they enabled — a check cannot clear the
- * suspicion that it was rigged.
- *
- * This gate DISCLOSES, it does not block: writing or repairing a test is normal,
- * legitimate work (TDD, adding coverage), so refusing to finish would punish the
- * common case. One demand per run: name what changed in the checks and why, and
- * confirm the fix stands without it.
  */
-import type { Message } from "@abukhaled/gg-ai";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import type { VerificationEvidence } from "./verification-evidence.js";
 
 export const VERIFICATION_STATE_KIND = "verification_state";
 const verificationStateSchema = z.object({
@@ -54,12 +40,6 @@ const verificationStateSchema = z.object({
   unknown: z.boolean(),
 });
 const checkKey = (command: string) => createHash("sha256").update(command.trim()).digest("hex");
-
-/** Initial demands per run; at most one separate post-verification recheck is allowed. */
-export const MAX_VERIFICATION_INJECTIONS = 1;
-
-/** Tamper-disclosure demands per run. Same reasoning as above: one is enough. */
-export const MAX_TAMPER_INJECTIONS = 1;
 
 /** Words that may precede the real command without changing its shape. */
 const SHELL_WRAPPERS = new Set([
@@ -327,162 +307,18 @@ export function isCheckOwnFile(filePath: string): boolean {
 }
 
 /**
- * Markers that silence or skip a check rather than satisfy it. Matched only
- * against text the model ADDED, so pre-existing suppressions in a file never
- * trip the gate.
- *
- * Deliberately limited to unambiguous intent (an explicit suppression pragma, a
- * skipped or narrowed test). Judgement calls that are ordinary in real test code
- * — `as any`, a loosened assertion — are NOT matched: at one extra model turn
- * per false positive, a noisy signal costs more than the rare miss.
- */
-const SUPPRESSION_MARKERS: ReadonlyArray<{ re: RegExp; what: string }> = [
-  { re: /@ts-(?:ignore|expect-error|nocheck)\b/, what: "TypeScript error suppression" },
-  { re: /eslint-disable(?:-next-line|-line)?\b/, what: "ESLint rule suppression" },
-  { re: /#\s*type:\s*ignore\b/, what: "mypy type-ignore" },
-  { re: /#\s*noqa\b/, what: "flake8/ruff noqa" },
-  { re: /#\s*(?:pylint|mypy|ruff):\s*disable\b/, what: "Python linter suppression" },
-  { re: /#\[allow\(/, what: "Rust allow attribute" },
-  { re: /\/\/\s*nolint\b/, what: "Go nolint directive" },
-  { re: /@SuppressWarnings\b/, what: "Java warning suppression" },
-  {
-    re: /\b(?:it|test|describe|context)\s*\.\s*(?:skip|todo)\s*\(/,
-    what: "skipped test",
-  },
-  { re: /\b(?:xit|xdescribe|xtest)\s*\(/, what: "skipped test" },
-  {
-    re: /\b(?:it|test|describe|context)\s*\.\s*only\s*\(/,
-    what: "test run narrowed to .only",
-  },
-  { re: /@pytest\.mark\.(?:skip|xfail)\b/, what: "skipped pytest case" },
-  { re: /\bt\.Skip\s*\(/, what: "skipped Go test" },
-  { re: /#\[ignore\]/, what: "ignored Rust test" },
-];
-
-/** The `+` lines of a unified diff, with the marker stripped. */
-export function extractAddedLines(diff: string): string {
-  return diff
-    .split("\n")
-    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
-    .map((line) => line.slice(1))
-    .join("\n");
-}
-
-/** Suppression/skip markers present in newly added text, de-duplicated. */
-export function detectCheckWeakening(addedText: string): string[] {
-  const found = new Set<string>();
-  for (const { re, what } of SUPPRESSION_MARKERS) {
-    if (re.test(addedText)) found.add(what);
-  }
-  return [...found];
-}
-
-/** A mutation that changed what a check asserts, and why it looked that way. */
-export interface SuspectMutation {
-  filePath: string;
-  reason: string;
-}
-
-export function buildTamperDisclosureMessage(suspects: readonly SuspectMutation[]): Message {
-  return {
-    role: "user",
-    provenance: { source: "runtime", kind: "completion_gate", visibility: "hidden" },
-    content:
-      "Verification gate: a check passed in this run, but this run also changed what the " +
-      "checks themselves assert:\n" +
-      suspects.map(({ filePath, reason }) => `- ${filePath} — ${reason}`).join("\n") +
-      "\nA check that was itself edited does not prove the code works. If these edits were " +
-      "legitimate (a new test, a test corrected against agreed behaviour, a suppression the " +
-      "user asked for), say so plainly in your final response and state why the fix stands " +
-      "without them. If instead the check was weakened, skipped, narrowed or silenced to get " +
-      "a green result, revert that now and fix the underlying code. This is the only time you " +
-      "will be asked — do not describe the change as verified without addressing this. " +
-      // A disclosure is not an answer: the user's pending question still needs
-      // a direct reply, or the turn spends itself on the gate alone.
-      "Whatever the user last asked still needs a direct answer in your final response — " +
-      "never reply with the disclosure alone.",
-  };
-}
-
-export function buildVerificationFollowUpMessage(
-  files: readonly string[],
-  recheck = false,
-  rejectedCheck?: { command: string; reason: string } | null,
-  invalidationCause?: string | null,
-): Message {
-  const noFiles = files.length === 0;
-  return {
-    role: "user",
-    provenance: { source: "runtime", kind: "completion_gate", visibility: "hidden" },
-    content:
-      (recheck
-        ? noFiles
-          ? "Verification gate: a command that can rewrite files" +
-            (invalidationCause ? ` (\`${invalidationCause}\`)` : "") +
-            " ran after the earlier verification, so its green check no longer proves the current state:\n"
-          : "Verification gate: code changed again after the earlier verification:\n"
-        : "Verification gate: current successful verification is missing for this run:\n") +
-      files.map((filePath) => `- ${filePath}`).join("\n") +
-      (noFiles ? "" : "\n") +
-      (recheck
-        ? noFiles
-          ? "Re-run the project's checks against the current state and address any failures. "
-          : "Re-run the affected checks against these changes and address any failures. "
-        : "Run the project's verification now (its test command, or the closest equivalent) and " +
-          "address any failures. ") +
-      "Do not describe the change as tested or working without having run it. " +
-      "There is no repeated reminder for unchanged code: if you cannot run it, say plainly in your final " +
-      "response which of these changes went unverified and why, so the user can check them." +
-      // Why a green run already in the transcript did not count. Without this,
-      // the agent re-ran the same untrusted command shape every turn and the
-      // gate never cleared — the user got verification status instead of
-      // answers on every prompt.
-      (rejectedCheck
-        ? `\nA check you ran did not count as verification evidence: \`${rejectedCheck.command}\` — ${rejectedCheck.reason}. ` +
-          "Green output from that command shape cannot clear this gate; run a bounded check instead " +
-          "(the project's test script via pnpm/npm/yarn test, vitest run, jest, pytest, or tsc --noEmit)."
-        : "") +
-      // The hijacked turn owes the user their answer too: verification status
-      // alone is not a reply.
-      " Whatever the user last asked still needs a direct answer in your final response — " +
-      "never reply with verification status alone." +
-      // Recheck-only: without this, the post-recheck answer re-prints the earlier
-      // turn's full checklist nearly verbatim — the "duplicate response" pattern
-      // (measured in experiments/prompt-bench/duplicate-summary-sim.ts).
-      (recheck
-        ? " This is a re-verification after a follow-up change, not a new report: the full " +
-          "checklist was already summarized earlier in this conversation. Do not repeat that " +
-          "summary or its structure. Once the affected checks pass again, reply briefly as a " +
-          "delta — name only the change that was just re-verified and confirm the checks still " +
-          'pass (for example: "Re-verified <change> — the affected checks still pass."). ' +
-          "Repeat the full checklist only if something actually broke."
-        : ""),
-  };
-}
-
-/**
- * Bookkeeping for "code was edited, nothing proved it since". Callers record
- * successful edit/write mutations on code files and host-observed check results.
- * Approval requires current successful evidence and no unresolved failures;
- * exhausting the reminder budget never clears the underlying problem.
+ * Bookkeeping for "code was edited, nothing proved it since".
+ * Callers record successful edit/write mutations on code files and
+ * host-observed check results. Passive evidence only: run status and
+ * autopilot read it; it never forces another model turn.
  */
 export class VerificationGate {
   private seq = 0;
   private lastMutationSeq = 0;
   private lastVerificationSeq = 0;
-  private injections = 0;
-  private recheckInjections = 0;
-  private lastDemandedMutationSeq = 0;
-  private tamperInjections = 0;
   private failedChecks = new Map<string, number>(); // checkKey → mutation revision at failure
   private passedChecks = new Map<string, number>();
   private unknownVerification = false;
-  /** A check the evidence classifier refused to vouch for, kept so the demand
-   *  can explain WHY a green run in the transcript did not clear the gate. */
-  private lastRejectedCheck: { command: string; reason: string } | null = null;
-  /** The file-rewriting command that last invalidated evidence, if any — named
-   *  in a recheck demand that has no tracked file edits to list instead. */
-  private lastInvalidationCause: string | null = null;
   /**
    * Did THIS run touch what the gate guards — a code mutation, or a check that
    * may have rewritten files? Inherited debt alone never re-arms the gate: a
@@ -493,33 +329,67 @@ export class VerificationGate {
   private runTouched = false;
   /** Code files mutated since the last verification — the gate's file list. */
   private mutatedFiles = new Set<string>();
-  /**
-   * Mutations that changed what a check asserts. Keyed by path so repeated edits
-   * to one file disclose once. Deliberately NOT cleared by recordVerification():
-   * the whole point is that the passing check cannot clear the suspicion that it
-   * was the thing edited.
-   */
-  private suspects = new Map<string, string>();
+  private evidenceRecords = new Map<string, VerificationEvidence & { revision: number }>();
+  private runEvidenceKeys = new Set<string>();
+  private runVerificationRequested = false;
 
-  /**
-   * @param addedText Text the model ADDED in this mutation (the `+` lines of a
-   * diff, or a written file's full content). Scanned for suppression and skip
-   * markers; omit it and only the path check applies.
-   */
-  recordMutation(filePath: string, addedText?: string): void {
+  recordVerificationAttempt(): void {
+    this.runVerificationRequested = true;
+  }
+
+  get checkedThisRun(): boolean {
+    return this.runVerificationRequested || this.runEvidenceKeys.size > 0;
+  }
+
+  get changedThisRun(): boolean {
+    return this.runTouched;
+  }
+
+  private rememberEvidence(
+    command: string,
+    status: VerificationEvidence["status"],
+    reason: string,
+    revision = this.revision,
+  ): void {
+    const key = checkKey(command);
+    if ((this.evidenceRecords.get(key)?.revision ?? -1) > revision) return;
+    this.runEvidenceKeys.add(key);
+    this.evidenceRecords.delete(key);
+    this.evidenceRecords.set(key, {
+      command: command.slice(0, 2000),
+      status,
+      reason: reason.slice(0, 1000),
+      revision,
+    });
+    if (this.evidenceRecords.size > 64) {
+      const oldest = this.evidenceRecords.keys().next().value;
+      if (oldest !== undefined) {
+        this.evidenceRecords.delete(oldest);
+        this.runEvidenceKeys.delete(oldest);
+      }
+    }
+  }
+
+  /** The same host-observed results used by the completion gate, not a second transcript verdict. */
+  evidence(scope: "workspace" | "run" = "workspace"): VerificationEvidence[] {
+    return [...this.evidenceRecords.entries()]
+      .filter(([key]) => scope === "workspace" || this.runEvidenceKeys.has(key))
+      .map(([, { revision, ...entry }]) =>
+        revision === this.revision
+          ? entry
+          : {
+              ...entry,
+              status: "rejected",
+              reason: "Superseded: result belongs to an earlier source revision",
+            },
+      );
+  }
+
+  recordMutation(filePath: string): void {
     this.lastMutationSeq = ++this.seq;
     this.runTouched = true;
     this.passedChecks.clear();
     this.mutatedFiles.add(filePath);
-
-    const reasons: string[] = [];
-    if (isCheckOwnFile(filePath)) reasons.push("edits a test or check configuration");
-    if (addedText) reasons.push(...detectCheckWeakening(addedText).map((what) => `adds ${what}`));
-    if (reasons.length === 0) return;
-    // Keep the fullest reason seen for this file rather than the newest.
-    const existing = this.suspects.get(filePath);
-    const merged = [...new Set([...(existing?.split("; ") ?? []), ...reasons])].join("; ");
-    this.suspects.set(filePath, merged);
   }
 
   get revision(): number {
@@ -529,6 +399,12 @@ export class VerificationGate {
   recordVerification(revision = this.revision, command = "verification"): void {
     // A check that started before a later edit cannot verify that edit.
     if (revision !== this.revision) return;
+    this.rememberEvidence(
+      command,
+      "passed",
+      "Host-observed successful exit at the current source revision",
+      revision,
+    );
     const key = checkKey(command);
     this.passedChecks.set(key, revision);
     // Eviction may require an extra check; it can never create an approval.
@@ -559,26 +435,24 @@ export class VerificationGate {
     // recordVerification, because it verified newer code.
     if ((this.passedChecks.get(key) ?? -1) > revision) return;
     this.failedChecks.set(key, revision);
+    this.rememberEvidence(command, "failed", "Host-observed unsuccessful exit", revision);
   }
 
-  requireFreshVerification(invalidateRevision = false, cause?: string): void {
+  requireFreshVerification(invalidateRevision = false): void {
+    this.runVerificationRequested = true;
     this.unknownVerification = true;
     if (invalidateRevision) {
       this.lastMutationSeq = ++this.seq;
       this.passedChecks.clear();
       this.runTouched = true; // the command may have rewritten files
-      this.lastInvalidationCause = cause?.trim().slice(0, 200) || null;
     }
   }
 
-  /** Remember a check shape the evidence classifier refused, for the demand's
-   *  explanation. Command text is model-authored: capped, never executed. */
+  /** Remember a check shape the evidence classifier refused. Command text is
+   *  model-authored: capped, never executed. */
   recordRejectedCheck(command: string, reason: string): void {
     if (!command.trim() || !reason.trim()) return;
-    this.lastRejectedCheck = {
-      command: command.trim().slice(0, 200),
-      reason: reason.trim().slice(0, 200),
-    };
+    this.rememberEvidence(command, "rejected", reason);
   }
 
   verificationProblem(): string | null {
@@ -634,14 +508,9 @@ export class VerificationGate {
   }
 
   beginRun(): void {
-    this.injections = 0;
-    this.recheckInjections = 0;
-    this.lastDemandedMutationSeq = 0;
-    this.tamperInjections = 0;
-    this.suspects.clear();
+    this.runEvidenceKeys.clear();
+    this.runVerificationRequested = false;
     this.runTouched = false;
-    this.lastRejectedCheck = null;
-    this.lastInvalidationCause = null;
   }
 
   isOwed(): boolean {
@@ -652,102 +521,17 @@ export class VerificationGate {
     );
   }
 
-  /**
-   * True when a check passed after the run altered what the checks assert —
-   * the false-green shape. Requires a verification to have completed: with none,
-   * the standard gate already demands one, and demanding disclosure of an
-   * unproven fix on top of it is noise.
-   */
-  isTamperOwed(): boolean {
-    return this.suspects.size > 0 && this.lastVerificationSeq > 0;
-  }
-
-  /** Suspect mutations recorded this run, sorted for stable output. */
-  tamperSuspects(): SuspectMutation[] {
-    return [...this.suspects]
-      .map(([filePath, reason]) => ({ filePath, reason }))
-      .sort((a, b) => a.filePath.localeCompare(b.filePath));
-  }
-
-  /**
-   * Would a stop right now inject? Lets the session arm clients BEFORE the
-   * candidate final answer streams, so the draft the injection replaces is held
-   * rather than painted and then superseded.
-   */
-  willInject(): boolean {
-    return this.pendingReason() !== null;
-  }
-
-  pendingReason(): "initial" | "recheck" | "tamper" | null {
-    // A run that neither edited code nor started a file-rewriting command
-    // cannot owe a NEW demand: inherited debt already had its turns, and
-    // re-arming here is what turned every later question prompt into a
-    // "Hook engaged" hijack. The debt itself stays recorded — the next run
-    // that edits code re-arms the demand as usual.
-    if (!this.runTouched) return null;
-    if (this.isOwed()) {
-      if (this.injections < MAX_VERIFICATION_INJECTIONS) {
-        return this.lastVerificationSeq > 0 && this.lastMutationSeq > this.lastVerificationSeq
-          ? "recheck"
-          : "initial";
-      }
-      // One extra pass only after the demanded check completed AND code changed
-      // again. Ignoring a prompt or editing without checking cannot re-arm it.
-      if (
-        this.recheckInjections === 0 &&
-        this.lastVerificationSeq > this.lastDemandedMutationSeq &&
-        this.lastMutationSeq > this.lastVerificationSeq
-      )
-        return "recheck";
-    }
-    if (this.isTamperOwed() && this.tamperInjections < MAX_TAMPER_INJECTIONS) return "tamper";
-    return null;
-  }
-
-  /**
-   * The blocking message for the pre-stop hook, or null when nothing is owed
-   * or its bounded budget is spent. A later edit after the demanded check gets
-   * one additional pass; unchanged/unverified work never repeats a reminder.
-   */
-  followUp(): Message[] | null {
-    // "Nothing proved this" outranks "the proof may be rigged": with no check
-    // run at all there is not yet a false green to disclose.
-    const reason = this.pendingReason();
-    if (reason === "initial" || reason === "recheck") {
-      if (this.injections < MAX_VERIFICATION_INJECTIONS) this.injections += 1;
-      if (reason === "recheck") this.recheckInjections += 1;
-      this.lastDemandedMutationSeq = this.lastMutationSeq;
-      return [
-        buildVerificationFollowUpMessage(
-          [...this.mutatedFiles].sort(),
-          reason === "recheck",
-          this.lastRejectedCheck,
-          this.lastInvalidationCause,
-        ),
-      ];
-    }
-    if (reason === "tamper") {
-      this.tamperInjections += 1;
-      return [buildTamperDisclosureMessage(this.tamperSuspects())];
-    }
-    return null;
-  }
-
   reset(): void {
     this.seq = 0;
     this.lastMutationSeq = 0;
     this.lastVerificationSeq = 0;
-    this.injections = 0;
-    this.recheckInjections = 0;
-    this.lastDemandedMutationSeq = 0;
-    this.tamperInjections = 0;
     this.mutatedFiles.clear();
-    this.suspects.clear();
     this.failedChecks.clear();
     this.passedChecks.clear();
+    this.evidenceRecords.clear();
+    this.runEvidenceKeys.clear();
+    this.runVerificationRequested = false;
     this.unknownVerification = false;
     this.runTouched = false;
-    this.lastRejectedCheck = null;
-    this.lastInvalidationCause = null;
   }
 }

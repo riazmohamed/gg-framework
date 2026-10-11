@@ -50,7 +50,9 @@ export default defineConfig({
   format: ["esm"],
   target: "es2022",
   platform: "node",
-  dts: true,
+  // tsup's dts step passes the deprecated `baseUrl` to TypeScript 6 (TS5101).
+  // Silence that for the dts step only, matching gg-ai / gg-agent.
+  dts: { compilerOptions: { ignoreDeprecations: "6.0" } },
   clean: true,
   sourcemap: true,
   splitting: true,

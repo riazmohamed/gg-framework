@@ -64,7 +64,7 @@ This doesn't help. It confuses the agent. More tool descriptions = more noise = 
 
 OG Coder ships with one MCP: [Grep](https://grep.dev). That's it. It lets the agent search across 1M+ public GitHub repos to verify implementations against real-world code. Correct API usage, library idioms, production patterns. One tool that actually makes the output better.
 
-You can still add your own MCPs if you need them. But start with less. You'll get better results.
+You can still add your own MCPs in `~/.gg/mcp.json` or `.gg/mcp.json`. But start with less. You'll get better results.
 
 ---
 

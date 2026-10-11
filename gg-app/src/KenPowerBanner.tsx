@@ -9,7 +9,10 @@
 // Pops in with the same scale+fade "flash" the app uses for its zoom-level HUD,
 // holds briefly, then dissolves back out — quick, decorative, non-interactive,
 // no lateral motion. Self-removes via `onDone` once the animation finishes so
-// the caller can just stop rendering it.
+// the caller can just stop rendering it. Ken's pixel face leads the line and
+// acts it out: he wakes up for "on" and nods off for "off".
+import { KenFace } from "./KenFace";
+
 interface Props {
   mode: "on" | "off";
   /** Fired once the flash animation finishes — unmount it here. */
@@ -22,8 +25,17 @@ export function KenPowerBanner({ mode, onDone }: Props): React.ReactElement {
       {/* Keyed on `mode` so flipping the toggle again mid-animation remounts
           this node instead of restyling it in place — the flash always plays
           from a clean start, even on a rapid on/off/on flip. */}
-      <div key={mode} className="ken-power-banner" onAnimationEnd={onDone}>
-        {mode === "on" ? "Ken is on." : "Ken is off."}
+      {/* The face animates inside the banner and animationend bubbles, so
+          only the banner's own flash may end it. */}
+      <div
+        key={mode}
+        className="ken-power-banner"
+        onAnimationEnd={(e) => {
+          if (e.target === e.currentTarget) onDone();
+        }}
+      >
+        <KenFace mood={mode} />
+        <span>{mode === "on" ? "Ken is on." : "Ken is off."}</span>
       </div>
     </div>
   );

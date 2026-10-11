@@ -50,7 +50,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
     globalSkillsDir: paths.skillsDir,
     projectDir: cwd,
   });
-  const { tools, processManager, lspManager } = await createTools(cwd, {
+  const { tools, processManager, lspManager, debugManager } = await createTools(cwd, {
     skills,
     provider,
     model,
@@ -70,6 +70,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   process.on("exit", () => {
     processManager.shutdownAll();
     lspManager?.shutdownAll();
+    debugManager?.shutdown();
   });
 
   // Initialize messages and session
@@ -117,7 +118,10 @@ export async function runInteractive(config: CliConfig): Promise<void> {
       threshold: savedSettings.compactThreshold,
       accountId: creds.accountId,
     });
-    if (savedSettings.autoCompact && shouldCompact(messages, contextWindow, policy.threshold)) {
+    if (
+      savedSettings.autoCompact &&
+      shouldCompact(messages, contextWindow, policy.threshold, undefined, policy.targetTokens)
+    ) {
       stdout.write("Compacting restored session...\n");
       const compactionAbort = new AbortController();
       const onSigint = () => compactionAbort.abort();

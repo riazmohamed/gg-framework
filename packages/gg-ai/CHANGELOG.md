@@ -1,5 +1,132 @@
 # @abukhaled/gg-ai
 
+## 5.78.0
+
+## 5.77.0
+
+### Minor Changes
+
+- 60a2495: gg-ai can now make embeddings and rerank documents. `embed()` and `rerank()` work through the same provider registry as `stream()`, so apps doing retrieval no longer need their own HTTP calls. `embed()` batches long inputs at each provider's limit and returns one vector per input in input order. It throws instead of padding when the count or `dimensions` don't match, and `normalize: true` L2-normalizes the output. `rerank()` returns `{ index, score }` sorted best-first and checks every index. Embeddings are available for OpenAI, OpenRouter, Gemini (native API with an AI Studio key) and local servers. Reranking is available for OpenRouter and local llama.cpp/vLLM servers. The `palsu` fake provider gets deterministic embed and rerank fakes for tests. Custom providers can add `embed`/`rerank` next to `stream`, and `providerRegistry.supports(name, "embed")` reports what a provider offers. Calling either API on a provider without it (such as Anthropic) throws a `"capability"` error. A new `providerOptions` field passes provider-specific body fields, such as OpenRouter's `provider: { zdr: true }`, to `stream()`, `embed()` and `rerank()` without overriding fields gg-ai sets. gg-agent now forwards `providerOptions` and `fetch` to every model request.
+
+## 5.76.0
+
+## 5.75.1
+
+## 5.75.0
+
+### Patch Changes
+
+- 4f763ed: Packages now declare Node.js 22 or newer as their supported runtime, matching what CI tests. `ggcoder` no longer ships its internal benchmark scripts in the npm tarball, and `gg-core` now has a README covering the model registry, auth storage and local-model discovery.
+
+## 5.74.3
+
+## 5.74.2
+
+## 5.74.1
+
+## 5.74.0
+
+## 5.73.0
+
+## 5.72.0
+
+## 5.71.0
+
+## 5.70.0
+
+## 5.69.0
+
+## 5.68.1
+
+## 5.68.0
+
+## 5.67.1
+
+## 5.67.0
+
+## 5.66.4
+
+## 5.66.3
+
+### Patch Changes
+
+- 946c459: Close six gaps found in the ecosystem scan. Secret redaction now hides the whole password in URLs with no username (`redis://:pw@host`) or an `@` inside the password, both of which previously leaked. ChatGPT-login replies cut off at the output limit now report `max_tokens` (so the agent continues them) instead of passing as finished, a stream that ends early is retried instead of running a tool call with cut-off arguments, and reasoning that only led into a dropped call is no longer replayed. `write` now refuses to overwrite a file the model has only partly read (offset/limit or the 2000-line cap) and names the unread lines, and clearing, rewinding, branching or resuming a conversation makes the model re-read files before changing them. `bash` no longer runs a command whose Stop arrived during sandbox setup, and no longer hangs until the timeout when a command leaves a process running with `&`. Invisible characters are stripped from AGENTS.md/CLAUDE.md, skills, agent files and custom commands before they reach the model. The OS sandbox library is updated to 0.0.78, which fixes a Linux race that could leave a protected file unprotected.
+
+## 5.66.2
+
+## 5.66.1
+
+### Patch Changes
+
+- 7dd643f: Fix GPT-6.1 Sol failing on ChatGPT (Codex) logins with "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account." The ChatGPT backend only serves GPT-6.1 Sol to Codex clients 0.159.0 and newer, while GG Coder still identified itself as Codex 0.155.1. It now reports Codex 0.159.1, the latest release.
+
+## 5.66.0
+
+### Minor Changes
+
+- Add GG Motion, the desktop app's video workspace: it plans, designs and renders MP4 videos from a prompt, using bundled fonts, music, sound effects, a style library and 3D, and designs every video from a shared motion-language guide rather than fixed templates. Motion is still a work in progress; `max` thinking gives the best results. Replace Claude Sonnet 5 with Claude Sonnet 5.5 (same 1M context and 128K output, now with `xhigh`) as the Anthropic default and compaction model. Sub-agent turns that stop on a loop error now fail instead of passing the child's mid-task narration off as its answer, and the `read` tool's error explains that `offset` takes one line number, not a range.
+- 331e868: Replace GPT-6 Sol with GPT-6.1 Sol (`gpt-6.1-sol`, released 2026-09-29). It keeps Sol's shape — 1.05M context on the public Responses API, 272K on the ChatGPT OAuth/Codex route, 128K output, text+image input, $2/$10 per MTok (cached input $0.10) — but now starts at `low` effort, matching OpenAI's Codex catalog. It runs the full ladder up to `ultra`, where it gets the proactive async-subagent orchestration prompt.
+
+  GPT-6.1 Sol is the new OpenAI default (registry, CLI, benchmarks), and GPT-6 Luna stays the fast subagent model. The login hub, footer names, README, and the "not in catalog" error hint now say GPT-6.1 Sol. `gpt-6-sol` is retired: a saved session still on it falls back to the provider default on next start. GPT-6 ids with a point release (`gpt-6.1-*`) now get the Codex responses-lite transport and the six-rung effort ladder; a bare `gpt-6-` prefix check would have missed them.
+
+## 5.65.1
+
+## 5.65.0
+
+## 5.64.3
+
+## 5.64.2
+
+## 5.64.1
+
+## 5.64.0
+
+### Minor Changes
+
+- 4800b0f: Add GPT-6 Sol (`gpt-6-sol`) and GPT-6 Luna (`gpt-6-luna`), released 2026-09-22, and retire the GPT-5.6 family (Sol, Terra, Luna). There is no GPT-6 Terra — OpenAI's Codex catalog upgrades 5.6 Terra to 6 Sol. Both new models get 1.05M context on the public Responses API and 272K on the ChatGPT OAuth/Codex route, 128K output, text+image input, and the responses-lite transport. Sol costs $2/$10 per MTok, defaults to `medium` effort, and runs the full ladder up to `ultra`, where it gets the proactive async-subagent orchestration prompt. Luna costs $0.10/$0.50 per MTok, defaults to `medium`, and tops out at `max`.
+
+  GPT-6 Sol is now the OpenAI default (registry, CLI, benchmarks), and GPT-6 Luna is the fast model for subagents. The login hub, footer names, README, and the "not in catalog" error hint list GPT-6 Astra, Sol, and Luna. A saved session still on a GPT-5.6 id falls back to the provider default on next start.
+
+## 5.63.0
+
+## 5.62.0
+
+## 5.61.1
+
+## 5.61.0
+
+## 5.60.9
+
+## 5.60.8
+
+## 5.60.7
+
+## 5.60.6
+
+## 5.60.5
+
+## 5.60.4
+
+## 5.60.3
+
+## 5.60.2
+
+## 5.60.1
+
+## 5.60.0
+
+## 5.59.4
+
+## 5.59.3
+
+## 5.59.2
+
+## 5.59.1
+
+## 5.59.0
+
+## 5.58.1
+
 ## 5.58.0
 
 ## 5.57.2

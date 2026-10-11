@@ -26,11 +26,11 @@ afterEach(async () => {
 // these flaked intermittently on a busy machine. Give them honest headroom.
 const INIT_TIMEOUT_MS = 30_000;
 
-describe("Sol/Terra async orchestration policy", () => {
+describe("Astra/Sol async orchestration policy", () => {
   it(
     "injects proactive named-tool guidance only at Ultra",
     async () => {
-      const prompt = await systemPrompt("gpt-5.6-sol", "ultra");
+      const prompt = await systemPrompt("gpt-6.1-sol", "ultra");
       expect(prompt).toContain("Proactively use spawn_agent");
       expect(prompt).toContain("Start every independent child before calling wait_agent");
       expect(prompt).toContain("disjoint files or subsystems");
@@ -41,7 +41,7 @@ describe("Sol/Terra async orchestration policy", () => {
   it(
     "injects explicit-request-only guidance below Ultra",
     async () => {
-      const prompt = await systemPrompt("gpt-5.6-terra", "high");
+      const prompt = await systemPrompt("gpt-6.1-sol", "high");
       expect(prompt).toContain(
         "only when the user or applicable project/skill instructions explicitly request",
       );
@@ -50,10 +50,29 @@ describe("Sol/Terra async orchestration policy", () => {
     INIT_TIMEOUT_MS,
   );
 
+  it.each(["gpt-6-astra", "gpt-6.1-sol"])(
+    "refreshes %s delegation policy when Ultra is enabled and disabled",
+    async (model) => {
+      await systemPrompt(model, "high");
+      const session = sessions.at(-1);
+      if (!session) throw new Error("Expected initialized session");
+      session.setThinkingLevel("ultra");
+      const ultra = String(session.getMessages()[0]?.content ?? "");
+      expect(ultra).toContain("Proactively use spawn_agent");
+      expect(ultra).not.toContain("only when the user");
+      session.setThinkingLevel("high");
+      const high = String(session.getMessages()[0]?.content ?? "");
+      expect(high).not.toContain("Proactively use spawn_agent");
+      expect(high).toContain("only when the user");
+      expect(high.match(/## Async subagent orchestration/g)).toHaveLength(1);
+    },
+    INIT_TIMEOUT_MS,
+  );
+
   it(
     "leaves other models unchanged",
     async () => {
-      await expect(systemPrompt("gpt-5.5-codex", "ultra")).resolves.toBe("base prompt");
+      await expect(systemPrompt("gpt-6-luna", "ultra")).resolves.toBe("base prompt");
     },
     INIT_TIMEOUT_MS,
   );

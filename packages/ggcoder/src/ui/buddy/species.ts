@@ -15,14 +15,7 @@ export type Rarity = "common" | "uncommon" | "rare" | "epic" | "legendary";
 export type EyeStyle = "\u00B7" | "\u2726" | "\u00D7" | "\u25C9" | "@" | "\u00B0";
 
 export type Hat =
-  | "none"
-  | "crown"
-  | "tophat"
-  | "propeller"
-  | "halo"
-  | "wizard"
-  | "beanie"
-  | "tinyduck";
+  "none" | "crown" | "tophat" | "propeller" | "halo" | "wizard" | "beanie" | "tinyduck";
 
 export type Species =
   | "duck"

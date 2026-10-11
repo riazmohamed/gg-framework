@@ -251,6 +251,10 @@ describe("classifyOverload", () => {
       new ProviderError("anthropic", "Bad Gateway", { statusCode: 502 }),
       new ProviderError("anthropic", "Service Unavailable", { statusCode: 503 }),
       new ProviderError("anthropic", "Gateway Timeout", { statusCode: 504 }),
+      // Cloudflare edge errors in front of the provider (an HTML body, no api_error).
+      ...[520, 521, 522, 523, 524].map(
+        (statusCode) => new ProviderError("anthropic", "<!DOCTYPE html><html>", { statusCode }),
+      ),
       new ProviderError("openai", "exceeded request buffer limit while retrying upstream", {
         statusCode: 507,
       }),
@@ -451,7 +455,7 @@ describe("agentLoop", () => {
 
     await collectLoop([{ role: "user", content: "test" }], {
       provider: "openai",
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       transportSessionId: "transport-session",
       promptCacheKey: "shared-cache-family",
       toolChoice: "none",
@@ -464,6 +468,34 @@ describe("agentLoop", () => {
         toolChoice: "none",
       }),
     );
+  });
+
+  it("forwards providerOptions and fetch to stream()", async () => {
+    mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+    const customFetch = vi.fn() as unknown as typeof globalThis.fetch;
+    const providerOptions = { provider: { zdr: true, data_collection: "deny" } };
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "openrouter",
+      model: "some/model",
+      providerOptions,
+      fetch: customFetch,
+    });
+
+    expect(mockStream).toHaveBeenCalledWith(
+      expect.objectContaining({ providerOptions, fetch: customFetch }),
+    );
+  });
+
+  it("forwards prepared-context observation without retaining provider payloads", async () => {
+    mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+    const onContextPrepared = vi.fn();
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "anthropic",
+      model: "claude-test",
+      onContextPrepared,
+    });
+    expect(mockStream).toHaveBeenCalledWith(expect.objectContaining({ onContextPrepared }));
   });
 
   it("calls transformContext before each LLM call", async () => {
@@ -1057,6 +1089,96 @@ describe("agentLoop", () => {
     expect(events.some((event) => event.type === "agent_done")).toBe(true);
   });
 
+  it.each([
+    {
+      name: "a pause inside an open tool call",
+      before: [
+        { type: "text_delta" as const, text: "Editing." },
+        { type: "toolcall_delta" as const, id: "t1", name: "edit", argsJson: '{"a":' },
+      ],
+      pauseMs: 240_000,
+    },
+    {
+      name: "silent thinking past five minutes",
+      before: [{ type: "thinking_delta" as const, text: "" }],
+      pauseMs: 400_000,
+    },
+  ])("does not abort $name", async ({ before, pauseMs }) => {
+    vi.useFakeTimers();
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          for (const e of before) yield e;
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(resolve, pauseMs);
+            opts.signal?.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+              },
+              { once: true },
+            );
+          });
+          yield { type: "text_delta" as const, text: "Done." };
+        },
+        response: Promise.resolve(makeResponse("Done.")),
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    const loopPromise = collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "go" },
+      ],
+      { provider: "anthropic", model: "test", thinking: "high" },
+    );
+    await vi.advanceTimersByTimeAsync(pauseMs + 1_000);
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    expect(mockStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === "retry")).toBe(false);
+    expect(events.some((event) => event.type === "agent_done")).toBe(true);
+  });
+
+  it("still retries a stall after output when no tool call is open", async () => {
+    vi.useFakeTimers();
+    let call = 0;
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      call++;
+      if (call > 1) return mockOkResult("Recovered") as unknown as ReturnType<typeof stream>;
+      const abortPromise = new Promise<never>((_, reject) => {
+        opts.signal?.addEventListener(
+          "abort",
+          () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          { once: true },
+        );
+      });
+      abortPromise.catch(() => {});
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: "text_delta" as const, text: "Partial" };
+          await abortPromise;
+        },
+        response: abortPromise,
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    const loopPromise = collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+    });
+    await vi.advanceTimersByTimeAsync(95_000);
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    const retry = events.find((event) => event.type === "retry");
+    expect(mockStream).toHaveBeenCalledTimes(2);
+    // The failed attempt kept the user waiting 90s, so the retry is shown.
+    expect(retry?.type === "retry" ? retry.silent : undefined).toBe(false);
+  });
+
   it("flips to non-streaming fallback after repeated stream stalls", async () => {
     vi.useFakeTimers();
 
@@ -1414,6 +1536,88 @@ describe("agentLoop", () => {
     expect(assistantTexts).not.toContain(tiny);
   }, 30_000);
 
+  it("cancels identical calls in one response but permits the same call next turn", async () => {
+    const args = z.object({ path: z.string(), flags: z.object({ a: z.number(), b: z.number() }) });
+    const execute = vi.fn(async () => "ran");
+    const tool: AgentTool<typeof args> = {
+      name: "change",
+      description: "change a file",
+      parameters: args,
+      execute,
+      executionMode: "sequential",
+    };
+    const response = (
+      content: { type: "tool_call"; id: string; name: string; args: object }[],
+    ) => ({
+      [Symbol.asyncIterator]: async function* () {
+        yield* [];
+      },
+      response: Promise.resolve({
+        message: { role: "assistant" as const, content },
+        stopReason: "tool_use",
+        usage: { inputTokens: 30, outputTokens: 10 },
+      }),
+    });
+    mockStream
+      .mockReturnValueOnce(
+        response([
+          {
+            type: "tool_call",
+            id: "a",
+            name: "change",
+            args: { path: "one", flags: { a: 1, b: 2 } },
+          },
+          {
+            type: "tool_call",
+            id: "b",
+            name: "change",
+            args: { flags: { b: 2, a: 1 }, path: "one" },
+          },
+          {
+            type: "tool_call",
+            id: "c",
+            name: "change",
+            args: { path: "two", flags: { a: 1, b: 2 } },
+          },
+          {
+            type: "tool_call",
+            id: "d",
+            name: "change",
+            args: { path: "one", flags: { a: 1, b: 2 } },
+          },
+        ]) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(
+        response([
+          {
+            type: "tool_call",
+            id: "e",
+            name: "change",
+            args: { path: "one", flags: { a: 1, b: 2 } },
+          },
+        ]) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "change" },
+    ];
+    const { events } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      tools: [tool],
+    });
+
+    expect(execute).toHaveBeenCalledTimes(4);
+    const cancelled = events.find(
+      (event) => event.type === "tool_call_end" && event.toolCallId === "b",
+    );
+    expect(cancelled).toMatchObject({ isError: true });
+    expect(messages.filter((message) => message.role === "tool")).toHaveLength(2);
+    expect(JSON.stringify(messages)).toContain("this call was not executed");
+  });
+
   it("runs parallel tools concurrently by default", async () => {
     const firstStarted = deferred();
     const releaseFirst = deferred();
@@ -1534,6 +1738,99 @@ describe("agentLoop", () => {
     );
 
     expect(calls).toEqual(["mutate:start", "mutate:end", "read_after"]);
+  });
+
+  it("ends a handoff before later batch tools, steering, or budget extensions can run", async () => {
+    const later = vi.fn(() => "should not run");
+    const getSteeringMessages = vi
+      .fn<() => Message[] | null>()
+      .mockReturnValueOnce(null)
+      .mockReturnValue([{ role: "user", content: "Queued while submitting" }]);
+    const getFollowUpMessages = vi.fn(() => null);
+    const onTurnBudgetExhausted = vi.fn(() => true);
+    mockStream.mockReturnValueOnce({
+      [Symbol.asyncIterator]: async function* () {
+        yield* [];
+      },
+      response: Promise.resolve({
+        message: {
+          role: "assistant" as const,
+          content: [
+            { type: "tool_call" as const, id: "submit", name: "handoff", args: {} },
+            { type: "tool_call" as const, id: "later", name: "mutate", args: {} },
+          ],
+        },
+        stopReason: "tool_use",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    } as unknown as ReturnType<typeof stream>);
+    const messages: Message[] = [{ role: "user", content: "Submit a plan for review." }];
+
+    const { events } = await collectLoop(messages, {
+      provider: "openai",
+      model: "test",
+      maxTurns: 1,
+      getSteeringMessages,
+      getFollowUpMessages,
+      onTurnBudgetExhausted,
+      tools: [
+        {
+          name: "handoff",
+          description: "Wait for approval",
+          parameters: emptyParams,
+          executionMode: "sequential",
+          execute: () => ({ content: "Awaiting review", endRun: true }),
+        },
+        { name: "mutate", description: "Later mutation", parameters: emptyParams, execute: later },
+      ],
+    });
+
+    expect(later).not.toHaveBeenCalled();
+    // The initial pre-provider poll is allowed; the queued message must stay
+    // queued instead of bypassing the review handoff after the tool finishes.
+    expect(getSteeringMessages).toHaveBeenCalledOnce();
+    expect(messages).not.toContainEqual({ role: "user", content: "Queued while submitting" });
+    expect(getFollowUpMessages).not.toHaveBeenCalled();
+    expect(onTurnBudgetExhausted).not.toHaveBeenCalled();
+    expect(mockStream).toHaveBeenCalledOnce();
+    expect(events.slice(-2)).toEqual([
+      { type: "checkpoint", turn: 1 },
+      { type: "agent_done", totalTurns: 1, totalUsage: { inputTokens: 10, outputTokens: 5 } },
+    ]);
+    expect(messages.at(-1)).toMatchObject({
+      role: "tool",
+      content: [
+        { toolCallId: "submit", content: "Awaiting review" },
+        {
+          toolCallId: "later",
+          content: expect.stringContaining("cancelled before it started"),
+          isError: true,
+        },
+      ],
+    });
+    expect(JSON.stringify(messages)).not.toContain("endRun");
+  });
+
+  it("honors a handoff from a parallel tool after the batch finishes", async () => {
+    mockStream.mockReturnValueOnce(
+      mockToolCallResult("handoff", { inputTokens: 10, outputTokens: 5 }) as unknown as ReturnType<
+        typeof stream
+      >,
+    );
+    const { events } = await collectLoop([{ role: "user", content: "Hand off" }], {
+      provider: "openai",
+      model: "test",
+      tools: [
+        {
+          name: "handoff",
+          description: "Hand off",
+          parameters: emptyParams,
+          execute: () => ({ content: "Review pending", endRun: true }),
+        },
+      ],
+    });
+    expect(mockStream).toHaveBeenCalledOnce();
+    expect(events.at(-1)).toMatchObject({ type: "agent_done", totalTurns: 1 });
   });
 
   it("tells a dispatched-then-aborted call apart from one that never started", async () => {
@@ -1778,6 +2075,70 @@ describe("agentLoop", () => {
     expect(result.totalTurns).toBe(3);
   });
 
+  it("counts one strike per response when parallel calls fail with the same invalid arguments", async () => {
+    // Haiku 5.5 sent ten broken `edit` calls in one response; counting each
+    // call ended the run before the model ever saw the error.
+    const brokenBatch = {
+      message: {
+        role: "assistant" as const,
+        // Distinct args (identical calls are deduplicated earlier), same error.
+        content: ["a", "b", "c", "d"].map((id, i) => ({
+          type: "tool_call" as const,
+          id,
+          name: "bash",
+          args: { command: 100 + i },
+        })),
+      },
+      stopReason: "tool_use",
+      usage: { inputTokens: 50, outputTokens: 25 },
+    };
+    const fixed = {
+      message: {
+        role: "assistant" as const,
+        content: [{ type: "tool_call" as const, id: "e", name: "bash", args: { command: "ls" } }],
+      },
+      stopReason: "tool_use",
+      usage: { inputTokens: 50, outputTokens: 25 },
+    };
+    const done = {
+      message: { role: "assistant" as const, content: [{ type: "text" as const, text: "done" }] },
+      stopReason: "end_turn",
+      usage: { inputTokens: 50, outputTokens: 5 },
+    };
+    for (const response of [brokenBatch, fixed, done]) {
+      mockStream.mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve(response),
+      } as unknown as ReturnType<typeof stream>);
+    }
+
+    const { events, result } = await collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "test" },
+      ],
+      {
+        provider: "anthropic",
+        model: "test",
+        tools: [
+          {
+            name: "bash",
+            description: "test",
+            parameters: z.object({ command: z.string() }),
+            execute: () => "ok",
+          },
+        ],
+      },
+    );
+
+    expect(events.filter((e) => e.type === "tool_call_end" && e.isError)).toHaveLength(4);
+    expect(events.filter((e) => e.type === "error")).toHaveLength(0);
+    expect(mockStream).toHaveBeenCalledTimes(3);
+    expect(result.totalTurns).toBe(3);
+  });
+
   it("auto-continues once after repeated EMPTY tool arguments, then stops if it recurs", async () => {
     // Empty args (`{}`) is the signature of a provider stream that closed the
     // tool_use block before ever sending argument tokens -- recoverable, so
@@ -1944,6 +2305,43 @@ describe("agentLoop", () => {
 
     expect(events.some((e) => e.type === "max_turns")).toBe(false);
     expect(events.some((e) => e.type === "agent_done")).toBe(true);
+  });
+});
+
+describe("agentLoop resolveTool", () => {
+  beforeEach(() => mockStream.mockReset());
+
+  it("runs a tool the model named before it was in the toolset", async () => {
+    const usage: Usage = { inputTokens: 1, outputTokens: 1 };
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("late_tool", usage) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+    const lateTool: AgentTool = {
+      name: "late_tool",
+      description: "loaded on demand",
+      parameters: emptyParams,
+      execute: () => "late result",
+    };
+    const tools: AgentTool[] = [];
+    const resolveTool = vi.fn((name: string) => {
+      if (name !== "late_tool") return undefined;
+      tools.push(lateTool);
+      return lateTool;
+    });
+
+    const { events } = await collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+      tools,
+      resolveTool,
+    });
+
+    const end = events.find((e) => e.type === "tool_call_end");
+    expect(end).toMatchObject({ isError: false, result: "late result" });
+    expect(resolveTool).toHaveBeenCalledWith("late_tool");
+    expect(tools.map((t) => t.name)).toEqual(["late_tool"]);
   });
 });
 

@@ -5,6 +5,7 @@ import {
   frameAutopilotInjection,
   AUTOPILOT_INJECTION_PREAMBLE,
   AUTOPILOT_PLAN_DRAFTING_REASON,
+  AUTOPILOT_VERIFY_PROMPT,
   type AutopilotCycleDeps,
   type AutopilotCycleEmit,
 } from "./autopilot-cycle.js";
@@ -84,16 +85,45 @@ function pendingFlag(initial = true): { get: () => boolean; set: (v: boolean) =>
 }
 
 describe("host verification control", () => {
-  it("blocks unverified work before spending a reviewer call", async () => {
+  it("asks once for checks, then hands still-unverified work back before any review", async () => {
     const deps = makeDeps([{ kind: "all_clear" }], {
       verificationProblem: () => "Unverified: current checks are missing.",
     });
     await driveAutopilotCycle(deps);
+    expect(deps.ran).toEqual([AUTOPILOT_VERIFY_PROMPT]);
     expect(deps.review).not.toHaveBeenCalled();
     expect(deps.resetReviewer).not.toHaveBeenCalled();
     expect(deps.emitted).toEqual([
       { type: "autopilot_human", data: { reason: "Unverified: current checks are missing." } },
     ]);
+  });
+
+  it("does not ask for checks while a plan is pending (plan mode cannot run them)", async () => {
+    const deps = makeDeps([{ kind: "all_clear" }], {
+      verificationProblem: () => "Unverified: current checks are missing.",
+      planPending: () => true,
+    });
+    await driveAutopilotCycle(deps);
+    expect(deps.ran).toEqual([]);
+    expect(deps.emitted).toEqual([
+      { type: "autopilot_human", data: { reason: "Unverified: current checks are missing." } },
+    ]);
+  });
+
+  it("reviews work once the injected check run verifies it", async () => {
+    let problem: string | null = "Unverified: current checks are missing.";
+    const ran: string[] = [];
+    const deps = makeDeps([{ kind: "all_clear" }], {
+      verificationProblem: () => problem,
+      runPrompt: async (body: string) => {
+        ran.push(body);
+        problem = null;
+      },
+    });
+    await driveAutopilotCycle(deps);
+    expect(ran).toEqual([AUTOPILOT_VERIFY_PROMPT]);
+    expect(deps.review).toHaveBeenCalledTimes(1);
+    expect(deps.emitted.map((e) => e.type)).toEqual(["autopilot_done"]);
   });
 
   it("rejects ALL_CLEAR if verification becomes stale during the review", async () => {
@@ -366,7 +396,7 @@ describe("driveAutopilotCycle — plan branch", () => {
     expect(deps.emitted).toEqual([{ type: "autopilot_done", data: {} }]);
   });
 
-  it("IGNORE on a plan maps to approve (no user blocker for plans)", async () => {
+  it("IGNORE on a plan stops without accepting or implementing it", async () => {
     const pending = pendingFlag();
     const deps = makeDeps(
       [{ kind: "all_clear" }],
@@ -380,8 +410,18 @@ describe("driveAutopilotCycle — plan branch", () => {
       [{ kind: "ignore" }],
     );
     await driveAutopilotCycle(deps);
-    expect(deps.counters.implemented).toBe(1);
-    expect(deps.emitted).toEqual([{ type: "autopilot_done", data: {} }]);
+    expect(pending.get()).toBe(true);
+    expect(deps.counters.implemented).toBe(0);
+    expect(deps.review).not.toHaveBeenCalled();
+    expect(deps.injected).toEqual([]);
+    expect(deps.emitted).toEqual([
+      {
+        type: "autopilot_human",
+        data: {
+          reason: "Ken did not explicitly approve the plan. Review it before implementation.",
+        },
+      },
+    ]);
   });
 
   it("plan revision → resubmit → approve", async () => {
@@ -396,8 +436,10 @@ describe("driveAutopilotCycle — plan branch", () => {
           pending.set(false);
           return true;
         },
-        runPrompt: async (body) => {
+        runPrompt: async (body, opts) => {
           expect(body).toBe(revisionBody);
+          // Revisions run back in read-only plan mode (sidecar re-enters it).
+          expect(opts).toEqual({ planRevision: true });
           // Sidecar: injecting a revision clears pending; the run resubmits
           // via exit_plan, which re-sets it.
           pending.set(true);
@@ -448,6 +490,42 @@ describe("driveAutopilotCycle — plan branch", () => {
     expect(deps.emitted).toEqual([
       { type: "autopilot_human", data: { reason: "destructive migration needs a user call" } },
     ]);
+  });
+
+  it("does not implement when cancelled while plan acceptance is awaiting", async () => {
+    let cancelled = false;
+    let releaseAcceptance!: () => void;
+    let acceptanceEntered!: () => void;
+    const accepted = new Promise<void>((resolve) => {
+      releaseAcceptance = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      acceptanceEntered = resolve;
+    });
+    const acceptPlan = vi.fn(async () => {
+      acceptanceEntered();
+      await accepted;
+      return true;
+    });
+    const deps = makeDeps(
+      [],
+      {
+        planPending: () => true,
+        isCancelled: () => cancelled,
+        acceptPlan,
+      },
+      [{ kind: "all_clear" }],
+    );
+    const cycle = driveAutopilotCycle(deps);
+    await entered;
+    cancelled = true;
+    releaseAcceptance();
+    await cycle;
+    expect(acceptPlan).toHaveBeenCalledOnce();
+    expect(deps.counters.implemented).toBe(0);
+    expect(deps.review).not.toHaveBeenCalled();
+    expect(deps.emitted).toEqual([]);
+    expect(deps.injected).toEqual([]);
   });
 
   it("acceptPlan returning false (stale generation — user acted) exits silently", async () => {

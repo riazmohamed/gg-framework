@@ -15,6 +15,11 @@ import {
 
 const refreshOpenAIToken = vi.hoisted(() => vi.fn());
 vi.mock("./oauth/openai.js", () => ({ refreshOpenAIToken }));
+const refreshKimiToken = vi.hoisted(() => vi.fn());
+vi.mock("./oauth/kimi.js", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  refreshKimiToken,
+}));
 
 async function tempAuthFile(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-core-auth-storage-test-"));
@@ -140,6 +145,26 @@ describe("AuthStorage — shared-file concurrency", () => {
     // invalidates token-a server-side. Serving it from cache is what surfaced
     // as a random mid-session authentication_error.
     await new AuthStorage(filePath).setCredentials("openai", oauthCreds("token-b"));
+
+    expect((await sidecar.resolveCredentials("openai")).accessToken).toBe("token-b");
+    expect(refreshOpenAIToken).not.toHaveBeenCalled();
+  });
+
+  it("detects a rotated token when replacement size and mtime match the cached file", async () => {
+    const sidecar = await makeStorage();
+    const timestamp = new Date("2026-01-01T00:00:00Z");
+    await sidecar.setCredentials("openai", oauthCreds("token-a"));
+    await fs.utimes(sidecar.path, timestamp, timestamp);
+    await sidecar.load();
+    const before = await fs.stat(sidecar.path);
+    expect((await sidecar.resolveCredentials("openai")).accessToken).toBe("token-a");
+
+    await new AuthStorage(sidecar.path).setCredentials("openai", oauthCreds("token-b"));
+    await fs.utimes(sidecar.path, timestamp, timestamp);
+    const after = await fs.stat(sidecar.path);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.ino).not.toBe(before.ino);
 
     expect((await sidecar.resolveCredentials("openai")).accessToken).toBe("token-b");
     expect(refreshOpenAIToken).not.toHaveBeenCalled();
@@ -289,8 +314,31 @@ describe("AuthStorage — Xiaomi dual credential (Token Plan vs. API Credits)", 
     expect(creds.baseUrl).toBe("https://api.xiaomimimo.com/v1");
   });
 
+  it("refreshes an expired OAuth credential reached through storageKeys (Kimi K2.8 Preview)", async () => {
+    const storage = await makeStorage();
+    await storage.setCredentials(MOONSHOT_OAUTH_KEY, {
+      accessToken: "stale",
+      refreshToken: "kimi-refresh",
+      expiresAt: Date.now() - 1_000,
+      baseUrl: "https://api.kimi.com/coding/v1",
+    });
+    refreshKimiToken.mockResolvedValueOnce({
+      accessToken: "fresh",
+      refreshToken: "kimi-refresh-2",
+      expiresAt: Date.now() + 1_000_000,
+      baseUrl: "https://api.kimi.com/coding/v1",
+    });
+
+    const creds = await storage.resolveCredentials("moonshot", {
+      storageKeys: [MOONSHOT_OAUTH_KEY],
+    });
+
+    expect(refreshKimiToken).toHaveBeenCalledTimes(1);
+    expect(creds.accessToken).toBe("fresh");
+  });
+
   it("resolveCredentials prefers the first storageKey, falling back to the next when only that's configured", async () => {
-    // Mirrors mimo-v2.5-pro: prefer Token Plan ("xiaomi"), fall back to
+    // Mirrors mimo-v2.6-pro: prefer Token Plan ("xiaomi"), fall back to
     // API Credits when only that's configured.
     const tokenPlanOnly = await makeStorage();
     await tokenPlanOnly.setCredentials("xiaomi", {

@@ -23,7 +23,7 @@ export type GenerateImageAuth = {
  * provider uses for chat. ChatGPT OAuth tokens (from auth.openai.com PKCE flow)
  * are rejected by api.openai.com/v1/images/* (missing `api.model.images.request`
  * scope), but they work here. Image generation is done via the Responses API's
- * built-in `image_generation` tool, which the backend routes to gpt-image-2.
+ * built-in `image_generation` tool, with the image model selected on that tool.
  */
 const CODEX_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 /** Model that supports the image_generation Responses API tool. */
@@ -31,6 +31,13 @@ const IMAGE_GEN_MODEL = "gpt-5.5";
 
 const GenerateImageParams = z.object({
   prompt: z.string().describe("Text description of the image to generate or the edit to apply"),
+  model: z
+    .enum(["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"])
+    .optional()
+    .describe(
+      "Image model. Default: gpt-image-2.5-flare for fast, high-quality generation. " +
+        "Use gpt-image-2.5-sunburst when editing precision matters most.",
+    ),
   image: z
     .string()
     .optional()
@@ -43,7 +50,7 @@ const GenerateImageParams = z.object({
     .string()
     .optional()
     .describe(
-      "Output resolution. gpt-image-2 accepts any size where both edges are multiples " +
+      "Output resolution. GPT Image 2.5 accepts any size where both edges are multiples " +
         "of 16px, max edge ≤3840px, long:short ratio ≤3:1, total pixels 655,360–8,294,400. " +
         "Popular: 1024x1024, 1536x1024, 1024x1536, 2048x2048. Default: auto.",
     ),
@@ -72,9 +79,13 @@ const GenerateImageParams = z.object({
     .optional()
     .describe("Output file format (default png)"),
   background: z
-    .enum(["opaque", "auto"])
+    .enum(["opaque", "auto", "transparent"])
     .optional()
-    .describe("Background type (default auto; gpt-image-2 does not support transparent)"),
+    .describe(
+      "Background type (default auto). Use auto or opaque. Transparent is currently " +
+        "unsupported by the connected ChatGPT/Codex backend for both models and will " +
+        "be rejected locally. Do not retry transparent requests or switch models to bypass this.",
+    ),
 });
 
 type GenerateImageArgs = z.infer<typeof GenerateImageParams>;
@@ -99,7 +110,9 @@ export function createGenerateImageTool(
   return {
     name: "generate_image",
     description:
-      "Generate or edit images using OpenAI's gpt-image-2 model. Works even when a different " +
+      "Generate or edit images using OpenAI's GPT Image 2.5 models: Flare (default, fast) " +
+      "or Sunburst (precise editing). Transparent backgrounds are currently unsupported " +
+      "through this tool. Works even when a different " +
       "chat provider is active — only requires OpenAI to be connected. Only use this tool when " +
       "the user explicitly asks to create, generate, or edit an image. Pass `image` with a " +
       "file path to edit an existing image (e.g. a previously generated one or a user attachment). " +
@@ -110,6 +123,16 @@ export function createGenerateImageTool(
       context: ToolContext,
     ): Promise<string | StructuredToolResult> {
       if (context.signal.aborted) return "Image generation aborted before start.";
+      // Keep the legacy parameter value parseable so cached/repeated calls get
+      // actionable guidance instead of another backend 400 or schema retry.
+      if (args.background === "transparent") {
+        return (
+          "Transparent backgrounds are currently unsupported by the connected ChatGPT/Codex " +
+          "image backend for both Flare and Sunburst, including PNG and WebP output. " +
+          "No request was sent. Do not retry with another model or format. " +
+          "Explain this limitation to the user; do not silently substitute an opaque background."
+        );
+      }
 
       // Resolve OpenAI credentials at execution time (lazy — token refresh
       // happens on use, not at registration).
@@ -136,6 +159,7 @@ export function createGenerateImageTool(
         // Build the image_generation tool definition with the requested params.
         const imageTool: Record<string, unknown> = {
           type: "image_generation",
+          model: args.model ?? "gpt-image-2.5-flare",
           output_format: outputFormat,
         };
         if (args.size) imageTool.size = args.size;
@@ -281,8 +305,8 @@ function insertIndex(filePath: string, index: number): string {
  * `response.output_item.done` events where `item.type === "image_generation_call"`.
  *
  * The Codex backend requires `stream: true` and the ChatGPT OAuth token (which
- * our auth.openai.com PKCE flow produces). The underlying image model is
- * gpt-image-2, routed internally by the backend.
+ * our auth.openai.com PKCE flow produces). The top-level model orchestrates the
+ * request; imageTool.model selects the GPT Image model separately.
  */
 async function callImageGeneration(
   inputContent: Array<Record<string, unknown>>,

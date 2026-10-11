@@ -22,7 +22,7 @@ export interface ContextLimits {
 }
 
 export const CONTEXT_LIMITS: ContextLimits = {
-  skillDescriptionBytes: 1024,
+  skillDescriptionBytes: 240,
   skillCatalogBytes: 16 * 1024,
   mcpToolDescriptionBytes: 1024,
   mcpToolSchemaBytes: 64 * 1024,
@@ -32,6 +32,18 @@ export const CONTEXT_LIMITS: ContextLimits = {
 
 export function resolveContextLimits(overrides?: Partial<ContextLimits>): ContextLimits {
   return { ...CONTEXT_LIMITS, ...overrides };
+}
+
+/**
+ * A session's limits: global defaults, then the mode's own defaults (e.g.
+ * Motion's larger bundled skill catalog), then the user's `contextLimits`
+ * setting, which always wins.
+ */
+export function resolveSessionContextLimits(
+  modeDefaults?: Partial<ContextLimits>,
+  userSettings?: Partial<ContextLimits>,
+): ContextLimits {
+  return resolveContextLimits({ ...modeDefaults, ...userSettings });
 }
 
 export interface ClampedText {

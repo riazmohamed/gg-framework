@@ -1,7 +1,6 @@
 import { useEffect } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { error as logError } from "@tauri-apps/plugin-log";
-import { CHANGELOG } from "./changelog";
 import { windowLabel, openWhatsNewWindow } from "./agent";
 
 /**
@@ -16,7 +15,8 @@ import { windowLabel, openWhatsNewWindow } from "./agent";
  * the running version (`getVersion`):
  *   - no record yet (fresh install) → remember silently, DON'T open.
  *   - same version → nothing new, stay quiet.
- *   - version changed (the updater downloaded + relaunched) → open once.
+ *   - version changed (the updater downloaded + relaunched) → open once, in
+ *     the `hype` mood (the home screen's button opens the calm one).
  * The seen-version is written the moment we decide, so a relaunch only ever
  * shows the notes a single time.
  */
@@ -32,23 +32,27 @@ export function WhatsNewModal(): null {
   useEffect(() => {
     // Only the main window decides — secondary/tiled windows never trigger it.
     if (windowLabel !== "main") return;
-    if (CHANGELOG.length === 0) return;
 
     if (import.meta.env.DEV && DEV_FORCE_WHATSNEW) {
-      void openWhatsNewWindow().catch(() => {});
+      void openWhatsNewWindow("hype").catch(() => {});
       return;
     }
 
     let cancelled = false;
     void getVersion()
-      .then((version) => {
+      .then(async (version) => {
         if (cancelled) return;
         const seen = localStorage.getItem(STORAGE_KEY);
-        // Persist the current version first so a re-check never re-opens it.
+        if (seen === version) return;
+        // Only upgrades need the history. Ordinary launches and fresh installs
+        // must not load it into every workspace just to check its length.
+        if (seen !== null) {
+          const { CHANGELOG } = await import("./changelog");
+          if (cancelled || CHANGELOG.length === 0) return;
+        }
+        // Persist before opening so a re-check never re-opens it.
         localStorage.setItem(STORAGE_KEY, version);
-        // Fresh install (no prior record) or unchanged version → nothing to show.
-        if (seen === null || seen === version) return;
-        void openWhatsNewWindow().catch(() => {});
+        if (seen !== null) void openWhatsNewWindow("hype").catch(() => {});
       })
       .catch((e) => logError(`What's-new version check failed: ${String(e)}`));
     return () => {

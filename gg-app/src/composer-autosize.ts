@@ -1,3 +1,5 @@
+import { viewportScale } from "./motion-geometry";
+
 // Auto-grow the chat textarea to fit its content, up to a CSS max-height after
 // which it scrolls — without disturbing the transcript scrolling above it.
 //
@@ -16,13 +18,20 @@ export function autosizeComposer(
   pinned = false,
 ): void {
   if (!el) return;
+  // An emptied draft (every send clears it) snaps back to one line in the same
+  // frame, with no height transition and no FLIP. The sent message is added in
+  // that same frame: while the field eased down from N lines over 160ms, the
+  // transcript viewport grew under the new bubble, so it appeared above where
+  // it rests and slid down while its own rise played, overshooting and
+  // settling ("pushes up, then corrects").
+  const snap = el.value === "";
   // That same `height: auto` collapse hands the composer's pixels back to the
   // transcript for one layout pass. If the transcript's content fits in the
   // briefly-taller viewport, the browser clamps its scrollTop toward 0; the
   // scroll event that follows reads as "the user scrolled up", drops App's
   // stick-to-bottom pin for good, and from then on the growing composer covers
-  // the newest messages instead of pushing them up. It only shows past ~3 line
-  // breaks, where the lost distance clears the pin's 48px threshold. Snapshot
+  // the newest messages instead of pushing them up. Any upward move un-pins
+  // (transcript-pin.ts), so even one line of lost distance would. Snapshot
   // and restore around the measurement so the collapse stays invisible: both
   // writes land in the same task, so the browser fires at most one scroll
   // event, carrying the restored offset.
@@ -35,7 +44,14 @@ export function autosizeComposer(
   // so that restored value is what the browser commits as the start; only then
   // write the target. Skipping the second read makes the restore invisible
   // (the browser coalesces both writes) and the animation breaks again.
-  const before = el.style.height;
+  //
+  // Restore what is ON SCREEN, not the last target: mid-transition (a draft
+  // replaced wholesale eases down over 160ms) the two differ, and restoring the
+  // target cut the animation short — the box snapped the rest of the way on
+  // the next keystroke. The computed height is the live animated value.
+  const written = el.style.height;
+  const live = getComputedStyle(el).height;
+  const before = live && live !== "auto" ? live : written;
   el.style.height = "auto";
   // One line keeps the caret beside the paperclip; past that the field claims
   // the whole row and the circles drop beneath it, moving the text up and left.
@@ -78,9 +94,10 @@ export function autosizeComposer(
         // the smooth path.
         row.classList.toggle("is-multiline", multiline);
         const last = stack?.getBoundingClientRect();
-        if (stack && first && last) {
-          const dx = first.left - last.left;
-          const dy = first.top - last.top;
+        if (stack && first && last && !snap) {
+          const scale = viewportScale(stack, last);
+          const dx = (first.left - last.left) / scale;
+          const dy = (first.top - last.top) / scale;
           if (dx || dy) {
             stack.style.transition = "none";
             stack.style.transform = `translate(${dx}px, ${dy}px)`;
@@ -99,11 +116,21 @@ export function autosizeComposer(
   const max = parseFloat(getComputedStyle(el).maxHeight) || Infinity;
   const content = el.scrollHeight;
   const next = `${Math.min(content, max)}px`;
-  if (before !== next) {
-    el.style.height = before;
+  if (snap && written !== next) {
+    // Land at the new height in this frame: suspend the transition, commit the
+    // height with a layout read (or the cleared transition would still apply
+    // to it), then hand the transition back for the next keystroke.
+    el.style.transition = "none";
+    el.style.height = next;
     void el.offsetHeight;
+    el.style.transition = "";
+  } else {
+    if (before !== next) {
+      el.style.height = before;
+      void el.offsetHeight;
+    }
+    el.style.height = next;
   }
-  el.style.height = next;
   // Only past the cap does the scrollbar earn its width. Below it, keeping
   // overflow hidden also avoids a phantom grey scrollbar under CSS zoom > 1,
   // where scrollHeight rounds down to an integer of unzoomed px and leaves the

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { ModalDismissButton } from "./modal-embed";
 import { Badge } from "./Badge";
 import {
+  openUrl,
   authApiKey,
   authOAuthStart,
   authOAuthCode,
@@ -349,9 +350,9 @@ export function ProviderLoginModal({
             Back
           </button>
         )}
-        <button className="modal-btn" onClick={onClose}>
+        <ModalDismissButton onClick={onClose}>
           {needCode || busy ? "Cancel" : "Close"}
-        </button>
+        </ModalDismissButton>
         {method === "apikey" && (
           <button
             className="modal-btn primary"

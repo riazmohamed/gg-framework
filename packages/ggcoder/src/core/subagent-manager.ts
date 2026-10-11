@@ -9,6 +9,7 @@ import { SubAgentStore, type PersistedSubAgentRecord } from "./subagent-store.js
 import { SessionManager } from "./session-manager.js";
 import { log } from "./logger.js";
 import type { AgentNotificationQueue } from "./agent-notifications.js";
+import type { AcceptanceCheck } from "./acceptance-checks.js";
 import {
   clearTurnRecord,
   readTurnRecord,
@@ -17,23 +18,17 @@ import {
 import {
   boundSubAgentOutput,
   childSubAgentEnv,
-  childThinkingLevel,
   resolveSubAgentCliEntry,
   selectSubAgent,
   subAgentCacheKey,
+  subAgentThinkingLevel,
   type SubAgentTokenUsage,
   SUB_AGENT_MAX_STDERR_CHARS,
   SUB_AGENT_TIMEOUT_MS,
 } from "../tools/subagent-shared.js";
 
 export type SubAgentState =
-  | "starting"
-  | "running"
-  | "completed"
-  | "failed"
-  | "interrupted"
-  | "closed"
-  | "reaped";
+  "starting" | "running" | "completed" | "failed" | "interrupted" | "closed" | "reaped";
 
 export interface SubAgentSnapshot {
   agent_id: string;
@@ -47,6 +42,18 @@ export interface SubAgentSnapshot {
   tool_use_count: number;
   token_usage: SubAgentTokenUsage;
   output?: string;
+  /**
+   * Engine-built receipt of the last turn's tool calls plus any paths the
+   * report names that the child never opened. Kept apart from `output` so
+   * wait()'s head truncation can never cut it and output parsers (the ideal
+   * reviewer) see the child's prose unchanged.
+   */
+  receipt?: string;
+  /**
+   * One-line verdict of the parent's acceptance checks for the last turn
+   * (`2/3 passed, 1 unverified`); the per-check lines ride in `receipt`.
+   */
+  acceptance?: string;
   error?: string;
   agent_name?: string;
   provider?: string;
@@ -62,12 +69,12 @@ export interface SubAgentManagerOptions {
   agents: AgentDefinition[];
   getProvider: () => Provider;
   getModel: () => string;
-  getThinkingLevel: () => ThinkingLevel | undefined;
+  getThinkingLevel?: () => ThinkingLevel | undefined;
   getCacheKey?: () => string | undefined;
   getBaseUrl?: () => string | undefined;
   /** Optional per-model concurrency cap (subagentMaxPerModel setting). Counted
-   *  against the RESOLVED child model — read-only agents may run on the fast
-   *  model, so they count under that model, not the parent's. Only ever
+   *  against the RESOLVED child model — an agent pinned to its own model id
+   *  counts under that model, not the parent's. Only ever
    *  reduces concurrency below the global ACTIVE_LIMIT. */
   getMaxPerModel?: () => number | undefined;
   onState?: (snapshot: SubAgentSnapshot) => void;
@@ -99,7 +106,8 @@ interface WorkerRecord extends SubAgentSnapshot {
   turnResolvers: Set<() => void>;
 }
 
-const ACTIVE_LIMIT = 8;
+/** Children that may be starting or running at once. */
+export const ACTIVE_LIMIT = 8;
 const RETAINED_WORKER_LIMIT = 8;
 const SNAPSHOT_LIMIT = 20;
 /**
@@ -282,6 +290,7 @@ export class SubAgentManager {
       ...snapshot,
       state: record.status === "completed" ? "completed" : record.status,
       output: record.output,
+      receipt: record.receipt,
       error:
         record.status === "completed"
           ? undefined
@@ -344,12 +353,18 @@ export class SubAgentManager {
 
   /** Explicit per-spawn overrides. Used by harness-owned children (the
    * independent Ideal reviewer): a read-only tool list and/or a forced model —
-   * bypassing agent-definition routing entirely. */
+   * bypassing agent-definition routing entirely — and a shorter turn time
+   * limit, after which the child answers from what it has gathered. */
   async spawn(
     taskName: string,
     task: string,
     agentName?: string,
-    overrides?: { model?: string; tools?: readonly string[] },
+    overrides?: {
+      model?: string;
+      tools?: readonly string[];
+      turnTimeoutMs?: number;
+      checks?: readonly AcceptanceCheck[];
+    },
   ): Promise<SubAgentSnapshot> {
     this.assertAvailable();
     if (!taskName.trim()) throw new Error("task_name is required");
@@ -362,12 +377,22 @@ export class SubAgentManager {
     this.reapExcessIdle();
     const provider = this.options.getProvider();
     const parentModel = this.options.getModel();
-    const base = selectSubAgent(this.options.agents, agentName, provider, parentModel);
+    const parentThinkingLevel = this.options.getThinkingLevel?.();
+    const base = selectSubAgent(
+      this.options.agents,
+      agentName,
+      provider,
+      parentModel,
+      parentThinkingLevel,
+    );
+    const model = overrides?.model ?? base.model;
     const selection = {
       agentDef: base.agentDef,
       provider: base.provider,
       parentModel: base.parentModel,
-      model: overrides?.model ?? base.model,
+      model,
+      // Resolve against the actual child model, including harness overrides.
+      thinkingLevel: subAgentThinkingLevel(provider, model, parentThinkingLevel),
       tools: overrides?.tools ?? base.agentDef?.tools ?? [],
     };
     if (agentName && !selection.agentDef) {
@@ -419,7 +444,8 @@ export class SubAgentManager {
           // context and Environment facts alongside its agent body.
           agentPrompt: selection.agentDef?.systemPrompt,
           agentContext: selection.agentDef?.context,
-          thinkingLevel: childThinkingLevel(this.options.getThinkingLevel()),
+          thinkingLevel: selection.thinkingLevel,
+          parentThinkingLevel,
           allowedTools: selection.tools.length ? [...selection.tools] : undefined,
           // Without this, an allow-listed child connects NO MCP servers — even
           // when its `tools:` frontmatter names `mcp__<server>__<tool>`.
@@ -432,6 +458,7 @@ export class SubAgentManager {
             selection.agentDef?.name ?? "default",
           ),
           sessionRootDir: this.sessionRootDir,
+          turnTimeoutMs: overrides?.turnTimeoutMs,
         },
       });
       record.child_session_id =
@@ -443,7 +470,7 @@ export class SubAgentManager {
           : undefined;
       this.publish(record);
       await this.waitForPersistence();
-      await this.request(record, "start", { task });
+      await this.request(record, "start", { task, checks: overrides?.checks ?? [] });
       record.state = "running";
       record.updated_at = Date.now();
       this.publish(record);
@@ -463,7 +490,11 @@ export class SubAgentManager {
     return Number(result.queued ?? 0);
   }
 
-  async followup(agentId: string, task: string): Promise<SubAgentSnapshot> {
+  async followup(
+    agentId: string,
+    task: string,
+    checks: readonly AcceptanceCheck[] = [],
+  ): Promise<SubAgentSnapshot> {
     this.assertAvailable();
     let worker = this.workers.get(agentId);
     if (!worker) {
@@ -480,9 +511,11 @@ export class SubAgentManager {
     clearTimeout(worker.idleTimer);
     worker.taskOutput = "";
     worker.output = undefined;
+    worker.receipt = undefined;
+    worker.acceptance = undefined;
     worker.error = undefined;
     worker.collected = false;
-    await this.request(worker, "followup", { task });
+    await this.request(worker, "followup", { task, checks });
     worker.state = "running";
     worker.updated_at = Date.now();
     this.publish(worker);
@@ -671,6 +704,7 @@ export class SubAgentManager {
     const provider = (snapshot.provider as Provider | undefined) ?? this.options.getProvider();
     const model = snapshot.model ?? this.options.getModel();
     const parentModel = this.options.getModel();
+    const parentThinkingLevel = this.options.getThinkingLevel?.();
     this.assertModelCapacity(model);
     const childSessionPath = this.assertChildSessionPath(snapshot.child_session_path);
     const child = this.spawnWorkerProcess();
@@ -680,6 +714,7 @@ export class SubAgentManager {
       updated_at: Date.now(),
       current_activity: undefined,
       output: undefined,
+      receipt: undefined,
       error: undefined,
       collected: false,
       recovered: false,
@@ -704,7 +739,8 @@ export class SubAgentManager {
           baseUrl: this.options.getBaseUrl?.(),
           agentPrompt: agentDef?.systemPrompt,
           agentContext: agentDef?.context,
-          thinkingLevel: childThinkingLevel(this.options.getThinkingLevel()),
+          thinkingLevel: subAgentThinkingLevel(provider, model, parentThinkingLevel),
+          parentThinkingLevel,
           allowedTools: agentDef?.tools.length ? agentDef.tools : undefined,
           allowedMcpServers: agentDef?.tools.length
             ? mcpServersForAgent(agentDef.tools)
@@ -820,6 +856,8 @@ export class SubAgentManager {
             ? "interrupted"
             : "failed";
       worker.output = boundSubAgentOutput(String(frame.output ?? worker.taskOutput));
+      worker.receipt = typeof frame.receipt === "string" ? frame.receipt : undefined;
+      worker.acceptance = typeof frame.acceptance === "string" ? frame.acceptance : undefined;
       worker.error = frame.error ? String(frame.error) : undefined;
       if (typeof frame.model === "string") worker.model = frame.model;
       worker.current_activity = undefined;
@@ -846,6 +884,7 @@ export class SubAgentManager {
       worker.agent_id,
       `Child agent "${worker.task_name}" (${worker.agent_id}) is ${worker.state} after ` +
         `${worker.turn_count} turn(s)${digest ? `: ${digest}` : ""}. ` +
+        `${worker.acceptance ? `Acceptance checks: ${worker.acceptance}. ` : ""}` +
         `Collect its full output with wait_agent agent_ids ["${worker.agent_id}"].`,
       { terminal: true },
     );
@@ -856,14 +895,12 @@ export class SubAgentManager {
     command: string,
     payload: Record<string, unknown> = {},
   ): Promise<Record<string, unknown>> {
-    if (!worker.process.stdin?.writable)
-      return Promise.reject(new Error("Subagent worker is closed"));
+    const stdin = worker.process.stdin;
+    if (!stdin?.writable) return Promise.reject(new Error("Subagent worker is closed"));
     const requestId = `${worker.agent_id}-${++worker.requestSequence}`;
     return new Promise((resolve, reject) => {
       worker.requests.set(requestId, { resolve, reject });
-      worker.process.stdin!.write(
-        `${JSON.stringify({ request_id: requestId, command, ...payload })}\n`,
-      );
+      stdin.write(`${JSON.stringify({ request_id: requestId, command, ...payload })}\n`);
     });
   }
 
@@ -879,8 +916,10 @@ export class SubAgentManager {
     const snapshot = this.snapshot(worker);
     this.snapshots.delete(worker.agent_id);
     this.snapshots.set(worker.agent_id, snapshot);
-    while (this.snapshots.size > SNAPSHOT_LIMIT)
-      this.snapshots.delete(this.snapshots.keys().next().value!);
+    for (const id of this.snapshots.keys()) {
+      if (this.snapshots.size <= SNAPSHOT_LIMIT) break;
+      this.snapshots.delete(id);
+    }
     this.options.onState?.(snapshot);
     for (const listener of this.listeners) listener(snapshot);
     if (persist) this.queuePersist();
@@ -899,6 +938,8 @@ export class SubAgentManager {
       tool_use_count: worker.tool_use_count,
       token_usage: { ...worker.token_usage },
       output: worker.output,
+      receipt: worker.receipt,
+      ...(worker.acceptance !== undefined && { acceptance: worker.acceptance }),
       error: worker.error,
       agent_name: worker.agent_name,
       provider: worker.provider,
@@ -922,12 +963,10 @@ export class SubAgentManager {
           this.persistPending = false;
           const parentSessionId = this.parentSessionId;
           if (!parentSessionId) continue;
-          const records = [...this.snapshots.values()].map(
-            (snapshot): PersistedSubAgentRecord => ({
-              ...snapshot,
-              token_usage: { ...snapshot.token_usage },
-            }),
-          );
+          const records = [...this.snapshots.values()].map((snapshot): PersistedSubAgentRecord => ({
+            ...snapshot,
+            token_usage: { ...snapshot.token_usage },
+          }));
           await this.store.save(this.options.cwd, parentSessionId, records);
         }
       })
@@ -1022,7 +1061,9 @@ export class SubAgentManager {
     const idle = [...this.workers.values()]
       .filter((worker) => this.isTerminal(worker.state))
       .sort((a, b) => a.updated_at - b.updated_at);
-    while (idle.length > RETAINED_WORKER_LIMIT) void this.close(idle.shift()!, true);
+    for (const worker of idle.slice(0, Math.max(0, idle.length - RETAINED_WORKER_LIMIT))) {
+      void this.close(worker, true);
+    }
   }
 
   private fail(worker: WorkerRecord, error: unknown, kill = true): void {

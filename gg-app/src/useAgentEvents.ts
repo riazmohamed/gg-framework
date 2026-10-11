@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
-import { theme } from "./theme";
+import { isHookKind, type HookKind } from "./HookNotice";
 import {
   listCommands,
   listModels,
@@ -8,12 +8,13 @@ import {
   type SubAgentStatePayload,
   type AgentState,
   type BackgroundTask,
+  type CacheExpiryStatus,
   type ModelOption,
   type ProjectTask,
   type QueuedMessage,
   type SlashCommand,
 } from "./agent";
-import { isAskUserPrompt } from "./ask-user";
+import { closeAsks, isAskUserPrompt, markAskDeferred } from "./ask-user";
 import { formatTokenCount } from "./ActivityBar";
 import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
@@ -21,6 +22,8 @@ import { playSound } from "./sounds";
 import { findCompletedSteps, countPlanSteps } from "./plan-steps";
 import type { PendingAttachment } from "./attachments";
 import type { Item } from "./App";
+import { readChatError } from "./chat-error";
+import type { LiveTextStore } from "./live-text";
 
 /**
  * Build-session SSE event handling + assistant-streaming helpers, extracted from
@@ -45,28 +48,8 @@ export interface ImagePreview {
   path?: string;
 }
 
-// Hook kind → notice copy + tone color, mirroring the TUI's app-items.ts.
-export type HookKind = "ideal" | "verification" | "loop_break" | "regrounding";
 /** Hooks that fire in place of a final answer, so their draft must be held. */
 export type PreFinalHookKind = Extract<HookKind, "ideal" | "verification">;
-export const HOOK_PRESENTATION: Record<HookKind, { text: string; color: string }> = {
-  ideal: {
-    text: "Hook engaged. Running an ideal review before finalizing.",
-    color: theme.secondary,
-  },
-  verification: {
-    text: "Hook engaged. Running the project's verification before finalizing.",
-    color: theme.secondary,
-  },
-  loop_break: {
-    text: "Hook engaged. Breaking a stuck loop and rethinking the approach.",
-    color: theme.warning,
-  },
-  regrounding: {
-    text: "Hook engaged. Re-grounding on the original request after compaction.",
-    color: theme.primary,
-  },
-};
 
 function formatElapsed(ms: number): string {
   const s = Math.round(ms / 1000);
@@ -74,45 +57,6 @@ function formatElapsed(ms: number): string {
   const m = Math.floor(s / 60);
   const r = s % 60;
   return r > 0 ? `${m}m ${r}s` : `${m}m`;
-}
-
-// Port of packages/ggcoder/src/ui/duration-summary.ts, adapted to the sidecar's
-// underscore tool names. Picks a contextual done-verb from which tools ran.
-function pickDoneVerb(toolsUsed: ReadonlySet<string>): string {
-  const has = (name: string): boolean => toolsUsed.has(name);
-  const writing = has("edit") || has("write");
-  const reading = has("read") || has("grep") || has("find") || has("ls");
-
-  if (has("subagent") && writing) return "Orchestrated changes in";
-  if (has("subagent")) return "Delegated work in";
-  if (has("web_fetch") && writing) return "Researched & coded in";
-  if (has("web_fetch") && reading) return "Researched in";
-  if (has("web_fetch")) return "Fetched the web in";
-  if (has("bash") && writing) return "Built & ran in";
-  if (has("edit") && has("write")) return "Crafted code in";
-  if (has("edit") && has("bash")) return "Refactored & tested in";
-  if (has("edit")) return "Refactored in";
-  if (has("write") && has("bash")) return "Wrote & ran in";
-  if (has("write")) return "Wrote code in";
-  if (has("bash") && has("grep")) return "Hacked away in";
-  if (has("bash") && reading) return "Ran & investigated in";
-  if (has("bash")) return "Executed commands in";
-  if (has("grep") && has("read")) return "Investigated in";
-  if (has("grep") && has("find")) return "Scoured the codebase in";
-  if (has("grep")) return "Searched in";
-  if (has("read") && has("find")) return "Explored in";
-  if (has("read")) return "Studied the code in";
-  if (has("find") || has("ls")) return "Browsed files in";
-
-  const phrases = [
-    "Brewed up a response in",
-    "Cooked up an answer in",
-    "Worked out a reply in",
-    "Conjured a response in",
-    "Pondered for",
-    "Reasoned for",
-  ];
-  return phrases[Math.floor(Math.random() * phrases.length)] ?? "Worked in";
 }
 
 /**
@@ -128,6 +72,8 @@ export interface AgentEventsDeps {
   handleKenEvent: (e: SidecarEvent) => boolean;
   /** Autopilot event delegate — consulted first; autopilot events early-return. */
   handleAutopilotEvent: (e: SidecarEvent) => boolean;
+  /** Whole-task status sees events before delegates consume their frames. */
+  handleActivityEvent?: (e: SidecarEvent) => void;
 
   setState: Dispatch<SetStateAction<AgentState | null>>;
   setTasks: Dispatch<SetStateAction<BackgroundTask[]>>;
@@ -157,6 +103,8 @@ export interface AgentEventsDeps {
   planReviewPathRef: MutableRefObject<string | null>;
   pendingPlanTotalRef: MutableRefObject<number | null>;
   stickToBottomRef: MutableRefObject<boolean>;
+  /** Where the streaming reply's text grows until it ends (live-text.ts). */
+  liveText: LiveTextStore;
 }
 
 export interface AgentEvents {
@@ -174,6 +122,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     nextId,
     handleKenEvent,
     handleAutopilotEvent,
+    handleActivityEvent,
     setState,
     setTasks,
     setProjectTasks,
@@ -200,6 +149,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     planReviewPathRef,
     pendingPlanTotalRef,
     stickToBottomRef,
+    liveText,
   } = deps;
 
   // ── Event-machine private refs (used nowhere outside this hook) ──
@@ -214,6 +164,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // that ack arrives, and clearing the flag is one-way, so this gates the clear
   // to messages we know really entered the queue.
   const ackedQueueTextsRef = useRef<Map<string, number>>(new Map());
+  const queueSnapshotRef = useRef<QueuedMessage[]>([]);
   const subagentGroupIdRef = useRef<number | null>(null);
   const subagentGroupByAgentRef = useRef<Map<string, number>>(new Map());
   // subagent_state snapshots arrive per tool/turn event PER AGENT — with
@@ -231,7 +182,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // flip the same row from shimmer → summary instead of pushing a new line.
   const compactionIdRef = useRef<number | null>(null);
   const runStartRef = useRef<number>(0);
-  const toolsUsedRef = useRef<Set<string>>(new Set());
+
   const tokensRef = useRef<number>(0);
   // Accumulated assistant text this run, for detecting [DONE:n] plan-step
   // markers that may split across deltas.
@@ -268,6 +219,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
 
   /** Queued→sent morph duration. Must match `.user-msg.promoted` in App.css. */
   const PROMOTE_MS = 300;
+  // Flushed chunks go to the live-text store, which re-renders only the
+  // streaming row; `items` gets the final text once, in endStreamingText.
   const flushChunks = useCallback(() => {
     flushTimerRef.current = null;
     const chunk = pendingChunksRef.current;
@@ -275,12 +228,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     pendingChunksRef.current = "";
     const current = streamingIdRef.current;
     if (current === null) return; // streaming ended while waiting
-    setItems((prev) =>
-      prev.map((it) =>
-        it.kind === "assistant" && it.id === current ? { ...it, text: it.text + chunk } : it,
-      ),
-    );
-  }, [setItems]);
+    liveText.append(current, chunk);
+  }, [liveText]);
 
   const appendAssistant = useCallback(
     (text: string) => {
@@ -296,6 +245,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         // on first paint — the user should see the bubble appear right away).
         const id = nextId();
         streamingIdRef.current = id;
+        liveText.begin(id, text);
         setItems((prev) => [...prev, { kind: "assistant", id, text }]);
       } else {
         // Subsequent tokens: buffer and flush on the 100ms timer
@@ -305,7 +255,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         }
       }
     },
-    [flushChunks, nextId, setItems],
+    [flushChunks, liveText, nextId, setItems],
   );
 
   // Paint text held under arming. Called the moment the turn proves it was not
@@ -318,31 +268,36 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     if (!held) return;
     const id = nextId();
     streamingIdRef.current = id;
+    liveText.begin(id, held);
     setItems((prev) => [...prev, { kind: "assistant", id, text: held }]);
-  }, [nextId, setItems]);
+  }, [liveText, nextId, setItems]);
 
   // Flush any pending buffered text and end the current streaming section.
   // Called whenever streaming transitions to tool calls, a new prompt, etc.
   // Without this, the last few buffered tokens (waiting for the timer) would be lost.
+  // The streamed text lives in the live-text store until here: write it into
+  // `items` once, then release the store entry.
   const endStreamingText = useCallback(() => {
     if (flushTimerRef.current !== null) {
       clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
     }
-    if (pendingChunksRef.current) {
-      const chunk = pendingChunksRef.current;
-      pendingChunksRef.current = "";
-      const current = streamingIdRef.current;
-      if (current !== null) {
-        setItems((prev) =>
-          prev.map((it) =>
-            it.kind === "assistant" && it.id === current ? { ...it, text: it.text + chunk } : it,
-          ),
-        );
-      }
-    }
+    const chunk = pendingChunksRef.current;
+    pendingChunksRef.current = "";
+    const current = streamingIdRef.current;
     streamingIdRef.current = null;
-  }, [setItems]);
+    if (current === null) return;
+    const live = liveText.get(current);
+    if (live !== undefined) {
+      const final = live + chunk;
+      setItems((prev) =>
+        prev.map((it) =>
+          it.kind === "assistant" && it.id === current ? { ...it, text: final } : it,
+        ),
+      );
+    }
+    liveText.release(current);
+  }, [liveText, setItems]);
 
   // Ideal review is a pre-final hook: the no-tool response immediately before
   // it is an internal draft, not a transcript answer. Normally the draft was
@@ -363,8 +318,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       setItems((prev) =>
         prev.filter((item) => !(item.kind === "assistant" && item.id === current)),
       );
+      liveText.release(current);
     }
-  }, [setItems]);
+  }, [liveText, setItems]);
 
   const pushItem = useCallback(
     (item: Item, opts?: { skipIfSameAsLast?: boolean }) => {
@@ -549,8 +505,24 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setIsThinking(false);
   }, [setThinkingAccumMs, setThinkingStartTs, setIsThinking]);
 
+  // Open the human plan-review box from a sidecar `{ planPath, content }`
+  // payload (plan_review, or ready.pendingPlan on reconnect). Anything else
+  // (null/absent) leaves the box as it is.
+  const openPlanReview = useCallback(
+    (value: unknown) => {
+      if (typeof value !== "object" || value === null) return;
+      const plan = value as Record<string, unknown>;
+      if (typeof plan.planPath !== "string" || typeof plan.content !== "string") return;
+      planReviewPathRef.current = plan.planPath;
+      planReviewContentRef.current = plan.content;
+      setPlanReview(plan.content);
+    },
+    [planReviewPathRef, planReviewContentRef, setPlanReview],
+  );
+
   const handleEvent = useCallback(
     (e: SidecarEvent) => {
+      handleActivityEvent?.(e);
       // Ken (mentor) events are owned by the useKenMentor hook; delegate and
       // early-return so they never touch the build-session handling below.
       if (handleKenEvent(e)) return;
@@ -563,6 +535,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const readyState = d as unknown as AgentState;
           setState(readyState);
           setRunning(readyState.running);
+          // A reconnecting window picks the review box back up for a plan the
+          // sidecar is still holding for the user.
+          openPlanReview(d.pendingPlan);
           setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
           setStatus(readyState.runState === "cancelling" ? "cancelling..." : "ready");
           break;
@@ -579,7 +554,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           subagentGroupIdRef.current = null;
           compactionIdRef.current = null;
           runStartRef.current = Date.now();
-          toolsUsedRef.current = new Set();
+
           tokensRef.current = 0;
           assistantTextRef.current = "";
           // Arming is per-run state on the sidecar; start every run streaming
@@ -660,7 +635,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const toolCallId = String(d.toolCallId ?? "");
           const name = String(d.name ?? "tool");
           const args = (d.args as Record<string, unknown>) ?? {};
-          toolsUsedRef.current.add(name);
+
           // Tools live ONLY in the pinned panel, never in the transcript. Keep a
           // bounded tail so memory stays flat across long sessions; the panel
           // itself renders just the last LIVE_TOOL_PANEL_ROWS.
@@ -701,7 +676,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           if (name === "generate_image") {
             const prompt = typeof args.prompt === "string" ? args.prompt : "generating image…";
             endStreamingText();
-            pushItem({ kind: "generating_image", id: nextId(), prompt });
+            pushItem({ kind: "generating_image", id: nextId(), prompt, toolCallId });
           }
           break;
         }
@@ -750,8 +725,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const groupId = subagentGroupIdRef.current;
           if (groupId !== null) {
             const endDetails = details as
-              | { durationMs?: number; tokenUsage?: SubAgentLine["tokenUsage"] }
-              | undefined;
+              { durationMs?: number; tokenUsage?: SubAgentLine["tokenUsage"] } | undefined;
             const durationMs = endDetails?.durationMs;
             const finalTokens = endDetails?.tokenUsage;
             setItems((prev) =>
@@ -785,9 +759,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                 : entry,
             ),
           );
-          // Remove any generating_image placeholders — the tool has finished
-          // (success or failure). If it produced images, they're pushed below.
-          setItems((prev) => prev.filter((it) => it.kind !== "generating_image"));
+          // Remove this call's generating_image placeholder — the tool has
+          // finished (success or failure). If it produced images, they're pushed
+          // below. Other tools ending must not clear a still-running generation.
+          setItems((prev) =>
+            prev.filter((it) => it.kind !== "generating_image" || it.toolCallId !== id),
+          );
           // Surface any image previews (screenshot / read of an image) inline in
           // the transcript — the tool panel is text-only.
           const previews = (details as { imagePreviews?: ImagePreview[] } | undefined)
@@ -844,6 +821,19 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           break;
         }
+        case "stream_rule_triggered": {
+          // The aborted attempt is discarded by the loop (its retry is silent, so
+          // nothing else rolls it back here): drop its partial text too.
+          discardStreamingDraft();
+          const names = Array.isArray(d.rules) ? d.rules.map(String) : [];
+          const name = names.join(", ") || "stream rule";
+          pushItem({
+            kind: "info",
+            id: nextId(),
+            text: `Rule "${name}" caught the reply mid-stream — retrying`,
+          });
+          break;
+        }
         case "compaction_start": {
           const id = nextId();
           compactionIdRef.current = id;
@@ -882,21 +872,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           setStatus("cancellation failed; agent still running");
           break;
         case "error": {
-          // Structured payload from the sidecar's broadcastError (headline always
-          // present; message/guidance may be omitted for terse capability errors).
-          // Fall back to a flat string for any older-shaped frame.
-          const headline = typeof d.headline === "string" ? d.headline : undefined;
-          pushItem(
-            headline
-              ? {
-                  kind: "error",
-                  id: nextId(),
-                  headline,
-                  message: typeof d.message === "string" ? d.message : undefined,
-                  guidance: typeof d.guidance === "string" ? d.guidance : undefined,
-                }
-              : { kind: "error", id: nextId(), text: `error: ${String(d.message ?? "unknown")}` },
-          );
+          pushItem({ kind: "error", id: nextId(), ...readChatError(d) });
           break;
         }
         case "run_end": {
@@ -961,7 +937,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             setStatus("cancelled");
           } else {
             const elapsedMs = runStartRef.current ? Date.now() - runStartRef.current : 0;
-            const verb = d.unverified === true ? "Unverified" : pickDoneVerb(toolsUsedRef.current);
+            const verb =
+              d.unverified === true
+                ? "Unverified"
+                : d.failed === true
+                  ? "Task failed after"
+                  : "Response ready in";
             const parts = [`${verb} ${formatElapsed(elapsedMs)}`];
             if (tokensRef.current > 0) {
               parts.push(`\u2193 ${formatTokenCount(tokensRef.current)} tokens`);
@@ -1010,6 +991,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               : s,
           );
           break;
+        case "plan_mode":
+          // Back in plan mode to revise a plan (no new "entering plan" banner).
+          setState((s) => (s ? { ...s, planMode: d.active === true } : s));
+          break;
         case "plan_enter":
           setState((s) => (s ? { ...s, planMode: true } : s));
           pushItem({ kind: "plan", id: nextId(), reason: String(d.reason ?? "") });
@@ -1020,6 +1005,21 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // malformed frame is dropped rather than rendered as an empty band
           // the user could never answer.
           if (isAskUserPrompt(d)) pushItem({ kind: "ask", id: nextId(), prompt: d });
+          break;
+        case "ask_user_deferred":
+          // Soft deadline passed: the agent continued on its best guess, but the
+          // band stays answerable — a later answer is sent to it as a message.
+          if (typeof d.id === "string") {
+            const promptId = d.id;
+            setItems((prev) => markAskDeferred(prev, promptId));
+          }
+          break;
+        case "ask_user_closed":
+          // A newer question or a new session superseded deferred questions.
+          if (Array.isArray(d.ids)) {
+            const ids = d.ids.filter((id): id is string => typeof id === "string");
+            setItems((prev) => closeAsks(prev, ids));
+          }
           break;
         case "plan_progress": {
           // The sidecar reads the live approved-plan file, so this snapshot
@@ -1053,19 +1053,16 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // seed the plan-progress widget if Ken approves it, and manual accept
           // needs the path when autopilot is off.
           planReviewPathRef.current = typeof d.planPath === "string" ? d.planPath : null;
-          const content = String(d.content ?? "");
-          planReviewContentRef.current = content;
-          // Autopilot owns plan review when enabled. Showing the human overlay
-          // during the few seconds before Ken accepts/rejects is just visual
-          // noise, and users generally cannot act in time anyway. Non-autopilot
-          // stays unchanged: the modal opens for manual Accept/Feedback/Reject.
-          if (stateRef.current?.autopilot) {
-            setPlanReview(null);
-          } else {
-            setPlanReview(content);
-          }
+          planReviewContentRef.current = String(d.content ?? "");
+          // Don't open the box yet: the submitting run is still finishing (an
+          // Accept now is refused) and autopilot Ken may still decide. The
+          // sidecar sends plan_review once the plan is genuinely the user's.
+          setPlanReview(null);
           break;
         }
+        case "plan_review":
+          openPlanReview(d);
+          break;
         case "autopilot_plan_accepted":
           // Keep an approval-time fallback for older sidecars, close the review
           // modal, and render the approved marker. Current sidecars override this
@@ -1114,6 +1111,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // row can offer an individual cancel.
           const list = Array.isArray(d.messages) ? (d.messages as QueuedMessage[]) : [];
           setQueuedMessages(list);
+          const previousQueue = queueSnapshotRef.current;
+          const cancelled = previousQueue.find((m) => m.id === d.cancelledId);
+          const cancelledIndex = cancelled
+            ? previousQueue
+                .filter((m) => m.text === cancelled.text)
+                .findIndex((m) => m.id === cancelled.id)
+            : -1;
+          queueSnapshotRef.current = list;
           // This event also fires when the agent CONSUMES queued steering at a
           // turn boundary (the sidecar re-broadcasts `queue_drained` here), so
           // drop the pending affordance from bubbles that have left the queue.
@@ -1138,6 +1143,15 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
 
           setItems((prev) => {
+            // Remove only a server-confirmed cancellation, before counting drains.
+            // Match its ordinal in the previous queue so duplicate text is safe.
+            if (cancelled && cancelledIndex >= 0) {
+              let index = 0;
+              prev = prev.filter((it) => {
+                if (it.kind !== "user" || !it.queued || it.text !== cancelled.text) return true;
+                return index++ !== cancelledIndex;
+              });
+            }
             // How many queued bubbles exist per text, so the number the agent has
             // taken is (bubbles - still pending).
             const bubbleCount = new Map<string, number>();
@@ -1168,6 +1182,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           schedulePromotionEnd();
           break;
         }
+        case "diagnostics": {
+          // Raw post-edit feedback belongs to the agent, not the conversation.
+          // The session still delivers it to the model and enforces verification;
+          // don't add chat rows, split streamed answers, or release held drafts.
+          break;
+        }
         case "hook_armed": {
           // Pre-final hooks hold text back; other hooks are mid-loop.
           const armedKind = String(d.kind ?? "ideal");
@@ -1184,8 +1204,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         }
         case "hook": {
-          const kind = String(d.kind ?? "ideal") as HookKind;
-          if (kind in HOOK_PRESENTATION) {
+          const kind = String(d.kind ?? "ideal");
+          if (isHookKind(kind)) {
             if (kind === "ideal" || kind === "verification") {
               // Draft dies here — held (never painted) in the normal armed path,
               // or removed from the transcript when arming came too late. Both
@@ -1206,8 +1226,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                 kind: "hook",
                 id: nextId(),
                 hook: kind,
-                ...(kind === "verification" && d.verificationReason === "recheck"
-                  ? { verificationReason: "recheck" as const }
+                ...(kind === "verification" &&
+                (d.verificationReason === "recheck" || d.verificationReason === "check_review")
+                  ? { verificationReason: d.verificationReason }
                   : {}),
               },
               { skipIfSameAsLast: true },
@@ -1223,14 +1244,23 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // The transcript is going away, so acked queue texts from the old
           // session must not gate clears in the new one.
           ackedQueueTextsRef.current.clear();
+          queueSnapshotRef.current = [];
           armedHooksRef.current.clear();
           heldTextRef.current = "";
+          // Its row is going away with the transcript; nothing left to show.
+          if (streamingIdRef.current !== null) liveText.release(streamingIdRef.current);
           stickToBottomRef.current = true;
           setItems([]);
+          // The empty transcript must show the welcome screen, not the previous
+          // run's status (for example "cancelled").
+          setStatus("ready");
           setLiveToolFeed([]);
           setTokens(0);
           setDoneStatus(null);
           setContextTokens(0);
+          // A fresh session has no history, so nothing to re-read: drop the
+          // previous chat's cold-cache notice instead of carrying it over.
+          setState((s) => (s ? { ...s, cacheExpiry: null } : s));
           setPlanReview(null);
           planReviewContentRef.current = null;
           {
@@ -1253,6 +1283,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           endStreamingText();
           subagentGroupIdRef.current = null;
           subagentGroupByAgentRef.current.clear();
+          break;
+        case "cache_expiry":
+          // Live cold-cache status pushed after a run, compaction or model
+          // switch settles. Null (empty chat / no known TTL) hides the notice.
+          setState((s) =>
+            s ? { ...s, cacheExpiry: (e.data as CacheExpiryStatus | null) ?? null } : s,
+          );
           break;
         case "models_change":
           // The set of usable models changed: local-model discovery landed
@@ -1292,6 +1329,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                       : s.gitHubRepoUrl,
                   gitHubCI:
                     d.gitHubCI !== undefined ? (d.gitHubCI as AgentState["gitHubCI"]) : s.gitHubCI,
+                  projectHealth: d.projectHealth !== undefined ? d.projectHealth : s.projectHealth,
                   additionalRoots: (d.additionalRoots as string[] | undefined) ?? s.additionalRoots,
                 }
               : s,
@@ -1306,6 +1344,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     [
       handleKenEvent,
       handleAutopilotEvent,
+      handleActivityEvent,
       appendAssistant,
       pushItem,
       finalizeThinking,
@@ -1343,6 +1382,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       planReviewPathRef,
       pendingPlanTotalRef,
       stickToBottomRef,
+      liveText,
+      openPlanReview,
     ],
   );
 

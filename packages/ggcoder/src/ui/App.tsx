@@ -32,11 +32,6 @@ import {
   type SubAgentSnapshot,
 } from "../core/subagent-manager.js";
 import { buildProcessCompletionFollowUp } from "../core/process-gate.js";
-import {
-  VerificationGate,
-  isCodeFilePath,
-  isVerificationCommand,
-} from "../core/verification-gate.js";
 import { useAgentLoop, type StreamSnapshot, type UserContent } from "./hooks/useAgentLoop.js";
 import { useTranscriptHistory } from "./hooks/useTranscriptHistory.js";
 import type { PasteInfo } from "./components/InputArea.js";
@@ -104,13 +99,6 @@ import type { TerminalHistoryPrinter } from "./terminal-history.js";
 import { buildUserContentWithAttachments } from "./prompt-routing.js";
 import { submitPromptCommand } from "./submit-prompt-command.js";
 import { handleUiSlashCommand } from "./submit-slash-commands.js";
-import {
-  buildIdealReviewMessage,
-  evaluateIdealReview,
-  detectTestDrift,
-  type ReviewCoverageTracker,
-} from "../core/ideal-review.js";
-import type { LspManager } from "../core/lsp/manager.js";
 import { buildLoopBreakMessage, evaluateLoopBreak } from "../core/loop-breaker.js";
 import { buildRegroundingMessage } from "../core/regrounding.js";
 import { getNextThinkingLevel, isThinkingLevelSupported } from "./thinking-level.js";
@@ -165,10 +153,8 @@ import type {
 
 export type { CompletedItem, ToolGroupItem } from "./app-items.js";
 import {
-  IDEAL_HOOK_NOTICE_TEXT,
   LOOP_BREAK_NOTICE_TEXT,
   REGROUNDING_NOTICE_TEXT,
-  VERIFICATION_HOOK_NOTICE_TEXT,
   TRUNCATED_CONTINUING_NOTICE_TEXT,
   TRUNCATED_INCOMPLETE_NOTICE_TEXT,
   TRUNCATED_EMPTY_RESPONSE_NOTICE_TEXT,
@@ -223,8 +209,6 @@ export interface AppProps {
   version: string;
   showTokenUsage?: boolean;
   idealReviewEnabled?: boolean;
-  /** Kill switch for the pre-stop verification gate (default on). */
-  verificationGateEnabled?: boolean;
   onSlashCommand?: (input: string) => Promise<string | null>;
   loggedInProviders?: Provider[];
   credentialsByProvider?: Record<
@@ -237,8 +221,6 @@ export interface AppProps {
   sessionId?: string;
   processManager?: ProcessManager;
   subAgentManager?: SubAgentManager;
-  lspManager?: LspManager;
-  reviewCoverageTracker?: ReviewCoverageTracker;
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
@@ -344,7 +326,6 @@ export interface AppProps {
     planMode?: boolean;
     sessionStats?: SessionStats;
     idealReviewEnabled?: boolean;
-    verificationGateEnabled?: boolean;
   };
 }
 
@@ -509,6 +490,7 @@ export function App(props: AppProps) {
   const currentToolsRef = useRef(props.tools);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel | undefined>(props.thinking);
   const thinkingLevelRef = useRef<ThinkingLevel | undefined>(props.thinking);
+  currentProviderRef.current = currentProvider;
   currentModelRef.current = currentModel;
   thinkingLevelRef.current = thinkingLevel;
   const [renderMarkdown, setRenderMarkdown] = useState(true);
@@ -555,11 +537,6 @@ export function App(props: AppProps) {
     props.sessionStore?.idealReviewEnabled ?? props.idealReviewEnabled ?? true,
   );
   const idealReviewEnabledRef = useRef(idealReviewEnabled);
-  /** Pre-stop verification gate: code edited this run, nothing proved it since. */
-  const verificationGateRef = useRef(new VerificationGate());
-  const verificationGateEnabledRef = useRef(
-    props.sessionStore?.verificationGateEnabled ?? props.verificationGateEnabled ?? true,
-  );
   /**
    * Languages whose style packs are currently injected into the system prompt.
    * Grown by `maybeInjectLanguagePacks` after `write`/`bash` tool results when
@@ -700,8 +677,8 @@ export function App(props: AppProps) {
 
   // Derive credentials for the current provider + model. Almost always keyed
   // by provider id, but a model can prefer one storage key and fall back to
-  // another (e.g. Xiaomi's mimo-v2.5-pro-ultraspeed is API-Credits-only,
-  // while mimo-v2.5-pro prefers the Token Plan but falls back to API Credits
+  // another (e.g. Xiaomi's mimo-v2.6-pro-ultraspeed is API-Credits-only,
+  // while mimo-v2.6-pro prefers the Token Plan but falls back to API Credits
   // when only that's configured) — see getAuthStorageKeys().
   const currentCreds = getAuthStorageKeys(currentProvider, currentModel)
     .map((key) => props.credentialsByProvider?.[key])
@@ -931,31 +908,23 @@ export function App(props: AppProps) {
   );
   const handleTaskNavigate = useCallback((index: number) => navigateTaskBar(index), []);
 
-  // Resolve fresh OAuth credentials before each agent loop run.
-  // Falls back to the static props when authStorage is not available.
+  // Resolve fresh OAuth credentials before each agent loop run. Only wired up
+  // when authStorage exists; without it the loop uses the static apiKey props.
+  const authStorage = props.authStorage;
   const resolveCredentials = useCallback(
     async (opts?: { forceRefresh?: boolean; rejectedToken?: string }) => {
-      if (props.authStorage) {
-        const creds = await props.authStorage.resolveCredentials(currentProvider, {
-          ...opts,
-          storageKeys: getAuthStorageKeys(currentProvider, currentModel),
-        });
-        return {
-          apiKey: creds.accessToken,
-          accountId: creds.accountId,
-          projectId: creds.projectId,
-        };
-      }
-      return { apiKey: activeApiKey!, accountId: activeAccountId, projectId: activeProjectId };
+      if (!authStorage) throw new Error("resolveCredentials called without authStorage");
+      const creds = await authStorage.resolveCredentials(currentProvider, {
+        ...opts,
+        storageKeys: getAuthStorageKeys(currentProvider, currentModel),
+      });
+      return {
+        apiKey: creds.accessToken,
+        accountId: creds.accountId,
+        projectId: creds.projectId,
+      };
     },
-    [
-      props.authStorage,
-      currentProvider,
-      currentModel,
-      activeApiKey,
-      activeAccountId,
-      activeProjectId,
-    ],
+    [authStorage, currentProvider, currentModel],
   );
 
   // Back-reference to the loop, so callbacks defined in its own options object
@@ -1001,29 +970,9 @@ export function App(props: AppProps) {
       baseUrl: activeBaseUrl,
       accountId: activeAccountId,
       projectId: activeProjectId,
-      resolveCredentials,
+      resolveCredentials: authStorage ? resolveCredentials : undefined,
       transformContext,
       modelRouter,
-      lspManager: props.lspManager,
-      reviewCoverageTracker: props.reviewCoverageTracker,
-      getIdealReviewMessage: (stats, touchedFiles) => {
-        if (!idealReviewEnabledRef.current) return null;
-        const decision = evaluateIdealReview(stats);
-        // Test drift fires the review even when the volume score is too low to
-        // trigger on its own \u2014 a stale sibling test is invisible to typecheck.
-        const driftedFiles = detectTestDrift(touchedFiles, process.cwd()).slice(0, 5);
-        if (!decision.shouldReview && driftedFiles.length === 0) return null;
-        log("INFO", "ideal", "Injecting ideal review before final response", {
-          score: String(decision.score),
-          reasons: decision.reasons.join(", "),
-          testDrift: driftedFiles.join(", "),
-        });
-        setLiveItems((prev) => [
-          ...prev,
-          { kind: "ideal_hook", text: IDEAL_HOOK_NOTICE_TEXT, tone: "review", id: getId() },
-        ]);
-        return buildIdealReviewMessage(decision.reasons, driftedFiles);
-      },
       getLoopBreakMessage: (stats, stage) => {
         if (!idealReviewEnabledRef.current) return null;
         const decision = evaluateLoopBreak(stats);
@@ -1349,31 +1298,7 @@ export function App(props: AppProps) {
           isError: boolean,
           durationMs: number,
           details?: unknown,
-          args?: Record<string, unknown>,
         ) => {
-          // Verification-gate bookkeeping, mirroring AgentSession.trackHookEvent:
-          // successful code mutations vs completed foreground verification runs.
-          if (!isError && args) {
-            const filePath = String(args.file_path ?? "");
-            if ((name === "edit" || name === "write") && isCodeFilePath(filePath)) {
-              verificationGateRef.current.recordMutation(filePath);
-            }
-            if (
-              name === "bash" &&
-              !args.run_in_background &&
-              isVerificationCommand(String(args.command ?? ""))
-            ) {
-              verificationGateRef.current.recordVerification();
-            }
-            // Reading the final output of an EXITED background verification run
-            // counts as verification — mirrors AgentSession.trackHookEvent.
-            if (name === "task_output") {
-              const proc = props.processManager?.list().find((p) => p.id === args.id);
-              if (proc && proc.exitCode !== null && isVerificationCommand(proc.command)) {
-                verificationGateRef.current.recordVerification();
-              }
-            }
-          }
           recordToolEnd(sessionStatsRef.current, name, isError, durationMs);
           setLiveToolFeed((prev) =>
             prev.map((entry) =>
@@ -1846,7 +1771,6 @@ export function App(props: AppProps) {
         if (gate.runStartedAt !== runStartedAt) {
           gate.runStartedAt = runStartedAt;
           gate.injected = 0;
-          verificationGateRef.current.reset();
         }
         const processFollowUp = buildProcessCompletionFollowUp(
           props.processManager?.list() ?? [],
@@ -1856,26 +1780,6 @@ export function App(props: AppProps) {
         if (processFollowUp) {
           gate.injected += 1;
           return processFollowUp;
-        }
-
-        // Verification gate: code was edited but no test/typecheck/lint/build
-        // completed since the last edit — demand it once, then let the run stop.
-        if (verificationGateEnabledRef.current) {
-          const verificationFollowUp = verificationGateRef.current.followUp();
-          if (verificationFollowUp) {
-            // Say why the run is continuing past its apparent end, or the extra
-            // answer reads as the agent talking to itself.
-            setLiveItems((prev) => [
-              ...prev,
-              {
-                kind: "ideal_hook",
-                text: VERIFICATION_HOOK_NOTICE_TEXT,
-                tone: "review",
-                id: getId(),
-              },
-            ]);
-            return verificationFollowUp;
-          }
         }
 
         const steps = planStepsRef.current;
@@ -2095,8 +1999,8 @@ export function App(props: AppProps) {
           {
             kind: "info",
             text: next
-              ? "Ideal review enabled. Use /ideal-off to disable it."
-              : "Ideal review disabled. Use /ideal-on to enable it.",
+              ? "Loop-break and re-grounding nudges enabled. Use /ideal-off to disable them."
+              : "Loop-break and re-grounding nudges disabled. Use /ideal-on to enable them.",
             id: getId(),
           },
         ]);
@@ -2433,10 +2337,11 @@ export function App(props: AppProps) {
           // re-spawning `npx` there only risks a failed
           // re-spawn that would silently drop the tools.
           const glmInvolved = newProvider === "glm" || prevProvider === "glm";
-          if (props.mcpManager && glmInvolved) {
+          const mcpManager = props.mcpManager;
+          if (mcpManager && glmInvolved) {
             void (async () => {
               // Disconnect old MCP servers
-              await props.mcpManager!.dispose();
+              await mcpManager.dispose();
 
               // Remove old MCP tools, connect new ones
               let apiKey: string | undefined;
@@ -2455,7 +2360,7 @@ export function App(props: AppProps) {
                 // ~/.gg/mcp.json and ./.gg/mcp.json) survive the reconnect —
                 // getMCPServers returns provider defaults only.
                 const servers = await getAllMcpServers(newProvider, apiKey, props.cwd);
-                const mcpTools = await props.mcpManager!.connectAll(servers);
+                const mcpTools = await mcpManager.connectAll(servers);
                 setCurrentTools((prev) => {
                   const next = [...prev.filter((t) => !t.name.startsWith("mcp__")), ...mcpTools];
                   rebuildPromptWithTools(next);
@@ -2614,8 +2519,8 @@ export function App(props: AppProps) {
         name: idealReviewEnabled ? "ideal-off" : "ideal-on",
         aliases: [],
         description: idealReviewEnabled
-          ? "Disable pre-final ideal review"
-          : "Enable pre-final ideal review",
+          ? "Disable loop-break and re-grounding nudges"
+          : "Enable loop-break and re-grounding nudges",
         sectionTitle: "built-in",
       },
       {

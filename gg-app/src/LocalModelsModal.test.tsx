@@ -90,6 +90,20 @@ afterEach(() => {
 });
 
 describe("LocalModelsModal", () => {
+  it("says the list couldn't be read instead of 'No models yet', and retries", async () => {
+    getLocalModelsMock.mockRejectedValueOnce(new Error("daemon down"));
+
+    render(<LocalModelsModal onClose={vi.fn()} />);
+
+    expect(await screen.findByText("Couldn't reach the agent to list models.")).toBeTruthy();
+    expect(screen.queryByText(/No models yet/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText("Ollama")).toBeTruthy();
+    expect(screen.queryByText("Couldn't reach the agent to list models.")).toBeNull();
+  });
+
   it("shows one compact context figure per model, capabilities in the tooltip", async () => {
     render(<LocalModelsModal onClose={vi.fn()} />);
 
@@ -192,10 +206,14 @@ describe("LocalModelsModal", () => {
     expect(screen.getByTitle('Remove "LM Studio"')).toBeTruthy();
   });
 
-  it("keeps the footer to three actions (HF download lives in the Connect-page tile)", () => {
+  it("keeps the footer to three actions (HF download lives in the Connect-page tile)", async () => {
     // The in-modal HF button was removed (it crowded the footer to four
     // buttons); the Connect-page tile is the entry point now.
     render(<LocalModelsModal onClose={vi.fn()} />);
+    // Let the mount-time load and background scan settle so their state
+    // updates land inside the test instead of after it.
+    await screen.findByText("Ollama");
+    await waitFor(() => expect(scanLocalModelsMock).toHaveBeenCalled());
     expect(screen.queryByText("Add from Hugging Face")).toBeNull();
     expect(screen.getByText("Add endpoint")).toBeTruthy();
     expect(screen.getByText("Close")).toBeTruthy();

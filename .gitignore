@@ -9,13 +9,17 @@ coverage/
 # Auth & secrets
 .env
 .env.*
-~/.gg/
+.npmrc
+
+# Local agent config and maintainer-only notes
 .gg/
-!/.gg/
-/.gg/*
-!/.gg/commands/
-/.gg/commands/*
-!/.gg/commands/release.md
+/.claude/
+.claude/*.lock
+CLAUDE.md
+
+# After Effects source projects never belong in the repo.
+*.[aA][eE][pP]
+*.[aA][eE][pP][xX]
 
 # Scratch / ad-hoc test files
 test_*.mjs
@@ -32,8 +36,6 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Local tool locks
-.claude/*.lock
 
 # Python
 __pycache__/
@@ -45,9 +47,6 @@ __pycache__/
 target/
 .build/
 
-# npm
-.npmrc
-
 # Goal audit generated evidence
 .goal-artifacts/
 .goal-evidence/
@@ -55,30 +54,32 @@ artifacts/
 packages/ggcoder/.goal-evidence/
 packages/ggcoder/ideal-sim/
 
-# prompt-bench scratch sandboxes
-experiments/prompt-bench/.bench-sandbox-*
-
-# Local agent config, benchmarks and one-off tooling. These are personal working
-# directories, not shipped source, EXCEPT the CI size/startup gates below: no
-# package build or npm script reads them, so a fresh clone is unaffected by
-# their absence.
-/.gg/
-/.claude/
-# bench/ stays personal except the committed CI gates and their baseline.
+# Local benchmarks, experiments and one-off tooling. Only the pieces CI or
+# contributors rely on are un-ignored below; everything else stays local.
 /bench/*
-!/bench/size-gate.mjs
-!/bench/startup-gate.mjs
 !/bench/baseline/
 /bench/baseline/*
 !/bench/baseline/sizes.json
+!/bench/size-gate.mjs
+!/bench/startup-gate.mjs
+!/bench/ui-library-real-flow/
+/bench/ui-library-real-flow/runs/
+/bench/ui-library-real-flow/live-approval.json
 /benchmarks/
-/experiments/bench-mark/
-/experiments/lean-code-bench/
+/experiments/*
+!/experiments/prompt-bench/
+experiments/prompt-bench/.bench-sandbox-*
 /scripts/
-CLAUDE.md
 packages/*/.bench-*.mjs
 
+# Temporary A/B sidecar builder; private harness and outputs live under /bench/.
+/gg-app/scripts/.review-control-bundle.mjs
+
 # Local research/strategy notes
+# Dated agent audit / study reports are maintainer notes, not public docs.
+/docs/*-audit-*.md
+/bench/ui-library-real-flow/REPORT.md
+/experiments/prompt-bench/review-bench.md
 /*-vs-*.md
 /*-report.md
 /fixes.md

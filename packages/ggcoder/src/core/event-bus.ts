@@ -38,6 +38,8 @@ export interface BusEventMap {
     };
   };
   max_turns: { totalTurns: number; maxTurns: number };
+  retry: Omit<Extract<AgentEvent, { type: "retry" }>, "type">;
+  stream_rule_triggered: Omit<Extract<AgentEvent, { type: "stream_rule_triggered" }>, "type">;
   /** Turn budget was exhausted but extended because the run showed progress. */
   turn_budget_extended: { turn: number; grantedTurns: number; extension: number };
   truncated: {
@@ -58,6 +60,8 @@ export interface BusEventMap {
     toProvider: string;
     reason: string;
   };
+  /** Informational edit feedback, not a completion gate or a draft replacement. */
+  diagnostics: { text: string };
 
   // Agent self-correction hooks (ideal review / verification / loop-break /
   // re-grounding). Carries only the semantic kind; the presentation layer owns
@@ -66,7 +70,7 @@ export interface BusEventMap {
     kind: "ideal" | "verification" | "loop_break" | "regrounding";
     coverageExpected?: string[];
     coverageMissing?: string[];
-    verificationReason?: "recheck";
+    verificationReason?: "recheck" | "check_review";
   };
 
   /** A pre-final hook would fire if the agent stopped right now: the Ideal
@@ -110,29 +114,60 @@ export interface BusEventMap {
 
 type EventKey = keyof BusEventMap;
 type EventHandler<K extends EventKey> = (payload: BusEventMap[K]) => void;
+type ListenerSets = { [K in EventKey]: Set<EventHandler<K>> };
+
+/** One listener set per event, created up front so every access is typed by its
+ *  event key. A new `BusEventMap` entry fails to compile until it is added here. */
+function emptyListenerSets(): ListenerSets {
+  return {
+    text_delta: new Set(),
+    thinking_delta: new Set(),
+    tool_call_start: new Set(),
+    tool_call_update: new Set(),
+    tool_call_end: new Set(),
+    turn_end: new Set(),
+    checkpoint: new Set(),
+    agent_done: new Set(),
+    max_turns: new Set(),
+    retry: new Set(),
+    stream_rule_triggered: new Set(),
+    turn_budget_extended: new Set(),
+    truncated: new Set(),
+    error: new Set(),
+    server_tool_call: new Set(),
+    server_tool_result: new Set(),
+    diagnostics: new Set(),
+    hook: new Set(),
+    hook_armed: new Set(),
+    subagent_state: new Set(),
+    queue_drained: new Set(),
+    session_start: new Set(),
+    model_change: new Set(),
+    model_switch: new Set(),
+    compaction_start: new Set(),
+    compaction_end: new Set(),
+    branch_created: new Set(),
+    user_input: new Set(),
+    slash_command: new Set(),
+  };
+}
 
 // ── EventBus ───────────────────────────────────────────────
 
 export class EventBus {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private listeners = new Map<string, Set<(...args: any[]) => void>>();
+  private readonly listeners: ListenerSets = emptyListenerSets();
 
   on<K extends EventKey>(event: K, handler: EventHandler<K>): () => void {
-    if (!this.listeners.has(event)) {
-      this.listeners.set(event, new Set());
-    }
-    this.listeners.get(event)!.add(handler);
+    this.listeners[event].add(handler);
     return () => this.off(event, handler);
   }
 
   off<K extends EventKey>(event: K, handler: EventHandler<K>): void {
-    this.listeners.get(event)?.delete(handler);
+    this.listeners[event].delete(handler);
   }
 
   emit<K extends EventKey>(event: K, payload: BusEventMap[K]): void {
-    const handlers = this.listeners.get(event);
-    if (!handlers) return;
-    for (const handler of handlers) {
+    for (const handler of this.listeners[event]) {
       handler(payload);
     }
   }
@@ -147,10 +182,9 @@ export class EventBus {
 
   /** Remove all listeners, freeing closures that may retain large scopes. */
   removeAllListeners(): void {
-    for (const set of this.listeners.values()) {
+    for (const set of Object.values(this.listeners)) {
       set.clear();
     }
-    this.listeners.clear();
   }
 
   forwardAgentEvent(event: AgentEvent): void {
@@ -200,6 +234,16 @@ export class EventBus {
           totalUsage: event.totalUsage,
         });
         break;
+      case "retry": {
+        const { type: _type, ...retry } = event;
+        this.emit("retry", retry);
+        break;
+      }
+      case "stream_rule_triggered": {
+        const { type: _type, ...triggered } = event;
+        this.emit("stream_rule_triggered", triggered);
+        break;
+      }
       case "max_turns":
         this.emit("max_turns", {
           totalTurns: event.totalTurns,

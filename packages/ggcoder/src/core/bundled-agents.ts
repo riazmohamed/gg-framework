@@ -68,7 +68,9 @@ Be exhaustive in research, compressed in reporting. Cite sources; don't guess.`;
 
 const WORKER_PROMPT = `You are Worker, a branch-isolated implementer.
 
-Your job is to implement a scoped change on its own git branch, verify it works, and open a PR. You always work on a fresh branch — never commit to the current branch directly.
+Your job is to implement a scoped change on its own git branch, verify it works, and commit it there. You always work on a fresh branch — never commit to the current branch directly.
+
+Publishing is opt-in: push and open a PR ONLY when your task states that the user explicitly asked for a push or PR. The delegating agent choosing a worker is not that permission. Without it, keep the commit local on your branch and report the branch name.
 
 ## Workflow
 
@@ -86,21 +88,21 @@ Your job is to implement a scoped change on its own git branch, verify it works,
 
 4. **Test**: Run the project's test suite. Fix failures **your change caused**. If a failure is pre-existing or outside your assigned unit, do NOT expand scope to chase it — leave it and note it in the report. Scope wins over green.
 
-5. **Commit & Push**:
+5. **Commit**:
    - Stage specific files (not \`git add -A\`)
    - Write a clear, descriptive commit message
-   - \`git push -u origin <branch-name>\`
 
-6. **Open PR**: \`gh pr create --title "<title>" --body "<description>"\`. If \`gh\` is unavailable or the push fails, note it.
+6. **Publish (only if authorized, see above)**: \`git push -u origin <branch-name>\`, then \`gh pr create --title "<title>" --body "<description>"\`. If \`gh\` is unavailable or the push fails, note it.
 
 7. **Switch back**: \`git checkout -\` to the original branch.
 
 ## Stop when
-- The change is implemented, self-reviewed, and pushed with a PR open — OR
+- The change is implemented, self-reviewed, and committed on its branch (plus pushed with a PR open, when authorized) — OR
 - You cannot proceed without exceeding scope, touching unrelated code, or fixing a pre-existing failure. Stop and report rather than sprawl.
 
 ## What to report — lead with exactly these lines
-- **PR**: \`<url>\` — or \`PR: none — <reason>\`
+- **Branch**: \`<branch-name>\`
+- **PR**: \`<url>\` — or \`PR: none — <reason>\` ("not authorized" is a valid reason)
 - **Changed**: files touched + one line each
 - **Tests**: pass / fail, and which failures were left as out-of-scope
 - **Notes**: assumptions made, anything left for follow-up
@@ -198,8 +200,7 @@ Be rigorous. The cost of a false positive is the user's trust in the entire repo
 export const BUNDLED_AGENTS: AgentDefinition[] = [
   {
     name: "bee",
-    description:
-      "Use for a self-contained implementation task on the current branch: write a module, fix a bug, run a migration, make a failing test pass. Edits files and runs commands. Use `worker` instead when the change needs its own git branch and a PR; use `owl` when nothing should be modified.",
+    description: "Implements a self-contained change in place.",
     tools: ["read", "write", "edit", "bash", "find", "grep", "code_search", "ls", "source_path"],
     model: "inherit",
     systemPrompt: BEE_PROMPT,
@@ -207,12 +208,9 @@ export const BUNDLED_AGENTS: AgentDefinition[] = [
   },
   {
     name: "owl",
-    description:
-      'Use for read-only questions about THIS repository: "where is X implemented", "what calls Y", "how does module Z fit together", tracing a data flow or mapping a directory. Never edits and never uses the web.',
+    description: "Read-only questions about this repo.",
     tools: ["read", "grep", "find", "ls", "code_search", "source_path"],
-    // Structural recon is mechanical pattern work; the cheap tier handles it
-    // well and keeps wide fan-out affordable.
-    model: "fast",
+    model: "inherit",
     // Conventions and style rules don't change where a symbol is defined, and
     // skipping them keeps recon fast (matching Claude Code's Explore agent).
     context: "none",
@@ -221,8 +219,7 @@ export const BUNDLED_AGENTS: AgentDefinition[] = [
   },
   {
     name: "researcher",
-    description:
-      "Use when an answer needs sources outside this repo: a dependency's real behavior, an API contract, framework internals, version/changelog differences, or current best practice. Reads installed package source, official docs, and public code. Use `owl` when the repo alone can settle it.",
+    description: "Research needing docs or dependency source outside the repo.",
     tools: [
       "read",
       "grep",
@@ -240,8 +237,7 @@ export const BUNDLED_AGENTS: AgentDefinition[] = [
   },
   {
     name: "worker",
-    description:
-      "Use to land one scoped change in isolation: it creates a `batch/*` git branch, implements, self-reviews, tests, commits, pushes, and opens a PR, then returns to the original branch. Use for parallel fan-out of independent units of work. Use `bee` for in-place edits with no branch or PR.",
+    description: "Lands one change on its own branch and commits it.",
     tools: ["read", "write", "edit", "bash", "find", "grep", "code_search", "ls"],
     model: "inherit",
     systemPrompt: WORKER_PROMPT,
@@ -249,8 +245,7 @@ export const BUNDLED_AGENTS: AgentDefinition[] = [
   },
   {
     name: "auditor",
-    description:
-      "Use for a defensive security review of code or a diff: traces untrusted input to dangerous sinks and reports exploitable findings with concrete vulnerability scenarios, CWE, and fixes. Read-only.",
+    description: "Read-only security review.",
     tools: ["read", "grep", "find", "ls", "code_search", "bash", "web_fetch", "web_search"],
     model: "inherit",
     systemPrompt: AUDITOR_PROMPT,
@@ -258,8 +253,7 @@ export const BUNDLED_AGENTS: AgentDefinition[] = [
   },
   {
     name: "skeptic",
-    description:
-      "Use to triage security findings before reporting them: re-verifies each claimed source→sink path in the code and returns CONFIRMED / DROP / DOWNGRADE with the reason. Pair it with `auditor` output. Read-only.",
+    description: "Verifies `auditor` findings.",
     tools: [
       "read",
       "grep",

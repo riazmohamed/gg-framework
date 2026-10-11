@@ -3,7 +3,7 @@ import type { AgentTool, ToolContext } from "@abukhaled/gg-agent";
 import { sliceHead } from "@abukhaled/gg-ai";
 import { extractToMarkdown } from "./html-extract.js";
 import { extractPdfText, PdfExtractorUnavailable } from "./pdf-extract.js";
-import { checkUrlPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
+import { checkUrlPolicy, withNetworkPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import { stripInvisibleUnicode } from "../utils/text.js";
 import { log } from "../core/logger.js";
 
@@ -458,10 +458,13 @@ async function fetchOne(
   signal: AbortSignal,
   format: FetchFormat,
   getNetworkPolicy?: GetNetworkPolicy,
+  onHop?: (url: string) => void,
 ): Promise<FetchOneResult> {
   let currentUrl = url;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    onHop?.(currentUrl);
+    signal.throwIfAborted();
     // Every hop — the initial request and each redirect target — is checked, so
     // a redirect can never carry the fetch to a disallowed host.
     const blocked = checkUrlPolicy(currentUrl, getNetworkPolicy);
@@ -659,31 +662,38 @@ async function fetchAndProcess(
   }
 
   try {
-    const result = await fetchOne(url, signal, opts.format, opts.getNetworkPolicy);
-    if (!result.ok) return result.error;
+    return await withNetworkPolicy(
+      url,
+      opts.getNetworkPolicy,
+      signal,
+      async (guardSignal, onHop) => {
+        const result = await fetchOne(url, guardSignal, opts.format, opts.getNetworkPolicy, onHop);
+        if (!result.ok) return result.error;
 
-    const { response } = result;
-    if (!(response.status >= 200 && response.status < 300)) {
-      return `Error: HTTP ${response.status} ${response.statusText}`;
-    }
+        const { response } = result;
+        if (!(response.status >= 200 && response.status < 300)) {
+          return `Error: HTTP ${response.status} ${response.statusText}`;
+        }
 
-    const bytes = await readBoundedBody(
-      response.body,
-      byteLimitForResponse(response.contentType, response.finalUrl),
+        const bytes = await readBoundedBody(
+          response.body,
+          byteLimitForResponse(response.contentType, response.finalUrl),
+        );
+        const head = bytes.slice(0, 4);
+
+        if (looksLikePdf(response.contentType, response.finalUrl, head)) {
+          const pdfResponse: RawResponse = {
+            ...response,
+            body: new Response(bytes.slice().buffer),
+            contentLength: bytes.byteLength,
+          };
+          return await processPdf(pdfResponse, opts.maxLength);
+        }
+
+        const text = new TextDecoder().decode(bytes);
+        return await processHtmlOrText(response, text, opts);
+      },
     );
-    const head = bytes.slice(0, 4);
-
-    if (looksLikePdf(response.contentType, response.finalUrl, head)) {
-      const pdfResponse: RawResponse = {
-        ...response,
-        body: new Response(bytes.slice().buffer),
-        contentLength: bytes.byteLength,
-      };
-      return await processPdf(pdfResponse, opts.maxLength);
-    }
-
-    const text = new TextDecoder().decode(bytes);
-    return await processHtmlOrText(response, text, opts);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return `Error fetching ${url}: ${msg}`;
@@ -824,14 +834,27 @@ async function tryLlmsResource(
   const probes = await runPool(eligibleCandidates, PROBE_CONCURRENCY, async (candidate) => {
     try {
       const probeSignal = AbortSignal.any([signal, AbortSignal.timeout(PROBE_TIMEOUT_MS)]);
-      const result = await fetchOne(candidate.url, probeSignal, "markdown", opts.getNetworkPolicy);
-      if (!result.ok) return null;
-      const { response } = result;
-      if (response.status !== 200) return null;
-      const bytes = await readBoundedBody(response.body);
-      const text = new TextDecoder().decode(bytes);
-      if (!looksLikeMarkdownDocument(text, response.contentType, candidate)) return null;
-      return `[${candidate.label}]\nSource: ${response.finalUrl}\n\n${truncate(text.trim(), opts.maxLength)}`;
+      return await withNetworkPolicy(
+        candidate.url,
+        opts.getNetworkPolicy,
+        probeSignal,
+        async (guardSignal, onHop) => {
+          const result = await fetchOne(
+            candidate.url,
+            guardSignal,
+            "markdown",
+            opts.getNetworkPolicy,
+            onHop,
+          );
+          if (!result.ok) return null;
+          const { response } = result;
+          if (response.status !== 200) return null;
+          const bytes = await readBoundedBody(response.body);
+          const text = new TextDecoder().decode(bytes);
+          if (!looksLikeMarkdownDocument(text, response.contentType, candidate)) return null;
+          return `[${candidate.label}]\nSource: ${response.finalUrl}\n\n${truncate(text.trim(), opts.maxLength)}`;
+        },
+      );
     } catch {
       return null;
     }
@@ -935,16 +958,7 @@ export function createWebFetchTool(
 
   return {
     name: "web_fetch",
-    description:
-      "Fetch and read web page content. Accepts a single `url` or a `urls` array (up to 10, " +
-      "fetched concurrently). Returns clean Markdown by default (`format`: markdown|text|html|outline) " +
-      "via main-content extraction. Extracts text from PDFs, follows safe redirects automatically, and " +
-      "prefers a site's curated /llms.txt for docs pages when available.\n" +
-      '`format: "outline"` is the cheap mode: main content only, every hyperlink replaced by a ' +
-      "number (`anchor text [12]`) with a numbered URL index at the end, and a small default " +
-      "`max_length`. Use it when hunting for the right page; then pass `follow: 12` " +
-      "(instead of `url`) to fetch link 12 from the last outline. Repeat views of a page in the " +
-      "same session are served from cache. Outline mode skips the /llms.txt probe.",
+    description: "Fetch pages/PDFs as Markdown. format outline numbers links; then `follow: N`.",
     parameters,
     async execute(args, context: ToolContext) {
       const format: FetchFormat = args.format ?? "markdown";
@@ -1032,39 +1046,15 @@ async function runPool<T, R>(
 
 const parameters = z
   .object({
-    url: z.string().optional().describe("The URL to fetch"),
-    urls: z
-      .array(z.string())
-      .max(MAX_URLS)
-      .optional()
-      .describe(`Fetch multiple URLs concurrently (up to ${MAX_URLS}); returns a sectioned digest`),
-    follow: z
-      .number()
-      .int()
-      .positive()
-      .optional()
-      .describe(
-        "Fetch link N from the most recent outline render, instead of `url`. " +
-          "Followed links are SSRF/allowlist-checked exactly like a supplied URL.",
-      ),
+    url: z.string().optional(),
+    urls: z.array(z.string()).max(MAX_URLS).optional().describe("Fetched concurrently"),
+    follow: z.number().int().positive().optional().describe("Link number from the last outline"),
     max_length: z
       .number()
       .optional()
-      .describe(
-        `Maximum characters to return (default: 10000; ${OUTLINE_DEFAULT_MAX_LENGTH} for outline)`,
-      ),
-    format: z
-      .enum(["markdown", "text", "html", "outline"])
-      .optional()
-      .describe(
-        "Output format: markdown (default, main-content extraction), text, html, or outline " +
-          `(compact main content with each link replaced by a number plus a numbered URL index, ` +
-          `capped at ${MAX_OUTLINE_LINKS} links — cheapest; follow links with \`follow\`)`,
-      ),
-    prefer_llms_txt: z
-      .boolean()
-      .optional()
-      .describe("Prefer a site's curated /llms.txt for documentation pages (default: true)"),
+      .describe(`Default 10000 (${OUTLINE_DEFAULT_MAX_LENGTH} for outline)`),
+    format: z.enum(["markdown", "text", "html", "outline"]).optional(),
+    prefer_llms_txt: z.boolean().optional(),
   })
   .refine(
     (v) =>

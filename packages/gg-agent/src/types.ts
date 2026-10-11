@@ -9,12 +9,18 @@ import type {
   Usage,
   StreamOptions,
 } from "@abukhaled/gg-ai";
+import type { StreamRulesConfig } from "./stream-rules.js";
 
 // ── Tool Results ────────────────────────────────────────────
 
 export interface StructuredToolResult {
   content: ToolResultContent;
   details?: unknown;
+  /** End the run after persisting this result, without another model call or
+   * draining steering/follow-ups. Use a sequential tool to also prevent later
+   * calls in the same batch from running (e.g. a pending plan-review handoff).
+   * Host control metadata only: never serialized into provider tool results. */
+  endRun?: boolean;
 }
 
 export type ToolExecuteResult = string | StructuredToolResult;
@@ -46,6 +52,12 @@ export interface AgentTool<T extends z.ZodType = z.ZodType> extends Tool {
    * message — becomes unreachable.
    */
   timeoutMs?: number;
+  /**
+   * Whether a mid-run steering message may preempt this tool. Defaults to
+   * true, except for atomic file mutators (`edit`, `write`, …) which always
+   * run to completion so they are never left half-applied.
+   */
+  interruptible?: boolean;
   execute: (
     args: z.infer<T>,
     context: ToolContext,
@@ -201,7 +213,8 @@ export interface AgentRetryEvent {
     | "stream_stall"
     | "overflow_compact"
     | "tool_argument_glitch"
-    | "runaway_toolcall";
+    | "runaway_toolcall"
+    | "stream_rule";
   attempt: number;
   maxAttempts: number;
   delayMs: number;
@@ -218,6 +231,30 @@ export interface AgentRetryEvent {
    * than rolling it back.
    */
   preservedChars?: number;
+}
+
+/**
+ * A stream rule matched mid-response. The attempt was aborted and discarded
+ * (no partial message persisted, no partial tool call executed), the rule's
+ * reminder was appended to the context, and the step is retried. Always
+ * followed by a silent `retry` (reason `stream_rule`) so UIs roll back the
+ * streamed partial exactly as for any other replayed attempt.
+ */
+export interface AgentStreamRuleTriggeredEvent {
+  type: "stream_rule_triggered";
+  /** Names of the rules that matched (usually one). */
+  rules: string[];
+  source: "text" | "tool";
+  /** Tool whose streamed arguments matched, for `source: "tool"`. */
+  toolName?: string;
+  attempt: number;
+  maxAttempts: number;
+  /**
+   * ESTIMATED usage of the aborted attempt (providers report none for an
+   * aborted stream): prompt chars/4 in, streamed chars/4 out. Already added to
+   * the run's `totalUsage`.
+   */
+  usage: Usage;
 }
 
 export interface AgentToolCallDeltaEvent {
@@ -276,6 +313,7 @@ export type AgentEvent =
   | AgentSteeringMessageEvent
   | AgentFollowUpMessageEvent
   | AgentRetryEvent
+  | AgentStreamRuleTriggeredEvent
   | AgentTurnEndEvent
   | AgentCheckpointEvent
   | AgentDoneEvent
@@ -338,6 +376,7 @@ export interface AgentOptions {
   transportSessionId?: StreamOptions["transportSessionId"];
   projectId?: StreamOptions["projectId"];
   cacheRetention?: StreamOptions["cacheRetention"];
+  onContextPrepared?: StreamOptions["onContextPrepared"];
   /** Stable per-session cache routing key for providers that support it. */
   promptCacheKey?: StreamOptions["promptCacheKey"];
   /** Override the User-Agent sent with OAuth-authenticated Anthropic requests. */
@@ -345,8 +384,17 @@ export interface AgentOptions {
   /** Extra HTTP headers attached to every model request (e.g. Kimi For Coding
    *  client-identity headers). Merged into the underlying SDK default headers. */
   defaultHeaders?: StreamOptions["defaultHeaders"];
+  /** Provider-specific request-body fields forwarded to every model request
+   *  (e.g. OpenRouter `provider: { zdr: true }`). See gg-ai `ProviderOptions`. */
+  providerOptions?: StreamOptions["providerOptions"];
+  /** Custom fetch implementation forwarded to the provider transport. */
+  fetch?: StreamOptions["fetch"];
   /** OpenAI service tier for latency-sensitive first-party API requests. */
   serviceTier?: StreamOptions["serviceTier"];
+  /** Codex Responses-Lite request shape override (see StreamOptions). */
+  responsesLite?: StreamOptions["responsesLite"];
+  /** Codex strict tool schema override (see StreamOptions). */
+  strictTools?: StreamOptions["strictTools"];
   /** Whether the target model supports image input. When false, image blocks
    *  in messages/tool_results are downgraded to text placeholders. Default: true. */
   supportsImages?: boolean;
@@ -365,6 +413,19 @@ export interface AgentOptions {
    *  against parallel fan-outs injecting huge uncached context in one turn;
    *  the largest results are trimmed (water-filling) with a re-run notice. */
   maxTurnToolResultChars?: number;
+  /** Load a tool the model called by name that is not in `tools` yet (e.g. a
+   *  deferred tool it saw advertised). Return it to run the call normally, or
+   *  undefined for the usual "Unknown tool" result. Must append the tool to the
+   *  live `tools` array itself so later turns see its schema. */
+  resolveTool?: (name: string) => AgentTool | undefined;
+  /** Optional post-processing of a SUCCESSFUL tool result (after redaction,
+   *  before the tool_call_end event and the provider context). Return the
+   *  content unchanged to leave it alone. A throw is ignored (original kept).
+   *  Used e.g. to append a warning to untrusted-content results. */
+  transformToolResult?: (
+    call: { name: string; args: Record<string, unknown> },
+    content: ToolResultContent,
+  ) => ToolResultContent;
   /** Max consecutive pause_turn continuations before stopping (default: 5).
    *  Prevents infinite loops when server-side tools keep pausing. */
   maxContinuations?: number;
@@ -400,6 +461,16 @@ export interface AgentOptions {
     currentModel: string,
     currentProvider: string,
   ) => ModelRouterResult | null | Promise<ModelRouterResult | null>;
+
+  /**
+   * Instant interrupt (codex `instant_interrupt`): subscribe to "a steering
+   * message just arrived". While tools are running, the listener preempts
+   * interruptible tools (their AbortSignal fires; unfinished calls get an
+   * "Interrupted" error result) and the loop drains steering and continues.
+   * Distinct from `signal` (the Stop button), which ends the run. Returns an
+   * unsubscribe function.
+   */
+  onSteeringAvailable?: (listener: () => void) => () => void;
   /**
    * Polled when the agent would otherwise stop (no tool calls, no steering).
    * Returns messages to inject and continue the loop. Lower priority than
@@ -420,6 +491,13 @@ export interface AgentOptions {
     maxTurns: number;
     extension: number;
   }) => Promise<boolean> | boolean;
+  /**
+   * Regex rules matched against streamed assistant text and tool-call
+   * arguments. A match aborts the attempt, discards it, appends the rule's
+   * reminder and retries the step. Each rule fires at most once per run;
+   * `maxRetries` (default 3) caps rule retries per run. Unset = no matching.
+   */
+  streamRules?: StreamRulesConfig;
 }
 
 // ── Agent Result ────────────────────────────────────────────

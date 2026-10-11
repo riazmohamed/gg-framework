@@ -10,10 +10,9 @@
  *    reviews the PLAN itself — approve (auto-accept + implement, then the next
  *    round work-reviews the implementation), send revision feedback, or hand a
  *    genuine user-level decision to the human. Verdict mapping for plans:
- *    `all_clear` ⇒ approve, and `ignore` ALSO maps to approve — "nothing to
- *    object to" on a plan means it's sound (autopilot has no user blocker for
- *    plans by design). Unparseable output still stops as HUMAN upstream (the
- *    verdict parser returns HUMAN for garbage) — never a blind loop.
+ *    Only `all_clear` approves. `ignore` stops for a human instead of granting
+ *    implicit permission to implement. Unparseable output also stops as HUMAN
+ *    upstream (the verdict parser returns HUMAN for garbage).
  *  - WORK branch: the classic review of a finished turn (ALL_CLEAR / IGNORE /
  *    HUMAN / PROMPT), unchanged.
  *
@@ -29,6 +28,11 @@ import { CORPUS_UNVERIFIED_REASON, type AutopilotVerdict } from "./autopilot-ver
  *  and hands control to the user. */
 export const AUTOPILOT_PLAN_DRAFTING_REASON =
   "GG Coder is still drafting a plan (plan mode is active with nothing submitted). Finish or cancel the plan yourself; autopilot can't prompt a read-only session.";
+
+/** Injected when Autopilot finds the work unchecked before its review. */
+export const AUTOPILOT_VERIFY_PROMPT =
+  "Run the project's checks for your changes (see Verification), standalone and unpiped, " +
+  "and fix any failures.";
 
 /** Situational-awareness preamble prepended to EVERY build-session run that
  *  Autopilot Ken injects (fix prompts, plan-revision prompts, the post-approval
@@ -109,8 +113,10 @@ export interface AutopilotCycleDeps {
   acceptPlan: (reason?: string) => Promise<boolean>;
   /** Run the "plan approved — implement it now" prompt on the fresh session. */
   runImplement: () => Promise<void>;
-  /** Feed a PROMPT verdict's body to GG Coder as an injected run. */
-  runPrompt: (body: string) => Promise<void>;
+  /** Feed a PROMPT verdict's body to GG Coder as an injected run.
+   *  `planRevision` marks a plan-feedback run: the host puts the session back
+   *  in read-only plan mode first, so revising can't start editing code. */
+  runPrompt: (body: string, opts?: { planRevision?: boolean }) => Promise<void>;
   /** Called BEFORE runPrompt: record the injected body (digest labeling) and
    *  broadcast the autopilot_prompted marker. */
   onInjected: (body: string, round: number) => void;
@@ -137,10 +143,25 @@ export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<voi
     deps.emit({ type: "autopilot_human", data: { reason } });
     return true;
   };
-  if (deps.isCancelled() || stopIfUnverified()) return;
+  // Plain replies leave checks to the commit, so a turn often ends unchecked.
+  // Autopilot has a real end, so it asks for the checks once before reviewing;
+  // only work still unchecked after that goes back to the human.
+  const ensureVerified = async (round: number): Promise<boolean> => {
+    if (!deps.verificationProblem()) return true;
+    // A pending plan is reviewed by Ken in plan mode, where checks cannot run;
+    // its outcome (or the user) decides what happens to the unchecked work.
+    if (deps.planPending()) {
+      stopIfUnverified();
+      return false;
+    }
+    deps.onInjected(AUTOPILOT_VERIFY_PROMPT, round);
+    await deps.runPrompt(AUTOPILOT_VERIFY_PROMPT);
+    return !deps.isCancelled() && !stopIfUnverified();
+  };
+  if (deps.isCancelled() || !(await ensureVerified(1))) return;
   await deps.resetReviewer();
   for (let round = 1; round <= deps.maxRounds; round++) {
-    if (deps.isCancelled() || stopIfUnverified()) return;
+    if (deps.isCancelled() || !(await ensureVerified(round))) return;
     if (deps.planPending()) {
       const verdict = await deps.reviewPlan();
       if (!verdict || deps.isCancelled() || stopIfUnverified()) return;
@@ -156,17 +177,24 @@ export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<voi
         // the run actually did.
         const body = buildPlanRevisionPrompt(verdict.body);
         deps.onInjected(body, round);
-        await deps.runPrompt(body);
+        await deps.runPrompt(body, { planRevision: true });
         continue;
       }
-      // all_clear — and ignore mapped to approve ("nothing to object to" on a
-      // plan means it's sound; plans never get a silent-ignore user blocker).
-      const reason =
-        verdict.kind === "all_clear" && verdict.evidenceLimitation
-          ? CORPUS_UNVERIFIED_REASON
-          : undefined;
+      // Only an explicit approval can authorize implementation of a plan.
+      if (verdict.kind !== "all_clear") {
+        deps.emit({
+          type: "autopilot_human",
+          data: {
+            reason: "Ken did not explicitly approve the plan. Review it before implementation.",
+          },
+        });
+        return;
+      }
+      const reason = verdict.evidenceLimitation ? CORPUS_UNVERIFIED_REASON : undefined;
       const ok = await deps.acceptPlan(reason);
-      if (!ok) return; // generation went stale — the user's manual action won
+      // Acceptance awaits session/plan setup. A cancellation during that await
+      // must win before we dispatch any implementation, even if setup succeeded.
+      if (!ok || deps.isCancelled()) return;
       await deps.runImplement();
       // Next round: normal work review of the implementation.
       continue;

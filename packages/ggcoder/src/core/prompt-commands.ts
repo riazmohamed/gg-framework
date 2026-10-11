@@ -3,6 +3,7 @@
  * into the agent loop. Each command maps to a full prompt the agent executes.
  */
 
+import { checklistSetupStep } from "./checklist-prompt.js";
 import { isGgApp } from "./runtime-mode.js";
 
 export interface PromptCommand {
@@ -188,11 +189,40 @@ After writing:
 2. Re-read the file and confirm every remaining line passes the bar: **project-specific, supported by a local file you actually read, and not already in the agent's context per the list above.**
 3. Report in one line: which file, how many bytes, and how many lines you removed as redundant.
 
-## Step 6: Restart Notice
+## Step 6: Update the checklist
+
+${checklistSetupStep(["agent-setup"])}
+
+## Step 7: Restart Notice
 
 End your reply with this exact notice so the user doesn't miss it:
 
 ${CLAUDE_MD_RESTART_NOTICE}`,
+  },
+  {
+    // The verification point for every project: replies leave checks to the
+    // commit, which is the one real end of a piece of work. A project's own
+    // `.gg/commands/commit.md` (from /setup-commit) is shadowed by this name,
+    // so step 1 defers to it.
+    name: "commit",
+    aliases: [],
+    description: "Run checks, review, commit with AI message, and push",
+    prompt: `# Commit: check, review, commit and push
+
+1. If \`.gg/commands/commit.md\` exists, read it and follow it instead of these steps: it is this project's own commit procedure. If it runs no tests while the project has some, run them too.
+2. Run the project's checks: everything under Verification in your instructions, plus the tests. If none are listed, use the project's own scripts (package.json \`check\`/\`typecheck\`, \`lint\`, \`format:check\`, \`test\`; pyproject, go.mod or Cargo.toml equivalents). Run each standalone, unpiped. Fix every failure (auto-fix formatting/lint where the project has a fix script), then re-run what failed.
+3. Review changes: run \`git status\`, \`git diff --staged\` and \`git diff\`.
+4. Fast review gate: spawn ONE subagent with the full diff. Instructions: review ONLY the diff for real bugs, regressions, leftover debug code and unintended changes. Score each issue 0-100 confidence (pre-existing issues and stylistic nitpicks are false positives, score low). Report ONLY issues with confidence >= 80, with file:line and a one-line fix. If none, reply "CLEAR". This is a last check, not a deep audit - be fast.
+5. If CLEAR: continue to step 6 without asking anything.
+   If issues >= 80 were reported: show them and ask with \`ask_user\` (one \`choice\` question, \`id: "land"\`) offering exactly:
+   - "Fix it first, then commit & push" (recommended, hint: keeps the branch green)
+   - "Commit & push anyway" (hint: issue stays open in the log)
+   On fix-first: fix, re-run step 2, then continue (no re-review).
+6. Stage the relevant files with \`git add <specific files>\`; never \`git add -A\`. Never stage secrets or files the user did not change on purpose.
+7. Commit message: one line, starting with Add/Update/Fix/Remove/Refactor, specific and concise.
+8. \`git commit -m "<message>"\`, never with \`--no-verify\`; if a hook fails, fix the cause and commit again. Then \`git push\` if the branch has an upstream; if it has none, say so instead of pushing.
+
+If any check still fails and cannot be fixed, stop before committing and say which one and why.`,
   },
   {
     name: "setup-commit",
@@ -202,8 +232,8 @@ ${CLAUDE_MD_RESTART_NOTICE}`,
 
 ## Step 1: Detect Project and Extract Commands
 
-Check for config files and extract the lint/typecheck commands:
-- package.json -> Extract lint, typecheck scripts
+Check for config files and extract the lint/typecheck/test commands:
+- package.json -> Extract lint, typecheck, format-check and test scripts
 - pyproject.toml -> Use configured mypy, pylint/ruff commands
 - go.mod -> Use configured go vet/gofmt/staticcheck commands
 - Cargo.toml -> Use configured cargo clippy/fmt commands
@@ -221,7 +251,7 @@ description: Run checks, agent code review, commit with AI message, and push
 ---
 
 1. Run quality checks:
-   [PROJECT-SPECIFIC LINT/TYPECHECK COMMANDS]
+   [PROJECT-SPECIFIC LINT/TYPECHECK/TEST COMMANDS]
    Fix ALL errors before continuing. Use auto-fix commands where available.
 
 2. Review changes: run git status and git diff --staged and git diff
@@ -251,11 +281,15 @@ description: Run checks, agent code review, commit with AI message, and push
    git push
 \`\`\`
 
-Replace [PROJECT-SPECIFIC LINT/TYPECHECK COMMANDS] with the actual commands.
+Replace [PROJECT-SPECIFIC LINT/TYPECHECK/TEST COMMANDS] with the actual commands, tests included: /commit is where this project's work gets verified.
 
 Keep the command file under 30 lines.
 
-## Step 3: Confirm
+## Step 3: Update the checklist
+
+${checklistSetupStep(["commit-gate"])}
+
+## Step 4: Confirm
 
 Report that /commit is now available with quality checks, an agent code review gate, and AI-generated commit messages, and mention which local scripts/docs verified the commands.`,
   },
@@ -347,6 +381,10 @@ For EVERY file in \`.github/workflows/\`, apply and report one line per change:
   a pointer that CI lives in \`.github/workflows/\` and must stay green, and a rule to
   never commit with \`--no-verify\`. If \`CLAUDE.md\` exists, keep AGENTS.md short and
   point to it.
+
+## Update the checklist
+
+${checklistSetupStep(["ci", "git-github"])}
 
 ## Finish
 

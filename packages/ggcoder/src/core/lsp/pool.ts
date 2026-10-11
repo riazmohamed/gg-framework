@@ -29,8 +29,7 @@ import type { LspServerSpec } from "./servers.js";
 
 /** Outcome of asking for a client: ready, or why it cannot be used. */
 export type PooledClient =
-  | { status: "ready"; client: LspClient }
-  | { status: "unavailable" | "server_failed" };
+  { status: "ready"; client: LspClient } | { status: "unavailable" | "server_failed" };
 
 interface PoolEntry {
   key: string;
@@ -211,6 +210,11 @@ export class LspClientPool {
   /** Reference count for one (spec, root), or 0 when nothing is pooled. */
   refCount(spec: LspServerSpec, root: string): number {
     return this.entries.get(this.keyFor(spec, root))?.holders.size ?? 0;
+  }
+
+  /** In-flight calls for one (spec, root), or 0 when nothing is pooled. Test/diagnostic use. */
+  activeCallCount(spec: LspServerSpec, root: string): number {
+    return this.entries.get(this.keyFor(spec, root))?.activeCalls ?? 0;
   }
 
   /**

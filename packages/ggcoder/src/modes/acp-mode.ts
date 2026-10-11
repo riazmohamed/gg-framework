@@ -25,7 +25,7 @@ import path from "node:path";
 import { readFileSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
-import { isAbortError } from "@abukhaled/gg-agent";
+import { isAbortError, type ToolExecuteResult } from "@abukhaled/gg-agent";
 import { getAllModels, getMaxThinkingLevel, getModel } from "@abukhaled/gg-core";
 import { AgentSession } from "../core/agent-session.js";
 import type { EventBus } from "../core/event-bus.js";
@@ -53,6 +53,7 @@ import {
 } from "../utils/plan-steps.js";
 import { formatUserError } from "../utils/error-handler.js";
 import { closeLogger } from "../core/logger.js";
+import { acpToolImages } from "./acp-images.js";
 
 /** The ACP major version this mode implements. Bumped only for breaking changes. */
 export const ACP_PROTOCOL_VERSION = 1;
@@ -139,7 +140,7 @@ export interface AcpAgentSession {
 export interface AcpPlanHooks {
   onEnterPlan: () => Promise<void>;
   /** Returns the instruction handed back to the model after approval. */
-  onExitPlan: (planPath: string) => Promise<string>;
+  onExitPlan: (planPath: string) => Promise<ToolExecuteResult>;
 }
 
 export interface AcpModeOptions {
@@ -633,6 +634,7 @@ export function historyUpdates(messages: readonly Message[]): Record<string, unk
             type: "content",
             content: { type: "text", text: messageText(entry.content) },
           },
+          ...acpToolImages(entry.content),
         ],
       });
     }
@@ -987,13 +989,16 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
         });
       }),
 
-      bus.on("tool_call_end", ({ toolCallId, result, isError }) => {
+      bus.on("tool_call_end", ({ toolCallId, result, isError, details }) => {
         notifyUpdate({
           sessionUpdate: "tool_call_update",
           toolCallId,
           status: isError ? "failed" : "completed",
-          content: diffContent(toolCallId, isError) ?? [
-            { type: "content", content: { type: "text", text: result } },
+          content: [
+            ...(diffContent(toolCallId, isError) ?? [
+              { type: "content", content: { type: "text", text: result } },
+            ]),
+            ...acpToolImages(undefined, details),
           ],
         });
       }),
@@ -1081,7 +1086,11 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
       // The approved plan becomes the client's to-do list, which then advances
       // from the [DONE:n] markers the returned instruction asks for.
       adoptPlan(approvedPath);
-      return "Plan approved. Proceed with implementation, marking each completed step with [DONE:n].";
+      return {
+        content:
+          "Plan approved. Proceed with implementation, marking each completed step with [DONE:n].",
+        endRun: false,
+      };
     },
   };
 

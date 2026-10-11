@@ -25,7 +25,7 @@ Three packages. Each one works on its own. Stack them together and you get a ful
         └─► @abukhaled/ogcoder (depends on both)
 ```
 
----
+1. Install GG Coder:
 
 ## Which package do I need?
 
@@ -45,7 +45,7 @@ npm i -g @abukhaled/ogcoder     # The full CLI
 
 **Windows users:** OG Coder runs inside WSL. See the [WSL installation guide](docs/INSTALL-WSL.md) for step-by-step setup.
 
----
+## Learn with me
 
 ## For developers
 

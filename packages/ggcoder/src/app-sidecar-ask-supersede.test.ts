@@ -17,12 +17,15 @@ import { createAskUserTool } from "./tools/ask-user.js";
  * on the user — the turn sits frozen until the ten-minute ask timeout fires,
  * and the user's message lands ten minutes late.
  *
- * The route lives inside app-sidecar's single `main()` closure with no seam to
+ * The route reads the daemon's per-session closure state with no seam to
  * inject a bridge into, so this covers it from both sides: the release itself
  * is exercised for real against a real parked tool call, and the route's source
  * is checked for where that release sits relative to the queue.
  */
-const APP_SIDECAR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "app-sidecar.ts");
+const PROMPT_ROUTES = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "app-sidecar/prompt-routes.ts",
+);
 
 /** The brace-balanced body of a route handler, keyed by its `url ===` guard. */
 function routeBlock(source: string, marker: string): string {
@@ -68,12 +71,12 @@ describe("a typed prompt supersedes a parked question", () => {
 
   it("releases it before the prompt can queue as steering", async () => {
     const block = routeBlock(
-      await fs.readFile(APP_SIDECAR, "utf8"),
+      await fs.readFile(PROMPT_ROUTES, "utf8"),
       'if (method === "POST" && url === "/prompt") {',
     );
     const released = block.indexOf("superseded: true");
-    const queued = block.indexOf("session.queueMessage(");
-    const started = block.indexOf("runClaim.claim()");
+    const queued = block.indexOf("ctx.session.queueMessage(");
+    const started = block.indexOf("ctx.runClaim.claim()");
 
     expect(released).toBeGreaterThan(-1);
     expect(queued).toBeGreaterThan(-1);

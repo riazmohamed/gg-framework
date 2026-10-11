@@ -4,7 +4,12 @@
 export * from "@abukhaled/gg-core/models";
 
 import type { Provider } from "@abukhaled/gg-ai";
-import { getFastModel, getModelsForProvider, type ModelInfo } from "@abukhaled/gg-core/models";
+import {
+  getDefaultModel,
+  getModel,
+  getModelsForProvider,
+  type ModelInfo,
+} from "@abukhaled/gg-core/models";
 
 // Capability-routing helpers used by the fork-only `core/model-router.ts`
 // (vision / plan-execute / hybrid routing). gg-core owns the model data but
@@ -44,10 +49,12 @@ export function getDocumentCapableModel(provider: Provider): ModelInfo | undefin
 }
 
 /**
- * Lighter executor model for plan-execute routing. gg-core's `getFastModel`
- * is the equivalent selector (cheapest sibling, falls back to the current
- * model when the provider has no cheaper tier).
+ * Lighter executor model for plan-execute routing: the provider's first
+ * low-tier model, falling back to the current model when there is no cheaper
+ * tier. gg-core dropped its `getFastModel` for `getSummaryModel`, whose
+ * per-provider tier map is tuned for compaction, so the selector lives here.
  */
 export function getExecutorModel(provider: Provider, currentModelId: string): ModelInfo {
-  return getFastModel(provider, currentModelId);
+  const low = getModelsForProvider(provider).find((m) => m.costTier === "low");
+  return low ?? getModel(currentModelId) ?? getDefaultModel(provider);
 }

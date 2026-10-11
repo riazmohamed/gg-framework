@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { AgentTool } from "@abukhaled/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
 import { killProcessTree } from "../utils/process.js";
-import { truncateTail, MAX_BYTES } from "./truncate.js";
+import { truncateTail, MAX_BYTES, describeCompressed } from "./truncate.js";
 import { compressToolOutput } from "./compress.js";
 import { writeOverflow } from "./overflow.js";
 import { localOperations, type ToolOperations } from "./operations.js";
@@ -12,6 +12,13 @@ import { PersistentShell } from "../core/persistent-shell.js";
 import { isReadOnlyCommand, sleepOnlySeconds } from "./read-only-bash.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
 import { isCatastrophicCommand } from "../core/workspace-guard.js";
+import { checkDestructiveGit } from "../core/destructive-git-guard.js";
+import { shellThreatBlockMessage } from "../core/shell-threats.js";
+import { checkPackageInstall } from "../core/package-threats.js";
+import {
+  classifyVerificationCommand,
+  containsBoundedCheck,
+} from "../core/verification-evidence.js";
 import { checkCommandPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import {
   prepareSandboxLaunch,
@@ -21,6 +28,7 @@ import {
 } from "../core/sandbox.js";
 import type { WakeRules } from "../core/process-manager.js";
 import { annotateSandboxDenial } from "../core/sandbox-feedback.js";
+import { collectVerificationReview } from "./verification-review.js";
 
 /** Tool env, plus the tweaks that only make sense inside the OS sandbox. */
 function sandboxAwareEnv(sandboxed: boolean): Record<string, string> {
@@ -29,7 +37,56 @@ function sandboxAwareEnv(sandboxed: boolean): Record<string, string> {
 }
 
 const DEFAULT_TIMEOUT = 120_000; // 120 seconds
+
+/** Host-authored rejection: no process started, so this is not a failed check. */
+export const REVIEW_REJECTED_BEFORE_START =
+  "Error: review requires a local, non-persistent foreground verification check. Pass only the check in command; do not combine it with edits or diff inspection. Nothing was run.";
+
+const AUTO_BACKGROUND_RE =
+  /^Still running after \d+(?:\.\d+)?s, so it was moved to the background\b/;
+
+/**
+ * Background process id when a bash result reports that a foreground command
+ * outlived its default budget and was handed to the process manager. Such a
+ * command has no exit code yet: its outcome arrives later, like an explicit
+ * `run_in_background` run, so callers must not read the result as a failure.
+ */
+export function autoBackgroundedId(result: string): string | undefined {
+  if (!AUTO_BACKGROUND_RE.test(result)) return undefined;
+  return /^ID:\s*(\S+)$/m.exec(result)?.[1];
+}
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB — cap buffered output to prevent OOM
+/**
+ * How long to keep collecting output after the shell exits while something it
+ * left behind (`cmd &`, `nohup cmd`) still holds its stdout/stderr open.
+ */
+const LEFTOVER_DRAIN_MS = 1_000;
+
+/**
+ * Result for a call whose Stop arrived while the launch was still being
+ * prepared. Wording matches the agent loop's result for a tool call that never
+ * reached its tool.
+ */
+const CANCELLED_BEFORE_START =
+  "Exit code: CANCELLED\n`bash` was cancelled before it started, so it had no effect. Safe to retry.";
+
+/**
+ * SIGKILL what is left of the process group the shell led, returning whether
+ * anything was there to stop. Group-only: once the shell has exited its lone
+ * pid may already belong to an unrelated process. Windows has no process
+ * groups, and taskkill /T cannot find the tree of a parent that already
+ * exited, so leftovers there are left running.
+ */
+function killLeftoverGroup(pid: number): boolean {
+  if (process.platform === "win32") return false;
+  try {
+    process.kill(-pid, "SIGKILL");
+    return true;
+  } catch {
+    // The group is empty: whatever still holds the output left it (setsid).
+    return false;
+  }
+}
 /** A sleep at least this long is a guess at when something finishes, not a
  *  settle pause before poking a service that is already up. */
 const GUESSED_WAIT_SECONDS = 10;
@@ -42,9 +99,29 @@ const GUESSED_WAIT_SECONDS = 10;
  * re-running the command. The offload is best-effort — a full disk or
  * permission error never fails the tool result.
  */
-export async function renderBashOutput(rawOutput: string): Promise<string> {
+export async function renderBashOutput(
+  rawOutput: string,
+  command?: string,
+  /** bash with pipefail (not the cmd.exe fallback): see classifyVerificationCommand. */
+  posixShell = false,
+): Promise<string> {
+  // Feedback only when the command wraps a real check. Exploration that merely
+  // mentions a verifier (`ls .venv/bin | grep ruff`) is not a verification
+  // attempt; nagging it made the model reshape harmless commands repeatedly.
+  // Showing the note only once per session was measured and rejected: it cut
+  // notes by a third but raised tool calls 27% (bench/h2h/DIRAC-FINDINGS.md).
+  const check =
+    command && containsBoundedCheck(command)
+      ? classifyVerificationCommand(command, { posixShell })
+      : undefined;
+  const feedback =
+    check?.candidate && !check.accepted && check.snapshotPreserveOnly
+      ? "\n\n[This mixed check/inspection chain cannot establish fresh verification; it can only preserve earlier successful checks. If the current changes are not already verified, run the check standalone or chain only checks with &&. Do not claim fresh verification from this shell exit status.]"
+      : check?.candidate && !check.accepted && !check.snapshotEligible
+        ? `\n\n[Verification evidence rejected: ${check.reason}. The output is still valid information; do not reshape this command to satisfy this note. When you need verification, run the check once as a standalone command (or chain only checks with &&) after your last edit, and do not claim verification from this shell exit status.]`
+        : "";
   const result = truncateTail(rawOutput);
-  if (!result.truncated) return result.content;
+  if (!result.truncated) return result.content + feedback;
   const overflowPath =
     Buffer.byteLength(rawOutput, "utf-8") > MAX_BYTES
       ? await writeOverflow(rawOutput, "bash").catch(() => null)
@@ -53,64 +130,26 @@ export async function renderBashOutput(rawOutput: string): Promise<string> {
     ? ` Full output saved to ${overflowPath} — read it with offset/limit if needed.`
     : "";
   const c = compressToolOutput(rawOutput);
-  return `[${c.notice}${overflowNotice}]\n${c.content}`;
+  const what = describeCompressed(rawOutput, c.content);
+  return `[${c.notice}${what ? ` ${what}` : ""}${overflowNotice}]\n${c.content}${feedback}`;
 }
 
 const BashParams = z.object({
-  command: z.string().describe("The bash command to execute"),
-  timeout: z
-    .number()
-    .int()
-    .min(1000)
-    .optional()
-    .describe("Timeout in milliseconds (default: 120000)"),
-  run_in_background: z
-    .boolean()
-    .optional()
-    .describe(
-      "Run the command in the background. Returns a process ID immediately. " +
-        "Use task_output to read output and task_stop to stop it.",
-    ),
-  persist: z
-    .boolean()
-    .optional()
-    .describe(
-      "Run in the persistent session shell: cd, exported env vars, and shell state " +
-        "survive across persist:true calls. Use for multi-step workflows in another " +
-        "directory or with sourced environments. Default false (fresh shell per call).",
-    ),
+  command: z.string(),
+  review: z.boolean().optional().describe("Append git diff after a passing final check"),
+  timeout: z.number().int().min(1000).optional(),
+  run_in_background: z.boolean().optional(),
+  persist: z.boolean().optional().describe("Keep cd/env across calls"),
   wake: z
     .object({
-      pattern: z
-        .string()
-        .min(1)
-        .max(200)
-        .optional()
-        .describe(
-          "A regex; the moment NEW output matches it you are actively woken with the " +
-            "matching line — no task_output polling. Use for signals in long builds, " +
-            "dev servers and watchers (e.g. 'compiled with errors', 'listening on').",
-        ),
-      silence_seconds: z
-        .number()
-        .int()
-        .min(10)
-        .max(3600)
-        .optional()
-        .describe(
-          "Wake me if the task produces no output at all for this many seconds while " +
-            "still running — a stall/hang detector for commands that should be chatty.",
-        ),
+      pattern: z.string().min(1).max(200).optional(),
+      silence_seconds: z.number().int().min(10).max(3600).optional(),
     })
     .refine((rules) => rules.pattern !== undefined || rules.silence_seconds !== undefined, {
       message: "Provide wake.pattern, wake.silence_seconds, or both.",
     })
     .optional()
-    .describe(
-      "Wake conditions for a background task (run_in_background only). You are " +
-        "notified automatically the instant one holds, instead of polling " +
-        "task_output. Each condition fires once; exit always notifies regardless.",
-    ),
+    .describe("Notify on output match or silence"),
 });
 
 export function createBashTool(
@@ -121,10 +160,14 @@ export function createBashTool(
   shellOpts?: ResolveShellOpts,
   getNetworkPolicy?: GetNetworkPolicy,
   getSandboxPolicy?: () => SandboxPolicy,
+  /** Default foreground budget; injectable so tests need not wait 120s. */
+  defaultTimeoutMs: number = DEFAULT_TIMEOUT,
 ): AgentTool<typeof BashParams> {
   // Lazily created on the first persist:true call; one session per tool
   // instance (i.e. per agent session), killed when the process exits.
   let sessionShell: PersistentShell | null = null;
+  /** Install commands the model re-ran after a typosquat warning. */
+  const confirmedInstalls = new Set<string>();
   let sessionSandboxKey: string | null = null;
   let sessionSandboxed = false;
   // Shell selection doesn't depend on the command, so resolve ONCE at tool
@@ -134,45 +177,30 @@ export function createBashTool(
   // for mid-session PATH changes.
   const isCmdFallback = resolveShell("", shellOpts ?? {}).isCmdFallback;
   const description = isCmdFallback
-    ? "Execute a command under Windows cmd.exe (no bash was found on this system). " +
-      "The working directory is already set to the project root — " +
-      "don't cd into it redundantly. Use cd only when you need a different directory. " +
-      "Returns exit code and combined stdout/stderr. " +
-      "Use cmd.exe syntax (dir, findstr, type, del); POSIX commands and bash syntax " +
-      "(ls, grep, cat, &&-chains relying on bash semantics, $(...), single-quoting) will fail. " +
-      "Long output is truncated (tail kept). " +
-      "Set run_in_background=true for long-running OR interactive processes " +
-      "(dev servers, watchers, REPLs, scaffolders, programs that prompt for input). " +
-      "Use task_output to read output, task_send to type input/answer prompts, and " +
-      "task_stop to stop background processes. " +
-      "Commit, push, amend, or rewrite git history only when the user explicitly asked. " +
-      "Kill processes by exact PID (taskkill /PID), never by image name alone."
-    : "Execute a bash command. The shell's working directory is already set to the project root — " +
-      "don't cd into it redundantly. Use cd only when you need a different directory. " +
-      "Returns exit code and combined stdout/stderr. " +
-      "Pipelines run with pipefail — a piped command reports the failing stage's exit " +
-      "code, so piping tests through tail/head cannot mask a failure. " +
-      "Commands run in a non-interactive bash shell with TERM=dumb. " +
-      "Long output is truncated (tail kept). " +
-      "Set run_in_background=true for long-running OR interactive processes " +
-      "(dev servers, watchers, REPLs, scaffolders, programs that prompt for input). " +
-      "Use task_output to read output, task_send to type input/answer prompts, and " +
-      "task_stop to stop background processes. " +
-      "Commit, push, amend, or rewrite git history only when the user explicitly asked. " +
-      "Never background a command with a trailing & or nohup — use run_in_background instead. " +
-      "Kill processes by exact PID, never broad patterns like pkill -f node. " +
-      "Set persist=true to run in a session shell where cd/env state survives across " +
-      "persist:true calls. " +
-      "With run_in_background, also set wake (pattern and/or silence_seconds) to be " +
-      "actively notified the moment matching output appears or the task stalls. " +
-      "Never sleep to wait for a background process — task_output with wait_ms returns " +
-      "the instant it exits.";
+    ? "Run a Windows cmd.exe command (no bash on this system) in the project root. Use cmd " +
+      "syntax (dir, findstr, type); POSIX commands and $(...) fail. Output tail is kept."
+    : "Run a non-interactive bash command (TERM=dumb, pipefail) in the project root.";
   return {
     name: "bash",
-    description,
+    description:
+      description +
+      " Servers/watchers/REPLs: run_in_background + wake.pattern, then task_output wait_ms; " +
+      "never `&`, nohup or sleep. Leave servers running. Kill by exact PID.",
     parameters: BashParams,
     executionMode: "sequential",
-    async execute({ command, timeout: timeoutMs, run_in_background, persist, wake }, context) {
+    async execute(
+      { command, timeout: timeoutMs, run_in_background, persist, wake, review },
+      context,
+    ) {
+      if (
+        review &&
+        (persist ||
+          run_in_background ||
+          ops !== localOperations ||
+          !classifyVerificationCommand(command).accepted)
+      ) {
+        return REVIEW_REJECTED_BEFORE_START;
+      }
       if (wake && !run_in_background) {
         return "Error: wake conditions require run_in_background=true — there is nothing to watch on a foreground call.";
       }
@@ -202,7 +230,7 @@ export function createBashTool(
           return (
             `Error: refusing to sleep ${napSeconds}s while ${running.length} background ` +
             `process(es) are running (${ids}). Sleeping guesses at a finish time. Call ` +
-            `task_output with wait_ms instead \u2014 it returns the moment the process exits. ` +
+            `task_output with wait_ms instead \u2014 it returns on exit or a declared wake. ` +
             `For something that never exits, such as a dev server, run it with a wake ` +
             `pattern and wait for that line.`
           );
@@ -216,6 +244,41 @@ export function createBashTool(
       const catastrophic = isCatastrophicCommand(command, cwd);
       if (catastrophic) {
         return `Error: ${catastrophic}`;
+      }
+      // Destructive-git guard — refuses reset --hard / checkout -- / restore /
+      // clean -f / stash drop / branch -D / force push when work would be lost.
+      // A persist:true call runs wherever the session shell last cd'd to.
+      const liveShell = persist && process.platform !== "win32" ? sessionShell : null;
+      const gitBlocked = await checkDestructiveGit(command, {
+        cwd,
+        resolveCwd:
+          liveShell && !liveShell.isBusy
+            ? async () => (await liveShell.run("pwd", 2_000, context.signal)).output.trim() || null
+            : undefined,
+      });
+      if (gitBlocked) {
+        return `Error: ${gitBlocked}`;
+      }
+      // Shell-threat guard — pipe-to-shell, reverse shells, secret exfiltration,
+      // lookalike hosts and terminal-escape tricks (core/shell-threats.ts).
+      const threatBlocked = shellThreatBlockMessage(command);
+      if (threatBlocked) {
+        return `Error: ${threatBlocked}`;
+      }
+      // Package-install guard: known malware (OSV, fail-open) is refused;
+      // a likely typosquat is stopped once and allowed on an identical retry.
+      const packageThreats = await checkPackageInstall(command, { signal: context.signal });
+      const malware = packageThreats.find((threat) => threat.severity === "block");
+      if (malware) {
+        return `Error: Blocked by package safety check (${malware.rule}): ${malware.detail}`;
+      }
+      const typosquats = packageThreats.filter((threat) => threat.severity === "warn");
+      if (typosquats.length > 0 && !confirmedInstalls.has(command)) {
+        confirmedInstalls.add(command);
+        return (
+          `Error: not run — ${typosquats.map((threat) => threat.detail).join("; ")}. ` +
+          `If this really is the package you want, run the exact same command again.`
+        );
       }
       // Network allowlist — defence in depth only. Recognises the common egress
       // command shapes; an unrecognised command is never blocked (see
@@ -257,6 +320,7 @@ export function createBashTool(
             return `Error: OS sandbox unavailable; command was not run: ${(error as Error).message}`;
           }
         }
+        if (context.signal.aborted) return CANCELLED_BEFORE_START;
         const res = await sessionShell.run(
           command,
           timeoutMs ?? DEFAULT_TIMEOUT,
@@ -265,12 +329,19 @@ export function createBashTool(
             ? (text) => context.onUpdate?.({ type: "bash_progress", output: text, totalBytes: 0 })
             : undefined,
         );
-        const output = await renderBashOutput(res.output);
+        const output = await renderBashOutput(res.output, command, !isCmdFallback);
         const exitCode =
           res.exitCode === "TIMEOUT"
-            ? `TIMEOUT (${timeoutMs ?? DEFAULT_TIMEOUT}ms) — session shell was reset; cd/env state is gone`
+            ? `TIMEOUT (${timeoutMs ?? DEFAULT_TIMEOUT}ms)` +
+              (res.shellKept
+                ? " — the command was stopped; the session shell kept its cwd/env"
+                : "")
             : String(res.exitCode);
-        return annotateSandboxDenial(`Exit code: ${exitCode}\n${output}`, sessionSandboxed);
+        // The restart note sits right under the exit code so output truncation
+        // can never drop it.
+        const restartNote = sessionShell.takeRestartNote();
+        const note = restartNote ? `${restartNote}\n` : "";
+        return annotateSandboxDenial(`Exit code: ${exitCode}\n${note}${output}`, sessionSandboxed);
       }
       if (run_in_background) {
         let launch: SandboxLaunch;
@@ -279,6 +350,7 @@ export function createBashTool(
         } catch (error) {
           return `Error: OS sandbox unavailable; command was not run: ${(error as Error).message}`;
         }
+        if (context.signal.aborted) return CANCELLED_BEFORE_START;
         const result = await processManager.start(command, cwd, launch, wakeRules);
         return (
           `Background process started.\n` +
@@ -302,7 +374,7 @@ export function createBashTool(
         );
       }
 
-      const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT;
+      const effectiveTimeout = timeoutMs ?? defaultTimeoutMs;
 
       // Cross-platform shell: bash on macOS/Linux, Git Bash on Windows (or
       // cmd.exe fallback), wrapped by the OS sandbox before any child starts.
@@ -313,8 +385,11 @@ export function createBashTool(
       } catch (error) {
         return `Exit code: 1\nOS sandbox unavailable; command was not run: ${(error as Error).message}`;
       }
+      // Stop may have landed while the launch was being prepared. The abort
+      // listener below would never fire for an already-aborted signal.
+      if (context.signal.aborted) return CANCELLED_BEFORE_START;
 
-      return new Promise<string>((resolve) => {
+      const result = await new Promise<string>((resolve, reject) => {
         const child = ops.spawn(launch.file, launch.args, {
           cwd,
           detached: true,
@@ -349,9 +424,52 @@ export function createBashTool(
 
         let killed = false;
         let timedOut = false;
+        let backgrounded = false;
+        const startedAt = Date.now();
+
+        /**
+         * Hand a still-running command to the process manager instead of
+         * killing it, so a slow build or test run keeps going (same process,
+         * same cwd) while the agent moves on. Only for the default budget: an
+         * explicit `timeout` is the model saying when to give up. Returns
+         * false when adoption is not possible, leaving the kill path to run.
+         */
+        const moveToBackground = (): boolean => {
+          // The shell already exited and only leftovers hold the pipes; the
+          // drain path owns that case.
+          if (timeoutMs !== undefined || child.exitCode !== null || !child.pid) return false;
+          child.stdout?.off("data", onData);
+          child.stderr?.off("data", onData);
+          let adopted: ReturnType<ProcessManager["adopt"]>;
+          try {
+            adopted = processManager.adopt(child, command, startedAt, Buffer.concat(chunks));
+          } catch {
+            child.stdout?.on("data", onData);
+            child.stderr?.on("data", onData);
+            return false;
+          }
+          backgrounded = true;
+          context.signal.removeEventListener("abort", onAbort);
+          void (async () => {
+            const soFar = await renderBashOutput(Buffer.concat(chunks).toString("utf-8"));
+            resolve(
+              `Still running after ${effectiveTimeout / 1000}s, so it was moved to the background ` +
+                `instead of being stopped. It keeps its working directory and output.\n` +
+                `ID: ${adopted.id}\n` +
+                `PID: ${adopted.pid}\n` +
+                `Log: ${adopted.logFile}\n` +
+                `You will be notified when it exits. Use task_output with id="${adopted.id}" ` +
+                `(wait_ms to block until it exits) to read output, task_stop to stop it. ` +
+                `Pass an explicit timeout to have a command stopped instead.\n` +
+                (soFar ? `Output so far:\n${soFar}` : "No output so far."),
+            );
+          })();
+          return true;
+        };
 
         // Timeout handling
         const timer = setTimeout(() => {
+          if (moveToBackground()) return;
           timedOut = true;
           killed = true;
           if (child.pid) killProcessTree(child.pid);
@@ -364,12 +482,30 @@ export function createBashTool(
         };
         context.signal.addEventListener("abort", onAbort, { once: true });
 
+        // "close" waits for every holder of the stdout/stderr pipes, and a
+        // process the command left running (`cmd &`, `nohup cmd`) inherits them,
+        // so without this the call hangs until the timeout. Once the shell
+        // itself exits, let late output drain briefly, then stop the leftovers
+        // and release the pipes so "close" fires.
+        let leftover: "stopped" | "detached" | undefined;
+        let drainTimer: ReturnType<typeof setTimeout> | undefined;
+        child.on("exit", () => {
+          drainTimer = setTimeout(() => {
+            leftover = child.pid && killLeftoverGroup(child.pid) ? "stopped" : "detached";
+            child.stdout?.destroy();
+            child.stderr?.destroy();
+          }, LEFTOVER_DRAIN_MS);
+        });
+
         child.on("close", async (code) => {
           clearTimeout(timer);
+          clearTimeout(drainTimer);
           context.signal.removeEventListener("abort", onAbort);
+          // The process manager owns an adopted command's exit.
+          if (backgrounded) return;
 
           const rawOutput = Buffer.concat(chunks).toString("utf-8");
-          let output = await renderBashOutput(rawOutput);
+          let output = await renderBashOutput(rawOutput, command, !shell.isCmdFallback);
           if (outputCapped) {
             output =
               `[Output capped at ${MAX_OUTPUT_BYTES / 1024 / 1024} MB to prevent memory exhaustion]\n` +
@@ -385,6 +521,17 @@ export function createBashTool(
               "Install Git for Windows to get bash.]\n" +
               output;
           }
+          if (leftover && !killed) {
+            const fate =
+              leftover === "stopped"
+                ? "so it was stopped"
+                : "so its later output was not captured; it may still be running";
+            output =
+              `[The command exited, but a process it left running in the background ` +
+              `(& or nohup) still held its output ${LEFTOVER_DRAIN_MS / 1000}s later, ${fate}. ` +
+              `Use run_in_background=true for anything that should keep running.]\n` +
+              output;
+          }
 
           const exitCode = timedOut
             ? `TIMEOUT (${effectiveTimeout}ms)`
@@ -396,11 +543,16 @@ export function createBashTool(
         });
 
         child.on("error", (err) => {
+          if (backgrounded) return;
           clearTimeout(timer);
+          clearTimeout(drainTimer);
           context.signal.removeEventListener("abort", onAbort);
-          resolve(`Exit code: 1\nFailed to spawn: ${err.message}`);
+          reject(new Error(`Exit code: 1\nFailed to spawn: ${err.message}`));
         });
       });
+      if (!review || context.signal.aborted || !/^Exit code: 0(?:\s|$)/.test(result)) return result;
+      const inspection = await collectVerificationReview(cwd, context.signal);
+      return `${result}\n\n--- Independent read-only review ---\n${await renderBashOutput(inspection)}`;
     },
   };
 }

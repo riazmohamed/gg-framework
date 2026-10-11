@@ -1,5 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import path from "node:path";
+import { z } from "zod";
+import { collectReferenceProjectFiles } from "./reference-project.js";
 import { JsonRpcConnection, JsonRpcRequestError, type WireTracer } from "./jsonrpc.js";
 import { getSafeToolEnv } from "../../tools/safe-env.js";
 import { killProcessTree } from "../../utils/process.js";
@@ -56,19 +59,20 @@ export interface LspSymbolEntry {
  * empty result that reads exactly like "this symbol has no references".
  */
 export type LspRequestOutcome<T> =
-  | { status: "ok"; value: T }
+  | { status: "ok"; value: T; warning?: string }
   | { status: "unsupported" }
   | { status: "timeout" }
   | { status: "failed"; message: string };
 
 interface PublishDiagnosticsParams {
   uri: string;
+  version?: number;
   diagnostics: LspDiagnostic[];
 }
 
 interface DiagnosticWaiter {
   uri: string;
-  resolve: (diagnostics: LspDiagnostic[]) => void;
+  resolve: (diagnostics: LspDiagnostic[] | null) => void;
 }
 
 interface ProgressParams {
@@ -87,6 +91,12 @@ const REQUEST_TIMED_OUT = -32803;
 const PULL_POLL_INTERVAL_MS = 300;
 /** Bounded stderr retained per server for failure diagnostics. */
 const STDERR_TAIL_BYTES = 4000;
+const ProjectInfoReply = z.object({
+  success: z.literal(true),
+  body: z.object({ configFileName: z.string(), languageServiceDisabled: z.boolean().optional() }),
+});
+const PARTIAL_REFERENCE_COVERAGE =
+  "Reference coverage is partial: the configless project exceeded its indexing budget or could not be fully read. Use grep to check additional callers.";
 const SHUTDOWN_TIMEOUT_MS = 2000;
 const KILL_GRACE_MS = 1500;
 
@@ -149,8 +159,7 @@ function parseLocations(raw: unknown): LspLocation[] {
     // not the whole declaration body.
     const uri = (record.uri ?? record.targetUri) as string | undefined;
     const range = (record.range ?? record.targetSelectionRange ?? record.targetRange) as
-      | LspRange
-      | undefined;
+      LspRange | undefined;
     if (typeof uri === "string" && range) locations.push({ uri, range });
   }
   return locations;
@@ -171,8 +180,7 @@ function parseSymbols(raw: unknown): LspSymbolEntry[] {
     if (typeof name !== "string") return;
     const location = record.location as { range?: LspRange } | undefined;
     const range = (record.selectionRange ?? record.range ?? location?.range) as
-      | LspRange
-      | undefined;
+      LspRange | undefined;
     if (!range) return;
     const containerName = record.containerName;
     const kind = typeof record.kind === "number" ? record.kind : 0;
@@ -270,6 +278,8 @@ export class LspClient {
   private readonly conn: JsonRpcConnection;
   private readonly versions = new Map<string, number>();
   private readonly published = new Map<string, LspDiagnostic[]>();
+  private readonly diagnosticTails = new Map<string, Promise<void>>();
+  private readonly uncertainDiagnostics = new Set<string>();
   private waiters: DiagnosticWaiter[] = [];
   private hasPullDiagnostics = false;
   /** Server capabilities from `initialize`; undefined until the handshake lands. */
@@ -280,6 +290,7 @@ export class LspClient {
 
   private readonly initializationOptions: unknown;
   private stderrBuffer = "";
+  private referenceProjectFiles: string | undefined;
 
   constructor(
     private readonly spec: LspServerSpec,
@@ -322,6 +333,8 @@ export class LspClient {
     this.conn.onNotification("textDocument/publishDiagnostics", (params) => {
       const publish = params as PublishDiagnosticsParams;
       const uri = normalizeUri(publish.uri);
+      if (publish.version !== undefined && publish.version !== this.versions.get(uri)) return;
+      if (publish.version !== undefined) this.uncertainDiagnostics.delete(uri);
       this.published.set(uri, publish.diagnostics);
       this.waiters = this.waiters.filter((waiter) => {
         if (waiter.uri !== uri) return true;
@@ -498,19 +511,95 @@ export class LspClient {
   }
 
   /** Every reference to the symbol at `position`, declaration included. */
-  references(
+  async references(
     uri: string,
     position: LspPosition,
     timeoutMs: number,
     includeDeclaration = true,
   ): Promise<LspRequestOutcome<LspLocation[]>> {
-    return this.navigate(
+    const started = Date.now();
+    const warning =
+      this.spec.id === "typescript"
+        ? await this.prepareReferenceProject(uri, timeoutMs)
+        : undefined;
+    const outcome = await this.navigate(
       "textDocument/references",
       { textDocument: { uri }, position, context: { includeDeclaration } },
-      timeoutMs,
+      Math.max(1, timeoutMs - (Date.now() - started)),
       "referencesProvider",
       parseLocations,
     );
+    return outcome.status === "ok" && warning ? { ...outcome, warning } : outcome;
+  }
+
+  /** Include unopened callers without creating configs or opening stale editor buffers. */
+  private async prepareReferenceProject(
+    uri: string,
+    timeoutMs: number,
+  ): Promise<string | undefined> {
+    const started = Date.now();
+    const remaining = (): number => Math.max(1, timeoutMs - (Date.now() - started));
+    const projectFileName = path.join(this.rootPath, ".gg-lsp-reference-project");
+    try {
+      const reply = await this.conn.request(
+        "workspace/executeCommand",
+        {
+          command: "typescript.tsserverRequest",
+          arguments: [
+            "projectInfo",
+            { file: fileURLToPath(uri), needFileNameList: false },
+            { executionTarget: 0 },
+          ],
+        },
+        remaining(),
+      );
+      const parsed = ProjectInfoReply.safeParse(reply);
+      if (!parsed.success || parsed.data.body.languageServiceDisabled)
+        return PARTIAL_REFERENCE_COVERAGE;
+      const config = parsed.data.body.configFileName;
+      if (
+        !/[\\/]inferredProject\d+\*$/.test(config) &&
+        path.normalize(config) !== path.normalize(projectFileName)
+      )
+        return undefined;
+      const scan = await collectReferenceProjectFiles(
+        this.rootPath,
+        AbortSignal.timeout(Math.min(1000, remaining())),
+      );
+      const files = [...new Set([...scan.files, fileURLToPath(uri)])].sort();
+      const signature = JSON.stringify(files);
+      if (signature !== this.referenceProjectFiles) {
+        const opened = await this.conn.request(
+          "workspace/executeCommand",
+          {
+            command: "typescript.tsserverRequest",
+            arguments: [
+              "openExternalProject",
+              {
+                projectFileName,
+                rootFiles: files.map((fileName) => ({ fileName })),
+                options: { allowJs: true, checkJs: false, noEmit: true },
+              },
+              { executionTarget: 0 },
+            ],
+          },
+          remaining(),
+        );
+        if (!z.object({ success: z.literal(true) }).safeParse(opened).success)
+          return PARTIAL_REFERENCE_COVERAGE;
+        this.referenceProjectFiles = signature;
+        log("DEBUG", "lsp", "Prepared configless reference project", {
+          server: this.spec.id,
+          root: this.rootPath,
+          files: files.length,
+          complete: scan.complete,
+          durationMs: Date.now() - started,
+        });
+      }
+      return scan.complete ? undefined : PARTIAL_REFERENCE_COVERAGE;
+    } catch {
+      return PARTIAL_REFERENCE_COVERAGE;
+    }
   }
 
   /** Flattened symbol outline for a whole document. */
@@ -549,6 +638,12 @@ export class LspClient {
     const uri = pathToFileURL(filePath).href;
     const key = normalizeUri(uri);
     this.published.delete(key);
+    // A reply for a newer edit cannot satisfy an older edit's wait.
+    this.waiters = this.waiters.filter((waiter) => {
+      if (waiter.uri !== key) return true;
+      waiter.resolve(null);
+      return false;
+    });
     const previousVersion = this.versions.get(key);
     if (previousVersion === undefined) {
       this.versions.set(key, 1);
@@ -572,14 +667,44 @@ export class LspClient {
     return uri;
   }
 
-  /**
-   * Current diagnostics for `uri`, racing the push channel (next
-   * publishDiagnostics after the last sync) against a pull-diagnostics poll
-   * loop when the server supports LSP 3.17 pull. Returns null on timeout.
-   */
+  /** Serialize document checks across sessions sharing this server, including unversioned publishers. */
+  async withDocumentDiagnostics<T>(filePath: string, work: () => Promise<T>): Promise<T> {
+    const key = normalizeUri(pathToFileURL(filePath).href);
+    const previous = this.diagnosticTails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => finished);
+    this.diagnosticTails.set(key, tail);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.diagnosticTails.get(key) === tail) this.diagnosticTails.delete(key);
+    }
+  }
+
+  documentVersion(uri: string): number | undefined {
+    return this.versions.get(normalizeUri(uri));
+  }
+
+  /** After a timeout, an unversioned empty publish may belong to an earlier edit. */
+  hasUncertainDiagnostics(uri: string): boolean {
+    return this.uncertainDiagnostics.has(normalizeUri(uri));
+  }
+
+  /** Race push against supported pull requests, rejecting superseded document versions. */
   async collectDiagnostics(uri: string, timeoutMs: number): Promise<LspDiagnostic[] | null> {
-    const push = this.waitForPublish(uri, timeoutMs);
-    if (!this.hasPullDiagnostics) return push;
+    const version = this.documentVersion(uri);
+    const cancelPush = new AbortController();
+    const push = this.waitForPublish(uri, timeoutMs, cancelPush.signal);
+    if (!this.hasPullDiagnostics) {
+      const result = await push;
+      if (result === null) this.uncertainDiagnostics.add(normalizeUri(uri));
+      return this.documentVersion(uri) === version ? result : null;
+    }
 
     let stopped = false;
     const pull = (async (): Promise<LspDiagnostic[] | null> => {
@@ -587,16 +712,23 @@ export class LspClient {
       while (!stopped && this.alive && Date.now() < deadline) {
         const items = await this.pullDiagnostics(uri, Math.max(1, deadline - Date.now()));
         if (items === "unsupported") return push;
-        if (items !== "retry") return items;
+        if (items !== "retry") {
+          if (this.documentVersion(uri) === version)
+            this.uncertainDiagnostics.delete(normalizeUri(uri));
+          return items;
+        }
         await sleep(PULL_POLL_INTERVAL_MS);
       }
       return push;
     })();
 
     try {
-      return await Promise.race([push, pull]);
+      const result = await Promise.race([push, pull]);
+      if (result === null) this.uncertainDiagnostics.add(normalizeUri(uri));
+      return this.documentVersion(uri) === version ? result : null;
     } finally {
       stopped = true;
+      cancelPush.abort();
     }
   }
 
@@ -640,29 +772,34 @@ export class LspClient {
     this.conn.dispose();
     const waiters = this.waiters;
     this.waiters = [];
-    for (const waiter of waiters) waiter.resolve([]);
+    for (const waiter of waiters) waiter.resolve(null);
   }
 
-  private waitForPublish(uri: string, timeoutMs: number): Promise<LspDiagnostic[] | null> {
+  private waitForPublish(
+    uri: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<LspDiagnostic[] | null> {
     // Both the cache and the waiter list are keyed by the normalized form, which
     // is what the publishDiagnostics handler stores under.
     const key = normalizeUri(uri);
     const cached = this.published.get(key);
     if (cached !== undefined) return Promise.resolve(cached);
-    if (!this.alive) return Promise.resolve(null);
+    if (!this.alive || signal?.aborted) return Promise.resolve(null);
     return new Promise<LspDiagnostic[] | null>((resolve) => {
       const waiter: DiagnosticWaiter = {
         uri: key,
         resolve: (diagnostics) => {
           clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
+          this.waiters = this.waiters.filter((w) => w !== waiter);
           resolve(diagnostics);
         },
       };
-      const timer = setTimeout(() => {
-        this.waiters = this.waiters.filter((w) => w !== waiter);
-        resolve(null);
-      }, timeoutMs);
+      const onAbort = () => waiter.resolve(null);
+      const timer = setTimeout(onAbort, timeoutMs);
       timer.unref();
+      signal?.addEventListener("abort", onAbort, { once: true });
       this.waiters.push(waiter);
     });
   }
@@ -678,7 +815,8 @@ export class LspClient {
         timeoutMs,
       )) as { kind?: string; items?: LspDiagnostic[] } | null;
       if (report?.kind === "full") return report.items ?? [];
-      if (report?.kind === "unchanged") return this.published.get(normalizeUri(uri)) ?? [];
+      if (report?.kind === "unchanged")
+        return this.published.get(normalizeUri(uri)) ?? "unsupported";
       return "unsupported";
     } catch (error) {
       if (error instanceof JsonRpcRequestError) {

@@ -4,8 +4,8 @@ import { CONTEXT_LIMITS, type ContextLimits } from "../core/context-limits.js";
 import { renderSkillLines, type Skill } from "../core/skills.js";
 
 const parameters = z.object({
-  skill: z.string().describe("The name of the skill to invoke"),
-  args: z.string().optional().describe("Optional arguments or context for the skill"),
+  skill: z.string(),
+  args: z.string().optional(),
 });
 
 export function createSkillTool(
@@ -23,8 +23,14 @@ export function createSkillTool(
     async execute(input) {
       const skill = skillMap.get(input.skill.toLowerCase());
       if (!skill) {
+        // Thrown, not returned: a plain-text "not found" reads as success to the
+        // model. Bench (glm-ab7): GLM "loaded" skill "enter_plan", believed it was
+        // in plan mode, and edited without the plan step. Name the real tool.
         const available = skills.map((s) => s.name).join(", ");
-        return `Error: Skill "${input.skill}" not found. Available skills: ${available || "none"}`;
+        throw new Error(
+          `Skill "${input.skill}" not found; nothing was loaded. Skills: ${available || "none"}. ` +
+            `If "${input.skill}" is a tool, call that tool directly instead.`,
+        );
       }
 
       const parts = [`<skill_content name="${skill.name}">`];
@@ -36,6 +42,13 @@ export function createSkillTool(
       parts.push(
         "\nTreat the above skill instructions as authoritative within their stated scope. Preserve higher-priority project and file/module rules while following the skill to complete the task.",
       );
+      if (skill.root) {
+        // Children start with an empty context: a brief that says "follow the
+        // skill" without its path silently drops the skill's rules.
+        parts.push(
+          `If you delegate part of this work to a child agent, it cannot see these instructions: put the skill root (${skill.root}), the exact reference files it must read, and the output you need in its brief.`,
+        );
+      }
       return parts.join("\n");
     },
   };
@@ -46,17 +59,19 @@ function generateSkillDescription(skills: Skill[], limits: ContextLimits = CONTE
     return "Invoke a skill by name. No skills are currently available.";
   }
 
-  // Same byte budgets as the prompt's Skills section — this description ships
-  // in the tool schema on every request, so a bloated skill list bills twice.
+  // The active schema owns skill discovery; the system prompt omits its duplicate catalog.
   const { lines, dropped } = renderSkillLines(skills, limits);
   const overflow =
     dropped.length > 0 ? `\n_Skills omitted (catalog byte budget): ${dropped.join(", ")}_` : "";
 
   return (
-    `Invoke a skill by name to get specialized instructions for a task. ` +
-    `Before acting, invoke a skill when the request matches its scope and respect explicit exclusions. ` +
-    `Invoke as soon as the work enters a skill's scope — while building or when checking — not only for reviews. ` +
-    `Match the work rather than the topic, skip it for routine or narrow changes, and do not re-invoke a skill already loaded in this conversation.\n\n` +
-    `Available skills:\n${lines.join("\n")}${overflow}`
+    // Replay-tested on gpt-6-astra (Codex head-to-head): the previous "Before
+    // acting, invoke a skill…" opener made the model spend a whole turn loading
+    // `bulletproof` for a plain rename 6/6 times. The prompt-diet bench then
+    // found the reverse on Sonnet 5.5: a description that opened with when NOT
+    // to load meant 0 skill loads in 132 runs, including security work. So it
+    // leads with the trigger and keeps the rename exclusion explicit.
+    `Specialised method checklists. When the work is in a skill's scope below, load it before writing code. Match the work, not the topic: routine fixes and renames need none. Respect exclusions; never reload one.\n\n` +
+    `${lines.join("\n")}${overflow}`
   );
 }

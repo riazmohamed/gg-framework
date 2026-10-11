@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { AuthProvider, SidecarEvent } from "./agent";
 import { authStatus } from "./agent";
 import { LoginScreen } from "./LoginScreen";
@@ -37,6 +37,26 @@ beforeEach(() => {
   vi.mocked(authStatus).mockReset();
 });
 afterEach(cleanup);
+
+describe("LoginScreen read failure", () => {
+  it("says the providers couldn't be read and retries, instead of an empty grid", async () => {
+    // authStatus reports a failed read as [] (the real list is never empty).
+    vi.mocked(authStatus).mockResolvedValueOnce([]).mockResolvedValue(providers([]));
+    await act(async () => {
+      render(<LoginScreen onClose={vi.fn()} />);
+    });
+    expect(screen.getByText("Couldn't read your AI providers.")).toBeTruthy();
+    expect(screen.queryByText("0 connected")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    });
+
+    expect(authStatus).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("Couldn't read your AI providers.")).toBeNull();
+    expect(screen.getByText("0 connected")).toBeTruthy();
+  });
+});
 
 describe("LoginScreen cross-window auth", () => {
   it("refreshes connection state when another window connects a provider", async () => {

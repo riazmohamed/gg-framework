@@ -7,9 +7,11 @@ import {
 } from "@abukhaled/gg-ai";
 import { estimateConversationTokens, estimateMessageTokens } from "./token-estimator.js";
 import { findLatestHumanQuery, selectQueryAwareContext } from "./query-aware-selector.js";
-import { getSummaryModel, getContextWindow } from "../model-registry.js";
+import { getSummaryModel, getContextWindow, getModel } from "../model-registry.js";
+import { isModelUnavailableFailure } from "../model-unavailable.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "../oauth/kimi.js";
 import { log } from "../logger.js";
+import { editTargetPaths } from "../../tools/edit-targets.js";
 
 /**
  * Per-message-part char caps when preparing messages for the summarizer.
@@ -164,10 +166,7 @@ const COMPACTION_USER_PROMPT =
   "Output only the summary, nothing else.";
 
 export type CompactionReductionStatus =
-  | "material"
-  | "insufficient_reduction"
-  | "above_target"
-  | "not_attempted";
+  "material" | "insufficient_reduction" | "above_target" | "not_attempted";
 
 export interface CompactionContextSelection {
   strategy: "query_aware" | "fallback";
@@ -244,7 +243,10 @@ const COMPACTION_MIN_MESSAGES = 4;
  * Check if compaction should be triggered.
  *
  * The boundary is the first whole token at or above the configured percentage
- * of the active transport's context window. Output-token ceilings do not move it.
+ * of the active transport's context window — or, when `triggerLimitTokens` is
+ * provided (the caller resolved it via resolveCompactionPolicy, which may cap
+ * the window on a latency budget), that absolute limit. Output-token ceilings
+ * do not move it.
  */
 export function shouldCompact(
   messages: Message[],
@@ -252,8 +254,9 @@ export function shouldCompact(
   threshold = 0.85,
   /** Actual API-reported token count — preferred over char-based estimate when available. */
   actualTokens?: number,
-  /** @deprecated Output-token reserves no longer affect compaction decisions. */
-  _reserveTokens = COMPACTION_RESERVE_TOKENS,
+  /** Pre-resolved trigger limit (policy.targetTokens). Takes precedence over
+   *  contextWindow × threshold so latency-capped policies fire where they should. */
+  triggerLimitTokens?: number,
 ): boolean {
   // Don't attempt compaction with too few messages — compact() would bail
   // anyway (middleMessages <= 2), but this avoids the spinner + LLM auth dance.
@@ -264,7 +267,10 @@ export function shouldCompact(
     return false;
   }
   const estimated = actualTokens ?? estimateConversationTokens(messages);
-  const limit = Math.ceil(contextWindow * threshold);
+  const limit =
+    triggerLimitTokens != null && triggerLimitTokens > 0
+      ? Math.ceil(triggerLimitTokens)
+      : Math.ceil(contextWindow * threshold);
   const source = actualTokens != null ? "actual" : "estimated";
   log("INFO", "compaction", `Context check: ${estimated} ${source} tokens, threshold ${limit}`);
   return estimated >= limit;
@@ -432,6 +438,10 @@ export function extractFileOperations(messages: Message[]): {
         name: string;
         args: Record<string, unknown>;
       };
+      if (tc.name === "edit") {
+        for (const target of editTargetPaths(tc.args)) modified.add(target);
+        continue;
+      }
       const filePath = tc.args.file_path ?? tc.args.path ?? tc.args.file;
       if (typeof filePath !== "string") continue;
 
@@ -760,6 +770,164 @@ export function buildModifiedFilesSection(paths: readonly string[], priorOmitted
   return `\n\n<modified-files>\n${kept.join("\n")}${note}\n</modified-files>`;
 }
 
+const FAILING_TESTS_BLOCK_RE = /\n*<failing-tests>\n([\s\S]*?)\n<\/failing-tests>/gu;
+
+/**
+ * Upper bound on carried failing-test names. Same reasoning as modified files:
+ * the tail is what the agent is still fixing.
+ */
+export const MAX_TRACKED_FAILING_TESTS = 20;
+
+const FAILING_OMITTED_NOTE_RE = /^\[\.\.\. (\d+) earlier failing tests omitted\]$/u;
+
+function renderFailingOmittedNote(count: number): string {
+  return `[... ${count} earlier failing tests omitted]`;
+}
+
+/**
+ * Bench G (2026-09-11) showed the summarizer reliably drops failing-test names
+ * even though the raw output was in a tool result — the exact loss class a
+ * deterministic carry-forward erases at zero model cost. Recognised reporters:
+ * jest/vitest (`✕ name (N ms)`, `FAIL path`), pytest (`FAILED id`), and Go test
+ * (`--- FAIL: name`). Each family has a matching pass signal so a later green
+ * run reverses an earlier red one instead of poisoning every future summary.
+ */
+const TEST_FAIL_LINE_RES: readonly RegExp[] = [
+  /^\s*[✕×]\s+(.+?)\s*(?:\(\d+(?:\.\d+)?\s*ms\))?$/gm,
+  /^FAILED\s+(\S+::\S+)$/gm,
+  /^--- FAIL:\s+(\S+)$/gm,
+];
+const TEST_PASS_LINE_RES: readonly RegExp[] = [
+  /^\s*[✓√+]\s+(.+?)\s*(?:\(\d+(?:\.\d+)?\s*ms\))?$/gm,
+  /^PASSED\s+(\S+::\S+)$/gm,
+  /^--- PASS:\s+(\S+)$/gm,
+];
+
+function matchTestLines(text: string, patterns: readonly RegExp[]): string[] {
+  const names: string[] = [];
+  for (const re of patterns) {
+    re.lastIndex = 0;
+    for (const match of text.matchAll(re)) {
+      const name = match[1]?.trim();
+      if (name && name.length <= 200) names.push(name);
+    }
+  }
+  return names;
+}
+
+/** One observed test event on the shared message timeline. */
+interface TestEvent {
+  fail: boolean;
+  name: string;
+}
+
+function collectTestEvents(messages: Message[]): TestEvent[] {
+  const events: TestEvent[] = [];
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (part.type !== "tool_result") continue;
+      const text =
+        typeof part.content === "string"
+          ? part.content
+          : Array.isArray(part.content)
+            ? part.content
+                .filter((p) => p.type === "text")
+                .map((p) => p.text ?? "")
+                .join("\n")
+            : "";
+      if (!text) continue;
+      for (const name of matchTestLines(text, TEST_FAIL_LINE_RES)) {
+        events.push({ fail: true, name });
+      }
+      for (const name of matchTestLines(text, TEST_PASS_LINE_RES)) {
+        events.push({ fail: false, name });
+      }
+    }
+  }
+  return events;
+}
+
+/**
+ * Failing and passing test names observed in tool results. Raw observation
+ * lists; reversal logic lives in {@link extractFailingTests}.
+ */
+export function extractTestSignals(messages: Message[]): {
+  failing: string[];
+  passed: string[];
+} {
+  const events = collectTestEvents(messages);
+  return {
+    failing: events.filter((e) => e.fail).map((e) => e.name),
+    passed: events.filter((e) => !e.fail).map((e) => e.name),
+  };
+}
+
+/** Tests still failing at the end of the message range (passes reversed out). */
+export function extractFailingTests(messages: Message[]): string[] {
+  const events = collectTestEvents(messages);
+  // A name survives only when its LAST event is a failure — a later green run
+  // reverses an earlier red one, and a later red run keeps a regression live.
+  const lastState = new Map<string, boolean>();
+  for (const event of events) lastState.set(event.name, event.fail);
+  const firstFailOrder: string[] = [];
+  const seen = new Set<string>();
+  for (const event of events) {
+    if (event.fail && !seen.has(event.name)) {
+      seen.add(event.name);
+      firstFailOrder.push(event.name);
+    }
+  }
+  return firstFailOrder.filter((name) => lastState.get(name));
+}
+
+/**
+ * Split a previous summary into prose (files AND failing-tests blocks stripped)
+ * and its carried failing-test names. Mirrors {@link splitTrackedModifiedFiles}.
+ */
+export function splitTrackedFailingTests(summaryText: string): {
+  text: string;
+  tests: string[];
+  omitted: number;
+} {
+  const tests: string[] = [];
+  let omitted = 0;
+  const text = summaryText
+    .replace(FAILING_TESTS_BLOCK_RE, (_match, body: string) => {
+      for (const line of body.split("\n")) {
+        const entry = line.trim();
+        if (!entry) continue;
+        const note = FAILING_OMITTED_NOTE_RE.exec(entry);
+        if (note) {
+          omitted += Number(note[1]);
+          continue;
+        }
+        tests.push(entry);
+      }
+      return "";
+    })
+    .trimEnd();
+  return { text, tests, omitted };
+}
+
+/**
+ * Render the single merged failing-test block appended to a summary. Carried
+ * names that a fresh PASS signal reversed are the caller's job to filter.
+ */
+export function buildFailingTestsSection(tests: readonly string[], priorOmitted = 0): string {
+  const unique = [...new Set(tests.map((t) => t.trim()).filter(Boolean))];
+  if (unique.length === 0) {
+    return priorOmitted > 0
+      ? `\n\n<failing-tests>\n${renderFailingOmittedNote(priorOmitted)}\n</failing-tests>`
+      : "";
+  }
+  const overflow = Math.max(0, unique.length - MAX_TRACKED_FAILING_TESTS);
+  const kept = overflow > 0 ? unique.slice(-MAX_TRACKED_FAILING_TESTS) : unique;
+  const totalOmitted = priorOmitted + overflow;
+  const note = totalOmitted > 0 ? `\n${renderFailingOmittedNote(totalOmitted)}` : "";
+  return `\n\n<failing-tests>\n${kept.join("\n")}${note}\n</failing-tests>`;
+}
+
 /**
  * Convert provenance into explicit summarizer attribution and remove low-value
  * runtime control traffic. Legacy messages remain available for old sessions.
@@ -927,6 +1095,11 @@ export async function compact(
     targetTokens?: number;
     signal?: AbortSignal;
     approvedPlanPath?: string;
+    /** User-stated compaction focus (`/compact <focus>`): a short description
+     * of what still matters. When present, the summarizer must preserve
+     * everything relevant to it verbatim. Optional — default behaviour is
+     * unchanged. */
+    focus?: string;
   },
 ): Promise<{ messages: Message[]; result: CompactionResult }> {
   const originalCount = messages.length;
@@ -988,16 +1161,10 @@ export async function compact(
   const summarizationSource = messages.slice(1);
   const fileOps = extractFileOperations(summarizationSource);
 
-  // Pick the appropriate model for summarization
+  // The cheaper summary model goes first (see getSummaryModel). The ACTIVE
+  // model is the fallback when the provider rejects it — retired upstream, or
+  // not on the user's plan — which the registry cannot know in advance.
   const summaryModel = getSummaryModel(options.provider, options.model);
-  const summaryContextWindow = getContextWindow(summaryModel.id, {
-    provider: options.provider,
-    accountId: options.accountId,
-  });
-  const summaryOutputTokens = Math.min(
-    summaryModel.maxOutputTokens,
-    resolveSummaryOutputTokens(summaryContextWindow),
-  );
 
   const previousSummary = findLatestPreviousSummary(summarizationSource);
   // Carry the prior tracked edits forward as DATA, not as prose the summarizer
@@ -1006,16 +1173,27 @@ export async function compact(
   const carriedSummary = previousSummary
     ? splitTrackedModifiedFiles(previousSummary.text)
     : { text: "", files: [] as string[], omitted: 0 };
+  // Strip the failing-tests block too, so the re-fed previous-summary prose
+  // carries neither machine-appended section (they are merged back below).
+  const carriedTests = splitTrackedFailingTests(carriedSummary.text);
+  carriedSummary.text = carriedTests.text;
   const fileTrackingSection = buildModifiedFilesSection(
     [...carriedSummary.files, ...fileOps.modified],
     carriedSummary.omitted,
   );
+  // Carried failing tests survive unless newer evidence shows them passing.
+  const testSignals = extractTestSignals(summarizationSource);
+  const failingTestsSection = buildFailingTestsSection(
+    [
+      ...carriedTests.tests.filter((name) => !testSignals.passed.includes(name)),
+      ...extractFailingTests(summarizationSource),
+    ],
+    carriedTests.omitted,
+  );
   const classifiedMessages = classifyMessagesForSummary(summarizationSource);
 
-  // Budget: summary model context - output tokens - system/user prompt overhead (~1K).
   // Prior compacted memory is pinned separately, never presented as a fresh human turn.
   const promptOverhead = 1000;
-  const tokenBudget = summaryContextWindow - summaryOutputTokens - promptOverhead;
   const previousSummaryMessage: Message | undefined = previousSummary
     ? {
         role: "user",
@@ -1026,33 +1204,6 @@ export async function compact(
     ? estimateMessageTokens(previousSummaryMessage)
     : 0;
   const query = findLatestHumanQuery(summarizationSource);
-  const contextSelection = selectQueryAwareContext(
-    classifiedMessages,
-    query,
-    Math.max(0, tokenBudget - previousSummaryTokens),
-    { fallback: selectMessagesInBudget },
-  );
-  const selectedMessages = contextSelection.messages;
-
-  log("INFO", "compaction", `Summarizing ${middleMessages.length} messages`, {
-    summaryModel: summaryModel.id,
-    summaryContextWindow: String(summaryContextWindow),
-    tokenBudget: String(tokenBudget),
-    preparedMessages: String(classifiedMessages.length),
-    selectedMessages: String(selectedMessages.length + (previousSummaryMessage ? 1 : 0)),
-    droppedMessages: String(contextSelection.droppedMessages),
-    selectedTokens: String(contextSelection.selectedTokens),
-    selectionStrategy: contextSelection.strategy,
-    queryTerms: String(contextSelection.queryTerms),
-    ...(contextSelection.fallbackReason
-      ? { selectionFallback: contextSelection.fallbackReason }
-      : {}),
-    previousSummary: String(!!previousSummaryMessage),
-    summaryOutputTokens: String(summaryOutputTokens),
-    filesModified: String(fileOps.modified.size),
-    filesModifiedCarried: String(carriedSummary.files.length),
-    recentKept: String(recentMessages.length),
-  });
 
   // Add plan preservation and summary-update instructions when applicable.
   const planPreservation = options.approvedPlanPath
@@ -1060,6 +1211,13 @@ export async function compact(
       `An approved implementation plan exists at: ${options.approvedPlanPath}\n` +
       `You MUST preserve all references to this plan and its approval status in the summary. ` +
       `The agent is following this plan for implementation — do not lose this context.`
+    : "";
+  const focusDirective = options.focus
+    ? `\n\n### COMPACTION FOCUS\n` +
+      `The user focused this compaction on: ${options.focus}\n` +
+      `Preserve EVERYTHING in the conversation relevant to this focus — constraints, decisions, ` +
+      `facts, and open questions — verbatim where possible. Content relevant to the focus is ` +
+      `never condensed into a passing mention.`
     : "";
   const updateInstruction = previousSummaryMessage
     ? "\n\n## Superseding a previous summary\n" +
@@ -1071,19 +1229,71 @@ export async function compact(
       "the previous summary' section, and never restate a fact in both old and new wording."
     : "";
 
-  const summaryMessages: Message[] = [
-    { role: "system", content: COMPACTION_SYSTEM_PROMPT + planPreservation + updateInstruction },
-    ...(previousSummaryMessage ? [previousSummaryMessage] : []),
-    ...selectedMessages,
-    { role: "user", content: COMPACTION_USER_PROMPT },
-  ];
+  /**
+   * Size and assemble the summary request for one model. Re-run when the
+   * request moves to the active model, whose context window may be smaller.
+   */
+  const prepareSummaryRequest = (modelId: string) => {
+    const contextWindow = getContextWindow(modelId, {
+      provider: options.provider,
+      accountId: options.accountId,
+    });
+    const outputTokens = Math.min(
+      getModel(modelId)?.maxOutputTokens ?? Number.POSITIVE_INFINITY,
+      resolveSummaryOutputTokens(contextWindow),
+    );
+    // Budget: summary model context - output tokens - system/user prompt overhead (~1K).
+    const tokenBudget = contextWindow - outputTokens - promptOverhead;
+    const contextSelection = selectQueryAwareContext(
+      classifiedMessages,
+      query,
+      Math.max(0, tokenBudget - previousSummaryTokens),
+      { fallback: selectMessagesInBudget },
+    );
+    const selectedMessages = contextSelection.messages;
 
-  log("INFO", "compaction", `Calling summary LLM`, {
-    provider: options.provider,
-    model: summaryModel.id,
-    messageCount: String(summaryMessages.length),
-    hasApiKey: String(!!options.apiKey),
-  });
+    log("INFO", "compaction", `Summarizing ${middleMessages.length} messages`, {
+      summaryModel: modelId,
+      summaryContextWindow: String(contextWindow),
+      tokenBudget: String(tokenBudget),
+      preparedMessages: String(classifiedMessages.length),
+      selectedMessages: String(selectedMessages.length + (previousSummaryMessage ? 1 : 0)),
+      droppedMessages: String(contextSelection.droppedMessages),
+      selectedTokens: String(contextSelection.selectedTokens),
+      selectionStrategy: contextSelection.strategy,
+      queryTerms: String(contextSelection.queryTerms),
+      ...(contextSelection.fallbackReason
+        ? { selectionFallback: contextSelection.fallbackReason }
+        : {}),
+      previousSummary: String(!!previousSummaryMessage),
+      summaryOutputTokens: String(outputTokens),
+      filesModified: String(fileOps.modified.size),
+      filesModifiedCarried: String(carriedSummary.files.length),
+      recentKept: String(recentMessages.length),
+    });
+
+    const summaryMessages: Message[] = [
+      {
+        role: "system",
+        content: COMPACTION_SYSTEM_PROMPT + planPreservation + focusDirective + updateInstruction,
+      },
+      ...(previousSummaryMessage ? [previousSummaryMessage] : []),
+      ...selectedMessages,
+      { role: "user", content: COMPACTION_USER_PROMPT },
+    ];
+
+    log("INFO", "compaction", `Calling summary LLM`, {
+      provider: options.provider,
+      model: modelId,
+      messageCount: String(summaryMessages.length),
+      hasApiKey: String(!!options.apiKey),
+    });
+    return { modelId, outputTokens, contextSelection, selectedMessages, summaryMessages };
+  };
+
+  let request = prepareSummaryRequest(summaryModel.id);
+  // Only a DIFFERENT model can rescue a rejected one.
+  let canFallBackToActiveModel = summaryModel.id !== options.model;
 
   // Retry empty successful responses only. Transport failures and timeouts use
   // the deterministic fallback immediately; replaying the same large request
@@ -1098,9 +1308,9 @@ export async function compact(
     try {
       const result = stream({
         provider: options.provider,
-        model: summaryModel.id,
-        messages: summaryMessages,
-        maxTokens: summaryOutputTokens,
+        model: request.modelId,
+        messages: request.summaryMessages,
+        maxTokens: request.outputTokens,
         apiKey: options.apiKey,
         accountId: options.accountId,
         projectId: options.projectId,
@@ -1156,6 +1366,20 @@ export async function compact(
       if (options.signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
         throw err;
       }
+      if (canFallBackToActiveModel && isModelUnavailableFailure(err)) {
+        // The cheaper model was rejected outright: summarize on the model the
+        // session is already using, instead of dropping to the much weaker
+        // extractive fallback.
+        canFallBackToActiveModel = false;
+        log("WARN", "compaction", `Summary model unavailable — retrying on the active model`, {
+          summaryModel: request.modelId,
+          activeModel: options.model,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        request = prepareSummaryRequest(options.model);
+        attempt--; // A rejected model is not one of the empty-response retries.
+        continue;
+      }
       log(
         "WARN",
         "compaction",
@@ -1171,6 +1395,10 @@ export async function compact(
     }
   }
 
+  // Report the selection of the request that actually ran (the active model's
+  // after a fallback).
+  const { contextSelection, selectedMessages } = request;
+
   // Fallback: preserve prior compacted memory and append a fresh extractive update.
   if (summaryText.length === 0) {
     log("WARN", "compaction", `All summary attempts failed — using fallback extractive summary`);
@@ -1183,7 +1411,7 @@ export async function compact(
       : fallbackUpdate;
   }
 
-  const summaryPayload = `${summaryText}${fileTrackingSection}`;
+  const summaryPayload = `${summaryText}${fileTrackingSection}${failingTestsSection}`;
   const makeSummaryMessage = (payload: string): Message => ({
     role: "user",
     content: `[Previous conversation summary]\n\n${payload}`,

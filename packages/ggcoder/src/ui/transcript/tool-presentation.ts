@@ -1,15 +1,7 @@
 import type { Theme } from "../theme/theme.js";
 
 export type ToolTone =
-  | "read"
-  | "search"
-  | "write"
-  | "run"
-  | "web"
-  | "agent"
-  | "state"
-  | "source"
-  | "default";
+  "read" | "search" | "write" | "run" | "web" | "agent" | "state" | "source" | "default";
 
 export interface ToolPalette {
   primary: string;
@@ -24,7 +16,7 @@ export function getToolTone(name: string): ToolTone {
   if (["bash", "task_output", "task_stop"].includes(name)) return "run";
   if (["web_fetch", "web_search"].includes(name)) return "web";
   if (["subagent", "skill"].includes(name)) return "agent";
-  if (["tasks"].includes(name)) return "state";
+  if (["tasks", "checklist"].includes(name)) return "state";
   if (["source_path"].includes(name)) return "source";
   if (name.startsWith("mcp__")) return "web";
   return "default";

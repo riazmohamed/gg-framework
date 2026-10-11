@@ -10,29 +10,58 @@ import {
   type ChatAgentId,
   type RecentSession,
 } from "./agent";
+import { motionWorkspacePath } from "./motion-workspace";
 import { Badge } from "./Badge";
 import { BackButton } from "./BackButton";
 import { ListSkeleton } from "./Skeleton";
 import { RadioButton } from "./RadioButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
+import { MetalButton } from "./MetalButton";
+import { useWindowFocused } from "./useWindowFocused";
 
 interface Props {
   onChosen: (cwd: string) => void;
   onClose?: () => void;
   initialAgent?: ChatAgentId;
+  /** Which non-coding workspace this picker opens. Defaults to chat. */
+  mode?: "chat" | "motion";
 }
 
-/** Agent and session chooser rooted at the configured projects folder. */
+const COPY = {
+  chat: {
+    title: "Chats",
+    newLabel: "+ New chat",
+    empty: "No previous chats yet.",
+    noRoot: "Choose a projects folder in Settings before starting a chat.",
+    loadError: "Chats could not be loaded.",
+  },
+  motion: {
+    title: "Motion",
+    newLabel: "+ New video",
+    empty: "No motion sessions yet.",
+    noRoot: "Choose a projects folder in Settings before starting a video.",
+    loadError: "Motion sessions could not be loaded.",
+  },
+} as const;
+
+/** Session chooser for Chat or Motion, rooted at the configured projects folder. */
 export function ChatPicker({
   onChosen,
   onClose,
   initialAgent = "general",
+  mode = "chat",
 }: Props): React.ReactElement {
+  const copy = COPY[mode];
+  const windowFocused = useWindowFocused();
   const [projectsRoot, setProjectsRoot] = useState("");
   const [sessions, setSessions] = useState<RecentSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Bumped by "Try again" to re-run the session load.
+  const [reloadNonce, setReloadNonce] = useState(0);
+  // Opening a chat failed; shown above the list so the click isn't silent.
+  const [chooseError, setChooseError] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -56,18 +85,19 @@ export function ChatPicker({
     setError(null);
     void getSettings()
       .then(async (settings) => {
-        const root = settings?.projectsRoot.trim() ?? "";
-        if (!root) throw new Error("Choose a projects folder in Settings before starting a chat.");
+        const projects = settings?.projectsRoot.trim() ?? "";
+        if (!projects) throw new Error(copy.noRoot);
+        const root = mode === "motion" ? motionWorkspacePath(projects) : projects;
         if (!cancelled) setProjectsRoot(root);
         await waitForReady();
-        return listSessions(root, "all");
+        return listSessions(root, mode === "motion" ? "motion" : "all");
       })
       .then((recent) => {
         if (!cancelled) setSessions(recent);
       })
       .catch((reason: unknown) => {
         if (!cancelled) {
-          setError(reason instanceof Error ? reason.message : "Chats could not be loaded.");
+          setError(reason instanceof Error ? reason.message : copy.loadError);
         }
       })
       .finally(() => {
@@ -76,30 +106,36 @@ export function ChatPicker({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [copy, mode, reloadNonce]);
 
   function choose(session?: RecentSession): void {
     if (busy || !projectsRoot) return;
     setBusy(true);
-    void selectWorkspace("chat", projectsRoot, session?.path, session?.chatAgent ?? initialAgent)
+    setChooseError(null);
+    void selectWorkspace(mode, projectsRoot, session?.path, session?.chatAgent ?? initialAgent)
       .then(() => onChosen(projectsRoot))
-      .catch(() => setBusy(false));
+      .catch((reason: unknown) => {
+        const message = reason instanceof Error ? reason.message : String(reason);
+        setChooseError(`Couldn't open that: ${message}`);
+        setBusy(false);
+      });
   }
 
   return (
     <div className="picker chat-picker">
       <div className="picker-head" data-tauri-drag-region>
         {onClose ? <BackButton label="Back" onClick={onClose} /> : null}
-        <span className="picker-title">Chats</span>
+        <span className="picker-title">{copy.title}</span>
         {!loading && !error && <Badge>{sessions.length}</Badge>}
         <span className="picker-head-actions">
-          <button
+          <MetalButton
+            windowFocused={windowFocused}
             className="btn btn-primary btn-sm"
             disabled={busy || loading || !projectsRoot}
             onClick={() => choose()}
           >
-            {"+ New chat"}
-          </button>
+            {copy.newLabel}
+          </MetalButton>
           <RadioButton />
           <WindowLayoutButton />
         </span>
@@ -107,17 +143,37 @@ export function ChatPicker({
 
       <div className="picker-list">
         {loading && <ListSkeleton rows={5} />}
+        {chooseError && (
+          <div className="picker-error" role="alert">
+            {chooseError}
+          </div>
+        )}
         {!loading && error && (
-          <div className="picker-empty" style={{ color: theme.textMuted }}>
-            {error}
+          <div className="picker-empty" role="alert">
+            <span style={{ color: theme.textMuted }}>{error}</span>
+            {/* No projects folder is a settings problem, so retrying can't fix it. */}
+            {error !== copy.noRoot && (
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => setReloadNonce((n) => n + 1)}
+              >
+                Try again
+              </button>
+            )}
           </div>
         )}
         {!loading && !error && sessions.length === 0 && (
           <div className="picker-empty">
-            <span style={{ color: theme.textMuted }}>No previous chats yet.</span>
-            <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => choose()}>
-              {"+ New chat"}
-            </button>
+            <span style={{ color: theme.textMuted }}>{copy.empty}</span>
+            <MetalButton
+              windowFocused={windowFocused}
+              className="btn btn-primary btn-sm"
+              disabled={busy}
+              onClick={() => choose()}
+            >
+              {copy.newLabel}
+            </MetalButton>
           </div>
         )}
         {!loading && !error && sessions.length > 0 && (

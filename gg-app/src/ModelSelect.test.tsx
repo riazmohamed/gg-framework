@@ -11,7 +11,7 @@ const supportsNativeMock = vi.mocked(supportsNativeSelectPopup);
 
 const MODELS: ModelOption[] = [
   { id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "anthropic" },
-  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: "openai" },
+  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", provider: "openai" },
   { id: "grok-4.5", name: "Grok 4.5", provider: "xai" },
   {
     id: "local/ollama/gemma4:e2b",
@@ -36,6 +36,25 @@ const MODELS: ModelOption[] = [
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+describe("ModelSelect — compact recovery action", () => {
+  it.each([true, false])("keeps selection behavior with an action label (native=%s)", (native) => {
+    supportsNativeMock.mockReturnValue(native);
+    render(
+      <ModelSelect
+        models={MODELS}
+        currentModel="claude-sonnet-5"
+        onSelect={vi.fn()}
+        title="Switch model"
+        label="Choose model"
+      />,
+    );
+    expect(screen.getByText("Choose model")).toBeTruthy();
+    if (native)
+      expect(screen.getByRole("combobox").getAttribute("aria-label")).toBe("Switch model");
+    else expect(screen.getByRole("button", { name: "Choose model" })).toBeTruthy();
+  });
 });
 
 describe("ModelSelect — native popup", () => {
@@ -161,10 +180,10 @@ describe("loadModelsInto", () => {
     expect(apply).toHaveBeenCalledWith(OTHER_PROJECT_MODELS);
   });
 
-  it("leaves the picker untouched when every attempt failed", async () => {
+  it("leaves the picker untouched when every attempt failed, and reports it", async () => {
     const apply = vi.fn();
 
-    await loadModelsInto(
+    const ok = await loadModelsInto(
       async () => null,
       apply,
       () => false,
@@ -172,6 +191,43 @@ describe("loadModelsInto", () => {
     );
 
     expect(apply).not.toHaveBeenCalled();
+    expect(ok).toBe(false);
+  });
+
+  it("reports success when the list was applied or dropped as stale", async () => {
+    const applied = await loadModelsInto(
+      async () => MODELS,
+      vi.fn(),
+      () => false,
+      async () => {},
+    );
+    const stale = await loadModelsInto(
+      async () => MODELS,
+      vi.fn(),
+      () => true,
+      async () => {},
+    );
+
+    expect(applied).toBe(true);
+    expect(stale).toBe(true);
+  });
+});
+
+describe("ModelSelect — failed model load", () => {
+  it("says the load failed instead of claiming it is still connecting", () => {
+    supportsNativeMock.mockReturnValue(false);
+    render(
+      <ModelSelect
+        models={[]}
+        currentModel="claude-sonnet-5"
+        onSelect={vi.fn()}
+        title="Switch model"
+        loadFailed
+      />,
+    );
+
+    expect(screen.getByTitle(/Couldn't load models from the agent/)).toBeTruthy();
+    expect(screen.queryByTitle(/still connecting/)).toBeNull();
   });
 });
 

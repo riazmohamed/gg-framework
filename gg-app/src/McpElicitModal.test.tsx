@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { SidecarEvent } from "./agent";
 import { McpElicitModal } from "./McpElicitModal";
+import { withViewTransition } from "./view-transition";
+
+vi.mock("./view-transition", () => ({
+  withViewTransition: vi.fn((update: () => void) => update()),
+}));
 
 const mcpElicitMock = vi.hoisted(() => vi.fn(async () => {}));
 const listeners = vi.hoisted(() => new Set<(e: SidecarEvent) => void>());
@@ -33,13 +38,51 @@ const askSchema = {
   required: ["name"],
 };
 
+// jsdom has no layout, so no `scrollIntoView` for the Dropdown's active option.
+beforeAll(() => {
+  Element.prototype.scrollIntoView = vi.fn();
+});
+
 beforeEach(() => {
   mcpElicitMock.mockClear();
+  vi.mocked(withViewTransition).mockClear();
   listeners.clear();
 });
 afterEach(cleanup);
 
 describe("McpElicitModal", () => {
+  it.each(["Cancel", "Close", "Escape"])(
+    "answers immediately and animates only the settled %s dismissal",
+    async (path) => {
+      let resolve: () => void = () => {};
+      mcpElicitMock.mockImplementationOnce(
+        () =>
+          new Promise<void>((done) => {
+            resolve = done;
+          }),
+      );
+      render(<McpElicitModal />);
+      emitElicit({
+        id: "pending",
+        server: "fixture",
+        message: "Fictional request",
+        requestedSchema: askSchema,
+      });
+      if (path === "Escape") fireEvent.keyDown(document, { key: "Escape" });
+      else fireEvent.click(screen.getByRole("button", { name: path }));
+      expect(mcpElicitMock).toHaveBeenCalledExactlyOnceWith("pending", "cancel", undefined);
+      expect(withViewTransition).not.toHaveBeenCalled();
+      expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(mcpElicitMock).toHaveBeenCalledOnce();
+      await act(async () => resolve());
+      expect(withViewTransition).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("dialog")).toBeNull();
+    },
+  );
+
   it("renders nothing until a server asks", () => {
     render(<McpElicitModal />);
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -63,7 +106,11 @@ describe("McpElicitModal", () => {
 
     fireEvent.change(screen.getByLabelText("Your name *"), { target: { value: "Ken" } });
     fireEvent.change(screen.getByLabelText("How many"), { target: { value: "3" } });
-    fireEvent.change(screen.getByLabelText("Region"), { target: { value: "eu" } });
+    // Region is the shared Dropdown (not a native <select>): open it, pick "Europe".
+    const region = screen.getByRole("button", { name: "Region" });
+    expect(region.id).toBe(screen.getByText("Region", { selector: "label" }).getAttribute("for"));
+    fireEvent.click(region);
+    fireEvent.click(screen.getByRole("option", { name: "Europe" }));
     fireEvent.click(screen.getByRole("checkbox"));
 
     expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(

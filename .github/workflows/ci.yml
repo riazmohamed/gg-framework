@@ -34,9 +34,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # pnpm version comes from package.json's packageManager field.
       - uses: pnpm/action-setup@v6
-        with:
-          version: 10
 
       - uses: actions/setup-node@v7
         with:
@@ -45,6 +44,20 @@ jobs:
 
       - name: Install
         run: pnpm install --frozen-lockfile
+
+      # ripgrep is optional at runtime, but grep-parity.test.ts only compares
+      # the rg path against the in-process scanner when `rg` is on PATH. None of
+      # the runner images ship it, so without this the parity suite skipped on
+      # every OS and proved nothing.
+      - name: Install ripgrep (grep parity test)
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) sudo apt-get install -y --no-install-recommends ripgrep ;;
+            macOS) HOMEBREW_NO_AUTO_UPDATE=1 brew install ripgrep ;;
+            Windows) choco install ripgrep -y --no-progress ;;
+          esac
+          rg --version
 
       # `shell: bash` on EVERY multi-line step is load-bearing, not cosmetic.
       # On Windows the default shell is PowerShell, which does not abort a
@@ -62,17 +75,24 @@ jobs:
           pnpm --filter @abukhaled/gg-core build
           pnpm --filter @abukhaled/ogcoder build
 
-      # Deterministic perf budgets (fx-pattern ratchet): bundle size + CLI
-      # startup. Baseline lives in bench/baseline/sizes.json; intentional
-      # growth re-baselines via `node bench/size-gate.mjs --update`.
-      - name: Size + startup gates
+      # Bundle growth is informational; measured CLI startup remains blocking.
+      # Reference sizes live in bench/baseline/sizes.json.
+      - name: Size report + startup gate
         shell: bash
         run: |
           # --only: a positional arg is ignored by the script, which then checks
           # every artifact — including the sidecar this job never builds (that
-          # one is gated in the `app` job, which bundles it).
+          # one is reported in the `app` job, which bundles it).
           node bench/size-gate.mjs --only dist:ggcoder
           node bench/startup-gate.mjs
+
+      # Lint and formatting are OS-independent, so one leg is enough.
+      - name: Lint + format check
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          pnpm lint
+          pnpm format:check
 
       - name: Typecheck
         shell: bash
@@ -88,6 +108,25 @@ jobs:
           pnpm --filter @abukhaled/gg-ai test
           pnpm --filter @abukhaled/gg-agent test
           pnpm --filter @abukhaled/gg-core test
+
+      # Motion's media regressions decode real clips on every OS. CI-only
+      # provisioning is intentional; never skip these tests when a tool is absent.
+      - name: Ensure FFmpeg and ffprobe for Motion media tests
+        shell: bash
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+            case "$RUNNER_OS" in
+              Linux)
+                sudo apt-get update
+                sudo apt-get install -y --no-install-recommends ffmpeg
+                ;;
+              macOS) HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg ;;
+              Windows) choco install ffmpeg --version=8.0.1 -y --no-progress ;;
+              *) echo "Unsupported media-test runner: $RUNNER_OS" >&2; exit 1 ;;
+            esac
+          fi
+          ffmpeg -version
+          ffprobe -version
 
       # Blocking on every OS, Windows included. This started as a 72-failure
       # Windows backlog that had been invisible because the default PowerShell
@@ -116,9 +155,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # pnpm version comes from package.json's packageManager field.
       - uses: pnpm/action-setup@v6
-        with:
-          version: 10
 
       - uses: actions/setup-node@v7
         with:
@@ -126,6 +164,8 @@ jobs:
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       # Both `cargo test` and the Windows packaged build compile the same large
       # Tauri dependency tree; without a cache the packaged smoke would rebuild
@@ -167,12 +207,30 @@ jobs:
       # OS-independent slice of the sidecar bundle (app-sidecar.mjs + skills;
       # node_modules carries platform-conditional binaries so one baseline
       # cannot hold across the matrix).
-      - name: Sidecar size gate
+      - name: Sidecar size report
         run: node bench/size-gate.mjs --only sidecar
         shell: bash
 
+      - name: Frontend build + initial JavaScript size report
+        shell: bash
+        run: |
+          pnpm --filter gg-app build
+          node bench/size-gate.mjs --only frontend:initial
+
       - name: Frontend platform-class test
         run: pnpm --filter gg-app test
+
+      - name: Rust format check
+        if: runner.os == 'Linux'
+        working-directory: gg-app/src-tauri
+        shell: bash
+        run: cargo fmt --check
+
+      # Every OS: lib.rs has Windows- and macOS-only code paths.
+      - name: Rust lint (clippy)
+        working-directory: gg-app/src-tauri
+        shell: bash
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Rust unit tests (path + window-chrome resolution)
         working-directory: gg-app/src-tauri

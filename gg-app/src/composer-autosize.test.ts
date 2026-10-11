@@ -14,14 +14,14 @@
  * scrollTop is clamped to `scrollHeight - clientHeight` whenever that shrinks.
  * With real numbers taken from a headless-Chromium repro at 900×700.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { autosizeComposer } from "./composer-autosize";
+import { pinAfterScroll } from "./transcript-pin";
 
 const SHELL = 700; // window height
 const CHROME = 123; // chat head + live region + footer + composer padding
 const ROW = 21; // 14px × 1.5 line-height
 const CONTENT = 541; // transcript scrollHeight: just taller than the viewport
-const PIN_THRESHOLD = 48; // must match App's onTranscriptScroll
 
 /** A transcript whose viewport is whatever the composer leaves it. */
 function makeShell() {
@@ -84,10 +84,12 @@ function typeLineBreaks(breaks: number) {
   // App's stick-to-bottom pin, updated by every scroll event exactly as
   // onTranscriptScroll does.
   let pinned = true;
+  let lastTop = 0;
   const observeScrolls = () => {
     while (shell.scrollEvents.length) {
       shell.scrollEvents.shift();
-      pinned = shell.distanceFromBottom() <= PIN_THRESHOLD;
+      pinned = pinAfterScroll(pinned, lastTop, shell.transcript);
+      lastTop = shell.transcript.scrollTop;
     }
   };
 
@@ -104,7 +106,11 @@ function typeLineBreaks(breaks: number) {
     // ResizeObserver runs; anything left for the RO to correct is a frame of
     // visible bounce while typing.
     if (wasPinned) offBottomAfterAutosize.push(shell.distanceFromBottom());
-    if (pinned) shell.transcript.scrollTop = CONTENT; // ResizeObserver re-pin
+    if (pinned) {
+      // ResizeObserver re-pin: scrollToBottom, which records its own offset.
+      shell.transcript.scrollTop = CONTENT;
+      lastTop = shell.transcript.scrollTop;
+    }
     observeScrolls();
   }
   return { pinned, shell, el, offBottomAfterAutosize };
@@ -126,8 +132,9 @@ describe("autosizeComposer", () => {
   });
 
   // The regression itself: without the scrollTop snapshot/restore inside
-  // autosizeComposer the pin is lost here and never comes back, so the composer
-  // overlaps the newest messages from the 4th break on.
+  // autosizeComposer the pin is lost and never comes back, so the composer
+  // overlaps the newest messages. Under the old 48px pin that began at the 4th
+  // break; the direction-based pin (transcript-pin.ts) loses it on the first.
   it("keeps the transcript pinned past 3 line breaks", () => {
     const { pinned, shell } = typeLineBreaks(6);
     expect(pinned).toBe(true);
@@ -172,6 +179,7 @@ describe("growth animation", () => {
   it("never leaves the collapsed measurement height as the transition's start value", () => {
     const el = document.createElement("textarea");
     document.body.appendChild(el);
+    el.value = "a draft that wraps";
     Object.defineProperty(el, "scrollHeight", { get: () => 60 });
     // The box is already two lines tall from the previous keystroke.
     el.style.height = "40px";
@@ -210,6 +218,7 @@ describe("transition start value", () => {
   it("commits the restored height with a layout read before writing the target", () => {
     const el = document.createElement("textarea");
     document.body.appendChild(el);
+    el.value = "a draft that wraps";
     Object.defineProperty(el, "scrollHeight", { get: () => 60 });
     el.style.height = "40px";
 
@@ -237,6 +246,36 @@ describe("transition start value", () => {
     autosizeComposer(el, null);
 
     expect(trace).toEqual(["set:auto", "set:40px", "read", "set:60px"]);
+  });
+
+  // A draft replaced wholesale eases down over 160ms; a keystroke mid-ease must
+  // continue from the height ON SCREEN, not jump to the last target first.
+  it("restores the live animated height, not the last written target", () => {
+    const el = document.createElement("textarea");
+    document.body.appendChild(el);
+    el.value = "a draft that wraps";
+    Object.defineProperty(el, "scrollHeight", { get: () => 30 });
+    el.style.height = "30px"; // the target the box is easing toward
+    const seen: string[] = [];
+    let current = el.style.height;
+    Object.defineProperty(el.style, "height", {
+      configurable: true,
+      get: () => current,
+      set: (v: string) => {
+        seen.push(v);
+        current = v;
+      },
+    });
+    // Mid-transition the computed height is still 55px.
+    const computed = vi
+      .spyOn(window, "getComputedStyle")
+      .mockReturnValue({ height: "55px", maxHeight: "" } as CSSStyleDeclaration);
+    try {
+      autosizeComposer(el, null);
+    } finally {
+      computed.mockRestore();
+    }
+    expect(seen).toEqual(["auto", "55px", "30px"]);
   });
 
   it("skips the restore dance when the height is unchanged", () => {
@@ -394,6 +433,7 @@ describe("wrap animation (FLIP)", () => {
 
   it("inverts the reflow so the move up-and-left animates", () => {
     const { row, stack, el } = harness(51, [rect(36, 10), rect(0, 0)]);
+    el.value = "a draft that wraps";
     // Trace transform writes AND the forced layout read between them.
     const trace: string[] = [];
     let current = "";
@@ -421,9 +461,119 @@ describe("wrap animation (FLIP)", () => {
     expect(trace).toEqual(["translate(36px, 10px)", "commit", "release"]);
   });
 
+  it.each([0.5, 0.95, 1, 1.25, 1.5, 2])(
+    "uses local pixels for wrapping and send at zoom %s",
+    (scale) => {
+      const { stack, el } = harness(51, [
+        new DOMRect(36 * scale, 10 * scale, 200 * scale, 51 * scale),
+        new DOMRect(0, 0, 200 * scale, 51 * scale),
+      ]);
+      stack.style.width = "200px";
+      stack.style.boxSizing = "border-box";
+      el.value = "a draft that wraps";
+      const writes: string[] = [];
+      Object.defineProperty(stack.style, "transform", {
+        get: () => "",
+        set: (value: string) => writes.push(value),
+      });
+      autosizeComposer(el, null);
+      expect(writes).toEqual(["translate(36px, 10px)", ""]);
+      expect(el.style.height).toBe("51px");
+      el.value = "";
+      autosizeComposer(el, null);
+      expect(writes).toHaveLength(2);
+    },
+  );
+
   it("does not touch transform when the row does not reflow", () => {
     const { stack, el } = harness(30, [rect(36, 10)]);
     autosizeComposer(el, null);
     expect(stack.style.transform).toBe("");
+  });
+});
+
+// "Pushes up, then corrects" on send: submit clears the draft in the same
+// frame the sent message is added. If the field eased down from N lines, the
+// transcript viewport grew under the new bubble for 160ms, so the bubble
+// appeared above where it rests and slid down into place.
+describe("emptied draft (send)", () => {
+  function sentHarness() {
+    const row = document.createElement("div");
+    row.className = "inputrow is-multiline";
+    const stack = document.createElement("div");
+    const el = document.createElement("textarea");
+    stack.appendChild(el);
+    row.appendChild(stack);
+    document.body.appendChild(row);
+    Object.defineProperty(el, "scrollHeight", { get: () => 30 });
+    el.style.lineHeight = "21px";
+    el.style.paddingTop = "4.5px";
+    el.style.paddingBottom = "4.5px";
+    el.style.height = "72px"; // three lines, just before send
+    el.value = "";
+    let call = 0;
+    const rects = [
+      { left: 0, top: 0 },
+      { left: 36, top: 10 },
+    ] as DOMRect[];
+    stack.getBoundingClientRect = () => rects[call++] ?? rects[1]!;
+    return { row, stack, el };
+  }
+
+  it("lands at one line with the height transition suspended", () => {
+    const { el } = sentHarness();
+    const trace: string[] = [];
+    let height = el.style.height;
+    let transition = "";
+    Object.defineProperty(el.style, "height", {
+      configurable: true,
+      get: () => height,
+      set: (v: string) => {
+        trace.push(`height:${v}`);
+        height = v;
+      },
+    });
+    Object.defineProperty(el.style, "transition", {
+      configurable: true,
+      get: () => transition,
+      set: (v: string) => {
+        trace.push(`transition:${v || "restore"}`);
+        transition = v;
+      },
+    });
+    Object.defineProperty(el, "offsetHeight", {
+      configurable: true,
+      get: () => {
+        trace.push("commit");
+        return 30;
+      },
+    });
+
+    autosizeComposer(el, null);
+
+    // No restore of the old 72px as a start value: the target is written with
+    // transitions off and committed before they come back.
+    expect(trace).toEqual([
+      "height:auto",
+      "transition:none",
+      "height:30px",
+      "commit",
+      "transition:restore",
+    ]);
+  });
+
+  it("gives the row back without a FLIP", () => {
+    const { row, stack, el } = sentHarness();
+    // A FLIP always ends by clearing the transform, so record writes rather
+    // than checking the final value.
+    const writes: string[] = [];
+    Object.defineProperty(stack.style, "transform", {
+      configurable: true,
+      get: () => "",
+      set: (v: string) => writes.push(v),
+    });
+    autosizeComposer(el, null);
+    expect(row.classList.contains("is-multiline")).toBe(false);
+    expect(writes).toEqual([]);
   });
 });

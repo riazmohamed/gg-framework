@@ -1,11 +1,34 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { clearRuntimeModels, registerRuntimeModels } from "./model-registry.js";
 import {
+  clampThinkingForPlanMode,
+  getLowestThinkingLevel,
   getNextThinkingLevel,
   getSupportedThinkingLevels,
   isThinkingLevelSupported,
 } from "./thinking-level.js";
 import type { ThinkingLevel } from "@abukhaled/gg-ai";
+
+describe("getLowestThinkingLevel", () => {
+  it.each([
+    ["anthropic", "claude-opus-5-5"],
+    ["openai", "gpt-6.1-sol"],
+    ["gemini", "gemini-3.8-flash"],
+    ["glm", "glm-5.3"],
+    ["deepseek", "deepseek-v4-pro"],
+    ["xai", "grok-4.7"],
+    ["moonshot", "kimi-k3"],
+  ] as const)("is the first rung of %s %s's own ladder, never off", (provider, model) => {
+    const lowest = getLowestThinkingLevel(provider, model);
+
+    expect(lowest).toBeDefined();
+    expect(lowest).toBe(getSupportedThinkingLevels(provider, model)[0]);
+  });
+
+  it("is undefined only for a model that cannot reason at all", () => {
+    expect(getLowestThinkingLevel("huggingface", "moonshotai/Kimi-K2.7-Code")).toBeUndefined();
+  });
+});
 
 describe("thinking-level helpers", () => {
   it("cycles GPT-6 Astra through the full six-rung ladder up to ultra", () => {
@@ -27,36 +50,51 @@ describe("thinking-level helpers", () => {
     expect(getNextThinkingLevel("openai", "gpt-5.2", "high")).toBeUndefined();
   });
 
-  it("exposes Ultra only for GPT-5.6 models that support proactive delegation", () => {
+  it("exposes Ultra only for GPT-6 models that support proactive delegation", () => {
     const baseLevels = ["low", "medium", "high", "xhigh", "max"];
-    expect(getSupportedThinkingLevels("openai", "gpt-5.6-sol")).toEqual([...baseLevels, "ultra"]);
-    expect(getSupportedThinkingLevels("openai", "gpt-5.6-terra")).toEqual([...baseLevels, "ultra"]);
-    expect(getSupportedThinkingLevels("openai", "gpt-5.6-luna")).toEqual(baseLevels);
-    expect(getNextThinkingLevel("openai", "gpt-5.6-sol", "max")).toBe("ultra");
-    expect(getNextThinkingLevel("openai", "gpt-5.6-sol", "ultra")).toBeUndefined();
+    expect(getSupportedThinkingLevels("openai", "gpt-6.1-sol")).toEqual([...baseLevels, "ultra"]);
+    expect(getSupportedThinkingLevels("openai", "gpt-6-luna")).toEqual(baseLevels);
+    expect(getNextThinkingLevel("openai", "gpt-6.1-sol", "max")).toBe("ultra");
+    expect(getNextThinkingLevel("openai", "gpt-6.1-sol", "ultra")).toBeUndefined();
   });
 
   it("cycles Anthropic adaptive Opus models through max, including xhigh", () => {
-    expect(getSupportedThinkingLevels("anthropic", "claude-opus-5")).toEqual([
+    expect(getSupportedThinkingLevels("anthropic", "claude-opus-5-5")).toEqual([
       "low",
       "medium",
       "high",
       "xhigh",
       "max",
     ]);
-    expect(getNextThinkingLevel("anthropic", "claude-opus-5", "xhigh")).toBe("max");
-    expect(getNextThinkingLevel("anthropic", "claude-opus-5", "max")).toBeUndefined();
+    expect(getNextThinkingLevel("anthropic", "claude-opus-5-5", "xhigh")).toBe("max");
+    expect(getNextThinkingLevel("anthropic", "claude-opus-5-5", "max")).toBeUndefined();
   });
 
-  it("cycles Anthropic adaptive Sonnet models without xhigh", () => {
-    expect(getSupportedThinkingLevels("anthropic", "claude-sonnet-5")).toEqual([
+  it("cycles Sonnet 5.5 through max, including its new xhigh level", () => {
+    expect(getSupportedThinkingLevels("anthropic", "claude-sonnet-5-5")).toEqual([
       "low",
       "medium",
       "high",
+      "xhigh",
       "max",
     ]);
-    expect(getNextThinkingLevel("anthropic", "claude-sonnet-5", "high")).toBe("max");
+    expect(getNextThinkingLevel("anthropic", "claude-sonnet-5-5", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("anthropic", "claude-sonnet-5-5", "xhigh")).toBe("max");
+    expect(getNextThinkingLevel("anthropic", "claude-sonnet-5-5", "max")).toBeUndefined();
+    expect(isThinkingLevelSupported("anthropic", "claude-sonnet-5-5", "xhigh")).toBe(true);
     expect(isThinkingLevelSupported("anthropic", "claude-sonnet-5", "xhigh")).toBe(false);
+  });
+
+  it("cycles Haiku 5.5 through the full adaptive ladder, including xhigh", () => {
+    expect(getSupportedThinkingLevels("anthropic", "claude-haiku-5-5")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(getNextThinkingLevel("anthropic", "claude-haiku-5-5", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("anthropic", "claude-haiku-5-5", "max")).toBeUndefined();
   });
 
   it("cycles Claude Fable 5.1 through the adaptive ladder without xhigh", () => {
@@ -70,31 +108,25 @@ describe("thinking-level helpers", () => {
     expect(isThinkingLevelSupported("anthropic", "claude-fable-5-1", "xhigh")).toBe(false);
   });
 
-  it("cycles xAI Grok 4.5 through low, medium, and high", () => {
-    expect(getSupportedThinkingLevels("xai", "grok-4.5")).toEqual(["low", "medium", "high"]);
-    expect(getNextThinkingLevel("xai", "grok-4.5", undefined)).toBe("low");
-    expect(getNextThinkingLevel("xai", "grok-4.5", "low")).toBe("medium");
-    expect(getNextThinkingLevel("xai", "grok-4.5", "medium")).toBe("high");
-    expect(getNextThinkingLevel("xai", "grok-4.5", "high")).toBeUndefined();
-    expect(isThinkingLevelSupported("xai", "grok-4.5", "xhigh")).toBe(false);
-  });
-
-  it("cycles xAI Grok 4.6 through low, medium, high, and its new xhigh rung", () => {
-    expect(getSupportedThinkingLevels("xai", "grok-4.6")).toEqual([
+  it("cycles xAI Grok 4.7 through low, medium, high, and its xhigh rung", () => {
+    expect(getSupportedThinkingLevels("xai", "grok-4.7")).toEqual([
       "low",
       "medium",
       "high",
       "xhigh",
     ]);
-    expect(getNextThinkingLevel("xai", "grok-4.6", undefined)).toBe("low");
-    expect(getNextThinkingLevel("xai", "grok-4.6", "high")).toBe("xhigh");
-    expect(getNextThinkingLevel("xai", "grok-4.6", "xhigh")).toBeUndefined();
-    expect(isThinkingLevelSupported("xai", "grok-4.6", "xhigh")).toBe(true);
-    expect(isThinkingLevelSupported("xai", "grok-4.6", "max")).toBe(false);
+    expect(getNextThinkingLevel("xai", "grok-4.7", undefined)).toBe("low");
+    expect(getNextThinkingLevel("xai", "grok-4.7", "low")).toBe("medium");
+    expect(getNextThinkingLevel("xai", "grok-4.7", "medium")).toBe("high");
+    expect(getNextThinkingLevel("xai", "grok-4.7", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("xai", "grok-4.7", "xhigh")).toBeUndefined();
+    expect(isThinkingLevelSupported("xai", "grok-4.7", "xhigh")).toBe(true);
+    expect(isThinkingLevelSupported("xai", "grok-4.7", "max")).toBe(false);
   });
 
   it("cycles Sakana Fugu through high and xhigh", () => {
     expect(getSupportedThinkingLevels("sakana", "fugu")).toEqual(["high", "xhigh"]);
+    expect(getSupportedThinkingLevels("sakana", "fugu-max")).toEqual(["high", "xhigh"]);
     expect(getSupportedThinkingLevels("sakana", "fugu-ultra")).toEqual(["high", "xhigh", "max"]);
     expect(getNextThinkingLevel("sakana", "fugu-ultra", "xhigh")).toBe("max");
     expect(getNextThinkingLevel("sakana", "fugu-ultra", "max")).toBeUndefined();
@@ -104,7 +136,7 @@ describe("thinking-level helpers", () => {
     expect(isThinkingLevelSupported("sakana", "fugu", "medium")).toBe(false);
   });
 
-  it.each(["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"])(
+  it.each(["deepseek-v4-pro", "deepseek-flash"])(
     "cycles %s through low, high, max and off",
     (model) => {
       expect(getSupportedThinkingLevels("deepseek", model)).toEqual(["low", "high", "max"]);
@@ -118,6 +150,12 @@ describe("thinking-level helpers", () => {
 
   it("cycles Kimi K3 through its server-declared low, high, max ladder", () => {
     expect(getSupportedThinkingLevels("moonshot", "kimi-k3")).toEqual(["low", "high", "max"]);
+    // K2.8 Preview declares the same ladder as K3.
+    expect(getSupportedThinkingLevels("moonshot", "kimi-for-coding")).toEqual([
+      "low",
+      "high",
+      "max",
+    ]);
     expect(getNextThinkingLevel("moonshot", "kimi-k3", undefined)).toBe("low");
     expect(getNextThinkingLevel("moonshot", "kimi-k3", "low")).toBe("high");
     expect(getNextThinkingLevel("moonshot", "kimi-k3", "high")).toBe("max");
@@ -250,5 +288,15 @@ describe("local models", () => {
 
   it("offers nothing for an unknown local id (never discovered)", () => {
     expect(getSupportedThinkingLevels("local", "local/ollama/ghost")).toEqual([]);
+  });
+
+  it("caps plan-mode thinking at medium, mirroring the Codex plan preset", () => {
+    expect(clampThinkingForPlanMode("ultra")).toBe("medium");
+    expect(clampThinkingForPlanMode("max")).toBe("medium");
+    expect(clampThinkingForPlanMode("xhigh")).toBe("medium");
+    expect(clampThinkingForPlanMode("high")).toBe("medium");
+    expect(clampThinkingForPlanMode("medium")).toBe("medium");
+    expect(clampThinkingForPlanMode("low")).toBe("low");
+    expect(clampThinkingForPlanMode(undefined)).toBeUndefined();
   });
 });

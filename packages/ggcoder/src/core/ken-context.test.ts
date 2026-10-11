@@ -10,6 +10,7 @@ import {
   INJECTED_PROMPT_LABEL,
 } from "./ken-context.js";
 import { USER_INSTRUCTIONS_HEADER } from "./autopilot-gate.js";
+import { frameAutopilotInjection } from "./autopilot-cycle.js";
 import { PROMPT_COMMANDS } from "./prompt-commands.js";
 import { createTools } from "../tools/index.js";
 import type { Message } from "@abukhaled/gg-ai";
@@ -74,6 +75,68 @@ describe("buildKenDigest", () => {
     platform: "darwin",
   };
 
+  it("uses host results instead of re-rejecting a completed background launch", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "bg",
+            name: "bash",
+            args: { command: "pnpm test", run_in_background: true },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "bg", content: "ID: task-1", isError: false }],
+      },
+    ];
+    const digest = buildKenDigest({
+      ...base,
+      messages,
+      verificationProblem: null,
+      verificationEvidence: [
+        { command: "pnpm test", status: "passed", reason: "Host exit code 0" },
+      ],
+    });
+    expect(digest).toContain("PASSED: `pnpm test`");
+    expect(digest).toContain("Current host gate: satisfied");
+    expect(digest).not.toContain("REJECTED: `pnpm test`");
+    expect(digest).not.toContain("background or persistent commands are not bounded evidence");
+  });
+
+  it("does not fall back to old transcript failures when restored host evidence has no command names", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_call", id: "old", name: "bash", args: { command: "pnpm test" } }],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool_result", toolCallId: "old", content: "Exit code: 1", isError: true },
+        ],
+      },
+    ];
+    const digest = buildKenDigest({
+      ...base,
+      messages,
+      verificationEvidence: [],
+      verificationProblem: null,
+    });
+    expect(digest).toContain("Current host gate: satisfied");
+    expect(digest).not.toContain("FAILED: `pnpm test`");
+    const unresolved = buildKenDigest({
+      ...base,
+      messages,
+      verificationEvidence: [],
+      verificationProblem: "Unverified: a check failed",
+    });
+    expect(unresolved).toContain("Current host gate: Unverified: a check failed");
+  });
+
   it("includes the env and the question", () => {
     const digest = buildKenDigest({ ...base, messages: [] });
     expect(digest).toContain("/tmp/proj");
@@ -88,11 +151,164 @@ describe("buildKenDigest", () => {
       messages.push({ role: "user", content: `msg-${i}` });
     }
     const digest = buildKenDigest({ ...base, messages });
-    // The earliest messages fall outside the cap.
-    expect(digest).not.toContain("msg-0");
-    expect(digest).not.toContain("msg-5");
+    // Older user requests survive separately; recent activity stays bounded.
+    const recent = digest.split("## Recent activity (GG Coder and user)")[1];
+    expect(recent).not.toContain("msg-0");
+    expect(recent).not.toContain("msg-5");
+    expect(digest).toContain("**User:** msg-0");
+    expect(digest).toContain("**User:** msg-5");
     // The newest message is kept.
     expect(digest).toContain(`msg-${KEN_RECENT_MESSAGE_LIMIT + 9}`);
+  });
+
+  it("retains early constraints and later corrections for manual and autopilot reviews", () => {
+    const messages: Message[] = [
+      { role: "user", content: "CSV only, no new dependencies." },
+      { role: "assistant", content: "SUGGESTED: rewrite in Excel." },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Correction: preserve the current filters too." }],
+      },
+      ...Array.from({ length: 25 }, (): Message => ({
+        role: "assistant",
+        content: "Still working.",
+      })),
+    ];
+    for (const digest of [
+      buildKenDigest({ ...base, messages }),
+      buildKenAutopilotContext({ ...base, messages }),
+    ]) {
+      expect(digest).toContain("CSV only, no new dependencies.");
+      expect(digest).toContain("Correction: preserve the current filters too.");
+      expect(digest.indexOf("CSV only")).toBeLessThan(digest.indexOf("Correction:"));
+      expect(digest).not.toContain("SUGGESTED:");
+      expect(digest).not.toContain("Context incomplete");
+    }
+  });
+
+  it("does not retain injected prompts as user decisions after restart", () => {
+    const messages: Message[] = [
+      { role: "user", content: frameAutopilotInjection("Add analytics.") },
+      { role: "user", content: "Old unframed injection." },
+      { role: "user", content: "Keep it dependency-free." },
+      ...Array.from({ length: 25 }, (): Message => ({ role: "assistant", content: "Working." })),
+    ];
+    const digest = buildKenDigest({
+      ...base,
+      messages,
+      injectedPrompts: ["Old unframed injection."],
+    });
+    expect(digest).toContain("Keep it dependency-free.");
+    expect(digest).not.toContain("Add analytics.");
+    expect(digest).not.toContain("Old unframed injection.");
+    const recent = buildKenDigest({ ...base, messages: [messages[0]] });
+    expect(recent).toContain(INJECTED_PROMPT_LABEL);
+    expect(recent).not.toContain("**User:**");
+  });
+
+  it("bounds retained decisions and explicitly discloses omitted or truncated context", () => {
+    const messages: Message[] = [
+      ...Array.from({ length: 100 }, (_, i): Message => ({
+        role: "user",
+        content: `Decision ${i}: ${"x".repeat(500)}`,
+      })),
+      ...Array.from({ length: 25 }, (): Message => ({ role: "assistant", content: "Working." })),
+    ];
+    const digest = buildKenDigest({ ...base, messages });
+    expect(digest).toContain("Context incomplete: some earlier user messages");
+    expect(digest).toContain("Decision 99:");
+    expect(digest.length).toBeLessThan(11000);
+    expect(buildKenDigest({ ...base, messages: [], originalRequest: "x".repeat(5000) })).toContain(
+      "Context incomplete: original request was truncated",
+    );
+    expect(
+      buildKenDigest({
+        ...base,
+        messages: [{ role: "user", content: "[Previous conversation summary]" + "x".repeat(5000) }],
+      }),
+    ).toContain("Context incomplete: conversation summary was truncated");
+  });
+
+  it("retains only human decisions and labels recent automation in both modes", () => {
+    const messages: Message[] = [
+      {
+        role: "user",
+        content: "CSV only.",
+        provenance: { source: "human", kind: "prompt", visibility: "transcript" },
+      },
+      { role: "user", content: "Legacy human constraint: no dependencies." },
+      {
+        role: "user",
+        content: "Old verification reminder.",
+        provenance: { source: "runtime", kind: "completion_gate", visibility: "hidden" },
+      },
+      {
+        role: "user",
+        content: "Old agent continuation.",
+        provenance: { source: "agent", kind: "automation", visibility: "hidden" },
+      },
+      ...Array.from({ length: 25 }, (): Message => ({ role: "assistant", content: "Progress." })),
+      {
+        role: "user",
+        content: "Latest verification reminder.",
+        provenance: { source: "runtime", kind: "completion_gate", visibility: "hidden" },
+      },
+      {
+        role: "user",
+        content: "Latest agent continuation.",
+        provenance: { source: "agent", kind: "automation", visibility: "hidden" },
+      },
+      {
+        role: "user",
+        content: "Correction: preserve filters.",
+        provenance: { source: "human", kind: "steering", visibility: "transcript" },
+      },
+    ];
+    for (const digest of [
+      buildKenDigest({ ...base, messages }),
+      buildKenAutopilotContext({ ...base, messages }),
+    ]) {
+      expect(digest).toContain("**User:** CSV only.");
+      expect(digest).toContain("**User:** Legacy human constraint: no dependencies.");
+      expect(digest).toContain("**User:** Correction: preserve filters.");
+      expect(digest).not.toContain("Old verification reminder.");
+      expect(digest).not.toContain("Old agent continuation.");
+      expect(digest).toContain("**Runtime (not a user request):** Latest verification reminder.");
+      expect(digest).toContain(
+        "**Agent automation (not a user request):** Latest agent continuation.",
+      );
+      expect(digest).not.toContain("**User:** Latest");
+    }
+  });
+
+  it("runtime reminders cannot consume the retained user-decision budget", () => {
+    const messages: Message[] = [
+      { role: "user", content: "Keep this genuine requirement." },
+      ...Array.from({ length: 40 }, (): Message => ({
+        role: "user",
+        content: "Internal reminder. ".repeat(300),
+        provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+      })),
+      ...Array.from({ length: 25 }, (): Message => ({ role: "assistant", content: "Progress." })),
+    ];
+    const digest = buildKenDigest({ ...base, messages });
+    expect(digest).toContain("Keep this genuine requirement.");
+    expect(digest).not.toContain("Internal reminder.");
+    expect(digest).not.toContain("Context incomplete");
+  });
+
+  it("preserves provenance-tagged compaction summaries", () => {
+    const messages: Message[] = [
+      {
+        role: "user",
+        content: "[Previous conversation summary] User chose CSV and rejected Excel.",
+        provenance: { source: "runtime", kind: "compaction_summary", visibility: "summary" },
+      },
+    ];
+    const digest = buildKenDigest({ ...base, messages });
+    expect(digest).toContain("## Story so far");
+    expect(digest).toContain("User chose CSV and rejected Excel.");
+    expect(digest).not.toContain("**User:**");
   });
 
   it("strips image blocks from user messages", () => {
@@ -132,6 +348,168 @@ describe("buildKenDigest", () => {
     expect(digest).toContain("HUMAN");
   });
 
+  it("frames autopilot digests as a machine review, never as a user's question", () => {
+    const messages: Message[] = [{ role: "user", content: "add a login form" }];
+    const input = { cwd: base.cwd, gitBranch: base.gitBranch, platform: base.platform, messages };
+    for (const digest of [
+      buildKenAutopilotContext(input),
+      buildKenAutopilotPlanContext({ ...input, planContent: "# Plan" }),
+    ]) {
+      expect(digest).toContain("No user is in this conversation");
+      expect(digest).toContain("## Your task");
+      expect(digest).not.toContain("mentoring the user");
+      expect(digest).not.toContain("They just asked you");
+    }
+    // Chat Ken keeps his user-facing framing.
+    const chat = buildKenDigest({ ...base, messages });
+    expect(chat).toContain("mentoring the user");
+    expect(chat).toContain("## They just asked you");
+  });
+
+  describe("autopilot changed-files section", () => {
+    const edit = (id: string, filePath: string): Message => ({
+      role: "assistant",
+      content: [{ type: "tool_call", id, name: "edit", args: { file_path: filePath } }],
+    });
+    const result = (id: string, isError = false): Message => ({
+      role: "tool",
+      content: [{ type: "tool_result", toolCallId: id, content: "ok", isError }],
+    });
+    const section = (digest: string): string =>
+      digest.split("## Files changed by the work under review")[1]?.split("\n\n## ")[0] ?? "";
+
+    it("lists successful edit/write paths from this turn only, sorted", () => {
+      const messages: Message[] = [
+        { role: "user", content: "older ask" },
+        edit("old", "src/old.ts"),
+        result("old"),
+        { role: "user", content: "add a login form" },
+        edit("z", "src/z.ts"),
+        result("z"),
+        {
+          role: "assistant",
+          content: [{ type: "tool_call", id: "w", name: "write", args: { file_path: "src/a.ts" } }],
+        },
+        result("w"),
+        edit("bad", "src/failed.ts"),
+        result("bad", true),
+        {
+          role: "assistant",
+          content: [{ type: "tool_call", id: "r", name: "read", args: { file_path: "src/r.ts" } }],
+        },
+        result("r"),
+      ];
+      const listed = section(
+        buildKenAutopilotContext({
+          cwd: base.cwd,
+          gitBranch: base.gitBranch,
+          platform: base.platform,
+          messages,
+          originalRequest: "add a login form",
+        }),
+      );
+      expect(listed).toContain("since the original request");
+      expect(listed.indexOf("- src/a.ts")).toBeLessThan(listed.indexOf("- src/z.ts"));
+      expect(listed).not.toContain("src/old.ts");
+      expect(listed).not.toContain("src/failed.ts");
+      expect(listed).not.toContain("src/r.ts");
+    });
+
+    it("does not restart the turn at Ken's injected prompt that quotes the request", () => {
+      const messages: Message[] = [
+        { role: "user", content: "add a login form" },
+        edit("first", "src/form.ts"),
+        result("first"),
+        { role: "user", content: frameAutopilotInjection("Finish: add a login form. Add a test.") },
+        edit("second", "src/form.test.ts"),
+        result("second"),
+      ];
+      const listed = section(
+        buildKenAutopilotContext({
+          cwd: base.cwd,
+          gitBranch: base.gitBranch,
+          platform: base.platform,
+          messages,
+          originalRequest: "add a login form",
+        }),
+      );
+      expect(listed).toContain("- src/form.ts");
+      expect(listed).toContain("- src/form.test.ts");
+    });
+
+    it("keeps files whose edits scrolled out of the recent-activity window", () => {
+      const messages: Message[] = [{ role: "user", content: "refactor auth" }];
+      for (let i = 0; i < KEN_RECENT_MESSAGE_LIMIT; i++) {
+        messages.push(edit(`e${i}`, `src/file-${String(i).padStart(2, "0")}.ts`), result(`e${i}`));
+      }
+      const digest = buildKenAutopilotContext({
+        cwd: base.cwd,
+        gitBranch: base.gitBranch,
+        platform: base.platform,
+        messages,
+        originalRequest: "refactor auth",
+      });
+      expect(digest.split("## Recent activity")[1]).not.toContain("refactor auth");
+      expect(section(digest)).toContain("- src/file-00.ts");
+    });
+
+    it("says when the original request message is gone instead of guessing a boundary", () => {
+      const digest = buildKenAutopilotContext({
+        cwd: base.cwd,
+        gitBranch: base.gitBranch,
+        platform: base.platform,
+        messages: [edit("e", "src/plan-step.ts"), result("e")],
+        originalRequest: "implement the approved plan",
+      });
+      expect(section(digest)).toContain("original request message was compacted or reset away");
+      expect(section(digest)).toContain("- src/plan-step.ts");
+    });
+
+    it("caps a huge file list and reports the overflow", () => {
+      const messages: Message[] = [{ role: "user", content: "rename everywhere" }];
+      for (let i = 0; i < 45; i++) {
+        messages.push(edit(`e${i}`, `src/f${String(i).padStart(2, "0")}.ts`), result(`e${i}`));
+      }
+      const listed = section(
+        buildKenAutopilotContext({
+          cwd: base.cwd,
+          gitBranch: base.gitBranch,
+          platform: base.platform,
+          messages,
+          originalRequest: "rename everywhere",
+        }),
+      );
+      expect(listed).toContain("- src/f39.ts");
+      expect(listed).not.toContain("- src/f40.ts");
+      expect(listed).toContain("[…5 more files]");
+    });
+
+    it("is omitted when no edit/write calls succeeded, so shell-only work never reads as 'no changes'", () => {
+      const digest = buildKenAutopilotContext({
+        cwd: base.cwd,
+        gitBranch: base.gitBranch,
+        platform: base.platform,
+        messages: [
+          { role: "user", content: "regenerate the client" },
+          edit("bad", "src/failed.ts"),
+          result("bad", true),
+        ],
+        originalRequest: "regenerate the client",
+      });
+      expect(digest).not.toContain("## Files changed by the work under review");
+      expect(digest).not.toContain("(none)");
+    });
+
+    it("is absent from chat digests", () => {
+      const digest = buildKenDigest({
+        ...base,
+        messages: [{ role: "user", content: "hi" }, edit("e", "src/x.ts"), result("e")],
+        originalRequest: "hi",
+      });
+      expect(digest).not.toContain("## Files changed by the work under review");
+    });
+  });
+
   it("feeds only harness-classified command outcomes into verification evidence", () => {
     const messages: Message[] = [
       {
@@ -168,7 +546,7 @@ describe("buildKenDigest", () => {
     const digest = buildKenAutopilotContext({ ...base, messages });
     const evidence = digest
       .split("## Harness-classified verification evidence")[1]
-      .split("## They just asked you")[0];
+      .split("## Your task")[0];
     expect(evidence).toContain("PASSED: `tsc --noEmit`");
     expect(evidence).toContain("REJECTED: `vitest --watch`");
     expect(evidence).not.toContain("git status");
@@ -211,9 +589,7 @@ describe("buildKenDigest", () => {
     expect(digest).toContain("Wire callback route");
     // … before the trailing question, which is the PLAN instruction (not the
     // work-review one).
-    expect(digest.indexOf("## Plan under review")).toBeLessThan(
-      digest.indexOf("## They just asked you"),
-    );
+    expect(digest.indexOf("## Plan under review")).toBeLessThan(digest.indexOf("## Your task"));
     expect(digest).toContain(AUTOPILOT_PLAN_REVIEW_INSTRUCTION);
     expect(digest).not.toContain(AUTOPILOT_REVIEW_INSTRUCTION);
   });
@@ -228,6 +604,7 @@ describe("buildKenDigest", () => {
     });
     const section = digest.slice(digest.indexOf("## Plan under review"));
     expect(section).toContain("more chars]");
+    expect(section).toContain("Context incomplete: plan was truncated");
     expect(section.length).toBeLessThan(9000);
   });
 

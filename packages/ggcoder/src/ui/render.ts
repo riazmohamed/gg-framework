@@ -10,8 +10,6 @@ import type { MCPClientManager } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
 import type { Skill } from "../core/skills.js";
 import type { CheckpointStore } from "../core/checkpoint-store.js";
-import type { LspManager } from "../core/lsp/manager.js";
-import type { ReviewCoverageTracker } from "../core/ideal-review.js";
 import type { TurnMetricPayload } from "../core/session-manager.js";
 import { App, type CompletedItem, type DoneStatus } from "./App.js";
 import { itemHasImagePreviews } from "./app-items.js";
@@ -69,8 +67,6 @@ export interface RenderAppConfig {
   sessionId?: string;
   processManager?: ProcessManager;
   subAgentManager?: SubAgentManager;
-  lspManager?: LspManager;
-  reviewCoverageTracker?: ReviewCoverageTracker;
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
@@ -78,6 +74,8 @@ export interface RenderAppConfig {
   skills?: Skill[];
   checkpointStore?: CheckpointStore;
   rebuildReadTool?: (model: string) => AgentTool;
+  /** Forgets every file read; run when a reset replaces the conversation. */
+  clearReadTracker?: () => void;
   connectInitialMcpTools?: () => Promise<AgentTool[]>;
   onRuntimeStateChange?: (updates: Partial<RuntimeState>) => void;
   planCallbacks?: {
@@ -590,8 +588,6 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             sessionId: sessionStore.sessionId,
             processManager: config.processManager,
             subAgentManager: config.subAgentManager,
-            lspManager: config.lspManager,
-            reviewCoverageTracker: config.reviewCoverageTracker,
             settingsFile: config.settingsFile,
             mcpManager: config.mcpManager,
             authStorage: config.authStorage,
@@ -634,6 +630,9 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       // Wipe everything session-scoped FIRST. Other options below can then
       // re-seed specific fields (e.g. plan accept wipes the chat then sets
       // approvedPlanPath + planSteps for the implementation phase).
+      // Every wipe replaces the conversation (/clear, /rewind, new task, plan
+      // accept), so the reads it recorded are gone from the model's context.
+      config.clearReadTracker?.();
       terminalHistoryPrinter.clear();
       sessionStore.history = [{ kind: "banner", id: "banner" }];
       sessionStore.turnMetrics = [];

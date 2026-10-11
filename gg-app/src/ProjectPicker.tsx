@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
+import { XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import {
   waitForReady,
@@ -14,12 +15,16 @@ import {
   type DiscoveredProject,
   type RecentSession,
 } from "./agent";
-import { Badge, sourceStyle } from "./Badge";
+import { Badge } from "./Badge";
+import { sourceStyle } from "./source-style";
 import { ListSkeleton } from "./Skeleton";
 import { BackButton } from "./BackButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
 import { RadioButton } from "./RadioButton";
 import { NewProjectModal } from "./NewProjectModal";
+import { MetalButton } from "./MetalButton";
+import { useWindowFocused } from "./useWindowFocused";
+import { toast } from "./toast";
 
 /**
  * Does this row point at another tool's transcript rather than a GG Coder
@@ -53,11 +58,18 @@ export function ProjectPicker({
   initialProjectPath,
   onClose,
 }: Props): React.ReactElement {
+  const windowFocused = useWindowFocused();
   const [projects, setProjects] = useState<DiscoveredProject[]>([]);
   const [loading, setLoading] = useState(true);
+  // Project discovery failed; shown instead of "No projects yet".
+  const [loadError, setLoadError] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [selected, setSelected] = useState<DiscoveredProject | null>(null);
   const [sessions, setSessions] = useState<RecentSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  // Listing the selected project's sessions failed; shown instead of
+  // "No previous sessions".
+  const [sessionsError, setSessionsError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [projectsRoot, setProjectsRoot] = useState("");
@@ -102,6 +114,8 @@ export function ProjectPicker({
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setLoadError(false);
     // The window's sidecar serves project discovery; wait for it before asking.
     void waitForReady()
       .then(() => listProjects())
@@ -116,13 +130,15 @@ export function ProjectPicker({
         }
       })
       .catch(() => {
-        if (!cancelled) setLoading(false);
+        if (cancelled) return;
+        setLoadError(true);
+        setLoading(false);
       });
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [reloadNonce]);
 
   /**
    * Drop a project from the list and persist the decision. Removed optimistically
@@ -153,11 +169,17 @@ export function ProjectPicker({
     setSelected(project);
     setSessions([]);
     setResumeError(null);
+    setSessionsError(false);
     setSessionsLoading(true);
-    void listSessions(project.path).then((s) => {
-      setSessions(s);
-      setSessionsLoading(false);
-    });
+    void listSessions(project.path)
+      .then((s) => {
+        setSessions(s);
+        setSessionsLoading(false);
+      })
+      .catch(() => {
+        setSessionsError(true);
+        setSessionsLoading(false);
+      });
   }
 
   function choose(cwd: string, sessionPath?: string): void {
@@ -227,7 +249,7 @@ export function ProjectPicker({
       .then((picked) => {
         if (typeof picked === "string") choose(picked);
       })
-      .catch(() => {});
+      .catch((e: unknown) => toast(`Couldn't open the folder picker: ${String(e)}`, "error"));
   }
 
   return (
@@ -239,7 +261,7 @@ export function ProjectPicker({
           <BackButton label="Back" onClick={onClose} />
         ) : null}
         <span className="picker-title">{selected ? selected.name : "Choose a project"}</span>
-        {!selected && !loading && <Badge>{projects.length}</Badge>}
+        {!selected && !loading && !loadError && <Badge>{projects.length}</Badge>}
         {!selected && !loading && projects.length > 0 && (
           <input
             className="picker-search"
@@ -252,13 +274,14 @@ export function ProjectPicker({
         )}
         <span className="picker-head-actions">
           {selected ? (
-            <button
+            <MetalButton
+              windowFocused={windowFocused}
               className="btn btn-primary btn-sm"
               disabled={busy}
               onClick={() => choose(selected.path)}
             >
               {"+ New session"}
-            </button>
+            </MetalButton>
           ) : (
             <>
               <button
@@ -269,9 +292,13 @@ export function ProjectPicker({
               >
                 {"Open existing"}
               </button>
-              <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
+              <MetalButton
+                windowFocused={windowFocused}
+                className="btn btn-primary btn-sm"
+                onClick={() => setShowNew(true)}
+              >
                 {"+ New project"}
-              </button>
+              </MetalButton>
             </>
           )}
           <RadioButton />
@@ -282,10 +309,22 @@ export function ProjectPicker({
       {!selected ? (
         <div className="picker-list">
           {loading && <ListSkeleton rows={6} />}
-          {!loading && projects.length === 0 && (
+          {!loading && loadError && (
+            <div className="picker-empty" role="alert">
+              <span style={{ color: theme.textMuted }}>Couldn't load your projects.</span>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => setReloadNonce((n) => n + 1)}
+              >
+                Try again
+              </button>
+            </div>
+          )}
+          {!loading && !loadError && projects.length === 0 && (
             <div className="picker-empty">
               <span style={{ color: theme.textMuted }}>No projects yet.</span>
-              <span style={{ display: "flex", gap: 8 }}>
+              <span style={{ display: "flex", gap: "var(--space-4)" }}>
                 <button
                   className="btn btn-ghost btn-sm"
                   disabled={busy}
@@ -294,9 +333,13 @@ export function ProjectPicker({
                 >
                   {"Open existing"}
                 </button>
-                <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
+                <MetalButton
+                  windowFocused={windowFocused}
+                  className="btn btn-primary btn-sm"
+                  onClick={() => setShowNew(true)}
+                >
                   {"+ New project"}
-                </button>
+                </MetalButton>
               </span>
             </div>
           )}
@@ -316,16 +359,14 @@ export function ProjectPicker({
                       </span>
                       <Badge>{p.lastActiveDisplay}</Badge>
                     </span>
+                    {/* Where the project comes from, as tinted glass pills. */}
                     <span className="picker-sources">
-                      {p.sources.map((s, i) => {
+                      {p.sources.map((s) => {
                         const { label, color } = sourceStyle(s);
                         return (
-                          <span key={s} style={{ color }}>
-                            {i > 0 ? (
-                              <span style={{ color: theme.textDim }}>{" \u00b7 "}</span>
-                            ) : null}
+                          <Badge key={s} color={color}>
                             {label}
-                          </span>
+                          </Badge>
                         );
                       })}
                     </span>
@@ -336,7 +377,9 @@ export function ProjectPicker({
                     title="Hide from this list"
                     onClick={() => hideProject(p)}
                   >
-                    {"\u00d7"}
+                    {/* The same drawn X as the modal close buttons: a text ×
+                        sits low and off-centre in a round button. */}
+                    <XIcon size={12} weight="bold" aria-hidden="true" />
                   </button>
                 </div>
               ))}
@@ -350,17 +393,30 @@ export function ProjectPicker({
               {resumeError}
             </div>
           )}
+          {sessionsError && (
+            <div className="picker-error" role="alert">
+              <span>Couldn't load this project's sessions.</span>{" "}
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => openProject(selected)}
+              >
+                Try again
+              </button>
+            </div>
+          )}
           {sessionsLoading && <ListSkeleton rows={4} />}
-          {!sessionsLoading && sessions.length === 0 && (
+          {!sessionsLoading && !sessionsError && sessions.length === 0 && (
             <div className="picker-empty">
               <span style={{ color: theme.textMuted }}>No previous sessions yet.</span>
-              <button
+              <MetalButton
+                windowFocused={windowFocused}
                 className="btn btn-primary btn-sm"
                 disabled={busy}
                 onClick={() => choose(selected.path)}
               >
                 {"+ New session"}
-              </button>
+              </MetalButton>
             </div>
           )}
           {!sessionsLoading && sessions.length > 0 && (
@@ -385,14 +441,14 @@ export function ProjectPicker({
                   </span>
                   <span className="picker-meta" style={{ color: theme.textMuted }}>
                     {isForeignSession(s) && (
-                      <span
+                      <Badge
                         className="picker-source-tag"
-                        style={{ color: sourceStyle(s.source ?? "").color }}
+                        color={sourceStyle(s.source ?? "").color}
                       >
                         {sourceStyle(s.source ?? "").label}
-                      </span>
+                      </Badge>
                     )}
-                    {`${s.messageCount} msgs`}
+                    <Badge>{`${s.messageCount} msgs`}</Badge>
                   </span>
                 </button>
               ))}

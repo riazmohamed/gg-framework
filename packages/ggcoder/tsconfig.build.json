@@ -7,7 +7,18 @@
 //
 // Typechecking still covers tests: `pnpm check` runs `tsc --noEmit` against
 // tsconfig.json, which has no excludes. Only emit is narrowed.
+// Declaration maps point to src/, which is not published. Keep the declarations
+// and runtime source maps, without shipping unusable editor navigation metadata.
 {
   "extends": "./tsconfig.json",
-  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/**/__fixtures__/**"]
+  "compilerOptions": {
+    "declarationMap": false
+  },
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/**/__fixtures__/**",
+    // Dev-only benchmarks, run from source via tsx (`pnpm bench:*`).
+    "src/**/*-benchmark.ts"
+  ]
 }
