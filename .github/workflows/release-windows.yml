@@ -84,14 +84,11 @@ jobs:
 
       # shell: bash so a failing intermediate build fails the step (PowerShell
       # only reports the last command's status — see upstream release.yml).
+      # `pnpm build` (= pnpm -r build) runs in workspace dependency order:
+      # gg-core imports gg-ai, so a hand-written order breaks silently on reorders.
       - name: Build framework packages
         shell: bash
-        run: |
-          pnpm --filter @abukhaled/gg-core build
-          pnpm --filter @abukhaled/gg-ai build
-          pnpm --filter @abukhaled/gg-agent build
-          pnpm --filter @abukhaled/ggcoder-eyes build
-          pnpm --filter @abukhaled/ogcoder build
+        run: pnpm build
 
       - name: Stage node runtime, bundle sidecar, installer art
         shell: bash
