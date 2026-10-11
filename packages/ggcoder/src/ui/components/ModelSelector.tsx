@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Box, Text } from "ink";
 import type { Provider } from "@abukhaled/gg-ai";
-import { getModel, MODELS } from "../../core/model-registry.js";
+import { getAllModels, getModel } from "../../core/model-registry.js";
 import { useTheme } from "../theme/theme.js";
 import { SlashStyledSelectList } from "./SlashStyledSelectList.js";
 
@@ -34,6 +34,7 @@ const PROVIDER_LABEL: Record<string, string> = {
   "opencode-go": "OpenCode Go",
   sakana: "Sakana",
   xai: "xAI",
+  local: "Local",
 };
 
 /** The `provider:model` value's model, when it spends real money. */
@@ -66,18 +67,20 @@ export function ModelSelector({
 
   const items = useMemo(
     () =>
-      MODELS.filter((m) => loggedInProviders.includes(m.provider)).map((m) => {
-        const value = `${m.provider}:${m.id}`;
-        const isCurrent = value === currentValue;
-        return {
-          label: `${isCurrent ? "* " : "  "}${m.id}`,
-          value,
-          // Fast modes change what the user pays; say so where they pick it.
-          description: [PROVIDER_LABEL[m.provider] ?? m.provider, m.billing?.label]
-            .filter(Boolean)
-            .join(" · "),
-        };
-      }),
+      getAllModels()
+        .filter((m) => loggedInProviders.includes(m.provider))
+        .map((m) => {
+          const value = `${m.provider}:${m.id}`;
+          const isCurrent = value === currentValue;
+          return {
+            label: `${isCurrent ? "* " : "  "}${m.id}`,
+            value,
+            // Fast modes change what the user pays; say so where they pick it.
+            description: [PROVIDER_LABEL[m.provider] ?? m.provider, m.billing?.label]
+              .filter(Boolean)
+              .join(" · "),
+          };
+        }),
     [currentValue, loggedInProviders],
   );
 

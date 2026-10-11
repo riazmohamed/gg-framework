@@ -59,25 +59,23 @@ import { pruneDiagnosticsRecords } from "./core/internal-diagnostics.js";
 import { pruneCheckpointSessions } from "./core/checkpoint-store.js";
 import {
   dualAuthProvider,
-  discoverLocalModels,
   findProbedModel,
   isLocalModelId,
-  formatLocalModelId,
   parseLocalModelId,
   probeEndpoint,
   ollamaServedContext,
   resolveClaudeCodeBinary,
   toModelInfo as localModelInfo,
-  type LocalEndpoint,
   type LocalEndpointProbe,
 } from "@abukhaled/gg-core";
-import {
-  listAllEndpoints,
-  listCustomEndpoints,
-  syncEndpointCredentials,
-} from "./core/local-endpoint-store.js";
+import { listAllEndpoints, listCustomEndpoints } from "./core/local-endpoint-store.js";
 import { loadOpenRouterCatalog } from "./core/openrouter-catalog-store.js";
 import { openCodeCatalogs } from "./core/opencode-catalog-store.js";
+import {
+  localStatePayload as localStatePayloadFor,
+  scanLocalModels as scanLocal,
+  type LocalStatePayload,
+} from "./core/local-scan.js";
 import type { OAuthLoginCallbacks } from "./core/oauth/types.js";
 import {
   AUTH_PROVIDERS,
@@ -94,7 +92,6 @@ import {
   withoutPaidTier,
   getDefaultThinkingLevel,
   getContextWindow,
-  clearRuntimeModels,
   registerRuntimeModels,
 } from "./core/model-registry.js";
 import { resolveStartOrFallback } from "./core/resolve-start.js";
@@ -1259,75 +1256,23 @@ async function createSession(
   }
 
   async function scanLocalModels(force: boolean): Promise<LocalEndpointProbe[]> {
-    const endpoints = await listAllEndpoints();
-    const discovered = await discoverLocalModels(endpoints, { force });
-    const probes = discovered.probes.map(withServedContexts);
-    const models = probes.flatMap((probe) =>
-      probe.models.map((model) => localModelInfo(model, probe.endpoint)),
-    );
+    // One scan for the sidecar and the ogcoder CLI (core/local-scan.ts).
+    const probes = await scanLocal(force, withServedContexts);
     localProbes = probes;
-    // Only endpoints that answered get a credential: writing one for a server
-    // that isn't running would make `hasProviderAuth("local")` true forever.
-    await syncEndpointCredentials(
-      probes.filter((probe) => probe.reachable).map((probe) => probe.endpoint),
-    );
-    clearRuntimeModels((m) => m.provider === "local");
-    registerRuntimeModels(models);
     const reachable = probes.filter((p) => p.reachable).length + "/" + probes.length;
+    const modelCount = probes.reduce((n, p) => n + p.models.length, 0);
     // Every window re-scans; only a changed result is news.
-    const summary = `${reachable} ${models.length}`;
+    const summary = `${reachable} ${modelCount}`;
     if (summary !== lastLocalScanSummary) {
       lastLocalScanSummary = summary;
-      log("INFO", "app-sidecar", "local model scan", { reachable, models: String(models.length) });
+      log("INFO", "app-sidecar", "local model scan", { reachable, models: String(modelCount) });
     }
     return probes;
   }
 
   /** Endpoint rows + models, in the shape the Local models UI renders. */
-  function localStatePayload(): {
-    endpoints: {
-      id: string;
-      label: string;
-      baseUrl: string;
-      kind: LocalEndpoint["kind"];
-      custom: boolean;
-      contextLength?: number;
-      reachable: boolean;
-      reason?: string;
-      models: {
-        id: string;
-        rawId: string;
-        contextWindow: number;
-        contextWindowKnown: boolean;
-        supportsTools: boolean;
-        supportsImages: boolean;
-        supportsThinking: boolean;
-        loaded?: boolean;
-      }[];
-    }[];
-  } {
-    return {
-      endpoints: localProbes.map((probe) => ({
-        id: probe.endpoint.id,
-        label: probe.endpoint.label,
-        baseUrl: probe.endpoint.baseUrl,
-        kind: probe.endpoint.kind,
-        custom: probe.endpoint.custom === true,
-        ...(probe.endpoint.contextLength ? { contextLength: probe.endpoint.contextLength } : {}),
-        reachable: probe.reachable,
-        ...(probe.reason ? { reason: probe.reason } : {}),
-        models: probe.models.map((m) => ({
-          id: formatLocalModelId(probe.endpoint.id, m.rawId),
-          rawId: m.rawId,
-          contextWindow: m.contextWindow,
-          contextWindowKnown: m.contextWindowKnown,
-          supportsTools: m.supportsTools,
-          supportsImages: m.supportsImages,
-          supportsThinking: m.supportsThinking,
-          ...(m.loaded === undefined ? {} : { loaded: m.loaded }),
-        })),
-      })),
-    };
+  function localStatePayload(): LocalStatePayload {
+    return localStatePayloadFor(localProbes);
   }
 
   // ── Hugging Face → Ollama pulls (see app-sidecar/hf-pull-manager.ts) ──
