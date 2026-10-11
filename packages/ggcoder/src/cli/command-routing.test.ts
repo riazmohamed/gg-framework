@@ -13,6 +13,9 @@ function handlers(calls: string[]): Record<CliSubcommandName, () => void> {
     acp: () => calls.push("acp"),
     "agent-home-login": () => calls.push("agent-home-login"),
     "agent-home": () => calls.push("agent-home"),
+    local: () => calls.push("local"),
+    steroids: () => calls.push("steroids"),
+    hf: () => calls.push("hf"),
   };
 }
 
@@ -71,5 +74,22 @@ describe("routeCliCommandInput", () => {
     ).toEqual({ kind: "continue" });
     expect(argv).toEqual(["node", "ggcoder", "--model", "x"]);
     expect(calls).toEqual([]);
+  });
+
+  it("keeps the action word for local, steroids and hf", () => {
+    for (const name of ["local", "steroids", "hf"]) {
+      const argv = ["node", "ogcoder", name, "pull", "org/model"];
+      const calls: string[] = [];
+      expect(
+        routeCliCommandInput({
+          argv,
+          printHelp: vi.fn(),
+          exit: vi.fn() as never,
+          handlers: handlers(calls),
+        }),
+      ).toEqual({ kind: "handled", subcommand: name });
+      expect(argv).toEqual(["node", "ogcoder", name, "pull", "org/model"]);
+      expect(calls).toEqual([name]);
+    }
   });
 });

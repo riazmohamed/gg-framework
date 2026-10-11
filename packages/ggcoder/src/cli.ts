@@ -108,6 +108,9 @@ import {
 import { MCPClientManager, getAllMcpServers } from "./core/mcp/index.js";
 import { runLogin, runLogout, runDoctor } from "./cli/auth.js";
 import { runMcp } from "./cli/mcp.js";
+import { runLocal } from "./cli/local.js";
+import { runSteroids } from "./cli/steroids.js";
+import { runHf } from "./cli/hf.js";
 import { scanLocalModels } from "./core/local-scan.js";
 import {
   CLI_VERSION,
@@ -189,6 +192,9 @@ function printHelp(): void {
     ["agent-home", "Connect to Agent Home as a remote agent"],
     ["mcp", "Add and manage MCP servers"],
     ["eyes", "Manage perception probes (screenshots, logs, HTTP capture)"],
+    ["local", "Local model servers (Ollama, LM Studio, …)"],
+    ["hf", "Search and pull Hugging Face models into Ollama"],
+    ["steroids", "Install Agent Steroids (local code corpus)"],
   ];
   for (const [name, desc] of cmds) {
     console.log(`  ${accent(name.padEnd(20))} ${dim(desc)}`);
@@ -278,6 +284,9 @@ function createCliSubcommandHandlers(): Record<CliSubcommandName, () => void> {
     },
     "agent-home-login": () => runWithStandardErrorHandling(runAgentHomeLogin),
     "agent-home": () => runWithStandardErrorHandling(runAgentHome),
+    local: () => runWithStandardErrorHandling(runLocal),
+    steroids: () => runWithStandardErrorHandling(runSteroids),
+    hf: () => runWithStandardErrorHandling(runHf),
   };
 }
 

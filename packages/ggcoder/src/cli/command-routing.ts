@@ -8,7 +8,10 @@ export type CliSubcommandName =
   | "doctor"
   | "acp"
   | "agent-home-login"
-  | "agent-home";
+  | "agent-home"
+  | "local"
+  | "steroids"
+  | "hf";
 
 export type CliCommandRouteResult =
   | { kind: "handled"; subcommand: CliSubcommandName }
@@ -31,6 +34,9 @@ const SUBCOMMANDS_THAT_KEEP_ARGV: ReadonlySet<CliSubcommandName> = new Set([
   "telegram",
   "doctor",
   "agent-home-login",
+  "local",
+  "steroids",
+  "hf",
 ]);
 
 function isCliSubcommandName(value: string | undefined): value is CliSubcommandName {
@@ -44,7 +50,10 @@ function isCliSubcommandName(value: string | undefined): value is CliSubcommandN
     value === "doctor" ||
     value === "acp" ||
     value === "agent-home-login" ||
-    value === "agent-home"
+    value === "agent-home" ||
+    value === "local" ||
+    value === "steroids" ||
+    value === "hf"
   );
 }
 
