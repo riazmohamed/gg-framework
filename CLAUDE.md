@@ -172,7 +172,7 @@ parts here** (step 5b of `~/.claude/commands/app-update.md`). Rules: reuse the s
 module the sidecar calls, never copy sidecar logic; one commit per feature; ask before anything
 large or of unclear fit; keep this list current.
 
-Built 2026-10-09 (all in `packages/ggcoder/src/ui/` unless noted):
+Built 2026-10-09, plus local models, `hf` and `steroids` on 2026-10-11 (all in `packages/ggcoder/src/ui/` unless noted):
 
 | Desktop feature | Terminal equivalent | Wiring |
 | --- | --- | --- |
@@ -188,14 +188,20 @@ Built 2026-10-09 (all in `packages/ggcoder/src/ui/` unless noted):
 | Prompt enhancer | `/enhance <draft>` → rewrite in the input box | `tui-enhance.ts` |
 | MCP elicitation | forms rendered with the `ask_user` picker | `mcp-elicit-form.ts` (schema ↔ questions), `mcp-elicit-host.ts` (queued, sidecar bridge) |
 | Foreign session import | `ogcoder sessions` lists Claude Code/Codex rows and imports on pick; `/import <file>` | `sessions.ts` `loadSessionRows`, `tui-import.ts` |
+| Local models | scanned at startup (awaited only when starting on one), listed in `/model` as "Local", `ogcoder local [add <url> \| remove <id>]` | `core/local-scan.ts` (the scan, moved out of `app-sidecar.ts`, which now calls it), `cli/local.ts`; `"local"` is in `resolveActiveProvider`'s list and `ModelSelector` reads `getAllModels()` so runtime models show |
+| Add from Hugging Face | `ogcoder hf search <query>`, `ogcoder hf pull <org/model>` (progress line, Ctrl+C cancels) | `cli/hf.ts` driving the sidecar's `createHfPullManager` with a printing `broadcast` |
+| Steroids install | `ogcoder steroids [install]` | `cli/steroids.ts` over `probeSteroids` / `installSteroids` |
 
 Not ported, and why: `/schedule`, `@`-file search and autopilot/`@ken` (sidecar- or webview-only
 logic, awkward in a terminal; ask first); the chat agents and GG Motion (whole separate
 workspaces); sound, radio, XP/rank, What's New, notes, window layout and Disk Access permissions
-(desktop-only). Still to do as subcommands: `ogcoder local` (local endpoints), `ogcoder
-steroids install`, `ogcoder hf pull`. Known pre-existing gap noticed on the way: `ogcoder
-sessions` shows "(no prompt)" for current-format sessions (its `extractFirstPrompt` reader
-predates the session-storage changes).
+(desktop-only). Nothing terminal-suited is left to port as of 2026-10-11.
+
+Fixed on the way (2026-10-11): `ogcoder sessions` showed "(no prompt)" for gzipped cold sessions
+and the summary text for compacted ones, because it re-read each file as plain JSONL; it now uses
+the `preview` that `SessionManager.list()` already computes. Sub-agent children (`--json`) on a
+local model failed with "Not logged in" — in the desktop app too — because nothing scanned in the
+child; `cli.ts` now scans before `runJsonMode` when the provider is `local`.
 
 ## Development Approach
 
@@ -778,6 +784,10 @@ through the `local` provider in gg-ai's `stream.ts`.
   high. When LM Studio routes by model key, the **smallest** known loaded allocation wins.
   Compaction summaries respect the summary model's output ceiling for the same reason — that
   ceiling is small exactly when the summary model is a local one.
+- **One scan, two hosts.** `ggcoder/src/core/local-scan.ts` (`scanLocalModels(force)` +
+  `localStatePayload(probes)`) probes every endpoint, writes a credential only for servers that
+  answered, and replaces the `local` runtime models. The desktop sidecar and the `ogcoder` CLI
+  (startup, `ogcoder local`, `ogcoder hf pull`, and `--json` sub-agent children) all call it.
 - **Probing never throws.** An unreachable server is a normal state — the user simply doesn't
   have it running — not an error to surface.
 - **Naming**: model ids are `local/<endpointId>/<rawId>`; auth keys are `local:<id>`.
