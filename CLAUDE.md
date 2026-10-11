@@ -2,6 +2,27 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Branches — which machine builds from which (read first)
+
+| Branch | Machine / OS | What it ships | Merges from |
+| --- | --- | --- | --- |
+| `main` | — | Exact mirror of upstream KenKaiii/gg-framework. Never commit here. | `upstream/main` |
+| `windows` (this file) | Windows PC: desktop app from `C:\Users\riaza\gg-framework`; WSL: `ogcoder` CLI from `/home/riaz24/gg-framework` | OG desktop app (`og-v*` releases, self-update feed, Job Object), WSL/Windows CLI fixes | `main` only |
+| `rebrand/abukhaled` | **Mac** | Mac `ogcoder` + its own CLI feature work | `main` only — **never merge `windows` into it, never push to it from here** |
+
+Rules:
+- The two fork branches are independent lines on top of `main`. Both have their own
+  `/app-update` history; neither is a base of the other. Do not cross-merge them.
+- Windows/WSL-only assets live only on `windows`: `.github/workflows/release-windows.yml`,
+  `gg-app/src-tauri/tauri.fork-release.conf.json`, `src-tauri/src/daemon_job.rs`, the Windows
+  build notes in `gg-app/DISTRIBUTION.md`, and the WSL fixes listed below.
+- Overlap as of 2026-10-11: both branches independently implement global `~/.gg/commands`.
+  `rebrand/abukhaled` has CLI features `windows` lacks (local models, `ogcoder local|hf|steroids`,
+  session import, `/usage`, `/health`, `/export`); porting any of them here is a deliberate,
+  one-way cherry-pick onto `windows`.
+- Installed binaries: WSL `ogcoder` → this checkout (`windows`). Upstream's npm `ggcoder` was
+  uninstalled on both sides 2026-10-11 so typing the wrong name cannot launch Ken's app.
+
 ## Project
 
 **gg-framework** — Modular TypeScript monorepo for building LLM-powered apps, from raw streaming to a full CLI coding agent.
