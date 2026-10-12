@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
+import { toAgentPath } from "./agent-path";
 import { XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import {
@@ -246,8 +247,8 @@ export function ProjectPicker({
       multiple: false,
       title: "Open existing project",
     })
-      .then((picked) => {
-        if (typeof picked === "string") choose(picked);
+      .then(async (picked) => {
+        if (typeof picked === "string") choose(await toAgentPath(picked));
       })
       .catch((e: unknown) => toast(`Couldn't open the folder picker: ${String(e)}`, "error"));
   }

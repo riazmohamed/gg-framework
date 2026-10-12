@@ -14,8 +14,9 @@ Rules:
 - The two fork branches are independent lines on top of `main`. Both have their own
   `/app-update` history; neither is a base of the other. Do not cross-merge them.
 - Windows/WSL-only assets live only on `windows`: `.github/workflows/release-windows.yml`,
-  `gg-app/src-tauri/tauri.fork-release.conf.json`, `src-tauri/src/daemon_job.rs`, the Windows
-  build notes in `gg-app/DISTRIBUTION.md`, and the WSL fixes listed below.
+  `gg-app/src-tauri/tauri.fork-release.conf.json`, `src-tauri/src/daemon_job.rs`,
+  `src-tauri/src/wsl.rs` (desktop WSL mode), the Windows build notes in
+  `gg-app/DISTRIBUTION.md`, and the WSL fixes listed below.
 - Overlap as of 2026-10-11: both branches independently implement global `~/.gg/commands`.
   `rebrand/abukhaled` has CLI features `windows` lacks (local models, `ogcoder local|hf|steroids`,
   session import, `/usage`, `/health`, `/export`); porting any of them here is a deliberate,
@@ -58,11 +59,15 @@ remote (`git -c credential.helper= fetch upstream` while the gh token is expired
 The app daemon's process tree is held in a kill-on-close Windows Job Object
 (`src-tauri/src/daemon_job.rs`, ported from creativeprofit22's fork), so agent-started dev
 servers/browsers die with the app.
-One sidecar per app, one OS: nothing bridges `\\wsl.localhost` and `/mnt/c`, and `~/.gg`
-(auth, sessions) is separate per OS. So the desktop project picker only lists Windows
-projects: `C:\Users\riaza\.gg\gg-app.json` → `projectsRoot` = `C:\Users\riaza\Desktop\projects`,
-plus Windows-side session stores. WSL projects (`/home/riaz24/projects`, WSL `~/.gg/sessions`)
-never appear there; work on them with the WSL `ogcoder` CLI.
+One sidecar per app, one OS: `~/.gg` (auth, sessions) is separate per OS. Launched normally,
+the desktop app is Windows-only: `C:\Users\riaza\.gg\gg-app.json` → `projectsRoot` =
+`C:\Users\riaza\Desktop\projects`. **WSL mode** (2026-10-12) runs the same installed app with
+its sidecar inside Ubuntu-22.04 — `C:\Users\riaza\.gg\OG Coder (WSL).cmd` sets `GG_NODE_BIN`
+(→ `wsl-sidecar.cmd`, which runs this checkout's `packages/ggcoder/dist/app-sidecar.js`) plus
+`GG_APP_WSL_DISTRO`/`GG_APP_WSL_HOME`, which make the Rust shell (`src-tauri/src/wsl.rs`) use the
+distro's `~/.gg` over `\\wsl.localhost` and hand the agent Linux paths. WSL projects then come
+from WSL `~/.gg/gg-app.json` → `/home/riaz24/projects`. Details in `gg-app/DISTRIBUTION.md`
+"WSL mode".
 
 **Dependency chain**: `gg-core` → `gg-ai` → `gg-agent` → `ogcoder` (uses `ggcoder-eyes` for perception)
 

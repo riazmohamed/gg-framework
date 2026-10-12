@@ -10,6 +10,8 @@ pub(crate) fn dropped_path_info(paths: Vec<String>) -> Vec<DroppedPathInfo> {
             let is_dir = std::fs::metadata(&path)
                 .map(|m| m.is_dir())
                 .unwrap_or(false);
+            // Fork: a file dragged from the WSL share reaches the agent as a Linux path.
+            let path = agent_path(&path);
             DroppedPathInfo { path, is_dir }
         })
         .collect()
@@ -118,6 +120,9 @@ pub(crate) fn open_project_path(webview: WebviewWindow, path: String) -> Result<
         .map(|(p, _)| p)
         .unwrap_or(without_anchor);
     let cleaned = strip_file_location_suffix(without_query);
+    if let Some(target) = wsl_target() {
+        return open_wsl_project_path(target, &cwd, cleaned);
+    }
     let candidate = PathBuf::from(cleaned);
     let resolved = if candidate.is_absolute() {
         candidate
@@ -130,6 +135,22 @@ pub(crate) fn open_project_path(webview: WebviewWindow, path: String) -> Result<
             .map_err(|_| format!("file not found: {}", cleaned))?,
     );
 
+    open_with_default(&canonical.to_string_lossy())
+}
+
+/// Fork: in WSL mode chat paths are Linux paths (relative ones resolve against
+/// the Linux cwd); open the matching file on the `\\wsl.localhost` share.
+fn open_wsl_project_path(target: &WslTarget, cwd: &Path, cleaned: &str) -> Result<(), String> {
+    let linux = if cleaned.starts_with('/') {
+        cleaned.to_string()
+    } else {
+        join_linux(&cwd.to_string_lossy(), cleaned)
+    };
+    let canonical = strip_extended_prefix(
+        PathBuf::from(linux_to_unc(target, &linux))
+            .canonicalize()
+            .map_err(|_| format!("file not found: {}", cleaned))?,
+    );
     open_with_default(&canonical.to_string_lossy())
 }
 

@@ -11,6 +11,7 @@ import {
 } from "react";
 import { createChatLayoutMotion } from "./chat-layout-motion";
 import { open } from "@tauri-apps/plugin-dialog";
+import { toAgentPath } from "./agent-path";
 import { theme } from "./theme";
 import { assignErrorCritters } from "./ErrorCritter";
 import { activeChatErrorId, readChatError } from "./chat-error";
@@ -1462,7 +1463,10 @@ function App(): React.ReactElement {
           : "Remove project folder from workspace",
     });
     if (typeof selected !== "string") return;
-    submitText(`/${command} ${selected}`, command === "add-dir" ? "/add-dir" : "/remove-dir");
+    submitText(
+      `/${command} ${await toAgentPath(selected)}`,
+      command === "add-dir" ? "/add-dir" : "/remove-dir",
+    );
   }
 
   // Detect an active `@`-mention token at the caret: a `@` that starts at a word

@@ -6,6 +6,7 @@ import { updateGoal } from "./agent";
 import { GoalSettingsModal } from "./GoalSettingsModal";
 
 vi.mock("./agent", () => ({ updateGoal: vi.fn() }));
+vi.mock("./agent-path", () => ({ toAgentPaths: (paths: string[]) => Promise.resolve(paths) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
 const updateGoalMock = vi.mocked(updateGoal);

@@ -15,7 +15,7 @@ use crate::*;
 
 /// Absolute path to ~/.gg/auth.json.
 pub(crate) fn auth_file_path() -> PathBuf {
-    home_dir().join(".gg").join("auth.json")
+    gg_home().join(".gg").join("auth.json")
 }
 
 /// One API-key option for a provider that splits auth across multiple

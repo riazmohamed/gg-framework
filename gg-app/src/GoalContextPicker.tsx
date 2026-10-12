@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { toAgentPaths } from "./agent-path";
 import { FileTextIcon, FolderSimpleIcon, PlusIcon, XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 
@@ -91,7 +92,9 @@ export function GoalContextPicker({
         multiple: true,
         title: kind === "folder" ? "Add folders to this goal" : "Add files to this goal",
       });
-      const paths = picked === null ? [] : Array.isArray(picked) ? picked : [picked];
+      const paths = await toAgentPaths(
+        picked === null ? [] : Array.isArray(picked) ? picked : [picked],
+      );
       if (paths.length > 0) {
         const seen = new Set(value.map((c) => c.path));
         const added = paths

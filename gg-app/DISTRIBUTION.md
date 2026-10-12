@@ -221,3 +221,27 @@ Gotchas hit on the first Windows build:
   byte-identical); build artifacts should be produced against it.
 - `installer/out/*.bmp|png` is generated (`pnpm --filter gg-app installer:art`, needs `sharp`)
   and not tracked; NSIS bundling fails without it.
+
+### WSL mode (fork)
+
+The installed Windows app can run its sidecar inside a WSL distro, so WSL projects open at
+native Linux speed with the distro's `~/.gg` (auth, sessions, settings). Nothing is bundled for
+it; two files in `C:\Users\riaza\.gg\` drive it:
+
+- `wsl-sidecar.cmd` — used as `GG_NODE_BIN`. Sets `WSLENV=GG_APP_PORT:GG_APP_TOKEN` (the
+  handshake env the shell passes) and runs
+  `wsl.exe -d Ubuntu-22.04 --cd /home/riaz24 --exec <nvm node> …/packages/ggcoder/dist/app-sidecar.js`.
+  The node path is absolute (nvm is not loaded under `--exec`); update it after an nvm switch.
+  It runs the WSL checkout's build, so a broken `pnpm --filter @abukhaled/ogcoder build` breaks it.
+- `OG Coder (WSL).cmd` — the launcher. Sets `GG_NODE_BIN`, `GG_APP_WSL_DISTRO=Ubuntu-22.04`,
+  `GG_APP_WSL_HOME=/home/riaz24`, then starts `%LOCALAPPDATA%\GG Coder\gg-app.exe`.
+  The Start Menu shortcut stays native-Windows; both can run at once.
+
+`src-tauri/src/wsl.rs` makes the shell consistent with the Linux sidecar when both
+`GG_APP_WSL_*` vars are set (exactly one set → startup error dialog, no fallback): settings,
+auth status and the workspace snapshot use the distro's `~/.gg` via `\\wsl.localhost\<distro>`;
+the boot cwd is the Linux home; the projects root must be a Linux path and "New project" creates
+it on the share; folder-picker and drag-drop paths on the share become Linux paths
+(`app_agent_path` / `src/agent-path.ts`); chat file links open through the share. The sidecar's
+port is reached via WSL2 localhost forwarding. The Job Object kills `wsl.exe`, which ends the
+Linux sidecar with it.

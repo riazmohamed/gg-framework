@@ -58,6 +58,7 @@ mod settings;
 mod state;
 mod tray;
 mod windows;
+mod wsl;
 
 use commands::agent_admin::*;
 use daemon::*;
@@ -68,6 +69,7 @@ use settings::*;
 use state::*;
 use tray::*;
 use windows::*;
+use wsl::*;
 
 /// Install the process-wide rustls crypto provider.
 ///
@@ -148,6 +150,7 @@ pub fn run() {
             commands::files::open_project_path,
             commands::files::open_image_data,
             commands::files::open_url,
+            wsl::app_agent_path,
             commands::agent::agent_state,
             commands::agent::agent_memories,
             commands::agent::agent_delete_memory,
@@ -240,6 +243,18 @@ pub fn run() {
             tray::set_remote_active
         ])
         .setup(|app| {
+            // Fork: refuse a half-configured WSL launcher loudly, before any
+            // window or sidecar starts against the wrong side's paths.
+            if let Err(reason) = wsl_config() {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                log::error!("invalid WSL mode configuration: {reason}");
+                app.dialog()
+                    .message(format!("OG Coder can't start in WSL mode: {reason}"))
+                    .title("OG Coder")
+                    .kind(MessageDialogKind::Error)
+                    .blocking_show();
+                return Err(reason.clone().into());
+            }
             // Windows-only: track per-window minimized state so restoring one
             // window can restore its siblings (macOS does this natively).
             #[cfg(target_os = "windows")]

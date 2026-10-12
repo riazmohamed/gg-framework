@@ -21,6 +21,7 @@ vi.mock("./agent", () => ({
   selectProject: vi.fn(),
   waitForReady: vi.fn(),
 }));
+vi.mock("./agent-path", () => ({ toAgentPaths: (paths: string[]) => Promise.resolve(paths) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./RadioButton", () => ({ RadioButton: () => <button>Radio</button> }));
 vi.mock("./WindowLayoutButton", () => ({ WindowLayoutButton: () => <button>Windows</button> }));

@@ -12,12 +12,41 @@ use crate::*;
 
 /// Absolute path to ~/.gg/gg-app.json.
 pub(crate) fn app_settings_path() -> PathBuf {
-    home_dir().join(".gg").join("gg-app.json")
+    gg_home().join(".gg").join("gg-app.json")
 }
 
-/// Default projects root: ~/gg-projects.
-pub(crate) fn default_projects_root() -> PathBuf {
-    home_dir().join("gg-projects")
+/// Default projects root: ~/gg-projects (a Linux path in WSL mode).
+pub(crate) fn default_projects_root() -> String {
+    match wsl_target() {
+        Some(target) => join_linux(&target.home, "gg-projects"),
+        None => home_dir().join("gg-projects").to_string_lossy().to_string(),
+    }
+}
+
+/// Fork: in WSL mode the projects root is handed to a Linux sidecar, so it
+/// must be a Linux path (a folder picked on the `\\wsl.localhost` share is
+/// converted first). Native mode accepts any path.
+fn wsl_projects_root(projects_root: &str) -> Result<String, String> {
+    let root = agent_path(projects_root);
+    match wsl_target() {
+        Some(target) if !root.starts_with('/') => Err(format!(
+            "In WSL mode the projects folder must be inside WSL: a Linux path, or a folder under {}",
+            linux_to_unc(target, "/")
+        )),
+        _ => Ok(root),
+    }
+}
+
+/// The new project's path as the agent sees it, plus where the shell
+/// creates it on disk (the WSL share in WSL mode).
+fn new_project_dir(root: &str, name: &str) -> (String, PathBuf) {
+    if wsl_target().is_some() {
+        let dir = join_linux(root, name);
+        let on_disk = fs_path(&dir);
+        return (dir, on_disk);
+    }
+    let dir = PathBuf::from(root).join(name);
+    (dir.to_string_lossy().to_string(), dir)
 }
 
 /// Validate a project folder name: lowercase letters, digits, single dashes
@@ -69,7 +98,7 @@ pub(crate) fn app_settings_get() -> serde_json::Value {
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| default_projects_root().to_string_lossy().to_string());
+        .unwrap_or_else(default_projects_root);
     serde_json::json!({ "projectsRoot": projects_root, "configured": configured })
 }
 
@@ -81,6 +110,8 @@ pub(crate) fn app_settings_save(projects_root: String) -> Result<serde_json::Val
     if trimmed.is_empty() {
         return Err("projectsRoot is required".to_string());
     }
+    let root = wsl_projects_root(trimmed)?;
+    let trimmed = root.as_str();
     let path = app_settings_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -193,14 +224,15 @@ pub(crate) fn app_create_project(name: String) -> Result<serde_json::Value, Stri
     let root = settings
         .get("projectsRoot")
         .and_then(|v| v.as_str())
-        .map(PathBuf::from)
+        .map(wsl_projects_root)
+        .transpose()?
         .unwrap_or_else(default_projects_root);
-    let dir = root.join(name);
-    if dir.exists() {
+    let (dir, on_disk) = new_project_dir(&root, name);
+    if on_disk.exists() {
         return Err(format!("A folder named \"{name}\" already exists."));
     }
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({ "path": dir.to_string_lossy() }))
+    std::fs::create_dir_all(&on_disk).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "path": dir }))
 }
 
 // ── Workspace snapshot (~/.gg/gg-app-workspace.json) ──────────────────────
@@ -244,7 +276,7 @@ pub(crate) struct Workspace {
 
 /// Absolute path to ~/.gg/gg-app-workspace.json.
 pub(crate) fn app_workspace_path() -> PathBuf {
-    home_dir().join(".gg").join("gg-app-workspace.json")
+    gg_home().join(".gg").join("gg-app-workspace.json")
 }
 
 /// Read the workspace snapshot; missing/invalid file → an empty workspace.

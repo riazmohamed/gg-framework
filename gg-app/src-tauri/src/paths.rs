@@ -101,6 +101,12 @@ pub(crate) fn pick_sidecar(
 /// Canonicalized so traversal segments (`../..`) don't leak into the session
 /// store path and surface as a stray ".." project in the picker.
 pub(crate) fn default_cwd() -> PathBuf {
+    // Fork: a WSL-hosted sidecar needs a Linux cwd, which Windows can't
+    // canonicalize (and the dev workspace root is a Windows path).
+    if let Some(target) = wsl_target() {
+        let home = PathBuf::from(&target.home);
+        return pick_cwd(std::env::var("GG_APP_CWD").ok(), false, home.clone(), home);
+    }
     let raw = pick_cwd(
         std::env::var("GG_APP_CWD").ok(),
         cfg!(debug_assertions),

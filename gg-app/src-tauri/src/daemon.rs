@@ -614,7 +614,7 @@ pub(crate) fn recreate_all_window_sessions(app: tauri::AppHandle) {
 /// single default `main` window at the boot cwd (the picker then shows).
 pub(crate) fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
     let ws = read_workspace();
-    let entries = filter_restorable(ws.windows, |c| Path::new(c).exists());
+    let entries = filter_restorable(ws.windows, |c| fs_path(c).exists());
     if entries.is_empty() {
         // Fresh boot / nothing to restore: the usual single main window.
         build_app_window(app, "main")?;
