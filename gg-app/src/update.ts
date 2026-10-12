@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
+import { playSound } from "./sounds";
+import { announceUpdate } from "./update-announce";
 
 /**
  * App self-update, driven by the Tauri updater plugin (GitHub releases of this
@@ -38,6 +40,19 @@ const DEV_FAKE_UPDATE = false;
 const devFakeEnabled = import.meta.env.DEV && DEV_FAKE_UPDATE;
 const FAKE_VERSION = "9.9.9";
 
+function storageOrNull(): Storage | null {
+  try {
+    return localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** The update-ready sound, once per version across every window. */
+function announce(version: string): void {
+  announceUpdate(version, storageOrNull(), () => playSound("updateReady"));
+}
+
 export function useAppUpdate(): UpdateInfo {
   const [update, setUpdate] = useState<Update | null>(null);
   const [phase, setPhase] = useState<UpdatePhase>("idle");
@@ -48,6 +63,7 @@ export function useAppUpdate(): UpdateInfo {
     if (devFakeEnabled) {
       setFakeVersion(FAKE_VERSION);
       setPhase((p) => (p === "installing" ? p : "available"));
+      announce(FAKE_VERSION);
       return;
     }
     // Don't interrupt an in-flight install with a re-check.
@@ -57,6 +73,7 @@ export function useAppUpdate(): UpdateInfo {
       if (found?.available) {
         setUpdate(found);
         setPhase((p) => (p === "installing" ? p : "available"));
+        announce(found.version);
         logInfo(`Update available: ${found.version}`);
       } else {
         setUpdate(null);

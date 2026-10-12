@@ -1,5 +1,5 @@
 import { theme } from "./theme";
-import { XIcon } from "@phosphor-icons/react";
+import { CheckCircleIcon, CircleIcon, RecordIcon, XIcon } from "@phosphor-icons/react";
 import { Modal } from "./Modal";
 import type { ProjectTask } from "./agent";
 
@@ -21,9 +21,9 @@ interface Props {
 }
 
 const STATUS_STYLE: Record<ProjectTask["status"], { label: string; color: string }> = {
-  pending: { label: "pending", color: theme.textMuted },
-  "in-progress": { label: "running", color: theme.warning },
-  done: { label: "done", color: theme.success },
+  pending: { label: "Pending", color: theme.textMuted },
+  "in-progress": { label: "Running", color: theme.warning },
+  done: { label: "Done", color: theme.success },
 };
 
 export function TasksModal({
@@ -52,7 +52,13 @@ export function TasksModal({
               return (
                 <div className="tasks-item" key={task.id}>
                   <span className="tasks-dot" style={{ color: status.color }} title={status.label}>
-                    {isDone ? "\u2713" : task.status === "in-progress" ? "\u23FA" : "\u25CB"}
+                    {isDone ? (
+                      <CheckCircleIcon size={14} aria-hidden="true" />
+                    ) : task.status === "in-progress" ? (
+                      <RecordIcon size={14} aria-hidden="true" />
+                    ) : (
+                      <CircleIcon size={14} aria-hidden="true" />
+                    )}
                   </span>
                   <span
                     className="tasks-title"
@@ -66,6 +72,7 @@ export function TasksModal({
                   </span>
                   {!isDone && (
                     <button
+                      type="button"
                       className="btn btn-sm btn-ghost tasks-run-one"
                       disabled={running}
                       title="Run this task in a fresh session"
@@ -75,8 +82,10 @@ export function TasksModal({
                     </button>
                   )}
                   <button
+                    type="button"
                     className="tasks-delete"
                     style={{ color: theme.textDim }}
+                    aria-label={`Delete ${task.title}`}
                     title="Delete task"
                     onClick={() => onDelete(task.id)}
                   >
@@ -88,6 +97,7 @@ export function TasksModal({
           </div>
           <div className="tasks-actions">
             <button
+              type="button"
               className="btn btn-sm btn-primary"
               disabled={running || !hasPending}
               title={

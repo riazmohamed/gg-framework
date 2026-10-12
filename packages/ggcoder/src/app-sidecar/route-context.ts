@@ -8,6 +8,7 @@ import type { EffectiveKenModel, KenModelPref } from "../core/ken-model.js";
 import type { ElicitationBridge } from "../core/mcp/elicitation-bridge.js";
 import type { BackgroundProcess } from "../core/process-manager.js";
 import type { RunClaim } from "../core/run-claim.js";
+import type { GoalRecord } from "../core/goals-store.js";
 import type { RunLifecycle } from "../core/run-lifecycle.js";
 import type { HfSearchRow } from "../hf-pull.js";
 import type { ServeController } from "../modes/serve-mode.js";
@@ -62,6 +63,14 @@ export interface SessionRouteContext {
   readonly cwd: string;
   readonly asks: AskUserBridge;
   readonly runClaim: RunClaim;
+  /** This window session's daemon id. */
+  readonly sessionId: string;
+  /** Ids of every live window session whose cwd is `cwd`, this one included. */
+  readonly sessionIdsAt: (cwd: string) => string[];
+  /** Whether any live window session in `cwd` is working right now (see goal list status). */
+  readonly busyAt: (cwd: string) => boolean;
+  /** Set when this session's cwd is a Goal folder; null for every other session. */
+  goal: { dir: string; record: GoalRecord } | null;
   readonly broadcast: (type: string, data: unknown) => void;
   scheduledRunActive: boolean;
   readonly loadWorkflowCommandSpecs: () => Promise<WorkflowCommandSpec[]>;

@@ -1,5 +1,6 @@
 //! Daemon-global proxy commands: telegram, local models, serve, MCP, projects.
 
+use super::agent::sidecar_json;
 use crate::*;
 
 /// Proxy: read Telegram config status (configured + masked preview).
@@ -16,9 +17,7 @@ pub(crate) async fn agent_telegram_get(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: local model endpoints + their last-scan status (no probing).
@@ -35,9 +34,7 @@ pub(crate) async fn agent_local(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: re-probe every local endpoint (the "Scan" button). Slower than
@@ -55,9 +52,7 @@ pub(crate) async fn agent_local_scan(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: add a custom local endpoint (URL + optional API key).
@@ -78,9 +73,7 @@ pub(crate) async fn agent_local_endpoint_add(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: remove a custom local endpoint (and its stored credential).
@@ -102,9 +95,7 @@ pub(crate) async fn agent_local_endpoint_remove(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: search Hugging Face for GGUF repos (the "Add from Hugging Face" modal).
@@ -182,9 +173,7 @@ pub(crate) async fn agent_hf_pull_status(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: cancel the running Hugging Face pull (if any).
@@ -201,9 +190,7 @@ pub(crate) async fn agent_hf_pull_cancel(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: save Telegram config (bot token + user id). Verifies the token via
@@ -253,9 +240,7 @@ pub(crate) async fn agent_serve_status(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: start the Telegram serve loop. Returns `{ running }` or an error.
@@ -301,9 +286,7 @@ pub(crate) async fn agent_serve_stop(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: Agent Steroids status (`{ installed, connected, version?, repos?, … }`).
@@ -320,9 +303,7 @@ pub(crate) async fn agent_steroids_status(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: download + verify + install the `steroids` binary. Returns the
@@ -372,9 +353,7 @@ pub(crate) async fn agent_mcp_list(
         req = req.query(&[("cwd", c)]);
     }
     let res = req.send().await.map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: add an MCP server from a pasted `claude mcp add …` line. Returns
@@ -432,14 +411,12 @@ pub(crate) async fn agent_mcp_remove(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: begin an interactive OAuth login for a remote (HTTP) MCP server.
 /// Returns 202 immediately; progress + outcome stream back via `agent-event`
-/// (`mcp_auth_url`, `mcp_auth_status`, `mcp_auth_done`, `mcp_auth_error`). The
+/// (`mcp_auth_url`, `mcp_auth_done`, `mcp_auth_error`). The
 /// webview opens the browser when it receives `mcp_auth_url`.
 /// `cwd` is required for project scope (the target project path).
 #[tauri::command]
@@ -469,38 +446,6 @@ pub(crate) async fn agent_mcp_login(
             .get("error")
             .and_then(|v| v.as_str())
             .unwrap_or("failed to start MCP login");
-        return Err(msg.to_string());
-    }
-    Ok(body)
-}
-
-/// Proxy: create a new project folder under the configured projects root.
-/// Returns `{ path }` on success, or an error message on validation/conflict.
-#[tauri::command]
-pub(crate) async fn agent_create_project(
-    webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
-    name: String,
-) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    let res = client
-        .post(format!("{}/create-project", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "name": name }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let status = res.status();
-    let body = res
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        let msg = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("failed to create project");
         return Err(msg.to_string());
     }
     Ok(body)
@@ -552,9 +497,192 @@ pub(crate) async fn agent_projects(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
+    sidecar_json(res).await
+}
+
+/// Turn a sidecar reply into the body or its `error` message.
+async fn json_or_error(
+    res: reqwest::Response,
+    fallback: &str,
+) -> Result<serde_json::Value, String> {
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or(fallback);
+        return Err(msg.to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: list Goals (the `~/.gg/goals` folders), newest activity first.
+#[tauri::command]
+pub(crate) async fn agent_goals(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}/goals", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    json_or_error(res, "failed to list goals").await
+}
+
+/// Proxy: create a Goal folder. The sidecar validates every field and resolves
+/// context paths on disk; this only forwards them.
+#[tauri::command]
+pub(crate) async fn agent_create_goal(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    name: String,
+    goal: String,
+    context: Vec<String>,
+    instructions: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/goals", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({
+            "name": name,
+            "goal": goal,
+            "context": context,
+            "instructions": instructions,
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    json_or_error(res, "failed to create goal").await
+}
+
+/// Proxy: delete a Goal (its folder and coordinator sessions). The sidecar
+/// validates the id and refuses while the goal is open elsewhere.
+#[tauri::command]
+pub(crate) async fn agent_delete_goal(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/goals/delete", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    json_or_error(res, "failed to delete goal").await
+}
+
+/// Proxy: pin the model a Goal's workers run on, or clear it (`None`) so they
+/// follow GG Goals. The sidecar validates the model and the provider login.
+#[tauri::command]
+pub(crate) async fn agent_set_critter_model(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    model: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/goal/critter-model", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    json_or_error(res, "failed to change the critters' model").await
+}
+
+/// Proxy: start a Goal's automatic first reply. Idempotent on the sidecar.
+#[tauri::command]
+pub(crate) async fn agent_goal_kickoff(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/goal/kickoff", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    json_or_error(res, "failed to start the goal").await
+}
+
+/// Proxy: change this window's Goal's attached context and/or standing
+/// instructions. The sidecar validates both and resolves paths on disk.
+#[tauri::command]
+pub(crate) async fn agent_update_goal(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    context: Option<Vec<String>>,
+    instructions: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let mut body = serde_json::Map::new();
+    if let Some(context) = context {
+        body.insert("context".into(), serde_json::json!(context));
+    }
+    if let Some(instructions) = instructions {
+        body.insert("instructions".into(), serde_json::json!(instructions));
+    }
+    let res = client
+        .post(format!("{}/goal/update", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::Value::Object(body))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    json_or_error(res, "failed to update the goal").await
+}
+
+/// Proxy: pause this window's Goal (the app also stops the current run).
+#[tauri::command]
+pub(crate) async fn agent_goal_pause(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/goal/pause", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    json_or_error(res, "failed to pause the goal").await
+}
+
+/// Proxy: carry this window's Goal on after a pause or an interrupted run.
+/// Idempotent on the sidecar.
+#[tauri::command]
+pub(crate) async fn agent_goal_resume(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/goal/resume", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    json_or_error(res, "failed to resume the goal").await
 }
 
 /// Proxy: list recent sessions for a project cwd.
@@ -579,9 +707,7 @@ pub(crate) async fn agent_sessions(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: search project files for the chat input's `@` picker. Empty `query`
@@ -601,9 +727,7 @@ pub(crate) async fn agent_files(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Minimal percent-encoding for a filesystem path in a query string.

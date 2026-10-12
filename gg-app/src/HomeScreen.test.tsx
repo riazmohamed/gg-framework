@@ -37,7 +37,13 @@ describe("HomeScreen", () => {
     vi.mocked(authStatus).mockResolvedValue([]);
 
     render(
-      <HomeScreen onProjects={vi.fn()} onChat={vi.fn()} onMotion={vi.fn()} onSettings={vi.fn()} />,
+      <HomeScreen
+        onProjects={vi.fn()}
+        onGoals={vi.fn()}
+        onChat={vi.fn()}
+        onMotion={vi.fn()}
+        onSettings={vi.fn()}
+      />,
     );
 
     await waitFor(() =>
@@ -61,7 +67,13 @@ describe("HomeScreen", () => {
     const onMotion = vi.fn();
 
     render(
-      <HomeScreen onProjects={vi.fn()} onChat={vi.fn()} onMotion={onMotion} onSettings={vi.fn()} />,
+      <HomeScreen
+        onProjects={vi.fn()}
+        onGoals={vi.fn()}
+        onChat={vi.fn()}
+        onMotion={onMotion}
+        onSettings={vi.fn()}
+      />,
     );
 
     const motion = screen.getByRole("button", { name: "Motion" });
@@ -74,19 +86,67 @@ describe("HomeScreen", () => {
     expect(onMotion).toHaveBeenCalledOnce();
   });
 
-  it("says under the Motion button that Motion is still in process", async () => {
+  it("orders the workspaces Code, Goals, Chat, Motion and opens Goals", async () => {
+    vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    vi.mocked(authStatus).mockResolvedValue([
+      {
+        value: "anthropic",
+        label: "Anthropic",
+        description: "",
+        methods: [],
+        connected: true,
+        connectedMethods: [],
+      },
+    ]);
+    const onGoals = vi.fn();
+
+    render(
+      <HomeScreen
+        onProjects={vi.fn()}
+        onGoals={onGoals}
+        onChat={vi.fn()}
+        onMotion={vi.fn()}
+        onSettings={vi.fn()}
+      />,
+    );
+
+    const names = ["Code", "Goals", "Chat", "Motion"];
+    const buttons = names.map((name) => screen.getByRole("button", { name }));
+    for (let i = 1; i < buttons.length; i++) {
+      const prev = buttons[i - 1];
+      const next = buttons[i];
+      if (!prev || !next) throw new Error("missing workspace button");
+      expect(prev.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    const goals = screen.getByRole("button", { name: "Goals" });
+    await waitFor(() => expect(goals.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(goals);
+    expect(onGoals).toHaveBeenCalledOnce();
+  });
+
+  it("says under the Goals button that Goals is in beta", async () => {
     vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
     vi.mocked(authStatus).mockResolvedValue([]);
 
     render(
-      <HomeScreen onProjects={vi.fn()} onChat={vi.fn()} onMotion={vi.fn()} onSettings={vi.fn()} />,
+      <HomeScreen
+        onProjects={vi.fn()}
+        onGoals={vi.fn()}
+        onChat={vi.fn()}
+        onMotion={vi.fn()}
+        onSettings={vi.fn()}
+      />,
     );
 
-    const note = await screen.findByText("Still in process");
+    const note = await screen.findByText("In beta");
     expect(note.id).not.toBe("");
-    // Screen readers hear it with the Motion button, and only with that one.
-    expect(screen.getByRole("button", { name: "Motion" }).getAttribute("aria-describedby")).toBe(
+    // Screen readers hear it with the Goals button, and only with that one.
+    expect(screen.getByRole("button", { name: "Goals" }).getAttribute("aria-describedby")).toBe(
       note.id,
+    );
+    expect(screen.queryByText("Still in process")).toBeNull();
+    expect(screen.getByRole("button", { name: "Motion" }).hasAttribute("aria-describedby")).toBe(
+      false,
     );
     expect(screen.getByRole("button", { name: "Code" }).hasAttribute("aria-describedby")).toBe(
       false,

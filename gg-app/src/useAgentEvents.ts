@@ -14,7 +14,15 @@ import {
   type QueuedMessage,
   type SlashCommand,
 } from "./agent";
-import { closeAsks, isAskUserPrompt, markAskDeferred } from "./ask-user";
+import {
+  askItemFor,
+  closeAsks,
+  closeAsksNotIn,
+  isAskUserPrompt,
+  markAskDeferred,
+  parseOpenAskPrompts,
+  withOpenAsks,
+} from "./ask-user";
 import { formatTokenCount } from "./ActivityBar";
 import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
@@ -24,6 +32,7 @@ import type { PendingAttachment } from "./attachments";
 import type { Item } from "./App";
 import { readChatError } from "./chat-error";
 import type { LiveTextStore } from "./live-text";
+import { lastIssuedId } from "./transcript-item";
 
 /**
  * Build-session SSE event handling + assistant-streaming helpers, extracted from
@@ -57,6 +66,18 @@ function formatElapsed(ms: number): string {
   const m = Math.floor(s / 60);
   const r = s % 60;
   return r > 0 ? `${m}m ${r}s` : `${m}m`;
+}
+
+/** How one run ended, for whoever keeps score across runs (the goal finish card). */
+export interface RunEnd {
+  readonly startedAt: number;
+  readonly endedAt: number;
+  /** The newest transcript item id when the run began: later items are its. */
+  readonly fromItemId: number;
+  /** Model turns the run took. */
+  readonly turns: number;
+  readonly outputTokens: number;
+  readonly outcome: "done" | "unverified" | "failed" | "cancelled";
 }
 
 /**
@@ -105,6 +126,10 @@ export interface AgentEventsDeps {
   stickToBottomRef: MutableRefObject<boolean>;
   /** Where the streaming reply's text grows until it ends (live-text.ts). */
   liveText: LiveTextStore;
+  /** A (re)connect found this goal cut off mid-work or mid-question. */
+  onGoalNeedsResume?: () => void;
+  /** A run ended (any outcome). */
+  onRunEnd?: (run: RunEnd) => void;
 }
 
 export interface AgentEvents {
@@ -150,6 +175,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     pendingPlanTotalRef,
     stickToBottomRef,
     liveText,
+    onGoalNeedsResume,
+    onRunEnd,
   } = deps;
 
   // ── Event-machine private refs (used nowhere outside this hook) ──
@@ -182,8 +209,15 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // flip the same row from shimmer → summary instead of pushing a new line.
   const compactionIdRef = useRef<number | null>(null);
   const runStartRef = useRef<number>(0);
+  // Whether a run is open, and whether it hit an error frame. A run that
+  // errored ends with the error sound instead of the done sound; an error
+  // outside any run (no run_end will follow) sounds as it lands.
+  const runOpenRef = useRef(false);
+  const runErroredRef = useRef(false);
 
   const tokensRef = useRef<number>(0);
+  const turnsRef = useRef<number>(0);
+  const runFromItemRef = useRef<number>(0);
   // Accumulated assistant text this run, for detecting [DONE:n] plan-step
   // markers that may split across deltas.
   const assistantTextRef = useRef<string>("");
@@ -540,6 +574,25 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           openPlanReview(d.pendingPlan);
           setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
           setStatus(readyState.runState === "cancelling" ? "cancelling..." : "ready");
+          // Close question cards this daemon can't answer (a restart killed
+          // their run), so none is left as a dead button.
+          if (Array.isArray(d.openAsks)) {
+            const open = d.openAsks.filter((id): id is string => typeof id === "string");
+            // ...and show the ones it still waits on that have no card (a
+            // reload rebuilt the transcript without them).
+            const openAsks = parseOpenAskPrompts(d.openAskPrompts);
+            setItems((prev) => {
+              const next = withOpenAsks(closeAsksNotIn(prev, open), openAsks, (ask) =>
+                askItemFor(ask, nextId()),
+              );
+              return next.length === prev.length && next.every((it, i) => it === prev[i])
+                ? prev
+                : next;
+            });
+          }
+          // A goal cut off by the restart picks itself back up (a briefing
+          // asks its question again), as it does when its window opens.
+          if (readyState.goal?.needsResume) onGoalNeedsResume?.();
           break;
         }
         case "run_start":
@@ -554,8 +607,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           subagentGroupIdRef.current = null;
           compactionIdRef.current = null;
           runStartRef.current = Date.now();
+          runOpenRef.current = true;
+          runErroredRef.current = false;
+          runFromItemRef.current = lastIssuedId();
 
           tokensRef.current = 0;
+          turnsRef.current = 0;
           assistantTextRef.current = "";
           // Arming is per-run state on the sidecar; start every run streaming
           // live and let hook_armed hold text back once a gate is crossed.
@@ -791,6 +848,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                 cacheWrite?: number;
               }
             | undefined;
+          turnsRef.current += 1;
           if (usage && typeof usage.outputTokens === "number") {
             tokensRef.current += usage.outputTokens;
             setTokens(tokensRef.current);
@@ -873,6 +931,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         case "error": {
           pushItem({ kind: "error", id: nextId(), ...readChatError(d) });
+          if (runOpenRef.current) runErroredRef.current = true;
+          else playSound("error");
           break;
         }
         case "run_end": {
@@ -899,6 +959,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // question the user can still answer and strand the agent until it
           // timed out ten minutes later.
           const runCancelled = d.cancelled === true;
+          const runErrored = runErroredRef.current || d.failed === true;
+          runOpenRef.current = false;
+          runErroredRef.current = false;
           setItems((prev) =>
             prev.map((it) => {
               if (it.kind === "user" && it.queued) return { ...it, queued: false };
@@ -932,6 +995,20 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               ),
             );
           }
+          onRunEnd?.({
+            startedAt: runStartRef.current || Date.now(),
+            endedAt: Date.now(),
+            fromItemId: runFromItemRef.current,
+            turns: turnsRef.current,
+            outputTokens: tokensRef.current,
+            outcome: d.cancelled
+              ? "cancelled"
+              : runErrored
+                ? "failed"
+                : d.unverified === true
+                  ? "unverified"
+                  : "done",
+          });
           if (d.cancelled) {
             setDoneStatus(null);
             setStatus("cancelled");
@@ -960,7 +1037,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               setPlanTotal(0);
               setPlanDone(new Set());
             }
-            if (d.unverified !== true) playSound("done");
+            // The agent couldn't continue: the error cue, not "done". A cancel
+            // takes the branch above and stays silent.
+            if (runErrored) playSound("error");
+            else if (d.unverified !== true) playSound("done");
             // A run may have created/removed `.gg/commands/*.md` (e.g.
             // /setup-commit writing commit.md). Refresh so the top-right
             // commit button flips /setup-commit → /commit without a restart.
@@ -990,6 +1070,19 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                 }
               : s,
           );
+          break;
+        case "goal_state":
+          // The user started the goal: the window switches to its world view.
+          setState((s) => {
+            if (!s?.goal || s.goal.id !== d.id) return s;
+            const phase = d.phase === "active" || d.phase === "briefing" ? d.phase : s.goal.phase;
+            const critterModel =
+              typeof d.critterModel === "string" || d.critterModel === null
+                ? d.critterModel
+                : s.goal.critterModel;
+            const paused = typeof d.paused === "boolean" ? d.paused : s.goal.paused;
+            return { ...s, goal: { ...s.goal, phase, critterModel, paused } };
+          });
           break;
         case "plan_mode":
           // Back in plan mode to revise a plan (no new "entering plan" banner).
@@ -1384,6 +1477,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       stickToBottomRef,
       liveText,
       openPlanReview,
+      onGoalNeedsResume,
+      onRunEnd,
     ],
   );
 

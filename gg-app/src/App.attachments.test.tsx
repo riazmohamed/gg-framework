@@ -58,6 +58,7 @@ async function setup(
   input: HTMLTextAreaElement;
   sends: ReturnType<typeof vi.fn>;
   stateCalls: () => number;
+  retries: () => number;
   emit: (event: SidecarEvent) => void;
 }> {
   const listeners = new Set<(event: SidecarEvent) => void>();
@@ -76,6 +77,7 @@ async function setup(
     running,
   };
   let stateCalls = 0;
+  let retries = 0;
   mockWindows("main");
   mockIPC((command, payload) => {
     switch (command) {
@@ -99,6 +101,9 @@ async function setup(
         sends(payload);
         if (promptFails) return Promise.reject(new Error("connection refused"));
         return null;
+      case "retry_window_session":
+        retries++;
+        return null;
       case "plugin:log|log":
         return null;
       default:
@@ -114,6 +119,7 @@ async function setup(
     input,
     sends,
     stateCalls: () => stateCalls,
+    retries: () => retries,
     emit: (event) => {
       for (const listener of listeners) listener(event);
     },
@@ -334,7 +340,7 @@ describe("composer attachments", () => {
   });
 
   it("offers a retry when the agent can't be reached at startup", async () => {
-    const { stateCalls } = await setup(false, { stateFailures: 1 });
+    const { stateCalls, retries } = await setup(false, { stateFailures: 1 });
 
     // A failed connect must say so, not sit on "connecting to agent…" forever.
     const alert = await screen.findByText("Couldn't connect to the agent.");
@@ -344,6 +350,8 @@ describe("composer attachments", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
 
     await waitFor(() => expect(stateCalls()).toBe(2));
+    // The failed start is restarted shell-side before re-hydrating.
+    expect(retries()).toBe(1);
     await waitFor(() => expect(screen.queryByText("Couldn't connect to the agent.")).toBeNull());
   });
 
