@@ -59,11 +59,15 @@ The app daemon's process tree is held in a kill-on-close Windows Job Object
 (`src-tauri/src/daemon_job.rs`, ported from creativeprofit22's fork), so agent-started dev
 servers/browsers die with the app.
 One sidecar per app, one OS: nothing bridges `\\wsl.localhost` and `/mnt/c`, and `~/.gg`
-(auth, sessions) is separate per OS.
+(auth, sessions) is separate per OS. So the desktop project picker only lists Windows
+projects: `C:\Users\riaza\.gg\gg-app.json` → `projectsRoot` = `C:\Users\riaza\Desktop\projects`,
+plus Windows-side session stores. WSL projects (`/home/riaz24/projects`, WSL `~/.gg/sessions`)
+never appear there; work on them with the WSL `ogcoder` CLI.
 
 **Dependency chain**: `gg-core` → `gg-ai` → `gg-agent` → `ogcoder` (uses `ggcoder-eyes` for perception)
 
-Current published version: **5.78.0** (last app-update sync: 2026-10-11; gg-app upstream v0.86.0).
+Current published version: **5.79.2** (last app-update sync: 2026-10-12; gg-app upstream v0.87.2,
+fork desktop release `og-v0.87.201`).
 
 Sync history note: the previous `origin/windows` had independently synced upstream to 4.5.0
 (2026-06-04) with 42 fork-only commits on top. The 2026-09-07 sync merged upstream 5.58.0 first,
@@ -78,6 +82,14 @@ compaction-tuned `getSummaryModel`; pnpm `overrides`/`onlyBuiltDependencies` mov
 passes `ignoreDeprecations: "6.0"` to the dts step (as gg-ai/gg-agent do). New upstream
 `@kenkaiiii/gg-*` imports arrive in every sync. Rebrand them, then confirm
 `git grep -E "@kenkaiiii/(gg-core|gg-ai|gg-agent|ggcoder)"` returns nothing outside docs.
+
+The 2026-10-12 sync (13 upstream commits, 5.78.0 → 5.79.2) added **GG Goals**
+(`goals-agent/`, `core/goals-store.ts`, app-sidecar `goal-routes.ts`; feature name kept, only
+`GOALS_SYSTEM_PROMPT`'s "inside GG Coder" was rebranded to OG Coder) and moved
+`auth-providers` into gg-core (`gg-core/src/auth-providers.ts`; `ggcoder/src/core/auth-providers.ts`
+is now a re-export shim). Fork touch points resolved: `system-prompt.ts` keeps the Eyes section
+before upstream's new `renderLanguageGuidance()`; `daemon.rs` runs both the fork's Job Object
+drop and upstream's `sweep_orphan_sidecars()` when the daemon dies.
 
 This is a rebranded fork of upstream `kenkaiiii/gg-framework`. Every workspace package is
 renamed `@kenkaiiii/*` → `@abukhaled/*`, `ggcoder` → `ogcoder` (binary, package name, and
@@ -212,7 +224,7 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 - **Compaction** (`core/compaction/compactor.ts`): Triggers at 80% context usage. Keeps system message + recent ~20K tokens intact. Middle section summarized via LLM (tool calls → text, thinking stripped, results truncated). Falls back to extractive summary on failure.
 - **Sessions** (`core/session-manager.ts`): Append-only JSONL with DAG structure (leafId for branching). Streams line-by-line for large files. `repairToolPairs()` fixes interrupted sessions on restore.
 - **Auth**: OAuth PKCE for Anthropic, OpenAI, Gemini, Kimi and xAI; static API keys for GLM, Moonshot, Xiaomi, MiniMax, DeepSeek, OpenRouter, HuggingFace and Sakana. Credentials live in `~/.gg/auth.json` (mode `0o600`, atomic write under a file lock — `gg-core`'s `auth-storage`). Xiaomi keys are **region-scoped**: a key issued for `ams` returns 401 on `sgp`. `runLogin()` in `cli/auth.ts` therefore runs the Ink region selector **before** `readline.createInterface()` — a raw-mode Ink selector (`ui/login.tsx`) cannot coexist with an active readline interface. Xiaomi's API-Credits endpoint (`XIAOMI_CREDITS_KEY`) is a single global URL and skips region selection.
-  - Known gap: the desktop app's provider descriptor (`core/auth-providers.ts` → `app-sidecar.ts`) still hardcodes the `sgp` Token Plan URL, so a desktop login with an `ams` key will 401. The CLI path is region-correct.
+  - Known gap: the desktop app's provider descriptor (`gg-core/src/auth-providers.ts` → `app-sidecar.ts`) still hardcodes the `sgp` Token Plan URL, so a desktop login with an `ams` key will 401. The CLI path is region-correct.
 - **Models**: The registry lives in `@abukhaled/gg-core` (`gg-core/src/model-registry.ts`); `ggcoder/src/core/model-registry.ts` is a re-export shim that additionally defines the fork's routing helpers — `getVisionModel`, `getVideoCapableModel`, `getDocumentCapableModel`, and `getExecutorModel` (first low-tier model for the provider, else the current model — implemented locally since gg-core dropped `getFastModel`). gg-core's `ModelInfo` has no `supportsDocuments` flag, so documents ride the image/multimodal path.
 - **Eyes (`packages/ggcoder-eyes`)**: Perception probes the agent invokes via the `ogcoder eyes ...` passthrough in `cli.ts`. Driven by the `/setup-eyes` and `/eyes-improve` prompt commands in `core/prompt-commands.ts`. Probes live in `probes/<name>/impl/*.sh`, with `detect.sh`, `install.sh`, and `test.sh` per probe. The agent reads `isEyesActive`/`journalCount`/`readJournal` from `@abukhaled/ggcoder-eyes`; `EyesOverlay.tsx` renders the live journal in the TUI.
 - **Startup** (`cli.ts`): Optimized for fast time-to-interactive. Key patterns:
