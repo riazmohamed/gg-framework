@@ -1693,6 +1693,8 @@ export function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
     roleCounts[msg.role] = (roleCounts[msg.role] ?? 0) + 1;
 
     if (msg.role === "user") {
+      // Runtime notes (environment updates, notifications) are for the model only.
+      if (msg.provenance?.visibility === "hidden") continue;
       const text = extractText(msg.content);
       if (!text) continue;
       items.push({

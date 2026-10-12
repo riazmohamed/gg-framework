@@ -113,6 +113,7 @@ import {
 } from "./tui-slash-commands.js";
 import type { SlashCommandContext } from "../core/slash-commands.js";
 import { addWorkspaceRoot, removeWorkspaceRoot } from "../core/workspace-roots.js";
+import { noteRootsChange } from "./roots-prompt-update.js";
 import type { TuiAskUserHost } from "./ask-user-host.js";
 import type { TuiElicitHost } from "./mcp-elicit-host.js";
 import { createExportCommand } from "./tui-export.js";
@@ -2306,6 +2307,19 @@ export function App(props: AppProps) {
         return;
       }
       if (isRegistryCommand(tuiSlashRegistry, trimmed)) {
+        // Mid-conversation, note the change instead of rewriting the cached
+        // prompt. While a run is in flight the history is the loop's to append
+        // to, so fall back to rebuilding the prompt as before.
+        const updatePromptForRoots = async (before: string[]): Promise<void> => {
+          const after = props.additionalRoots ?? [];
+          if (agentLoopRef.current?.isRunning) {
+            await replaceSystemPrompt();
+            return;
+          }
+          if (noteRootsChange(messagesRef.current, before, after) === "rebuild") {
+            await replaceSystemPrompt();
+          }
+        };
         const context: SlashCommandContext = {
           switchModel: async (provider, model) => {
             const value = resolveModelTarget(provider ? `${provider}:${model}` : model, MODELS);
@@ -2342,14 +2356,16 @@ export function App(props: AppProps) {
           listBranches: async () => "Use /rewind to go back to an earlier point.",
           addDirectory: async (dir) => {
             if (!props.additionalRoots) return { ok: false, error: "Not available in this mode." };
+            const before = [...props.additionalRoots];
             const result = await addWorkspaceRoot(props.cwd, props.additionalRoots, dir);
-            if (result.ok) await replaceSystemPrompt();
+            if (result.ok) await updatePromptForRoots(before);
             return result;
           },
           removeDirectory: async (dir) => {
             if (!props.additionalRoots) return { ok: false, error: "Not available in this mode." };
+            const before = [...props.additionalRoots];
             const result = removeWorkspaceRoot(props.cwd, props.additionalRoots, dir);
-            if (result.ok) await replaceSystemPrompt();
+            if (result.ok) await updatePromptForRoots(before);
             return result;
           },
           getAdditionalRoots: () => [...(props.additionalRoots ?? [])],
