@@ -102,6 +102,14 @@ export interface AskUserBridge {
   readonly pendingCount: number;
   /** Questions past their soft deadline that can still be answered. */
   readonly deferredCount: number;
+  /** Ids of every question that can still be answered (pending or deferred). */
+  readonly openIds: () => string[];
+  /**
+   * Every question that can still be answered, in the order asked, so a
+   * reconnecting window can show the cards again (a reload lost them, leaving
+   * the agent waiting on a question nobody could see).
+   */
+  readonly openPrompts: () => Array<{ prompt: AskUserPrompt; deferred: boolean }>;
 }
 
 export interface AskUserBridgeOptions {
@@ -119,7 +127,11 @@ export interface AskUserBridgeOptions {
 export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
   const pending = new Map<
     string,
-    { resolve: (result: AskUserResult) => void; timer: ReturnType<typeof setTimeout> }
+    {
+      prompt: AskUserPrompt;
+      resolve: (result: AskUserResult) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
   >();
   const deferred = new Map<string, AskUserPrompt>();
   let seq = 0;
@@ -160,7 +172,7 @@ export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
           release(prompt.id, { action: "deferred" });
         }, deadline());
         timer.unref?.();
-        pending.set(prompt.id, { resolve, timer });
+        pending.set(prompt.id, { prompt, resolve, timer });
         opts.broadcast(prompt);
       }),
     settle: (id, result) => {
@@ -182,6 +194,11 @@ export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
     get deferredCount() {
       return deferred.size;
     },
+    openIds: () => [...pending.keys(), ...deferred.keys()],
+    openPrompts: () => [
+      ...[...deferred.values()].map((prompt) => ({ prompt, deferred: true })),
+      ...[...pending.values()].map(({ prompt }) => ({ prompt, deferred: false })),
+    ],
   };
 }
 

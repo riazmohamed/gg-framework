@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
 import { act, renderHook } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Item } from "./App";
+import { playSound } from "./sounds";
 import { useAutopilot } from "./useAutopilot";
+
+// playSound builds an <audio> element, which jsdom can't play.
+vi.mock("./sounds", () => ({ playSound: vi.fn() }));
 import { driveAutopilotCycle } from "../../packages/ggcoder/src/core/autopilot-cycle";
 import {
   CORPUS_UNVERIFIED_REASON,
@@ -54,5 +58,27 @@ describe("Autopilot evidence limitation delivery", () => {
       }),
     ]);
     expect(result.current.autopilotReviewing).toBe(false);
+  });
+});
+
+describe("Autopilot errors", () => {
+  it("adds the error row and plays the error sound when the cycle stops", () => {
+    let items: Item[] = [];
+    const { result } = renderHook(() =>
+      useAutopilot({
+        setItems: (update) => {
+          items = typeof update === "function" ? update(items) : update;
+        },
+        nextId: () => 1,
+      }),
+    );
+    act(() => {
+      result.current.handleAutopilotEvent({
+        type: "autopilot_error",
+        data: { headline: "Review failed" },
+      });
+    });
+    expect(items.map((it) => it.kind)).toEqual(["error"]);
+    expect(vi.mocked(playSound)).toHaveBeenCalledWith("error");
   });
 });

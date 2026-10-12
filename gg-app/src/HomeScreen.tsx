@@ -5,6 +5,7 @@ import {
   DownloadSimpleIcon,
   FilmSlateIcon,
   GearSixIcon,
+  TargetIcon,
 } from "@phosphor-icons/react";
 import { getVersion } from "@tauri-apps/api/app";
 import { error as logError } from "@tauri-apps/plugin-log";
@@ -40,6 +41,7 @@ function logSetupCheckFailure(e: unknown): Promise<void> {
 
 interface Props {
   onProjects: () => void;
+  onGoals: () => void;
   onChat: () => void;
   onMotion: () => void;
   /** Opens full-screen Settings, optionally on a given tab. */
@@ -59,6 +61,7 @@ interface Props {
  */
 export function HomeScreen({
   onProjects,
+  onGoals,
   onChat,
   onMotion,
   onSettings,
@@ -70,7 +73,7 @@ export function HomeScreen({
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
   const [showScorecard, setShowScorecard] = useState(false);
   const appUpdate = useAppUpdate();
-  const motionNoteId = useId();
+  const goalsNoteId = useId();
 
   useEffect(() => {
     void getVersion()
@@ -175,6 +178,22 @@ export function HomeScreen({
           <CodeIcon size={18} weight="bold" aria-hidden="true" />
           Code
         </button>
+        {/* Goals is new, so its button says so underneath. */}
+        <div className="home-action-slot">
+          <button
+            type="button"
+            className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
+            aria-disabled={ready ? undefined : true}
+            aria-describedby={goalsNoteId}
+            onClick={() => handleWorkspace(onGoals)}
+          >
+            <TargetIcon size={18} weight="bold" aria-hidden="true" />
+            Goals
+          </button>
+          <span id={goalsNoteId} className="home-action-note">
+            In beta
+          </span>
+        </div>
         <button
           type="button"
           className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
@@ -184,22 +203,15 @@ export function HomeScreen({
           <ChatCircleTextIcon size={18} weight="bold" aria-hidden="true" />
           Chat
         </button>
-        {/* Motion is still being built, so its button says so underneath. */}
-        <div className="home-action-slot">
-          <button
-            type="button"
-            className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
-            aria-disabled={ready ? undefined : true}
-            aria-describedby={motionNoteId}
-            onClick={() => handleWorkspace(onMotion)}
-          >
-            <FilmSlateIcon size={18} weight="bold" aria-hidden="true" />
-            Motion
-          </button>
-          <span id={motionNoteId} className="home-action-note">
-            Still in process
-          </span>
-        </div>
+        <button
+          type="button"
+          className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
+          aria-disabled={ready ? undefined : true}
+          onClick={() => handleWorkspace(onMotion)}
+        >
+          <FilmSlateIcon size={18} weight="bold" aria-hidden="true" />
+          Motion
+        </button>
       </div>
       <button
         type="button"

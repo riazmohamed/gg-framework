@@ -74,7 +74,6 @@ import {
 } from "./core/model-registry.js";
 import { resolveStartOrFallback } from "./core/resolve-start.js";
 import { getGitBranch, getGitDirtyFileCount, isGitRepo } from "./utils/git.js";
-import { getGitHubRepoSlug } from "./utils/github.js";
 import type { GitHubCI } from "./utils/github-ci.js";
 import type { ProjectHealthScan } from "./core/project-health-scan.js";
 import { scoreProjectHealth, type ProjectHealth } from "./core/project-health-score.js";
@@ -90,7 +89,13 @@ import { stopRadio } from "./core/radio.js";
 import { enrichProcessPath } from "./core/shell-path.js";
 import type { ServeController } from "./modes/serve-mode.js";
 import { createElicitationBridge } from "./core/mcp/index.js";
-import { askSoftDeadlineMs, createAskUserBridge, deliverLateAnswer } from "./core/ask-user.js";
+import {
+  askSoftDeadlineMs,
+  createAskUserBridge,
+  deliverLateAnswer,
+  type AskQuestion,
+  type AskUserResult,
+} from "./core/ask-user.js";
 import { createAskUserTool } from "./tools/ask-user.js";
 import { createUsageService } from "./app-sidecar/usage.js";
 import { daemonReadBody, daemonJson, json } from "./app-sidecar/http.js";
@@ -110,6 +115,20 @@ import {
 import { KEN_ALLOWED_TOOLS } from "./app-sidecar/ken-context.js";
 import { type ProgressManager, createProgressManager } from "./app-sidecar/progress-manager.js";
 import { handleSessionRoutes } from "./app-sidecar/session-routes.js";
+import { handleGoalRoutes } from "./app-sidecar/goal-routes.js";
+import { readGitState, resolveGitCwd } from "./app-sidecar/git-target.js";
+import {
+  goalPhase,
+  goalsRoot,
+  isGoalDir,
+  startGoalOnAnswer,
+  readGoal,
+} from "./core/goals-store.js";
+import {
+  createGoalsAgentSession,
+  goalCritterPick,
+  loadGoalBriefExtras,
+} from "./goals-agent/goals-agent.js";
 import { handleWorkspaceRoutes } from "./app-sidecar/workspace-routes.js";
 import { handleHistoryRoutes } from "./app-sidecar/history-routes.js";
 import { handlePromptRoutes } from "./app-sidecar/prompt-routes.js";
@@ -234,6 +253,19 @@ async function main(): Promise<void> {
     for (const ctx of sessions.values()) ctx.broadcast(type, data);
   };
 
+  const sessionIdsAt = (cwd: string): string[] => {
+    const target = path.resolve(cwd);
+    return [...sessions.values()]
+      .filter((ctx) => path.resolve(ctx.cwd) === target)
+      .map((ctx) => ctx.id)
+      .sort();
+  };
+  /** Whether any live window session in `cwd` is working right now. */
+  const busyAt = (cwd: string): boolean => {
+    const target = path.resolve(cwd);
+    return [...sessions.values()].some((ctx) => path.resolve(ctx.cwd) === target && ctx.isBusy());
+  };
+
   // Providers currently mid-OAuth in some window. Daemon-level so two windows
   // cannot race two browser flows for the same provider into one auth file.
   const oauthInFlightProviders = new Set<string>();
@@ -338,6 +370,8 @@ async function main(): Promise<void> {
               broadcastAll,
               oauthInFlightProviders,
               repoPolls,
+              sessionIdsAt,
+              busyAt,
             },
             { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
           );
@@ -348,7 +382,13 @@ async function main(): Promise<void> {
             chatAgent,
             cwd: sessionCwd,
           });
-          daemonJson(res, 200, { sessionId: id });
+          // The conversation file too, so the app can reopen this exact
+          // session if the daemon restarts (a new session has no path yet
+          // on the app's side).
+          daemonJson(res, 200, {
+            sessionId: id,
+            sessionPath: ctx.session.getState().sessionPath ?? null,
+          });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           log("ERROR", "app-sidecar", "session create failed", { message });
@@ -521,6 +561,10 @@ async function createSession(
     oauthInFlightProviders: Set<string>;
     /** Daemon-wide repo pollers shared by windows on the same repo. */
     repoPolls: RepoPolls;
+    /** Ids of every live window session whose cwd is `cwd` (resolved). */
+    sessionIdsAt: (cwd: string) => string[];
+    /** Whether any live window session in `cwd` is working right now. */
+    busyAt: (cwd: string) => boolean;
   },
   opts: {
     id: string;
@@ -538,6 +582,8 @@ async function createSession(
     broadcastAll,
     oauthInFlightProviders,
     repoPolls,
+    sessionIdsAt,
+    busyAt,
   } = deps;
   const paths = deps.paths;
   const mode = opts.mode;
@@ -546,6 +592,11 @@ async function createSession(
   // Motion's workspace is a dedicated folder the app names inside the projects
   // root; create it on first use so a fresh install can start a video at once.
   if (mode === "motion") await fs.mkdir(cwd, { recursive: true });
+  // A coding session whose cwd is a Goal folder is that goal's coordinator.
+  let goal =
+    mode === "code" && isGoalDir(goalsRoot(paths.agentDir), cwd)
+      ? await readGoal(cwd).then((record) => (record ? { dir: cwd, record } : null))
+      : null;
   // Base host for parsing request-URL query params (value is irrelevant to
   // parsing); the daemon owns the real listen host.
   const host = "127.0.0.1";
@@ -722,23 +773,71 @@ async function createSession(
     onClosed: (ids) => broadcast("ask_user_closed", { ids }),
     onLateAnswer: (late) => {
       log("INFO", "app-sidecar", "ask_user late answer queued", { id: late.prompt.id });
-      deliverLateAnswer(late, {
-        queueMessage: (text) => session.queueMessage(text),
-        isBusy: () => running || runClaim.active || autopilotActive,
-        onQueued: () =>
-          broadcast("queued", {
-            count: session.getQueuedCount(),
-            messages: session.listQueuedMessages(),
+      // A late "Start the goal now" starts the goal before GG Goals hears it,
+      // so the run it wakes into may already hand out work.
+      void startGoalFrom({ action: "answer", answers: late.answers }, late.prompt.questions).then(
+        () =>
+          deliverLateAnswer(late, {
+            queueMessage: (text) => session.queueMessage(text),
+            isBusy: () => running || runClaim.active || autopilotActive,
+            onQueued: () =>
+              broadcast("queued", {
+                count: session.getQueuedCount(),
+                messages: session.listQueuedMessages(),
+              }),
+            startIdleRun: () => void runStrandedQueue(),
           }),
-        startIdleRun: () => void runStrandedQueue(),
-      });
+      );
     },
   });
-  const askUserTool = createAskUserTool(asks.park);
+  // A goal starts when the user picks "Start the goal now" from GG Goals'
+  // question: answered while it waits, or late, after its deadline (see
+  // onLateAnswer). Recorded once, and announced so the window can switch to
+  // the goal's world view. Never throws: a failed write leaves it briefing.
+  const startGoalFrom = async (
+    result: AskUserResult,
+    questions: ReadonlyArray<AskQuestion>,
+  ): Promise<void> => {
+    const current = goal;
+    if (!current) return;
+    const started = await startGoalOnAnswer(
+      current.dir,
+      current.record,
+      result,
+      new Date(),
+      questions,
+    ).catch((err: unknown) => {
+      log("WARN", "app-sidecar", "couldn't record goal start", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    });
+    if (started) {
+      goal = { dir: current.dir, record: started };
+      broadcast("goal_state", { id: started.id, phase: goalPhase(started) });
+    }
+  };
+  const askUserTool = createAskUserTool(async (request) => {
+    const result = await asks.park(request);
+    await startGoalFrom(result, request.questions);
+    return result;
+  });
 
   // The session file path to resume (passed by the daemon's POST /session);
-  // empty/unset starts a fresh session.
-  const resumeSessionPath = opts.sessionPath;
+  // empty/unset starts a fresh session. A file that's gone (retention cleaned
+  // it up, or its goal was deleted) starts fresh too: failing instead left
+  // the window with no session at all, so not even its goal list loaded.
+  const resumeSessionPath =
+    opts.sessionPath &&
+    (await fs.access(opts.sessionPath).then(
+      () => true,
+      () => false,
+    ))
+      ? opts.sessionPath
+      : undefined;
+  if (opts.sessionPath && !resumeSessionPath) {
+    log("WARN", "app-sidecar", "session file gone, starting fresh", { cwd });
+  }
 
   let abort = new AbortController();
   const baseSessionOptions = {
@@ -785,6 +884,18 @@ async function createSession(
       sessionsDir: paths.sessionsDir,
       additionalTools: [askUserTool],
     });
+  } else if (goal) {
+    // A Goal window talks to GG Goals, the orchestrator, not the coding agent.
+    session = createGoalsAgentSession({
+      ...baseSessionOptions,
+      goal,
+      // Memory and the attached projects' rules, read once for this session.
+      extras: await loadGoalBriefExtras(goal),
+      // Read live: the goal turns active mid-session when the user starts it.
+      isActive: () => Boolean(goal?.record.startedAt),
+      getChildModel: () => goalCritterPick(goal?.record),
+      additionalTools: [askUserTool],
+    });
   } else {
     session = new AgentSession({
       ...baseSessionOptions,
@@ -814,6 +925,17 @@ async function createSession(
     });
   }
   await session.initialize();
+  // A goal's attached folders join its workspace so the coordinator can read
+  // them. A resumed session may already carry them; `addDirectory` skips those.
+  if (goal) {
+    for (const item of goal.record.context) {
+      if (item.kind !== "folder") continue;
+      const added = await session.addDirectory(item.path);
+      if (!added.ok && !added.error.startsWith("Already in the workspace")) {
+        log("WARN", "app-sidecar", "goal context folder unavailable", { error: added.error });
+      }
+    }
+  }
   if (mode === "chat") {
     const restoredAgent = [...session.getAppMarkers()]
       .reverse()
@@ -906,21 +1028,18 @@ async function createSession(
   }
 
   // Workspace extras (context window, git status, background tasks). Git state
-  // is resolved once at startup and refreshed after every run; the context
-  // window follows the active model.
-  const [initialGitBranch, initialGitIsRepo, initialDirtyFileCount, initialGitHubSlug] =
-    await Promise.all([
-      getGitBranch(cwd).catch(() => null),
-      isGitRepo(cwd).catch(() => false),
-      getGitDirtyFileCount(cwd).catch(() => 0),
-      getGitHubRepoSlug(cwd).catch(() => null),
-    ]);
-  let gitBranch: string | null = initialGitBranch;
-  let gitIsRepo: boolean = initialGitIsRepo;
-  let gitDirtyFileCount = initialDirtyFileCount;
+  // is resolved at startup and refreshed after every run; the context window
+  // follows the active model. A Goal window reads git from its attached
+  // project folder, not the goal folder (see resolveGitCwd), and re-targets
+  // when the goal's folders change (`retargetGit`).
+  let gitCwd = await resolveGitCwd(cwd, goal?.record ?? null);
+  const initialGit = await readGitState(gitCwd);
+  let gitBranch: string | null = initialGit.branch;
+  let gitIsRepo: boolean = initialGit.isRepo;
+  let gitDirtyFileCount = initialGit.dirtyFileCount;
   // Open issue/PR counts for the origin repo's GitHub slug, via the `gh` CLI's
   // auth. null = unknown (gh missing/unauthed, non-GitHub origin) → chips hidden.
-  const gitHubSlug: string | null = initialGitHubSlug;
+  let gitHubSlug: string | null = initialGit.gitHubSlug;
   let gitHubIssues: number | null = null;
   let gitHubPRs: number | null = null;
   let gitHubCI: GitHubCI | null = null;
@@ -1601,15 +1720,15 @@ async function createSession(
       // A run may have switched branches, changed files, or spawned/finished
       // background tasks. Refresh the workspace extras once it settles.
       [gitBranch, gitIsRepo, gitDirtyFileCount] = await Promise.all([
-        getGitBranch(cwd).catch(() => gitBranch),
-        isGitRepo(cwd).catch(() => gitIsRepo),
-        getGitDirtyFileCount(cwd).catch(() => gitDirtyFileCount),
+        getGitBranch(gitCwd).catch(() => gitBranch),
+        isGitRepo(gitCwd).catch(() => gitIsRepo),
+        getGitDirtyFileCount(gitCwd).catch(() => gitDirtyFileCount),
       ]);
       // A run may have opened/closed issues or PRs — refresh fire-and-forget so
       // teardown isn't delayed by the network. Broadcasts itself on change.
-      gitHubCountsPoll?.refresh();
-      ciPoll.refresh();
-      healthPoll?.refresh();
+      repoWatch.gitHubCounts?.refresh();
+      repoWatch.ci.refresh();
+      repoWatch.health?.refresh();
       // Serialize behind any marker/tool-triggered refresh so the terminal
       // progress snapshot uses the live plan file. Once every canonical step
       // is complete, remove the approved plan from future system prompts and
@@ -1967,36 +2086,77 @@ async function createSession(
   // (they change outside the agent: editor saves, commits, teammates). Branch/
   // repo state already refreshes after agent runs. The pollers are shared with
   // every other window on the same repo; each window broadcasts only changes.
-  const repoKey = path.resolve(cwd);
-  const dirtyFilesPoll = repoPolls.dirtyFiles.subscribe(repoKey, (next) => {
-    if (next === gitDirtyFileCount) return;
-    gitDirtyFileCount = next;
-    broadcast("extras", footerExtras());
-  });
-  // Failed checks publish nothing, so the chips keep their last-known numbers
-  // instead of flickering off on a timeout. None when origin isn't GitHub.
-  const gitHubCountsPoll = gitHubSlug
-    ? repoPolls.gitHubCounts.subscribe(gitHubSlug, (counts) => {
-        if (counts.issues === gitHubIssues && counts.prs === gitHubPRs) return;
-        gitHubIssues = counts.issues;
-        gitHubPRs = counts.prs;
-        broadcast("extras", footerExtras());
-      })
-    : null;
-  const ciPoll = repoPolls.gitHubCI.subscribe(repoKey, (next) => {
-    if (JSON.stringify(next) === JSON.stringify(gitHubCI)) return;
-    gitHubCI = next;
-    broadcast("extras", footerExtras());
-  });
-  // Project Health is a code-workspace signal; chat and motion windows skip the scan.
-  const healthPoll =
-    mode === "code"
-      ? repoPolls.projectHealth.subscribe(repoKey, (next) => {
-          if (JSON.stringify(next) === JSON.stringify(projectHealthScan)) return;
-          projectHealthScan = next;
+  function watchRepo(dir: string) {
+    const repoKey = path.resolve(dir);
+    const dirtyFiles = repoPolls.dirtyFiles.subscribe(repoKey, (next) => {
+      if (next === gitDirtyFileCount) return;
+      gitDirtyFileCount = next;
+      broadcast("extras", footerExtras());
+    });
+    // Failed checks publish nothing, so the chips keep their last-known numbers
+    // instead of flickering off on a timeout. None when origin isn't GitHub.
+    const gitHubCounts = gitHubSlug
+      ? repoPolls.gitHubCounts.subscribe(gitHubSlug, (counts) => {
+          if (counts.issues === gitHubIssues && counts.prs === gitHubPRs) return;
+          gitHubIssues = counts.issues;
+          gitHubPRs = counts.prs;
           broadcast("extras", footerExtras());
         })
       : null;
+    const ci = repoPolls.gitHubCI.subscribe(repoKey, (next) => {
+      if (JSON.stringify(next) === JSON.stringify(gitHubCI)) return;
+      gitHubCI = next;
+      broadcast("extras", footerExtras());
+    });
+    // Project Health is a code-workspace signal; chat and motion windows skip the scan.
+    const health =
+      mode === "code"
+        ? repoPolls.projectHealth.subscribe(repoKey, (next) => {
+            if (JSON.stringify(next) === JSON.stringify(projectHealthScan)) return;
+            projectHealthScan = next;
+            broadcast("extras", footerExtras());
+          })
+        : null;
+    return {
+      gitHubCounts,
+      ci,
+      health,
+      unsubscribe(): void {
+        dirtyFiles.unsubscribe();
+        gitHubCounts?.unsubscribe();
+        ci.unsubscribe();
+        health?.unsubscribe();
+      },
+    };
+  }
+  let repoWatch = watchRepo(gitCwd);
+  let repoWatchStopped = false;
+  let gitTargetGeneration = 0;
+  /**
+   * A goal's attached folders changed: point the titlebar's git state at the
+   * new project folder. No-op when the target is unchanged; a newer call or
+   * teardown supersedes one still reading git.
+   */
+  async function retargetGit(): Promise<void> {
+    const generation = ++gitTargetGeneration;
+    const next = await resolveGitCwd(cwd, goal?.record ?? null);
+    if (generation !== gitTargetGeneration || repoWatchStopped || next === gitCwd) return;
+    const state = await readGitState(next);
+    if (generation !== gitTargetGeneration || repoWatchStopped) return;
+    repoWatch.unsubscribe();
+    gitCwd = next;
+    gitBranch = state.branch;
+    gitIsRepo = state.isRepo;
+    gitDirtyFileCount = state.dirtyFileCount;
+    gitHubSlug = state.gitHubSlug;
+    // The old repo's numbers don't apply; the new watchers fill these in.
+    gitHubIssues = null;
+    gitHubPRs = null;
+    gitHubCI = null;
+    projectHealthScan = null;
+    repoWatch = watchRepo(gitCwd);
+    broadcast("extras", footerExtras());
+  }
 
   const routeCtx: SessionRouteContext = {
     get session() {
@@ -2049,6 +2209,23 @@ async function createSession(
     cwd,
     asks,
     runClaim,
+    sessionId: opts.id,
+    sessionIdsAt,
+    busyAt,
+    get goal() {
+      return goal;
+    },
+    set goal(v) {
+      const foldersBefore = JSON.stringify(goal?.record.context ?? []);
+      goal = v;
+      if (JSON.stringify(goal?.record.context ?? []) !== foldersBefore) {
+        retargetGit().catch((err: unknown) => {
+          log("WARN", "app-sidecar", "goal git retarget failed", {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
+    },
     broadcast,
     get scheduledRunActive() {
       return scheduledRunActive;
@@ -2210,6 +2387,7 @@ async function createSession(
   ): void {
     if (handleSessionRoutes(routeCtx, req, res, url, method)) return;
     if (handleWorkspaceRoutes(routeCtx, req, res, url, method)) return;
+    if (handleGoalRoutes(routeCtx, req, res, url, method)) return;
     if (handleHistoryRoutes(routeCtx, req, res, url, method)) return;
     if (handlePromptRoutes(routeCtx, req, res, url, method)) return;
     if (handleTaskRoutes(routeCtx, req, res, url, method)) return;
@@ -2222,6 +2400,12 @@ async function createSession(
   }
 
   async function dispose(): Promise<void> {
+    // A window closed (or switched project) mid-run: stop the run itself, any
+    // run-all sweep or autopilot turn, and a model download this window
+    // started. Otherwise they keep streaming tokens and running tools on a
+    // session that is being torn down.
+    abortOwnedWork();
+    cancelHfPull();
     releaseRunAwake?.();
     releaseRunAwake = null;
     releaseSubagentAwake?.();
@@ -2230,10 +2414,8 @@ async function createSession(
     asks.cancelAll();
     tasksPollStopped = true;
     if (tasksPoll) clearTimeout(tasksPoll);
-    dirtyFilesPoll.unsubscribe();
-    gitHubCountsPoll?.unsubscribe();
-    ciPoll.unsubscribe();
-    healthPoll?.unsubscribe();
+    repoWatchStopped = true;
+    repoWatch.unsubscribe();
     // Stop the Telegram serve loop + dispose its per-chat sessions.
     if (serveController) await serveController.stop().catch(() => {});
     for (const c of clients) c.res.end();
@@ -2264,6 +2446,11 @@ async function createSession(
     handle,
     dispose,
     stopBackgroundProcesses,
+    isBusy: () =>
+      running ||
+      runClaim.active ||
+      autopilotActive ||
+      session.listSubAgents().some((w) => w.state === "running" || w.state === "starting"),
   };
 }
 

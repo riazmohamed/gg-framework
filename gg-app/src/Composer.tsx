@@ -67,6 +67,8 @@ export interface ComposerProps {
   mentionedPaths: string[];
   removeMentionChip: (p: string) => void;
   visibleQueuedMessages: readonly QueuedMessage[];
+  /** Bumped by every send; the strips a send clears leave in that same commit. */
+  sendCount: number;
   handleCancelQueued: (id: string) => void;
   enhanceAnim: { oldText: string; newText: string | null } | null;
   onEnhanceAnimDone: () => void;
@@ -131,6 +133,7 @@ export function Composer({
   mentionedPaths,
   removeMentionChip,
   visibleQueuedMessages,
+  sendCount,
   handleCancelQueued,
   enhanceAnim,
   onEnhanceAnimDone,
@@ -186,11 +189,13 @@ export function Composer({
         attachments={attachments}
         onRemove={removeAttachment}
         onOpenImage={(src) => void openImageDataUrl(src)}
+        sendCount={sendCount}
       />
-      <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
+      <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} sendCount={sendCount} />
       <CacheExpiryNotice
         expiry={state?.cacheExpiry}
         running={running}
+        sendCount={sendCount}
         onCompact={() =>
           void sendPrompt("/compact").catch(() =>
             toast("Couldn't start compaction. Try again.", "error"),
@@ -239,6 +244,8 @@ export function Composer({
           )}
           <textarea
             ref={attachInput}
+            // AskBand's number keys still pick an option while this is empty.
+            data-composer-input=""
             className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
             rows={1}
             // Lock the input while the dissolve→decode animation plays: the caret

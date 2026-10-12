@@ -5,6 +5,8 @@ import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { KenModelPref } from "../core/ken-model.js";
 import { SettingsManager, type Settings } from "../core/settings-manager.js";
 import { log } from "../core/logger.js";
+import { atomicWrite } from "../core/session-storage.js";
+import { withFileLock } from "@abukhaled/gg-core";
 
 export const ALL_PROVIDERS: Provider[] = [
   // US
@@ -80,8 +82,15 @@ export function projectModelKey(cwd: string): string {
 
 export async function loadAppSettings(): Promise<AppSettings> {
   try {
-    const raw = JSON.parse(await fs.readFile(appSettingsFile(), "utf-8")) as Partial<AppSettings>;
+    const parsed = JSON.parse(await fs.readFile(appSettingsFile(), "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { projectsRoot: defaultProjectsRoot() };
+    }
+    const raw = parsed as Partial<AppSettings>;
     return {
+      // Keep every key this module doesn't own (localEndpoints, fields a newer
+      // app version or the Rust side writes) so a save never drops them.
+      ...raw,
       projectsRoot:
         typeof raw.projectsRoot === "string" && raw.projectsRoot.trim()
           ? raw.projectsRoot
@@ -102,7 +111,24 @@ export async function loadAppSettings(): Promise<AppSettings> {
 
 export async function saveAppSettings(settings: AppSettings): Promise<void> {
   await fs.mkdir(path.dirname(appSettingsFile()), { recursive: true });
-  await fs.writeFile(appSettingsFile(), JSON.stringify(settings, null, 2), "utf-8");
+  await atomicWrite(appSettingsFile(), JSON.stringify(settings, null, 2));
+}
+
+/**
+ * Read-modify-write gg-app.json under the shared file lock, so two windows
+ * saving at once (or a local-endpoint save racing a model save) can't lose
+ * each other's change. Every settings write in the sidecar goes through here.
+ */
+export async function updateAppSettings<T = void>(
+  mutate: (settings: AppSettings) => T | Promise<T>,
+): Promise<T> {
+  await fs.mkdir(path.dirname(appSettingsFile()), { recursive: true });
+  return withFileLock(appSettingsFile(), async () => {
+    const s = await loadAppSettings();
+    const result = await mutate(s);
+    await saveAppSettings(s);
+    return result;
+  });
 }
 
 /** Read this project's persisted model/thinking prefs, if any. */
@@ -114,10 +140,10 @@ export async function loadProjectModelPrefs(cwd: string): Promise<ProjectModelPr
 /** Persist this project's model/thinking prefs via read-modify-write so the rest
  *  of the settings file (projectsRoot, other projects' entries) is preserved. */
 export async function saveProjectModelPrefs(cwd: string, prefs: ProjectModelPrefs): Promise<void> {
-  const s = await loadAppSettings();
   const key = projectModelKey(cwd);
-  s.projectModels = { ...(s.projectModels ?? {}), [key]: prefs };
-  await saveAppSettings(s);
+  await updateAppSettings((s) => {
+    s.projectModels = { ...(s.projectModels ?? {}), [key]: prefs };
+  });
 }
 
 /** Read this project's persisted Ken model override, if any. */
@@ -129,13 +155,13 @@ export async function loadKenModelPref(cwd: string): Promise<KenModelPref | unde
 /** Persist (or with null, clear) this project's Ken model override via
  *  read-modify-write so the rest of the settings file is preserved. */
 export async function saveKenModelPref(cwd: string, pref: KenModelPref | null): Promise<void> {
-  const s = await loadAppSettings();
   const key = projectModelKey(cwd);
-  const next = { ...(s.kenModels ?? {}) };
-  if (pref) next[key] = pref;
-  else delete next[key];
-  s.kenModels = next;
-  await saveAppSettings(s);
+  await updateAppSettings((s) => {
+    const next = { ...(s.kenModels ?? {}) };
+    if (pref) next[key] = pref;
+    else delete next[key];
+    s.kenModels = next;
+  });
 }
 
 /** Read this project's persisted autopilot flag (default off). */
@@ -147,10 +173,10 @@ export async function loadAutopilot(cwd: string): Promise<boolean> {
 /** Persist this project's autopilot flag via read-modify-write so the rest of
  *  the settings file (projectsRoot, model map, other projects) is preserved. */
 export async function saveAutopilot(cwd: string, enabled: boolean): Promise<void> {
-  const s = await loadAppSettings();
   const key = projectModelKey(cwd);
-  s.autopilot = { ...(s.autopilot ?? {}), [key]: enabled };
-  await saveAppSettings(s);
+  await updateAppSettings((s) => {
+    s.autopilot = { ...(s.autopilot ?? {}), [key]: enabled };
+  });
 }
 
 /**
@@ -188,11 +214,6 @@ export async function persistThinkingLevel(
   } catch (err) {
     log("WARN", "app-sidecar", "failed to persist thinking level", { err: String(err) });
   }
-}
-
-/** Validate a project folder name: lowercase letters, digits, dashes only. */
-export function isValidProjectName(name: string): boolean {
-  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name);
 }
 
 // ── History reconstruction types ──────────────────────────

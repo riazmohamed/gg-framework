@@ -22,6 +22,8 @@ interface Props {
    *  clears the pin. `followActive` makes it the selected value. */
   onSelectFollow?: () => void;
   followActive?: boolean;
+  /** Who the follow choice follows ("GG Coder" by default). */
+  followLabel?: string;
   /** The model list failed to load. With no models, the locked picker says
    *  so instead of claiming it is still connecting. */
   loadFailed?: boolean;
@@ -102,6 +104,7 @@ export function ModelSelect({
   color,
   onSelectFollow,
   followActive,
+  followLabel = "GG Coder",
   loadFailed,
 }: Props): React.ReactElement {
   const [open, setOpen] = useState(false);
@@ -258,8 +261,8 @@ export function ModelSelect({
           {onSelectFollow && (
             <option value={FOLLOW_VALUE}>
               {following
-                ? `Follow GG Coder (${modelDisplayName(models, currentModel)})`
-                : "Follow GG Coder"}
+                ? `Follow ${followLabel} (${modelDisplayName(models, currentModel)})`
+                : `Follow ${followLabel}`}
             </option>
           )}
           {!known && currentModel !== "" && <option value={currentModel}>{currentModel}</option>}
@@ -317,9 +320,9 @@ export function ModelSelect({
                   aria-checked={following}
                   style={{ color: following ? theme.primary : theme.text }}
                   onClick={chooseFollow}
-                  title="Ken adopts whatever model GG Coder is using"
+                  title={`Use whatever model ${followLabel} is using`}
                 >
-                  Follow GG Coder
+                  {`Follow ${followLabel}`}
                 </button>
               )}
               {groups.map((group) => (

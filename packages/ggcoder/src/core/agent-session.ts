@@ -92,7 +92,12 @@ import type { BackgroundProcess } from "./process-manager.js";
 import type { DebugManager } from "../tools/debug.js";
 import { buildProcessCompletionFollowUp } from "./process-gate.js";
 import { PLAN_SUBMISSION_NUDGE, shouldNudgePlanSubmission } from "./plan-submission-gate.js";
-import { buildSubAgentCompletionFollowUp, type SubAgentManager } from "./subagent-manager.js";
+import {
+  buildSubAgentCompletionFollowUp,
+  type ChildModelPick,
+  type SubAgentManager,
+  type SubAgentSnapshot,
+} from "./subagent-manager.js";
 import { applyAsyncSubagentPolicy } from "./subagent-policy.js";
 import {
   resolveResponsesLite,
@@ -138,8 +143,8 @@ import {
 import { extractPlanSteps, findCompletedMarkers } from "../utils/plan-steps.js";
 import { readFileSync } from "node:fs";
 import { clampThinkingForPlanMode } from "./thinking-level.js";
-import { pruneStaleToolResults } from "./compaction/tool-result-pruner.js";
-import { discoverAgents } from "./agents.js";
+import { pruneStaleToolResults, shouldPruneToolResults } from "./compaction/tool-result-pruner.js";
+import { discoverAgents, type AgentDefinition } from "./agents.js";
 import { enhancePrompt, type EnhanceResult } from "../utils/prompt-enhancer.js";
 import { detectLanguages, detectProjectStack, type LanguageId } from "./language-detector.js";
 import { buildLoopBreakMessage } from "./loop-breaker.js";
@@ -151,7 +156,7 @@ import {
   SEMANTIC_LOOP_JUDGE_TIMEOUT_MS,
   withJudgeTimeout,
 } from "./semantic-loop-check.js";
-import { buildEnvDeltaMessage } from "./env-delta.js";
+import { buildEnvDeltaMessage, buildLanguageUpdateMessage } from "./env-delta.js";
 import { wrapSteeringText, buildNotificationSteeringText, STEERING_PREFIX } from "./steering.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
 import { VerificationGate, VERIFICATION_STATE_KIND } from "./verification-gate.js";
@@ -288,6 +293,45 @@ export interface AgentSessionOptions {
    * UI. Omitted by callers that don't want plan mode (CLI wires its own).
    */
   onEnterPlan?: (reason?: string) => void | Promise<void>;
+  /**
+   * Built-in tools to keep in the core set instead of the deferred
+   * tool_search catalog: for a specialist whose job is a deferred tool (GG
+   * Goals orchestrates with spawn_agent and friends). Fixed for the session.
+   */
+  coreTools?: readonly string[];
+  /**
+   * Default provider/model for the workers this session spawns, when their
+   * agent names no model of its own. Read at spawn time.
+   */
+  getChildModel?: () => ChildModelPick | undefined;
+  /**
+   * Wrap each built-in tool once, at registration. Must keep the tool's name,
+   * description and parameters (only `execute` may change), so the tool block
+   * stays prompt-cache stable. Used by GG Goals to gate its own editing.
+   */
+  wrapTool?: (tool: AgentTool) => AgentTool;
+  /**
+   * Built-in tools this session never has, removed at registration (before
+   * tiering) and left out of the system prompt's Tools section. Unlike
+   * `allowedTools`, the rest of the tool set and its tiering are untouched.
+   * Fixed for the session, so the cached tool block never changes. Used by
+   * GG Goals, which never edits or runs anything itself.
+   */
+  withoutTools?: readonly string[];
+  /**
+   * A fixed team of sub-agents, replacing agent discovery (project, global
+   * and bundled): the only agents spawn_agent and subagent can start. Used by
+   * GG Goals, whose workers follow their own rules (goals-agent/goal-team.ts).
+   */
+  subAgents?: readonly AgentDefinition[];
+  /**
+   * Start every spawned child with this session's extra workspace roots too
+   * (less the folder it works in), so it can read and change all of them.
+   * GG Goals' workers work across all of a goal's attached folders.
+   */
+  shareRootsWithSubAgents?: boolean;
+  /** The sub-agent a spawned child is when the spawn names none (one of `subAgents`). */
+  defaultSubAgent?: string;
   onExitPlan?: (planPath: string) => Promise<ToolExecuteResult>;
   /**
    * If provided, the session's tool set is filtered to ONLY these tool names
@@ -541,6 +585,9 @@ export class AgentSession {
    * for no benefit.
    */
   private activeLanguages = new Set<LanguageId>();
+  /** Languages the model has already been given guidance for, via the system
+   *  prompt or an appended language update. */
+  private announcedLanguages = new Set<LanguageId>();
   /** Shared with the tool layer so plan-mode restrictions read live state. */
   private planModeRef = { current: false };
   /** Path of the approved plan currently being implemented, or undefined. When
@@ -648,7 +695,10 @@ export class AgentSession {
     this.sessionManager = new SessionManager(this.opts.sessionRootDir ?? paths.sessionsDir);
 
     const projectCustomization = this.opts.projectCustomization !== false;
-    if (projectCustomization) {
+    // A sub-agent worker never creates them: the session that owns the
+    // project does. GG Goals' workers work in the user's attached folders,
+    // which mustn't gain empty .gg folders as a side effect.
+    if (projectCustomization && !this.opts.subagentWorker) {
       // Ensure project-local .gg directories exist.
       const localGGDir = path.join(this.cwd, ".gg");
       await fs.mkdir(path.join(localGGDir, "skills"), { recursive: true });
@@ -668,14 +718,16 @@ export class AgentSession {
 
     // Discover agents and create tools (with sub-agent support). Chat sessions
     // can retain bundled workers without loading project/global customization.
-    const agents = projectCustomization
-      ? await discoverAgents({
-          globalAgentsDir: paths.agentsDir,
-          projectDir: this.cwd,
-        })
-      : this.opts.globalSubagents
-        ? await discoverAgents({ globalAgentsDir: paths.agentsDir })
-        : [];
+    const agents = this.opts.subAgents
+      ? [...this.opts.subAgents]
+      : projectCustomization
+        ? await discoverAgents({
+            globalAgentsDir: paths.agentsDir,
+            projectDir: this.cwd,
+          })
+        : this.opts.globalSubagents
+          ? await discoverAgents({ globalAgentsDir: paths.agentsDir })
+          : [];
     const {
       tools: builtInTools,
       processManager,
@@ -687,6 +739,8 @@ export class AgentSession {
       subAgentManager,
     } = await createTools(this.cwd, {
       agents,
+      shareWorkspaceRoots: this.opts.shareRootsWithSubAgents,
+      defaultSubAgent: this.opts.defaultSubAgent,
       skills: this.skills,
       contextLimits: this.contextLimits,
       provider: this.provider,
@@ -728,6 +782,7 @@ export class AgentSession {
       getBaseUrl: () => this.baseUrl,
       getCacheKey: () => this.getPromptCacheKey(),
       getMaxPerModel: () => this.settingsManager.get("subagentMaxPerModel"),
+      getChildModel: this.opts.getChildModel,
       // A persistent child is already the single allowed fan-out level. Blocking
       // `subagent` here created a timeout sandwich: the nested call could consume
       // the child's entire 10-minute turn budget, discarding all nested results.
@@ -755,6 +810,15 @@ export class AgentSession {
     // a hallucinated call can't mutate the repo — and buildSystemPrompt below is
     // fed the same filtered names so the Tools section matches exactly.
     this.tools = this.opts.allowedTools ? tools.filter((t) => this.isToolAllowed(t.name)) : tools;
+    const without = new Set(this.opts.withoutTools ?? []);
+    if (without.size > 0) this.tools = this.tools.filter((t) => !without.has(t.name));
+    // A host may wrap built-ins (GG Goals holds back its own editing once a
+    // goal is underway). Same names and schemas, so the cached tool block and
+    // the system prompt's Tools section are unchanged.
+    if (this.opts.wrapTool) {
+      const wrap = this.opts.wrapTool;
+      this.tools = this.tools.map((t) => wrap(t));
+    }
     // Both delegation tools carry the agent roster; when both survive the
     // allow-list, `subagent` points at `spawn_agent`'s copy instead.
     if (this.tools.some((t) => t.name === "spawn_agent")) {
@@ -771,7 +835,14 @@ export class AgentSession {
       // catalog must hold the wrapped tool so a promoted spawn still loads
       // wait_agent.
       this.promoteFollowUpTools();
-      const { core, deferred } = partitionToolsByTier(this.tools);
+      const partition = partitionToolsByTier(this.tools);
+      // A session can keep chosen built-ins in its core set (GG Goals
+      // orchestrates, so its agent tools are always at hand). Fixed for the
+      // session, so the cached tool block stays byte-stable.
+      const keep = new Set(this.opts.coreTools ?? []);
+      const deferred = partition.deferred.filter((t) => !keep.has(t.name));
+      // Everything not deferred, in the original relative order.
+      const core = keep.size > 0 ? this.tools.filter((t) => !deferred.includes(t)) : partition.core;
       if (deferred.length > 0) {
         // Append-only: `core` preserves the original relative order and
         // tool_search is pushed after it, so the serialized tool block that
@@ -807,6 +878,9 @@ export class AgentSession {
       await this.connectMcpServers();
     }
 
+    // Detect languages before the first render so the opening prompt already
+    // carries their packs and only a genuinely new language needs an update.
+    this.refreshActiveLanguages();
     const basePrompt = await this.buildBasePrompt(false, undefined);
     this.baseSystemPrompt = basePrompt;
     this.messages = [{ role: "system", content: this.withSystemPromptTail(basePrompt) }];
@@ -1165,6 +1239,7 @@ export class AgentSession {
     if (slash?.kind === "template") {
       // Prompt templates remain human-originated: the user invoked the command.
       const userMessage: Message = { role: "user", content: slash.fullPrompt, provenance };
+      await this.announceNewLanguages();
       this.messages.push(userMessage);
       await this.persistMessage(userMessage);
       this.lastPersistedIndex = this.messages.length;
@@ -1182,6 +1257,7 @@ export class AgentSession {
 
     // Push user message
     const userMessage: Message = { role: "user", content, provenance };
+    await this.announceNewLanguages();
     this.messages.push(userMessage);
     await this.persistMessage(userMessage);
     this.lastPersistedIndex = this.messages.length;
@@ -1207,6 +1283,7 @@ export class AgentSession {
       content: parts,
       provenance: { source: "human", kind: "prompt", visibility: "transcript" },
     };
+    await this.announceNewLanguages();
     this.messages.push(userMessage);
     await this.persistMessage(userMessage);
     this.lastPersistedIndex = this.messages.length;
@@ -2093,37 +2170,6 @@ export class AgentSession {
           if (!force) {
             if (!this.settingsManager.get("autoCompact")) return messages;
 
-            // Cheap stale-tool-output pruning before the expensive LLM
-            // compaction check. In-place mutation preserves anchors; drop the
-            // retained usage afterwards since it counted the pruned content.
-            const pruneResult = pruneStaleToolResults(messages);
-            if (pruneResult.pruned) {
-              this.cacheDiagnostics.noteEdit("tool_prune", pruneResult.freedTokens);
-              this.providerContext = null;
-              log("INFO", "compaction", "Pruned stale tool outputs", {
-                prunedResults: String(pruneResult.prunedResults),
-                compactedToolCalls: String(pruneResult.compactedToolCalls),
-                freedTokens: String(pruneResult.freedTokens),
-              });
-            }
-
-            if (Date.now() < this.compactionRetryAfter) return messages;
-
-            // The turn's own usage also counted the pruned content — after a
-            // prune, fall back to estimating the (now smaller) history so the
-            // freed tokens actually defer the LLM compaction.
-            let usage = pruneResult.pruned ? undefined : transformOpts.usage;
-            let pendingMessages = transformOpts.pendingMessages;
-            if (!usage && this.providerContext) {
-              const anchorIndex = messages.lastIndexOf(this.providerContext.anchor);
-              if (anchorIndex >= 0) {
-                usage = this.providerContext.usage;
-                pendingMessages = messages.slice(anchorIndex + 1);
-              } else {
-                this.providerContext = null;
-              }
-            }
-
             const contextWindow = getContextWindow(this.model, {
               provider: this.provider,
               accountId,
@@ -2136,10 +2182,48 @@ export class AgentSession {
               accountId,
               approvedPlanPath: this.approvedPlanPath,
             });
-            const activeTokens = calculateActiveContextTokens(messages, {
-              usage,
-              pendingMessages,
-            });
+            // Provider usage when there is some, else an estimate of the history.
+            const measureActiveTokens = (): number => {
+              let usage = transformOpts.usage;
+              let pendingMessages = transformOpts.pendingMessages;
+              if (!usage && this.providerContext) {
+                const anchorIndex = messages.lastIndexOf(this.providerContext.anchor);
+                if (anchorIndex >= 0) {
+                  usage = this.providerContext.usage;
+                  pendingMessages = messages.slice(anchorIndex + 1);
+                } else {
+                  this.providerContext = null;
+                }
+              }
+              return calculateActiveContextTokens(messages, { usage, pendingMessages });
+            };
+            let activeTokens = measureActiveTokens();
+
+            // Cheap stale-tool-output pruning before the expensive LLM
+            // compaction check, once the context is big enough for the freed
+            // tokens to be worth a cache rewrite. In-place mutation preserves
+            // anchors; drop the retained usage afterwards since it counted the
+            // pruned content.
+            if (shouldPruneToolResults(activeTokens, policy.targetTokens)) {
+              const pruneResult = pruneStaleToolResults(messages);
+              if (pruneResult.pruned) {
+                this.cacheDiagnostics.noteEdit("tool_prune", pruneResult.freedTokens);
+                this.providerContext = null;
+                log("INFO", "compaction", "Pruned stale tool outputs", {
+                  prunedResults: String(pruneResult.prunedResults),
+                  compactedToolCalls: String(pruneResult.compactedToolCalls),
+                  freedTokens: String(pruneResult.freedTokens),
+                });
+                // The turn's own usage also counted the pruned content — estimate
+                // the (now smaller) history so the freed tokens actually defer
+                // the LLM compaction.
+                activeTokens = calculateActiveContextTokens(messages, {
+                  pendingMessages: transformOpts.pendingMessages,
+                });
+              }
+            }
+
+            if (Date.now() < this.compactionRetryAfter) return messages;
             // An approved plan runs as ONE run, so step boundaries are only
             // visible here, between model steps — not after the run ends.
             const planStep = this.observePlanStepProgress(messages, contextWindow, activeTokens);
@@ -2966,6 +3050,9 @@ export class AgentSession {
     // new session's /history, and get re-persisted into the new file by the
     // next compaction — the cross-session duplicate-marker propagation bug.
     this.markers.clear();
+    // Detect languages before the first render so the opening prompt already
+    // carries their packs and only a genuinely new language needs an update.
+    this.refreshActiveLanguages();
     const basePrompt = await this.buildBasePrompt(false, undefined);
     this.baseSystemPrompt = basePrompt;
     this.messages = [{ role: "system", content: this.withSystemPromptTail(basePrompt) }];
@@ -3186,6 +3273,21 @@ export class AgentSession {
       .join("\n\n");
   }
 
+  /**
+   * Tell the agent a new fact at its next turn, as a short hidden message
+   * appended after the cached prompt (the same channel as a finished worker),
+   * so a mid-session change reaches it without re-rendering the prompt. A
+   * later note with the same id replaces one not yet delivered.
+   */
+  notify(id: string, text: string): void {
+    this.notifications.enqueue("goal", id, text, { terminal: true });
+  }
+
+  /** This session's sub-agents (workers), newest-state, including ones restored after a restart. */
+  listSubAgents(): SubAgentSnapshot[] {
+    return this.subAgentManager?.list() ?? [];
+  }
+
   /** Snapshot of background processes (bash run_in_background), newest-state. */
   listBackgroundProcesses(): BackgroundProcess[] {
     return this.processManager?.list() ?? [];
@@ -3266,15 +3368,26 @@ export class AgentSession {
    */
   async addDirectory(dir: string): Promise<WorkspaceRootResult> {
     const result = await addWorkspaceRoot(this.cwd, this.additionalRoots, dir);
-    if (result.ok) await this.rebuildSystemPromptInPlace();
+    if (result.ok) await this.refreshPromptForRoots();
     return result;
   }
 
   /** Remove an exact root previously added with `/add-dir`. */
   async removeDirectory(dir: string): Promise<WorkspaceRootResult> {
     const result = removeWorkspaceRoot(this.cwd, this.additionalRoots, dir);
-    if (result.ok) await this.rebuildSystemPromptInPlace();
+    if (result.ok) await this.refreshPromptForRoots();
     return result;
+  }
+
+  /**
+   * Name a root change in the prompt only while there is no conversation yet.
+   * Mid-conversation the env-delta note tells the model instead: the roots sit
+   * in the Environment section, and rewriting it would invalidate every cached
+   * message after it (a goal attaching a folder re-sent ~75k tokens).
+   */
+  private async refreshPromptForRoots(): Promise<void> {
+    if (this.messages.some((message) => message.role !== "system")) return;
+    await this.rebuildSystemPromptInPlace();
   }
 
   /**
@@ -3319,6 +3432,8 @@ export class AgentSession {
     if (this.customSystemPrompt) return this.customSystemPrompt;
     const toolNames = this.tools.map((tool) => tool.name);
     const deferredToolNames = this.deferredToolNamesForPrompt(toolNames);
+    // Whatever is rendered now is what the model has been told.
+    this.announcedLanguages = new Set(this.activeLanguages);
     if (this.agentPrompt !== undefined) {
       return buildSubAgentSystemPrompt(this.agentPrompt, {
         cwd: this.cwd,
@@ -3328,6 +3443,7 @@ export class AgentSession {
         role: this.opts.agentRole,
         environment: this.recordRenderedEnvironment(),
         contextLimits: this.contextLimits,
+        ...(this.languagesApply() ? { activeLanguages: this.activeLanguages } : {}),
       });
     }
     return buildSystemPrompt(
@@ -3345,24 +3461,69 @@ export class AgentSession {
   }
 
   /**
-   * Add newly detected project languages. Returns true when the set grew and
-   * the standard prompt therefore needs a rebuild. Custom and sub-agent
-   * prompts never render packs, so detection is skipped for them.
-   */
-  /**
    * Bring the system prompt to the exact state the next provider request will
    * send. Shared by real runs and {@link prewarm} so both see one prefix.
+   *
+   * Languages are re-detected at each task boundary. Before the first reply
+   * nothing is cached worth keeping, so a new language simply rebuilds the
+   * prompt. After that the prompt is a cached prefix and is left alone: the
+   * new language is announced by {@link announceNewLanguages} instead.
    */
   private async prepareSystemPromptForRequest(): Promise<void> {
-    // Languages are re-detected at each task boundary so a project scaffolded
-    // during the previous turn gets its packs; the prompt is rebuilt only when
-    // the set grows, keeping the cached prefix stable otherwise.
-    if (this.refreshActiveLanguages()) await this.rebuildSystemPromptInPlace();
+    if (this.refreshActiveLanguages() && !this.hasReply()) {
+      await this.rebuildSystemPromptInPlace();
+    }
     this.refreshSystemPromptTail();
   }
 
+  private hasReply(): boolean {
+    return this.messages.some((m) => m.role === "assistant");
+  }
+
+  /**
+   * Give the model style packs for languages that appeared after its prompt
+   * was cached (e.g. the previous task scaffolded a TypeScript project), as a
+   * hidden message appended to the history rather than a prompt re-render that
+   * would throw away the whole cache. Runs just before a new user message is
+   * added, so the user's request stays the last thing the model reads and the
+   * update is saved in order with the rest of the conversation.
+   */
+  private async announceNewLanguages(): Promise<void> {
+    if (!this.hasReply()) return; // the next request rebuilds the prompt instead
+    this.refreshActiveLanguages();
+    const fresh = new Set(
+      [...this.activeLanguages].filter((id) => !this.announcedLanguages.has(id)),
+    );
+    if (fresh.size === 0) return;
+    for (const id of fresh) this.announcedLanguages.add(id);
+    const update = buildLanguageUpdateMessage(fresh, this.cwd);
+    if (!update) return;
+    this.messages.push(update);
+    await this.persistMessage(update);
+    this.lastPersistedIndex = this.messages.length;
+    log("INFO", "language", "Appended style packs for new languages", {
+      added: [...fresh].join(","),
+    });
+  }
+
+  /**
+   * Whether this session renders language packs: the standard prompt, and a
+   * code-writing child (a sub-agent prompt with project context). A verbatim
+   * custom prompt never does, nor do user-facing specialist agents (Motion,
+   * goals) or recon children without project context.
+   */
+  private languagesApply(): boolean {
+    if (this.customSystemPrompt) return false;
+    if (this.agentPrompt === undefined) return true;
+    return (
+      (this.opts.agentRole ?? "subagent") === "subagent" &&
+      (this.opts.agentContext ?? "project") === "project"
+    );
+  }
+
+  /** Add newly detected project languages. Returns true when the set grew. */
   private refreshActiveLanguages(): boolean {
-    if (this.customSystemPrompt || this.agentPrompt !== undefined) return false;
+    if (!this.languagesApply()) return false;
     let grew = false;
     try {
       for (const id of detectLanguages(this.cwd)) {

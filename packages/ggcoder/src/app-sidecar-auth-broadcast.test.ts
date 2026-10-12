@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { execFileSync, spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -104,10 +104,13 @@ function request(
   });
 }
 
-/** Open a window's SSE stream and collect the event types it receives. */
-function openEventStream(session: string): Promise<{ types: string[] }> {
+/** Open a window's SSE stream and collect the events it receives. */
+function openEventStream(
+  session: string,
+): Promise<{ types: string[]; frames: { type: string; data?: Record<string, unknown> }[] }> {
   return new Promise((resolve, reject) => {
     const types: string[] = [];
+    const frames: { type: string; data?: Record<string, unknown> }[] = [];
     const req = http.request(
       {
         host: "127.0.0.1",
@@ -128,7 +131,12 @@ function openEventStream(session: string): Promise<{ types: string[] }> {
             for (const line of frame.split("\n")) {
               if (!line.startsWith("data: ")) continue;
               try {
-                types.push((JSON.parse(line.slice(6)) as { type: string }).type);
+                const parsed = JSON.parse(line.slice(6)) as {
+                  type: string;
+                  data?: Record<string, unknown>;
+                };
+                types.push(parsed.type);
+                frames.push(parsed);
               } catch {
                 // Non-JSON keepalives are not events.
               }
@@ -136,7 +144,7 @@ function openEventStream(session: string): Promise<{ types: string[] }> {
             split = buf.indexOf("\n\n");
           }
         });
-        resolve({ types });
+        resolve({ types, frames });
       },
     );
     req.on("error", reject);
@@ -209,6 +217,84 @@ describe("loopback daemon auth", () => {
   it("rejects requests with a non-loopback Host (DNS rebinding)", async () => {
     const res = await request("GET", "/progress", { host: "attacker.example" });
     expect(res.status).toBe(403);
+  });
+});
+
+describe("a goal window reconnecting", () => {
+  it("keeps the goal in the ready frame, as in GET /state", async () => {
+    // Live bug: after a daemon restart the app swaps its state for the events
+    // stream's "ready" frame, which had no `goal`, so a goal window turned
+    // into a plain project screen.
+    const goalDir = path.join(tmpHome, ".gg", "goals", "speed");
+    await fs.mkdir(goalDir, { recursive: true });
+    await fs.writeFile(
+      path.join(goalDir, "goal.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        id: "speed",
+        name: "Speed",
+        goal: "Make it fast",
+        context: [],
+        createdAt: "2026-10-11T00:00:00.000Z",
+      }),
+    );
+    const created = await request("POST", "/session", { body: { mode: "code", cwd: goalDir } });
+    expect(created.status).toBe(200);
+    const session = created.json.sessionId as string;
+    // The app also keeps the conversation file, to reopen it after a restart.
+    expect(typeof created.json.sessionPath).toBe("string");
+
+    const stream = await openEventStream(session);
+    await waitFor(() => stream.types.includes("ready"));
+    const ready = stream.frames.find((frame) => frame.type === "ready");
+    expect(ready?.data?.goal).toMatchObject({ id: "speed", name: "Speed" });
+    // And the questions it can still answer, so stale cards from a dead run close.
+    expect(ready?.data?.openAsks).toEqual([]);
+    const state = await request("GET", "/state", { session });
+    expect(state.json.goal).toMatchObject({ id: "speed", name: "Speed" });
+  });
+
+  it("shows the attached project's uncommitted files, not the goal folder's", async () => {
+    // Live bug: the goal window read git from its own folder under
+    // ~/.gg/goals, so the titlebar never showed what the agent had changed.
+    const project = path.join(tmpHome, "site");
+    await fs.mkdir(project, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: project });
+    await fs.writeFile(path.join(project, "a.txt"), "changed by the agent\n");
+    await fs.writeFile(path.join(project, "b.txt"), "and this\n");
+    const goalDir = path.join(tmpHome, ".gg", "goals", "site-speed");
+    await fs.mkdir(goalDir, { recursive: true });
+    await fs.writeFile(
+      path.join(goalDir, "goal.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        id: "site-speed",
+        name: "Site speed",
+        goal: "Make it fast",
+        context: [{ path: project, kind: "folder" }],
+        createdAt: "2026-10-11T00:00:00.000Z",
+      }),
+    );
+    const created = await request("POST", "/session", { body: { mode: "code", cwd: goalDir } });
+    expect(created.status).toBe(200);
+    const state = await request("GET", "/state", { session: created.json.sessionId as string });
+    expect(state.json.isGitRepo).toBe(true);
+    expect(state.json.gitDirtyFileCount).toBe(2);
+  });
+});
+
+describe("a window whose saved conversation is gone", () => {
+  it("opens a fresh session instead of failing", async () => {
+    // Live bug: after a restart the app asked to resume a deleted session
+    // file; the create failed and the window had no session, so even its
+    // goal list said "Couldn't load your goals".
+    const gone = path.join(tmpHome, ".gg", "sessions", "deleted", "2026-10-11T00-00-00_gone.jsonl");
+    const created = await request("POST", "/session", {
+      body: { mode: "code", cwd: tmpProject, sessionPath: gone },
+    });
+    expect(created.status).toBe(200);
+    expect(typeof created.json.sessionId).toBe("string");
+    expect(created.json.sessionPath).not.toBe(gone);
   });
 });
 

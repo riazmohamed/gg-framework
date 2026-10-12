@@ -1,5 +1,4 @@
 import type http from "node:http";
-import fs from "node:fs/promises";
 import path from "node:path";
 import { sessionToMarkdown, defaultExportFilename } from "../core/session-export.js";
 import {
@@ -8,17 +7,13 @@ import {
   removePlugin,
 } from "../core/extensions/plugin-bundles.js";
 import { discoverProjects } from "../core/project-discovery.js";
+import { goalsRoot } from "../core/goals-store.js";
 import { listSidecarSessions } from "../app-sidecar-sessions.js";
 import { log } from "../core/logger.js";
 import { readBody, json } from "./http.js";
 import { parseToolDetail } from "./history.js";
 import { searchProjectFiles } from "./file-search.js";
-import {
-  appSettingsFile,
-  loadAppSettings,
-  saveAppSettings,
-  isValidProjectName,
-} from "./app-settings.js";
+import { loadAppSettings, updateAppSettings } from "./app-settings.js";
 import type { SessionRouteContext } from "./route-context.js";
 
 export function handleWorkspaceRoutes(
@@ -65,90 +60,6 @@ export function handleWorkspaceRoutes(
     return true;
   }
 
-  if (method === "GET" && url === "/settings") {
-    // `configured` is true only when the user explicitly saved a projects root
-    // (the gg-app.json file exists with a value) — not when we fall back to the
-    // default. The home screen gates "Your Projects" on this.
-    void (async () => {
-      const s = await loadAppSettings();
-      let configured: boolean;
-      try {
-        const raw = JSON.parse(await fs.readFile(appSettingsFile(), "utf-8")) as {
-          projectsRoot?: string;
-        };
-        configured = typeof raw.projectsRoot === "string" && raw.projectsRoot.trim().length > 0;
-      } catch {
-        configured = false;
-      }
-      // Only projectsRoot + configured flag are webview-facing; the
-      // per-project model map is internal persistence, never shipped out.
-      json(res, 200, { projectsRoot: s.projectsRoot, configured });
-    })();
-    return true;
-  }
-
-  if (method === "POST" && url === "/settings") {
-    void readBody(req, res).then(async (raw) => {
-      if (raw === null) return;
-      let projectsRoot: string;
-      try {
-        projectsRoot = (JSON.parse(raw) as { projectsRoot?: string }).projectsRoot ?? "";
-      } catch {
-        json(res, 400, { error: "invalid JSON body" });
-        return;
-      }
-      if (!projectsRoot.trim()) {
-        json(res, 400, { error: "projectsRoot is required" });
-        return;
-      }
-      // Read-modify-write so the per-project model map survives a projectsRoot
-      // change (a naive overwrite would drop every window's saved model).
-      const s = await loadAppSettings();
-      s.projectsRoot = projectsRoot;
-      await saveAppSettings(s);
-      json(res, 200, { projectsRoot });
-    });
-    return true;
-  }
-
-  if (method === "POST" && url === "/create-project") {
-    void readBody(req, res).then(async (raw) => {
-      if (raw === null) return;
-      let name: string;
-      try {
-        name = (JSON.parse(raw) as { name?: string }).name ?? "";
-      } catch {
-        json(res, 400, { error: "invalid JSON body" });
-        return;
-      }
-      name = name.trim();
-      if (!isValidProjectName(name)) {
-        json(res, 400, {
-          error: "Project name must be lowercase letters, digits, and dashes (e.g. my-project).",
-        });
-        return;
-      }
-      const { projectsRoot } = await loadAppSettings();
-      const dir = path.join(projectsRoot, name);
-      try {
-        // Refuse to clobber an existing directory.
-        const exists = await fs
-          .stat(dir)
-          .then(() => true)
-          .catch(() => false);
-        if (exists) {
-          json(res, 409, { error: `A folder named "${name}" already exists.` });
-          return;
-        }
-        await fs.mkdir(dir, { recursive: true });
-        json(res, 200, { path: dir });
-      } catch (err) {
-        json(res, 500, { error: err instanceof Error ? err.message : String(err) });
-      }
-    });
-    return true;
-  }
-
   // Dismiss a project from the picker (or restore it with hidden:false). The
   // path is kept rather than the row: sessions in scratch dirs keep
   // re-surfacing, so the user's decision has to outlive any one scan.
@@ -169,12 +80,13 @@ export function handleWorkspaceRoutes(
       }
       const key = path.resolve(target);
       try {
-        const settings = await loadAppSettings();
-        const current = new Set((settings.hiddenProjects ?? []).map((p) => path.resolve(p)));
-        if (body.hidden === false) current.delete(key);
-        else current.add(key);
-        settings.hiddenProjects = current.size > 0 ? Array.from(current) : undefined;
-        await saveAppSettings(settings);
+        const current = await updateAppSettings((settings) => {
+          const next = new Set((settings.hiddenProjects ?? []).map((p) => path.resolve(p)));
+          if (body.hidden === false) next.delete(key);
+          else next.add(key);
+          settings.hiddenProjects = next.size > 0 ? Array.from(next) : undefined;
+          return next;
+        });
         json(res, 200, { hidden: Array.from(current) });
       } catch (err) {
         json(res, 500, { error: err instanceof Error ? err.message : String(err) });
@@ -193,6 +105,8 @@ export function handleWorkspaceRoutes(
           projectsRoot,
           extraRoots: projectRoots,
           hiddenPaths: hiddenProjects,
+          // Goal workspaces have their own list; they are not coding projects.
+          excludeRoots: [goalsRoot(ctx.paths.agentDir)],
         }),
       )
       .then((projects) => json(res, 200, { projects }))

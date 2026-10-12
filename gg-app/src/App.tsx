@@ -1,5 +1,7 @@
 import {
   Activity,
+  Suspense,
+  lazy,
   useState,
   useRef,
   useEffect,
@@ -15,7 +17,12 @@ import { activeChatErrorId, readChatError } from "./chat-error";
 import { withViewTransition } from "./view-transition";
 import {
   waitForReady,
+  retryWindowSession,
   getState,
+  kickoffGoal,
+  pauseGoal,
+  resumeGoal,
+  setCritterModel,
   sendPrompt,
   sendKenPrompt,
   cancelKen,
@@ -57,7 +64,13 @@ import {
   type PromptSegment,
   answerAskUser,
 } from "./agent";
-import { answerAskItem, dropSupersededAsks } from "./ask-user";
+import {
+  answerAskItem,
+  askItemFor,
+  dropSupersededAsks,
+  parseOpenAskPrompts,
+  withOpenAsks,
+} from "./ask-user";
 import { glowPlacement, glowStateFor, glowVars } from "./window-glow";
 import { ActivityBar } from "./ActivityBar";
 import { autosizeComposer } from "./composer-autosize";
@@ -68,9 +81,33 @@ import { KenActivityBar } from "./KenActivityBar";
 import { useTaskActivity } from "./useTaskActivity";
 import { useKenMentor } from "./useKenMentor";
 import { useAutopilot } from "./useAutopilot";
-import { useAgentEvents } from "./useAgentEvents";
+import { useAgentEvents, type RunEnd } from "./useAgentEvents";
 import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
-import { CritterFloor, type CritterGroup } from "./CritterFloor";
+import { CritterFloor, collectFloorAgents, type CritterGroup } from "./CritterFloor";
+import { COORDINATOR_KEY, goalViewFor } from "./goal-world-agents";
+import {
+  EMPTY_TALLY,
+  blockingAsk,
+  coordinatorAtWork,
+  floorPhase,
+  tallyGoal,
+  type GoalTally,
+} from "./goal-progress";
+import { latestKenLine } from "./goal-ken-talk";
+import {
+  FINISH_SETTLE_MS,
+  goalFinishOf,
+  goalIsQuiet,
+  openStretch,
+  recordRun,
+  type GoalFinish,
+  type GoalRun,
+} from "./goal-finish";
+// The farm (its art, map and simulation) loads on demand, so it adds nothing
+// to the app's start-up bundle; it is only needed once a goal has started.
+const GoalWorld = lazy(() =>
+  import("./GoalWorld").then((module) => ({ default: module.GoalWorld })),
+);
 import { ModelSelect, loadModelsInto } from "./ModelSelect";
 import {
   describeSchedule,
@@ -85,6 +122,9 @@ import { ChecklistScreen } from "./ChecklistScreen";
 import { parseProjectHealth } from "./project-health";
 import { NotesModal } from "./NotesModal";
 import { MemoryModal } from "./MemoryModal";
+import { GoalSettingsModal } from "./GoalSettingsModal";
+import { isHiddenScroller } from "./transcript-pin";
+import { emptyTranscriptStatus } from "./transcript-status";
 import { WakeScreen } from "./WakeScreen";
 import { MotionStarters } from "./MotionStarters";
 import { ConfirmModal } from "./ConfirmModal";
@@ -96,8 +136,12 @@ import { PlanReviewModal } from "./PlanReviewModal";
 import { McpElicitModal } from "./McpElicitModal";
 import { ProjectPicker } from "./ProjectPicker";
 import { ChatPicker } from "./ChatPicker";
+// The goal list and its New goal modal load on demand: they are only needed
+// once someone opens Goals.
+const GoalPicker = lazy(() =>
+  import("./GoalPicker").then((module) => ({ default: module.GoalPicker })),
+);
 import { BackButton } from "./BackButton";
-import { Badge } from "./Badge";
 import { HomeScreen } from "./HomeScreen";
 import { SettingsModal } from "./SettingsModal";
 import { initialEntryView, type EntryView } from "./app-entry-view";
@@ -135,7 +179,9 @@ import { useProjectNotes } from "./useProjectNotes";
 import { useChromeToggles } from "./useChromeToggles";
 import { useTranscriptExport } from "./useTranscriptExport";
 import { useWindowOrder } from "./useWindowOrder";
+import { dropHiddenFocus } from "./hidden-focus";
 import { Composer } from "./Composer";
+import { UpdateBanner } from "./UpdateBanner";
 import { usePromptHistory } from "./usePromptHistory";
 import { usePromptEnhance } from "./usePromptEnhance";
 import "./App.css";
@@ -259,6 +305,9 @@ function App(): React.ReactElement {
     segments: PromptSegment[];
   } | null>(null);
   const [enhancing, setEnhancing] = useState(false);
+  // Composer sends so far: a change tells the composer strips (attachments,
+  // @-files, cold-cache notice) to drop what the send cleared in that commit.
+  const [sendCount, setSendCount] = useState(0);
   // The floating "Enhance" pill is shown only after the user pauses typing for
   // ~1s (and hidden again on the next keystroke / send / empty input).
   const [enhanceHintVisible, setEnhanceHintVisible] = useState(false);
@@ -488,6 +537,8 @@ function App(): React.ReactElement {
   // provider without re-subscribing the SSE listener on every state change.
   const stateRef = useRef<AgentState | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Bumped each time the transcript is reloaded from the session file.
+  const [transcriptEpoch, setTranscriptEpoch] = useState(0);
   // NOTE: the build-session event machine's private refs (streaming bubble id,
   // rAF buffer, per-run accumulators, sub-agent / compaction group ids) now live
   // inside the useAgentEvents hook. Only the cross-cutting refs that App's render
@@ -704,18 +755,20 @@ function App(): React.ReactElement {
 
   // Keep the native window title aligned with the visible title-bar context.
   useEffect(() => {
-    const fallbackTitle = workspaceProductName(workspaceMode);
+    const fallbackTitle = workspaceProductName(workspaceMode, Boolean(state?.goal));
     const title =
-      !needsProject && !showPicker
-        ? formatWorkspaceTitle(
-            state?.cwd,
-            state?.gitBranch,
-            fallbackTitle,
-            state?.gitDirtyFileCount,
-            state?.gitHubIssues ?? null,
-            state?.gitHubPRs ?? null,
-          )
-        : fallbackTitle;
+      !needsProject && !showPicker && state?.goal
+        ? `${state.goal.name} \u2502 ${fallbackTitle}`
+        : !needsProject && !showPicker
+          ? formatWorkspaceTitle(
+              state?.cwd,
+              state?.gitBranch,
+              fallbackTitle,
+              state?.gitDirtyFileCount,
+              state?.gitHubIssues ?? null,
+              state?.gitHubPRs ?? null,
+            )
+          : fallbackTitle;
     setWindowTitle(title);
   }, [
     needsProject,
@@ -725,6 +778,7 @@ function App(): React.ReactElement {
     state?.gitDirtyFileCount,
     state?.gitHubIssues,
     state?.gitHubPRs,
+    state?.goal,
     workspaceMode,
   ]);
 
@@ -752,7 +806,13 @@ function App(): React.ReactElement {
   // History anchoring and autosizing have landed. Commit the final scroll
   // position before paint; only the displayed positions move, never scrollTop.
   useLayoutEffect(() => {
-    if (showChecklist || needsProject) {
+    // Nothing to commit while the transcript is hidden behind another view
+    // (a goal's Workers): it has no size, so any offset taken now is wrong.
+    if (
+      showChecklist ||
+      needsProject ||
+      (scrollRef.current !== null && isHiddenScroller(scrollRef.current))
+    ) {
       chatLayout.cancel();
       return;
     }
@@ -862,6 +922,27 @@ function App(): React.ReactElement {
 
   const { windowIndex, windowTotal, isThisFocused } = useWindowOrder(inputRef);
 
+  // A goal cut off by a daemon restart (found on reconnect) carries on, or
+  // asks its briefing question again. The sidecar ignores it when nothing was
+  // cut off or a run is already going.
+  const resumeCutOffGoal = useCallback(() => {
+    void resumeGoal().catch((e: unknown) =>
+      toast(
+        `Couldn't pick the goal back up: ${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      ),
+    );
+  }, []);
+
+  // Every run of a started goal, for its finish card (see goal-finish). The
+  // event hook reports each run as it ends; only a started goal's are kept.
+  const [goalRuns, setGoalRuns] = useState<readonly GoalRun[]>([]);
+  const goalRunTargetRef = useRef<string | null>(null);
+  const recordGoalRun = useCallback((run: RunEnd) => {
+    const goalId = goalRunTargetRef.current;
+    if (goalId) setGoalRuns((runs) => recordRun(runs, { ...run, goalId }));
+  }, []);
+
   // Build-session SSE handling + assistant-streaming helpers live in the
   // useAgentEvents hook (mirrors useKenMentor). It owns the event machine's
   // private refs + the streaming helpers; App keeps owning the build-session
@@ -901,6 +982,8 @@ function App(): React.ReactElement {
     pendingPlanTotalRef,
     stickToBottomRef,
     liveText,
+    onGoalNeedsResume: resumeCutOffGoal,
+    onRunEnd: recordGoalRun,
   });
 
   // Run the connect/ready flow against the current sidecar and hydrate state,
@@ -961,6 +1044,9 @@ function App(): React.ReactElement {
             return (parsed ? parsed.text : h.text).trim();
           })
           .filter((t, i, a) => t.length > 0 && a[i - 1] !== t);
+        // A reloaded transcript gives every worker a new row key; the goal
+        // header's tally starts again from it (see tallySource).
+        setTranscriptEpoch((epoch) => epoch + 1);
         setItems(
           history.map((h): Item => {
             // Tool-produced images (screenshots, generate_image) — reconstructed
@@ -1055,6 +1141,32 @@ function App(): React.ReactElement {
                 : {}),
             };
           }),
+        );
+      }
+      // History keeps a question's tool call but not its card: put back the
+      // ones the agent is still waiting on.
+      const openAsks = parseOpenAskPrompts(st?.openAskPrompts);
+      if (openAsks.length > 0 && hydrateGenerationRef.current === generation) {
+        setItems((prev) => withOpenAsks(prev, openAsks, (ask) => askItemFor(ask, nextId())));
+      }
+      // A goal's coordinator speaks first: the sidecar starts its reply once,
+      // the first time the new goal is opened, and streams it like any turn.
+      if (st?.goal?.needsKickoff && hydrateGenerationRef.current === generation) {
+        void kickoffGoal().catch((e: unknown) =>
+          toast(
+            `Couldn't start the goal's first reply: ${e instanceof Error ? e.message : String(e)}`,
+            "error",
+          ),
+        );
+      }
+      // A goal cut off mid-work (the app closed while it worked) carries on
+      // by itself when its window opens again.
+      if (st?.goal?.needsResume && hydrateGenerationRef.current === generation) {
+        void resumeGoal().catch((e: unknown) =>
+          toast(
+            `Couldn't pick the goal back up: ${e instanceof Error ? e.message : String(e)}`,
+            "error",
+          ),
         );
       }
     } catch (err) {
@@ -1162,6 +1274,22 @@ function App(): React.ReactElement {
           : s,
       );
     });
+  }
+
+  // A Goal window's footer: the model GG Goals' workers ("critters") run on.
+  function onSelectCritterModel(modelId: string | null): void {
+    const current = state?.goal?.critterModel ?? null;
+    if (modelId === current) return;
+    void setCritterModel(modelId)
+      .then((res) => {
+        setState((s) =>
+          s?.goal ? { ...s, goal: { ...s.goal, critterModel: res.critterModel } } : s,
+        );
+      })
+      .catch((e: unknown) =>
+        // Otherwise the picker just snaps back and the click looks ignored.
+        toast(e instanceof Error ? e.message : String(e), "error"),
+      );
   }
 
   function onSelectModel(modelId: string): void {
@@ -1654,6 +1782,219 @@ function App(): React.ReactElement {
     [],
   );
 
+  // ── Goal world ──
+  // A started goal opens on its Workers view: the critters at work, edge to
+  // edge, in place of the chat, input and footer. The header's Chat | Workers
+  // switch flips between that and the full conversation (with its input).
+  const [goalChatFor, setGoalChatFor] = useState<string | null>(null);
+  const [showGoalSettings, setShowGoalSettings] = useState(false);
+  // Pause stops the current run and its workers (the same cancel as Stop) and
+  // keeps the goal put, even across restarts; resume carries it on.
+  const setGoalPaused = useCallback(
+    (paused: boolean) => {
+      const act = paused
+        ? pauseGoal().then(() => {
+            if (running) requestCancel();
+          })
+        : resumeGoal().then((resumed) => {
+            // Nothing was cut short: the goal had simply finished.
+            if (!resumed && !state?.goal?.paused) {
+              toast(
+                "Nothing to carry on: the goal finished. Tell GG Goals what's next in the chat.",
+              );
+            }
+          });
+      void act.catch((e: unknown) =>
+        toast(
+          `Couldn't ${paused ? "pause" : "resume"} the goal: ${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        ),
+      );
+    },
+    [running, requestCancel, state?.goal?.paused],
+  );
+  // The Workers view runs under the (see-through) header; it keeps the
+  // workshop clear of whatever height the header has.
+  const workspaceHeaderRef = useRef<HTMLDivElement>(null);
+  const { activeGoalId, view: goalView } = goalViewFor(state?.goal, goalChatFor);
+  const goalWorldOpen = goalView === "workers";
+  // When the current run began, for the activity bar's timer. Kept here, not
+  // in the bar: the bar lives in the chat, which the Workers view hides, and
+  // its own clock would restart from zero each time the chat came back.
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  // A question waiting in the transcript means the run is waiting on the user,
+  // even when the window reopened after it was asked (the activity reducer
+  // only sees the ask arrive live): say so instead of "Working...".
+  const openQuestion = useMemo(
+    () =>
+      items.some((item) => item.kind === "ask" && !item.sent && !item.cancelled && !item.deferred),
+    [items],
+  );
+  const barActivity = useMemo(
+    () =>
+      running && openQuestion && !activity.waitingForAnswer
+        ? {
+            ...activity,
+            phase: "attention" as const,
+            label: "Your decision needed",
+            detail: "Answer the question in chat to continue.",
+            waitingForAnswer: true,
+            startedAt: activity.startedAt ?? runStartedAt,
+          }
+        : activity,
+    [running, openQuestion, activity, runStartedAt],
+  );
+  useEffect(() => {
+    setRunStartedAt((prev) => (running ? (prev ?? Date.now()) : null));
+  }, [running]);
+  // The chat stays mounted but hidden behind the Workers view, and a hidden
+  // scroller loses its offset. Remember where the reader was when it hid, and
+  // put them back on return: at the bottom if they were following, else at
+  // the same spot (it otherwise came back pushed up the page).
+  const chatScrollOnHideRef = useRef<{ pinned: boolean; top: number } | null>(null);
+  useLayoutEffect(() => {
+    if (goalWorldOpen) {
+      chatScrollOnHideRef.current = {
+        pinned: stickToBottomRef.current,
+        top: lastScrollTopRef.current,
+      };
+      dropHiddenFocus();
+      return;
+    }
+    const saved = chatScrollOnHideRef.current;
+    chatScrollOnHideRef.current = null;
+    const el = scrollRef.current;
+    if (!saved || !el) return;
+    stickToBottomRef.current = saved.pinned;
+    if (saved.pinned) scrollToBottom();
+    else {
+      el.scrollTop = saved.top;
+      lastScrollTopRef.current = el.scrollTop;
+    }
+  }, [goalWorldOpen, stickToBottomRef, lastScrollTopRef, scrollToBottom]);
+  // And for as long as the farm is up, not just as it opens: the composer can
+  // take focus while still visible (its autoFocus on a reload) and be hidden
+  // right after.
+  useEffect(() => {
+    if (!goalWorldOpen) return;
+    document.addEventListener("focusin", dropHiddenFocus);
+    return () => document.removeEventListener("focusin", dropHiddenFocus);
+  }, [goalWorldOpen]);
+  const goalWorkers = useMemo(
+    () => (activeGoalId ? collectFloorAgents(critterGroups) : []),
+    [activeGoalId, critterGroups],
+  );
+  // GG Goals heads for the mailbox while a question waits on the user.
+  const goalWaitingOnUser = useMemo(
+    () =>
+      activeGoalId !== null &&
+      items.some((item) => item.kind === "ask" && !item.sent && !item.cancelled),
+    [activeGoalId, items],
+  );
+  // GG Goals blocked on a question: a sign over the Workers view until the
+  // user has gone to the chat while it was waiting (seen), then just the
+  // Chat tab's dot until it's answered.
+  const goalAsk = useMemo(() => (activeGoalId ? blockingAsk(items) : null), [activeGoalId, items]);
+  const [seenGoalAsks, setSeenGoalAsks] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    if (!goalAsk || goalView !== "chat") return;
+    setSeenGoalAsks((seen) => (seen.has(goalAsk.id) ? seen : new Set([...seen, goalAsk.id])));
+  }, [goalAsk, goalView]);
+  const goalAskNotice = useMemo(
+    () =>
+      goalAsk && !seenGoalAsks.has(goalAsk.id)
+        ? { question: goalAsk.question, more: goalAsk.more }
+        : null,
+    [goalAsk, seenGoalAsks],
+  );
+  // Ken's newest spoken line (the `[ken:face]` line GG Goals ends a message
+  // with), for the Workers view's dialogue box. Finished messages only: the
+  // streaming one lives in the live-text store, not `items`.
+  const kenSaid = useMemo(
+    () => (activeGoalId ? latestKenLine(items, (id) => liveText.get(id) !== undefined) : null),
+    [activeGoalId, items, liveText],
+  );
+  // A stretch of goal work finished (nothing left going, and it stayed that
+  // way a moment): the Workers view's end-of-level card, with its score. It
+  // comes down when closed, when the user goes to the chat, or when work
+  // starts again. Only runs seen live count, so a reopened window shows none.
+  useEffect(() => {
+    goalRunTargetRef.current = activeGoalId;
+  }, [activeGoalId]);
+  const [goalClosedAt, setGoalClosedAt] = useState(0);
+  const [goalFinish, setGoalFinish] = useState<GoalFinish | null>(null);
+  const goalStretch = useMemo(
+    () => (activeGoalId ? openStretch(goalRuns, activeGoalId, goalClosedAt) : []),
+    [activeGoalId, goalRuns, goalClosedAt],
+  );
+  const goalQuiet =
+    goalStretch.length > 0 &&
+    goalIsQuiet({
+      paused: state?.goal?.paused === true,
+      running,
+      waitingOnUser: goalWaitingOnUser,
+      workers: goalWorkers,
+    });
+  const finishInputsRef = useRef({ groups: critterGroups, said: kenSaid });
+  useEffect(() => {
+    finishInputsRef.current = { groups: critterGroups, said: kenSaid };
+  }, [critterGroups, kenSaid]);
+  useEffect(() => {
+    if (!goalQuiet) return;
+    const timer = window.setTimeout(() => {
+      const { groups, said } = finishInputsRef.current;
+      const last = goalStretch[goalStretch.length - 1];
+      if (last) setGoalClosedAt(last.endedAt);
+      setGoalFinish(goalFinishOf(goalStretch, groups, said));
+    }, FINISH_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [goalQuiet, goalStretch]);
+  useEffect(() => {
+    if (goalFinish && (running || goalView === "chat")) setGoalFinish(null);
+  }, [goalFinish, running, goalView]);
+  const shownGoalFinish = goalFinish?.goalId === activeGoalId ? goalFinish : null;
+  // The header's counts: workers working now, tasks done and failed so far
+  // (see goal-progress). Counting starts afresh for each goal.
+  // Restarted when the transcript is reloaded (after a daemon restart, say):
+  // the tally counts each worker's change by row key, and reloaded rows get
+  // new keys (live bug: "6 done, 6 failed" for a goal that ran 3 workers).
+  const tallySource = `${activeGoalId ?? ""}:${transcriptEpoch}`;
+  const tallyInput = useMemo(
+    () => [
+      ...goalWorkers.map((worker) => ({
+        key: worker.key,
+        phase: floorPhase(worker.status),
+      })),
+      // GG Goals itself, while it does hands-on work (it's never a finished task).
+      ...(running && coordinatorAtWork(liveToolFeed)
+        ? [{ key: COORDINATOR_KEY, phase: "working" as const }]
+        : []),
+    ],
+    [goalWorkers, running, liveToolFeed],
+  );
+  const [tallyState, setTallyState] = useState<{ source: string; tally: GoalTally }>({
+    source: "",
+    tally: EMPTY_TALLY,
+  });
+  useEffect(() => {
+    setTallyState((prev) => {
+      const base = prev.source === tallySource ? prev.tally : EMPTY_TALLY;
+      const tally = tallyGoal(base, tallyInput);
+      return prev.source === tallySource && tally === prev.tally
+        ? prev
+        : { source: tallySource, tally };
+    });
+  }, [tallySource, tallyInput]);
+  const goalTally = useMemo(
+    () =>
+      !activeGoalId
+        ? null
+        : tallyState.source === tallySource
+          ? tallyState.tally
+          : tallyGoal(EMPTY_TALLY, tallyInput),
+    [activeGoalId, tallyState, tallySource, tallyInput],
+  );
+
   const { recordHistory, navigateHistory } = usePromptHistory({
     promptHistoryRef,
     historyDraftRef,
@@ -1777,6 +2118,7 @@ function App(): React.ReactElement {
       const question = trimmed.slice(kenMatch[0].length).trim();
       if (!question) return;
       chatLayout.capture();
+      setSendCount((n) => n + 1);
       recordHistory(trimmed);
       stickToBottomRef.current = true;
       const kenBubbleId = nextId();
@@ -1798,6 +2140,9 @@ function App(): React.ReactElement {
     }
 
     chatLayout.capture();
+    // The strips this send clears (chips, the cold-cache notice) must leave in
+    // the bubble's commit, or their fold resizes the transcript mid-move.
+    setSendCount((n) => n + 1);
     recordHistory(trimmed);
     // Read BEFORE the dismissal clears the band: a prompt that supersedes a
     // question is consumed as soon as it lands, so it must neither flash the
@@ -2052,6 +2397,12 @@ function App(): React.ReactElement {
                 setEntryView("projects");
               })
             }
+            onGoals={() =>
+              withViewTransition(() => {
+                setWorkspaceMode("code");
+                setEntryView("goals");
+              })
+            }
             onChat={() =>
               withViewTransition(() => {
                 setWorkspaceMode("chat");
@@ -2083,6 +2434,13 @@ function App(): React.ReactElement {
               })
             }
           />
+        ) : entryView === "goals" ? (
+          <Suspense fallback={null}>
+            <GoalPicker
+              onChosen={onProjectChosen}
+              onClose={() => withViewTransition(() => setEntryView("home"))}
+            />
+          </Suspense>
         ) : entryView === "chats" ? (
           <ChatPicker
             onChosen={onProjectChosen}
@@ -2132,6 +2490,10 @@ function App(): React.ReactElement {
           <ChatPicker initialAgent={state?.chatAgent ?? "general"} {...pickerProps} />
         ) : workspaceMode === "motion" ? (
           <ChatPicker mode="motion" {...pickerProps} />
+        ) : state?.goal ? (
+          <Suspense fallback={null}>
+            <GoalPicker {...pickerProps} />
+          </Suspense>
         ) : (
           <ProjectPicker initialProjectPath={state?.cwd ?? null} {...pickerProps} />
         )}
@@ -2144,7 +2506,7 @@ function App(): React.ReactElement {
 
   return (
     <div
-      className={`app${isFileDragOver ? " app-file-dragover" : ""}${windowFocused ? " window-focused" : ""}${workspaceMode === "code" && showChecklist ? " checklist-open" : ""}`}
+      className={`app${isFileDragOver ? " app-file-dragover" : ""}${windowFocused ? " window-focused" : ""}${workspaceMode === "code" && showChecklist ? " checklist-open" : ""}${goalWorldOpen && !showChecklist ? " goal-world-open" : ""}`}
       data-glow={glowState}
       style={{ background: theme.background, ...glowStyle }}
       onDragEnter={handleWindowDragEnter}
@@ -2155,8 +2517,10 @@ function App(): React.ReactElement {
       {confettiNonce && <Confetti key={confettiNonce} />}
 
       <WorkspaceHeader
+        ref={workspaceHeaderRef}
         workspaceMode={workspaceMode}
         cwd={state?.cwd}
+        goalName={state?.goal?.name ?? null}
         gitBranch={state?.gitBranch}
         gitDirtyFileCount={state?.gitDirtyFileCount}
         gitHubIssues={state?.gitHubIssues}
@@ -2193,14 +2557,39 @@ function App(): React.ReactElement {
                   ? "Back to motion sessions"
                   : "Back to this project's sessions"
           }
-          onClick={() =>
-            withViewTransition(() =>
-              showChecklist ? setShowChecklist(false) : setShowPicker(true),
-            )
-          }
+          onClick={() => {
+            const goBack = (): void =>
+              showChecklist ? setShowChecklist(false) : setShowPicker(true);
+            // Leaving a goal (Chat or Workers) for the goal list skips the
+            // screen crossfade: WebKit's snapshot of a goal workspace flashed a
+            // magenta line along the header's bottom edge for a few frames
+            // (caught on screen recordings of the real window, every time from
+            // Workers and some of the time from Chat; never without the
+            // crossfade). The list still resolves in through its own dissolve-in.
+            if (state?.goal && !showChecklist) goBack();
+            else withViewTransition(goBack);
+          }}
         />
         <WorkspaceHeaderActions
           workspaceMode={workspaceMode}
+          isGoal={Boolean(state?.goal)}
+          goalView={goalView}
+          // No view transition: WebKit leaves the header's frost (backdrop
+          // blur) out of its snapshots, so it popped in after the crossfade.
+          // The farm and its frost fade in together instead (App.css), and the
+          // chat dissolves back in on its own when shown again.
+          onGoalViewChange={(view) => setGoalChatFor(view === "chat" ? activeGoalId : null)}
+          goalNeedsAnswer={goalWaitingOnUser}
+          goalTally={goalTally}
+          goalState={
+            state?.goal?.paused
+              ? "paused"
+              : running || (goalTally?.working ?? 0) > 0
+                ? "running"
+                : "stopped"
+          }
+          onGoalPauseChange={state?.goal?.phase === "active" ? setGoalPaused : undefined}
+          onOpenGoalSettings={state?.goal ? () => setShowGoalSettings(true) : undefined}
           progress={progress}
           rankCelebrateNonce={rankCelebrateNonce}
           xpChips={xpChips}
@@ -2252,9 +2641,31 @@ function App(): React.ReactElement {
         />
       )}
 
+      {/* Kept alive while hidden (Chat view), so switching back doesn't rebuild the farm. */}
+      {activeGoalId && (
+        <Activity mode={goalWorldOpen && !showChecklist ? "visible" : "hidden"}>
+          <Suspense fallback={null}>
+            <GoalWorld
+              key={activeGoalId}
+              headerRef={workspaceHeaderRef}
+              goalId={activeGoalId}
+              running={running}
+              liveTools={liveToolFeed}
+              waitingOnUser={goalWaitingOnUser}
+              workers={goalWorkers}
+              ask={goalAskNotice}
+              kenSaid={kenSaid}
+              onShowChat={() => setGoalChatFor(activeGoalId)}
+              finish={shownGoalFinish}
+              onCloseFinish={() => setGoalFinish(null)}
+            />
+          </Suspense>
+        </Activity>
+      )}
+
       {/* React owns chat visibility rather than a stylesheet override. Activity
           keeps the draft and transcript state, and suspends hidden child effects. */}
-      <Activity mode={showChecklist ? "hidden" : "visible"}>
+      <Activity mode={showChecklist || goalWorldOpen ? "hidden" : "visible"}>
         {/* Non-scrolling frame the same size as the chat viewport. The banner
           lives HERE, not inside `.transcript` — `.transcript` scrolls, and an
           absolutely positioned child of a scrolling container is pinned to the
@@ -2288,7 +2699,18 @@ function App(): React.ReactElement {
                       <button
                         type="button"
                         className="btn btn-sm btn-ghost"
-                        onClick={() => setHydrateNonce((n) => n + 1)}
+                        onClick={() => {
+                          // Restart the failed start first so the re-hydrate
+                          // waits on a fresh attempt, not the recorded failure.
+                          void retryWindowSession()
+                            .catch((e: unknown) =>
+                              toast(
+                                `Couldn't restart the agent: ${e instanceof Error ? e.message : String(e)}`,
+                                "error",
+                              ),
+                            )
+                            .finally(() => setHydrateNonce((n) => n + 1));
+                        }}
                       >
                         Try again
                       </button>
@@ -2297,12 +2719,13 @@ function App(): React.ReactElement {
                     <WakeScreen
                       chat={workspaceMode === "chat"}
                       motion={workspaceMode === "motion"}
+                      goals={Boolean(state?.goal)}
                     />
-                  ) : (
+                  ) : emptyTranscriptStatus(status) ? (
                     <div className="line transcript-reveal" style={{ color: theme.textDim }}>
-                      {`\u273b ${status}`}
+                      {`\u273b ${emptyTranscriptStatus(status)}`}
                     </div>
-                  ))}
+                  ) : null)}
                 <PromptSendProvider value={sendKenRecommendedPrompt}>
                   <LiveTextContext.Provider value={liveText}>
                     {visibleItems.flatMap((it) => {
@@ -2410,7 +2833,8 @@ function App(): React.ReactElement {
           {(workspaceMode !== "code" || running || autopilotReviewing || !kenRunning) && (
             <ActivityBar
               running={running}
-              activity={activity}
+              runStartedAt={runStartedAt}
+              activity={barActivity}
               cancelling={cancelling}
               tokens={tokens}
               doneStatus={doneStatus}
@@ -2466,6 +2890,7 @@ function App(): React.ReactElement {
           mentionedPaths={mentionedPaths}
           removeMentionChip={removeMentionChip}
           visibleQueuedMessages={visibleQueuedMessages}
+          sendCount={sendCount}
           handleCancelQueued={handleCancelQueued}
           enhanceAnim={enhanceAnim}
           onEnhanceAnimDone={onEnhanceAnimDone}
@@ -2502,35 +2927,10 @@ function App(): React.ReactElement {
           modelsFailed={modelsFailed}
           onSelectModel={onSelectModel}
           onSelectKenModel={onSelectKenModel}
+          onSelectCritterModel={state?.goal ? onSelectCritterModel : undefined}
         />
 
-        {appUpdate.phase === "available" && (
-          <button
-            className="update-banner"
-            title={`Update to ${appUpdate.version} — installs and restarts the app`}
-            onClick={() => void appUpdate.install()}
-          >
-            <span className="update-banner-dot" />
-            {"Ken just updated GG Coder!"}
-            <Badge>Install</Badge>
-          </button>
-        )}
-        {appUpdate.phase === "installing" && (
-          // Same .update-banner box (padding/font) as the available state, so
-          // banner → progress bar swaps content with zero layout shift. The fill
-          // is absolutely positioned; only the centered percentage is in flow.
-          <div
-            className="update-banner update-banner-busy update-banner-progress"
-            role="progressbar"
-            aria-valuenow={appUpdate.progress ?? 0}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-label="Downloading update"
-          >
-            <span className="update-banner-fill" style={{ width: `${appUpdate.progress ?? 0}%` }} />
-            <span className="update-banner-pct">{`${appUpdate.progress ?? 0}%`}</span>
-          </div>
-        )}
+        <UpdateBanner appUpdate={appUpdate} />
       </Activity>
 
       {workspaceMode === "code" && showInitGit && (
@@ -2587,6 +2987,17 @@ function App(): React.ReactElement {
         />
       )}
 
+      {showGoalSettings && state?.goal && (
+        <GoalSettingsModal
+          context={state.goal.context ?? []}
+          instructions={state.goal.instructions ?? ""}
+          busy={running}
+          onClose={() => setShowGoalSettings(false)}
+          onSaved={(next) =>
+            setState((s) => (s?.goal ? { ...s, goal: { ...s.goal, ...next } } : s))
+          }
+        />
+      )}
       {showScorecard && progress && (
         <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
       )}
