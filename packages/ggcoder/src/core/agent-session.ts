@@ -4704,7 +4704,11 @@ export class AgentSession {
       this.settingsManager.get("networkMode") === "allowlist"
         ? this.settingsManager.get("networkAllow")
         : [];
-    return { additionalRoots: this.additionalRoots, networkAllow, projectFiles: this.projectFiles };
+    return {
+      additionalRoots: [...this.additionalRoots],
+      networkAllow,
+      projectFiles: this.projectFiles,
+    };
   }
 
   /**
