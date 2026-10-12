@@ -3418,7 +3418,7 @@ export class AgentSession {
       this.settingsManager.get("networkMode") === "allowlist"
         ? this.settingsManager.get("networkAllow")
         : [];
-    return { additionalRoots: this.additionalRoots, networkAllow };
+    return { additionalRoots: [...this.additionalRoots], networkAllow };
   }
 
   /**
