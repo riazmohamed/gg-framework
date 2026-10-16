@@ -127,7 +127,6 @@ import { parseThinkingLevel } from "./cli/thinking-arg.js";
 import { createTuiAskUserHost } from "./ui/ask-user-host.js";
 import { createTuiElicitHost } from "./ui/mcp-elicit-host.js";
 import { KeepAwake } from "./core/keep-awake.js";
-import { createAskUserTool } from "./tools/ask-user.js";
 
 function printHelp(): void {
   // Clear the visible viewport for a clean look without erasing scrollback.
@@ -745,11 +744,13 @@ async function runInkTUI(opts: {
     return initialMcpConnectPromise;
   };
 
-  // ask_user: the terminal renders it as a keyboard picker (AskUserPanel).
+  // ask_user is deliberately not registered in the terminal: with it, the
+  // prompt turns every question (even an optional "want me to also…?") into a
+  // blocking picker. Without it the model asks, rarely, as a prose last line.
+  // The host stays wired so App.tsx's AskUserPanel has a (never-used) bridge.
   const askUserHost = createTuiAskUserHost();
   // Hold off idle system sleep while a run is in flight (`keepAwake` setting).
   const keepAwake = new KeepAwake({ enabled: savedSettings.keepAwake });
-  tools.push(createAskUserTool(askUserHost.bridge.park));
 
   const toolNames = tools.map((tool) => tool.name);
   const systemPrompt = applyAsyncSubagentPolicy(

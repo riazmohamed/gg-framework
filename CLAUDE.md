@@ -177,7 +177,7 @@ Built 2026-10-09, plus local models, `hf` and `steroids` on 2026-10-11 (all in `
 | Desktop feature | Terminal equivalent | Wiring |
 | --- | --- | --- |
 | Shared slash registry | `/help` (commands + shortcuts), `/settings`, `/session`, `/new`, `/add-dir`, `/remove-dir`, `/teach-me`, `/compact <focus>`, `/model provider:model` | `tui-slash-commands.ts` builds `createBuiltinCommands()` minus what App.tsx owns; `/add-dir` roots are one array shared by the write guard and `useModeState` (`core/workspace-roots.ts`, also used by `AgentSession`) |
-| `ask_user` band | keyboard picker above the input | `ask-user-host.ts` (sidecar bridge + late answers), `ask-user-state.ts` (pure key reducer), `components/AskUserPanel.tsx`; tool registered in `cli.ts` |
+| `ask_user` band | keyboard picker above the input, **tool not registered** (2026-10-16, by choice: with it the prompt turns every question, even an optional "want me to also…?", into a blocking picker; without it the model asks as a prose last line). Do not re-add on a sync. The desktop keeps it | `ask-user-host.ts` (sidecar bridge + late answers), `ask-user-state.ts` (pure key reducer), `components/AskUserPanel.tsx`; still used by MCP elicitation forms |
 | Export chat | `/export [file] [--tools …] [--thinking] [--force]` | `tui-export.ts` over `core/session-export.ts` |
 | Health badge + checklist | `/health [review]`, `/checklist [run <id> \| next]` | `tui-health.ts`; the run prompt's `tool_search` step is rewritten because the TUI loads every tool up front |
 | CI / dirty files / PR counts | footer `statusLabel` segment | `hooks/useRepoStatus.ts` + `repo-status.ts`; `getCurrentGitHubCI` added to `utils/github-ci.ts` |
