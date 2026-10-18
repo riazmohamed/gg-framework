@@ -15,6 +15,15 @@ describe("ogcoder steroids", () => {
       "Agent Steroids 1.2.0 at /bin/steroids",
       "Corpus: 3 repos, 120 documents.",
     ]);
+    expect(
+      formatSteroidsStatus({
+        ...base,
+        connected: true,
+        repos: 3,
+        documents: 120,
+        diskSize: "2.0GB",
+      })[1],
+    ).toBe("Corpus: 3 repos, 120 documents, 2.0GB on disk.");
     expect(formatSteroidsStatus({ ...base, connected: false, repos: 0 })[1]).toBe(
       "The corpus is empty. Run /steroids inside ogcoder to add repos.",
     );
