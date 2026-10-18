@@ -2,7 +2,6 @@ import { useEffect, useId, useMemo, useState, type CSSProperties } from "react";
 import {
   CodeIcon,
   ChatCircleTextIcon,
-  DownloadSimpleIcon,
   FilmSlateIcon,
   GearSixIcon,
   TargetIcon,
@@ -12,24 +11,20 @@ import { error as logError } from "@tauri-apps/plugin-log";
 import { AsciiLogo } from "./AsciiLogo";
 import { HomeScenery, withScenery } from "./HomeScenery";
 import { HomeCritters } from "./HomeCritters";
+import { HomeUpdateButton } from "./HomeUpdateButton";
 import { useHomeBackgroundEnabled } from "./home-background";
 import { groundFilter, lightAt } from "./scene-light";
 import { useLocalHour } from "./use-local-hour";
 import { useRandomBiome } from "./use-random-biome";
 import type { SettingsTabId } from "./SettingsScreen";
 import {
-  openUrl,
   waitForReady,
   getSettings,
   authStatus,
   openWhatsNewWindow,
-  getProgress,
   setRemoteActive,
   getServeStatus,
-  type ProgressSnapshot,
 } from "./agent";
-import { RankBadge } from "./RankBadge";
-import { ScorecardModal } from "./ScorecardModal";
 import { useAppUpdate } from "./update";
 import { toast } from "./toast";
 
@@ -70,19 +65,17 @@ export function HomeScreen({
   const [folderSet, setFolderSet] = useState(false);
   const [providerCount, setProviderCount] = useState(0);
   const [version, setVersion] = useState<string | null>(null);
-  const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
-  const [showScorecard, setShowScorecard] = useState(false);
+  // The version row stays hidden until the version is read, so What's new
+  // never shifts sideways when the number arrives.
+  const [versionRead, setVersionRead] = useState(false);
   const appUpdate = useAppUpdate();
   const goalsNoteId = useId();
 
   useEffect(() => {
     void getVersion()
       .then(setVersion)
-      .catch(() => {});
-    void waitForReady()
-      .then(() => getProgress())
-      .then(setProgress)
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setVersionRead(true));
   }, []);
 
   async function refresh(): Promise<void> {
@@ -150,13 +143,16 @@ export function HomeScreen({
   return (
     <div className="home" data-tauri-drag-region style={sceneStyle}>
       {backgroundOn && <HomeScenery hour={hour} />}
-      {/* Above the banner: your rank and What's new. */}
-      <div className="home-version-row">
-        <RankBadge
-          snapshot={progress}
-          onClick={() => setShowScorecard(true)}
-          className="home-rank-badge"
-        />
+      {/* Above the banner: the running version, and what's new in it. */}
+      <div className={`home-version-row${versionRead ? "" : " is-pending"}`}>
+        {version && (
+          <>
+            <span className="home-version">{`v${version}`}</span>
+            <span className="home-version-sep" aria-hidden="true">
+              {"\u00b7"}
+            </span>
+          </>
+        )}
         <button
           className="home-whatsnew"
           type="button"
@@ -178,7 +174,7 @@ export function HomeScreen({
           <CodeIcon size={18} weight="bold" aria-hidden="true" />
           Code
         </button>
-        {/* Goals is new, so its button says so underneath. */}
+        {/* Goals is new, so a Beta pill sits on its top border. */}
         <div className="home-action-slot">
           <button
             type="button"
@@ -190,8 +186,8 @@ export function HomeScreen({
             <TargetIcon size={18} weight="bold" aria-hidden="true" />
             Goals
           </button>
-          <span id={goalsNoteId} className="home-action-note">
-            In beta
+          <span id={goalsNoteId} className="home-action-beta">
+            Beta
           </span>
         </div>
         <button
@@ -222,74 +218,12 @@ export function HomeScreen({
       >
         <GearSixIcon size={20} weight="bold" aria-hidden="true" />
       </button>
-      {/* Along the bottom edge: every critter, out playing. The links sit just
-        above their lane. */}
+      {/* Along the bottom edge: every critter, out playing. */}
       <HomeCritters biome={biome} />
-      {/* Bottom centre: your links. */}
-      <div className="home-byline home-links">
-        By Ken Kai
-        <span className="home-byline-sep" aria-hidden="true">
-          {"\u00b7"}
-        </span>
-        <a
-          className="home-link"
-          href="https://skool.com/kenkai"
-          onClick={(e) => {
-            e.preventDefault();
-            void openUrl("https://skool.com/kenkai");
-          }}
-        >
-          Skool
-        </a>
-        <span className="home-byline-sep" aria-hidden="true">
-          {"\u00b7"}
-        </span>
-        <a
-          className="home-link"
-          href="https://youtube.com/@kenkaidoesai"
-          onClick={(e) => {
-            e.preventDefault();
-            void openUrl("https://youtube.com/@kenkaidoesai");
-          }}
-        >
-          YouTube
-        </a>
-      </div>
-      {/* Top centre: the version, or the update button when one is ready. */}
+      {/* Top centre: the update button, only while an update is out. */}
       <div className="home-version-corner">
-        {appUpdate.phase === "available" || appUpdate.phase === "installing" ? (
-          <button
-            className={`home-update${appUpdate.phase === "installing" ? " home-update-progress" : ""}`}
-            disabled={appUpdate.phase === "installing"}
-            title={`Update to ${appUpdate.version} — installs and restarts the app`}
-            onClick={() => void appUpdate.install()}
-          >
-            {appUpdate.phase === "installing" && (
-              <span className="home-update-fill" style={{ width: `${appUpdate.progress ?? 0}%` }} />
-            )}
-            <DownloadSimpleIcon size={14} weight="bold" aria-hidden="true" />
-            {/* Both labels occupy the same grid cell; the inactive one is
-              visibility:hidden, so the pill is ALWAYS sized to the wider of
-              the two and never resizes when the install starts or the
-              percentage climbs. */}
-            <span className="home-update-swap">
-              <span className={appUpdate.phase === "installing" ? "home-update-hidden" : undefined}>
-                {`Update to ${appUpdate.version}`}
-              </span>
-              <span className={appUpdate.phase === "installing" ? undefined : "home-update-hidden"}>
-                {"Installing\u2026"}
-                <span className="home-update-pct">{`${appUpdate.progress ?? 0}%`}</span>
-              </span>
-            </span>
-          </button>
-        ) : (
-          version && <span className="home-version">{`v${version}`}</span>
-        )}
+        <HomeUpdateButton appUpdate={appUpdate} current={version} />
       </div>
-
-      {showScorecard && progress && (
-        <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
-      )}
     </div>
   );
 }

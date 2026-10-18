@@ -120,3 +120,74 @@ describe("looping CSS animations", () => {
     ]);
   });
 });
+
+// Guard: Home's update key is disabled while it installs, and a dimming
+// :disabled rule once faded it so the progress was hard to see. No rule for
+// either update key itself (as opposed to its effects) may lower its opacity.
+describe("update keys", () => {
+  it.each([
+    ["./HomeUpdateButton.css", /\.(?:home-update|lvl-face|lvl-base)\b/],
+    ["./UpdateBanner.css", /\.(?:update-banner|ub-row|ub-key)/],
+  ])("%s never fades, including while it installs or is pressed", (sheet, names) => {
+    const css = SHEETS[sheet] ?? "";
+    const rules = (css.match(/[^{}]*\{[^}]*\}/g) ?? []).filter((rule) =>
+      names.test(rule.slice(0, rule.indexOf("{"))),
+    );
+    expect(rules.length).toBeGreaterThan(3);
+    for (const rule of rules) expect(rule).not.toMatch(/\bopacity:\s*0?\.\d/);
+  });
+});
+
+// Guard: the What's new window's body once sat on a fixed grey with see-through
+// white cards and a fixed orange, so in the light theme the cards vanished
+// and the story numbers read at 1.65:1. Its page, cards and numbers follow the
+// theme now.
+describe("What's new window", () => {
+  const css = SHEETS["./WhatsNew.css"] ?? "";
+  const rule = (selector: string): string =>
+    css.match(new RegExp(`(?:^|\\n)${selector.replace(/[.*]/g, "\\$&")} \\{([^}]*)\\}`))?.[1] ?? "";
+
+  it("sits on the app's page and cards", () => {
+    expect(rule(".whatsnew-window")).toContain("background: var(--bg)");
+    expect(rule(".wn-camp-story")).toContain("background: var(--surface-1)");
+    expect(rule(".wn-camp-story")).toContain("border: 1px solid var(--border)");
+  });
+
+  it("gives the story numbers a colour for each theme", () => {
+    expect(rule(".wn-camp-num")).toContain("color: var(--wn-ember)");
+    expect(css).toMatch(/:root\[data-theme="light"\] \.whatsnew-window \{[^}]*--wn-ember:/);
+  });
+});
+
+// Guard: the production bundle loads AboutPage.css before App.css, so a
+// single-class About rule lost to the shared class it sits beside (the maker
+// card stacked into one column in the release, though dev looked right). Every
+// About rule that restyles a shared class's element names both classes, so it
+// wins in any load order.
+describe("About page layout", () => {
+  const css = SHEETS["./AboutPage.css"] ?? "";
+
+  it.each([
+    [".settings-card.about-maker", ".about-maker"],
+    [".btn.about-cta", ".about-cta"],
+    [".settings-section-title.about-log-title", ".about-log-title"],
+    [".about-ken.ken-dialogue", ".about-ken"],
+  ])("styles %s with both classes", (both, alone) => {
+    expect(css).toContain(`${both} {`);
+    expect(css).not.toMatch(new RegExp(`(?:^|\\n)\\s*${alone.replace(/\./g, "\\.")} \\{`));
+  });
+});
+
+// Guard: the CI indicator inherits its font (it was drawn for the title bar),
+// so in the Git panel's tab row it rendered at the page's 16px beside 11.5px
+// keys. The row gives it the keys' type.
+describe("Git panel CI indicator", () => {
+  it("takes the row's key type instead of inheriting the page's", () => {
+    const css = SHEETS["./Deck.css"] ?? "";
+    const rule = css.match(/\n\.git-tabs \.chat-head-ci \{([^}]*)\}/)?.[1] ?? "";
+    const keySm = css.match(/\n\.key-sm \{([^}]*)\}/)?.[1] ?? "";
+    const size = (body: string): string | undefined => body.match(/font-size:\s*([^;]+);/)?.[1];
+    expect(size(rule)).toBeDefined();
+    expect(size(rule)).toBe(size(keySm));
+  });
+});

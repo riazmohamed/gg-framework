@@ -52,7 +52,7 @@ Desktop coding workspace (code / chat / motion modes): a React+Tauri app drives 
 
 - Tool array is append-only: `tool_search` promotion must `push` onto `this.tools`; reordering invalidates the session's prefix cache (`system-prompt.tiering.test.ts`).
 - Env changes mid-session go in as an appended "env delta" message (`core/env-delta.ts`); never re-render the cached system prompt (~10k–120k tokens lost to fix ~40).
-- Core vs deferred tools: `tools/tool-tiers.ts`. A deferred tool needs a `TOOL_PROMPT_HINTS` entry (`tools/prompt-hints.ts`) — its only discoverability. A tool goes core only if used in >~1 in 5 sessions (`bench/baseline/14-tool-tiering.mjs`).
+- Core vs deferred tools: `tools/tool-tiers.ts`. A deferred tool needs a `TOOL_PROMPT_HINTS` entry (`tools/prompt-hints.ts`) — its only discoverability. A tool goes core only if used in >~1 in 5 sessions (measured with the private tool-tiering bench).
 
 ## Gotchas
 
@@ -64,7 +64,7 @@ Desktop coding workspace (code / chat / motion modes): a React+Tauri app drives 
 - **Windows EBUSY/EPERM is the recurring CI failure:** files held by live children can't be removed. Wait for the process to exit before `rm` in tests; reuse `retryWindowsReplace` / `removeWhenReleased` patterns.
 - **CI steps use `shell: bash`** — PowerShell only fails on the last line and once hid 72 failing tests.
 - **pnpm settings live in `pnpm-workspace.yaml`**, not package.json `"pnpm"` (Dependabot's pnpm ignores it → frozen-lockfile breaks). A new native dep must be added to `onlyBuiltDependencies` or its install script silently doesn't run.
-- `bench/size-gate.mjs` ignores positional args — always pass `--only <artifact>`.
+- `.github/ci/size-gate.mjs` ignores positional args — always pass `--only <artifact>`.
 - `patches/ink@6.8.0.patch` is not applied; ggcoder uses the fork `@kenkaiiii/ink`.
 
 ## Workflows

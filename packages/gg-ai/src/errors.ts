@@ -14,6 +14,8 @@
  *     → This is a GG Coder bug — please report it.
  */
 
+import { parseFastModeRejection } from "./fast-mode.js";
+
 export type ErrorSource = "provider" | "ggcoder" | "network" | "auth" | "capability";
 
 /**
@@ -91,6 +93,24 @@ export class VideoUnsupportedError extends GGAIError {
   constructor() {
     super("This model can't analyze video.", { source: "capability" });
     this.name = "VideoUnsupportedError";
+  }
+}
+
+/**
+ * Every automatic retry connected to the provider but the reply never finished:
+ * the provider went silent mid-response (or the full non-streamed reply never
+ * arrived in time). Distinct from "couldn't reach the provider" — the network
+ * worked, the response was too slow or too large to complete.
+ * `inToolCall` is set when the replies kept dying while the model was still
+ * writing a tool call's arguments, which is almost always one oversized write.
+ */
+export class ResponseStalledError extends GGAIError {
+  readonly inToolCall: boolean;
+
+  constructor(message: string, options: { inToolCall: boolean; hint?: string; cause?: unknown }) {
+    super(message, { source: "network", hint: options.hint, cause: options.cause });
+    this.name = "ResponseStalledError";
+    this.inToolCall = options.inToolCall;
   }
 }
 
@@ -192,6 +212,9 @@ export function isHardBillingMessage(message: string): boolean {
     lower.includes("recharge") ||
     lower.includes("balance is too low") ||
     lower.includes("out of credits") ||
+    // Anthropic fast mode when usage credits can't pay (see fast-mode.ts).
+    lower.includes("usage credits are required") ||
+    lower.includes("fast mode unavailable") ||
     lower.includes("arrears") ||
     lower.includes("arrearage") ||
     lower.includes("token quota") ||
@@ -298,6 +321,21 @@ export function formatError(err: unknown): FormattedError {
           "Request access via your Anthropic account team (see platform.claude.com/docs/en/about-claude/models/overview), or switch to Claude Fable 5.1 via the model selector — same underlying model, generally available.",
       };
     }
+    // Fast mode rejections must never read as the plan's usage running out:
+    // they bill usage credits, which is real money the user controls.
+    const fastRejection =
+      err.provider === "anthropic" ? parseFastModeRejection(err.message) : undefined;
+    if (fastRejection) {
+      return {
+        headline: `${fastRejection.headline}.`,
+        source: "provider",
+        message: cleanMessage,
+        provider: err.provider,
+        statusCode: err.statusCode,
+        ...(err.requestId ? { requestId: err.requestId } : {}),
+        guidance: fastRejection.guidance,
+      };
+    }
     if (isUsageLimitError(err)) {
       const resetClause = err.resetsAt ? ` It resets at ${formatResetTime(err.resetsAt)}.` : "";
       return {
@@ -322,6 +360,15 @@ export function formatError(err: unknown): FormattedError {
     };
   }
 
+  if (err instanceof ResponseStalledError) {
+    // Connected, but the reply never finished — not an unreachable provider.
+    return {
+      headline: "The response kept stalling before it finished.",
+      source: err.source,
+      message: err.message,
+      guidance: err.hint ?? "Retry once. If it keeps happening, choose another model.",
+    };
+  }
   if (err instanceof GGAIError) {
     return finaliseBySource(err.source, err.message, err.requestId, err.hint);
   }

@@ -115,6 +115,12 @@ export interface ServerToolResult {
 export interface RawContent {
   type: "raw";
   data: Record<string, unknown>;
+  /**
+   * Which transport and model produced an opaque block whose replay is only
+   * valid there (e.g. `"xai:grok-4.7"` for Grok's encrypted reasoning). Never
+   * sent on the wire. Absent on blocks from before this field existed.
+   */
+  origin?: string;
 }
 
 export type ContentPart =
@@ -251,6 +257,12 @@ export interface ServerToolResultEvent {
 
 export interface KeepaliveEvent {
   type: "keepalive";
+  /**
+   * The model is reasoning, but the reasoning is hidden from the UI (thinking
+   * display off on a model that always reasons). Watchdogs treat it like a
+   * thinking delta; nothing is rendered.
+   */
+  reasoning?: true;
 }
 
 export type StreamEvent =
@@ -324,6 +336,10 @@ export interface StreamOptions {
   promptCacheKey?: string;
   /** OpenAI service tier for latency-sensitive requests. Only sent to first-party OpenAI API calls. */
   serviceTier?: "auto" | "default" | "flex" | "priority";
+  /** Provider speed tier. "fast" sends Anthropic `speed: "fast"` (first-party API
+   *  only) or OpenAI/Codex `service_tier: "priority"`. Set automatically by
+   *  `stream()` for fast-mode model ids (see `resolveFastModeModel`). */
+  speed?: "standard" | "fast";
   /** Codex endpoint only: send the Responses-Lite request shape (lite header,
    *  `parallel_tool_calls: false`, all-turns reasoning context). Unset follows
    *  the model family (on for gpt-5.6/gpt-6 models). Lite allows only one tool

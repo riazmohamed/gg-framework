@@ -54,21 +54,6 @@ importers:
         specifier: ^8.70.0
         version: 8.70.0(eslint@10.10.0(jiti@2.7.0))(typescript@6.0.3)
 
-  experiments/prompt-bench:
-    dependencies:
-      '@abukhaled/gg-agent':
-        specifier: workspace:*
-        version: link:../../packages/gg-agent
-      '@abukhaled/gg-ai':
-        specifier: workspace:*
-        version: link:../../packages/gg-ai
-      '@abukhaled/ogcoder':
-        specifier: workspace:*
-        version: link:../../packages/ggcoder
-      zod:
-        specifier: ^4.5.4
-        version: 4.5.4
-
   gg-app:
     dependencies:
       '@phosphor-icons/react':
@@ -205,6 +190,9 @@ importers:
       openai:
         specifier: ^7.13.0
         version: 7.13.0(undici@7.25.0)(ws@8.21.3)(zod@4.5.4)
+      undici:
+        specifier: 7.25.0
+        version: 7.25.0
       zod:
         specifier: ^4.4.3
         version: 4.5.4

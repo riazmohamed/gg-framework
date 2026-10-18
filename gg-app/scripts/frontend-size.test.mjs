@@ -11,14 +11,14 @@ let manifest;
 beforeEach(() => {
   root = mkdtempSync(path.join(tmpdir(), "gg-frontend-size-"));
   dist = path.join(root, "gg-app/dist");
-  mkdirSync(path.join(root, "bench/baseline"), { recursive: true });
+  mkdirSync(path.join(root, ".github/ci/baseline"), { recursive: true });
   mkdirSync(path.join(dist, ".vite"), { recursive: true });
   copyFileSync(
-    new URL("../../bench/size-gate.mjs", import.meta.url),
-    path.join(root, "bench/size-gate.mjs"),
+    new URL("../../.github/ci/size-gate.mjs", import.meta.url),
+    path.join(root, ".github/ci/size-gate.mjs"),
   );
   writeFileSync(
-    path.join(root, "bench/baseline/sizes.json"),
+    path.join(root, ".github/ci/baseline/sizes.json"),
     JSON.stringify({
       artifacts: { "frontend:initial": { bytes: 35_000 } },
     }),
@@ -50,7 +50,7 @@ function runGate() {
   writeFileSync(path.join(dist, ".vite/manifest.json"), JSON.stringify(manifest));
   return spawnSync(
     process.execPath,
-    [path.join(root, "bench/size-gate.mjs"), "--only", "frontend:initial"],
+    [path.join(root, ".github/ci/size-gate.mjs"), "--only", "frontend:initial"],
     {
       encoding: "utf8",
       timeout: 10_000,
@@ -84,12 +84,12 @@ describe("bundle-size reporting", () => {
       mkdirSync(path.join(root, "gg-app/src-tauri/sidecar/skills"));
     }
     writeFileSync(
-      path.join(root, "bench/baseline/sizes.json"),
+      path.join(root, ".github/ci/baseline/sizes.json"),
       JSON.stringify({ artifacts: { [artifact]: { bytes: 35_000 } } }),
     );
     const result = spawnSync(
       process.execPath,
-      [path.join(root, "bench/size-gate.mjs"), "--only", artifact],
+      [path.join(root, ".github/ci/size-gate.mjs"), "--only", artifact],
       { encoding: "utf8", timeout: 10_000 },
     );
     expect(result.status).toBe(0);

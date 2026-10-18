@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { clearMocks, mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentState } from "./agent";
@@ -71,16 +71,18 @@ describe("session navigation notes", () => {
       localStorage.setItem("gg-notes:/workspaces/other", "Unrelated notes");
 
       const view = render(<App />);
+      // Notes lives in the deck's ⋯ keypad and opens inside the window, over
+      // the conversation, rather than as a pop-up dialog.
       const openNotes = async (): Promise<void> => {
-        const button = await screen.findByRole("button", { name: "Notes" });
+        fireEvent.click(await screen.findByRole("button", { name: "More" }));
         expect(
           screen.getByRole("button", {
             name: mode === "chat" ? "Back to chats" : "Back to motion sessions",
           }),
         ).toBeTruthy();
-        expect(button.closest(".picker-head-actions")).not.toBeNull();
-        fireEvent.click(button);
-        expect(screen.getByRole("dialog", { name: "Your notes" })).toBeTruthy();
+        fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+        expect(screen.getByRole("region", { name: "Notes" })).toBeTruthy();
+        expect(screen.queryByRole("dialog")).toBeNull();
       };
       await openNotes();
       await waitFor(() => {
@@ -94,12 +96,8 @@ describe("session navigation notes", () => {
       expect(localStorage.getItem(key)).toBe(edited);
       expect(localStorage.getItem("gg-notes:/workspaces/other")).toBe("Unrelated notes");
 
-      fireEvent.click(
-        within(screen.getByRole("dialog", { name: "Your notes" })).getByRole("button", {
-          name: "Close",
-        }),
-      );
-      expect(screen.queryByRole("dialog", { name: "Your notes" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Close Notes" }));
+      expect(screen.queryByRole("region", { name: "Notes" })).toBeNull();
       await openNotes();
       expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Your notes" }).value).toBe(
         edited,

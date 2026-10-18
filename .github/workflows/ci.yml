@@ -60,7 +60,24 @@ jobs:
           case "$RUNNER_OS" in
             Linux) sudo apt-get install -y --no-install-recommends ripgrep ;;
             macOS) HOMEBREW_NO_AUTO_UPDATE=1 brew install ripgrep ;;
-            Windows) choco install ripgrep -y --no-progress ;;
+            Windows)
+              # The Chocolatey community feed intermittently 504s, and choco
+              # can exit 0 after installing nothing ("installed 0/0"), so
+              # retry until `rg` actually exists; fail if every attempt fails.
+              for attempt in 1 2 3 4; do
+                choco install ripgrep -y --no-progress || true
+                if command -v rg >/dev/null 2>&1; then
+                  break
+                fi
+                if [ "$attempt" -eq 4 ]; then
+                  echo "choco install ripgrep failed after $attempt attempts" >&2
+                  exit 1
+                fi
+                delay=$((attempt * 30))
+                echo "choco install ripgrep failed (attempt $attempt); retrying in ${delay}s" >&2
+                sleep "$delay"
+              done
+              ;;
           esac
           rg --version
 
@@ -81,15 +98,15 @@ jobs:
           pnpm --filter @abukhaled/ogcoder build
 
       # Bundle growth is informational; measured CLI startup remains blocking.
-      # Reference sizes live in bench/baseline/sizes.json.
+      # Reference sizes live in .github/ci/baseline/sizes.json.
       - name: Size report + startup gate
         shell: bash
         run: |
           # --only: a positional arg is ignored by the script, which then checks
           # every artifact — including the sidecar this job never builds (that
           # one is reported in the `app` job, which bundles it).
-          node bench/size-gate.mjs --only dist:ggcoder
-          node bench/startup-gate.mjs
+          node .github/ci/size-gate.mjs --only dist:ggcoder
+          node .github/ci/startup-gate.mjs
 
       # Lint and formatting are OS-independent, so one leg is enough.
       - name: Lint + format check
@@ -232,14 +249,14 @@ jobs:
       # node_modules carries platform-conditional binaries so one baseline
       # cannot hold across the matrix).
       - name: Sidecar size report
-        run: node bench/size-gate.mjs --only sidecar
+        run: node .github/ci/size-gate.mjs --only sidecar
         shell: bash
 
       - name: Frontend build + initial JavaScript size report
         shell: bash
         run: |
           pnpm --filter gg-app build
-          node bench/size-gate.mjs --only frontend:initial
+          node .github/ci/size-gate.mjs --only frontend:initial
 
       - name: Frontend platform-class test
         run: pnpm --filter gg-app test

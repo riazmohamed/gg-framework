@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   getSettings,
@@ -36,6 +36,10 @@ const session: RecentSession = {
   messageCount: 4,
   chatAgent: "therapist",
 };
+
+// Pickers keep their last list per window (useCachedList); each test starts
+// from a first visit.
+beforeEach(() => sessionStorage.clear());
 
 afterEach(() => {
   cleanup();

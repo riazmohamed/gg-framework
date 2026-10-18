@@ -18,6 +18,7 @@ import { codeLanguage, codeNodeText } from "./markdown-prompt";
 import { collapsedCode, shouldCollapseCode, visibleBlockCount } from "./collapse";
 import { marked } from "marked";
 import { rehypeAnimateWords } from "./rehype-animate-words";
+import { rehypeArrows } from "./rehype-arrows";
 import { useAnimatedHeight } from "./animated-height";
 import "highlight.js/styles/github-dark.css";
 
@@ -83,6 +84,26 @@ function ExternalLink({
  * `display: table` (a block-display table loses its table semantics for
  * VoiceOver), and the frame is focusable so a keyboard can scroll it.
  */
+/**
+ * A numbered list. Replies show top-level steps as rows numbered by a CSS
+ * counter; a list GG continues after a code block arrives as `start="4"`, so
+ * the counter starts where the list does instead of restarting at 1.
+ */
+function StepList({
+  start,
+  children,
+}: {
+  start?: number;
+  children?: React.ReactNode;
+}): React.ReactElement {
+  const first = typeof start === "number" && Number.isFinite(start) ? start : 1;
+  return (
+    <ol start={first === 1 ? undefined : first} style={{ counterReset: `step ${first - 1}` }}>
+      {children}
+    </ol>
+  );
+}
+
 function ScrollTable({ children }: { children?: React.ReactNode }): React.ReactElement {
   return (
     <div className="md-table-scroll" tabIndex={0} role="region" aria-label="Table">
@@ -358,15 +379,21 @@ function isPromptBlockComplete(raw: string): boolean {
   return /`{3,}\s*$/.test(body);
 }
 
-const ANIMATED_PLUGINS = [rehypeHighlight, rehypeAnimateWords];
+const ANIMATED_PLUGINS = [rehypeHighlight, rehypeArrows, rehypeAnimateWords];
 /**
  * How long a block keeps its word spans after a newer block starts below it.
  * Covers the reveal catching up plus the word fade (`--dur-row`, 220ms), so the
  * last words of a finished paragraph finish fading instead of snapping solid.
  */
 const WORD_FADE_HOLD_MS = 450;
-const PLUGINS = [rehypeHighlight];
-const COMPONENTS = { a: ExternalLink, pre: PreBlock, table: ScrollTable, td: TableCell };
+const PLUGINS = [rehypeHighlight, rehypeArrows];
+const COMPONENTS = {
+  a: ExternalLink,
+  ol: StepList,
+  pre: PreBlock,
+  table: ScrollTable,
+  td: TableCell,
+};
 
 const MemoizedMarkdownBlock = memo(
   function MarkdownBlock({

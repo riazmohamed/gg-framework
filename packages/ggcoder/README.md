@@ -73,7 +73,7 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 | ----------------- | ------------------------------------------------------------------------------------------- | ---------------- |
 | **Anthropic**     | Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5                                           | OAuth            |
 | **OpenAI**        | GPT-6 Astra, GPT-6.1 Sol, GPT-6 Luna                                                        | OAuth            |
-| **Gemini**        | Gemini 3.1 Pro (Preview), 3.8 Flash, 3.7 Flash, 3.5 Flash, 3.5 Flash Lite, 3.1 Flash Lite   | OAuth            |
+| **Gemini**        | Gemini 3.1 Pro (Preview), 3.8 Flash, 3.5 Flash, 3.5 Flash Lite, 3.1 Flash Lite              | OAuth            |
 | **xAI (Grok)**    | Grok 4.7                                                                                    | OAuth or API key |
 | **Moonshot**      | Kimi K3, K2.8 Preview (Kimi sign-in), K2.7 Code, K2.7 Code HighSpeed                        | OAuth or API key |
 | **Z.AI (GLM)**    | GLM-5.3, GLM-5.3-Flash                                                                      | API key          |

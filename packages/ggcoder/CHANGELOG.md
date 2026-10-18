@@ -1,5 +1,129 @@
 # @kenkaiiii/ggcoder
 
+## 5.83.5
+
+### Patch Changes
+
+- a69cc27: The titlebar no longer shows a project as "not a git repo, 0 changed files" when git is just slow to answer. On a busy machine, git could miss GG's 2-second limit when a window opened, and that timeout was reported as "not a repo" with nothing to correct it until the next run. GG now treats a timeout as unknown, and re-reads the git state in the background with more time.
+- Leaner, faster requests. On Anthropic, the built-in web search tool (about 2,500 tokens on every request) is now attached only when a session needs the web, either when the prompt asks for it or when the model looks it up. `tool_search` now loads only the best match instead of up to five loosely related tools. Grep output lists each file path once instead of on every matching line. Oversized bash output is held to its 50 KB cap even when it is made of a few huge lines, such as minified bundles. The Claude Code version lookup no longer blocks the first message. On Claude Haiku 5.5 across 270 benchmark runs, input tokens fell 24% with more tasks passing.
+  - @kenkaiiii/gg-ai@5.83.5
+  - @kenkaiiii/gg-agent@5.83.5
+  - @kenkaiiii/gg-core@5.83.5
+
+## 5.83.4
+
+### Patch Changes
+
+- 420b1ad: The bash tool no longer appends a "Verification evidence rejected" note to checks whose exit status can't prove success (e.g. `npm test | grep x; git diff`). The model almost always re-ran the suite after it, and the output it already had was correct. Such checks still don't count as verification: run status reports the turn as incomplete, as before. On Claude Haiku 5.5 this cut model requests about 7% and input tokens about 9%, with no change in pass rate.
+- 420b1ad: Shorter replies and a cleaner system prompt. After changing code, the agent's summary now aims for under ~100 words: a bold headline, then a few flat bullets with what changed, the check result, and any caveat or change made beyond the request. Answers and reviews keep the length they need. Progress messages between steps are one sentence. On Claude Haiku 5.5 this cut task time about 15% and cost about 15%, with no change in pass rate or test reporting. The prompt also drops a few contradictions. Language style packs no longer override a project's own conventions or push it to install a schema library. The agent runs one check after its edits instead of deferring checks to /commit. Detailed hardening rules now live only in the bulletproof skill.
+- 420b1ad: Turns no longer show as unverified when the agent's tests actually passed. Agents often run tests inside a longer command (`npm test 2>&1 | tail; node -e '…'`), and that command's exit status comes from its last part, so the tests never counted. When a turn would end unverified that way, GG now runs that test command once more on its own and records its real result. It never runs checks the agent skipped. If nothing was edited since, a pass counts as verification. A failed re-run leaves the turn unverified without marking it failed.
+- Updated dependencies [420b1ad]
+  - @kenkaiiii/gg-ai@5.83.4
+  - @kenkaiiii/gg-agent@5.83.4
+  - @kenkaiiii/gg-core@5.83.4
+
+## 5.83.3
+
+### Patch Changes
+
+- Fix provider requests dying at Node's 300s fetch cap (all providers now run on a transport with a 30-minute backstop), ask the model to split oversized tool calls after a stall, report exhausted stalls as `ResponseStalledError` instead of a network failure, keep hidden reasoning on always-reasoning models from tripping the stall watchdog, and move Grok to xAI's Responses API with encrypted reasoning replayed across turns.
+  - @kenkaiiii/gg-ai@5.83.3
+  - @kenkaiiii/gg-agent@5.83.3
+  - @kenkaiiii/gg-core@5.83.3
+
+## 5.83.2
+
+### Patch Changes
+
+- `generate_image` now reports the size it actually delivered. The ChatGPT image backend can return a smaller image than requested (2048x2048 came back as 1254x1254), so the result states the real dimensions and warns plainly on a mismatch instead of reading as a clean success. The file is still saved exactly as OpenAI sent it, with no resizing and no repeat request. Image requests also follow the Codex CLI's retry policy: up to 4 retries with backoff (or the server's `Retry-After`) on server errors and dropped connections, and never on a usage limit or other client error, so no extra quota is spent.
+  - @kenkaiiii/gg-ai@5.83.2
+  - @kenkaiiii/gg-agent@5.83.2
+  - @kenkaiiii/gg-core@5.83.2
+
+## 5.83.1
+
+### Patch Changes
+
+- Fix `generate_image`, which failed for every ChatGPT login because it drove image generation through the retired `gpt-5.5` chat model. It now calls Codex's own image endpoints (`codex/images/generations` and `codex/images/edits`) with the same request shape and client headers as the Codex CLI, supports transparent backgrounds and up to five edit references, and explains a refused account (free ChatGPT plans get a 403) or a used-up image quota instead of passing through a bare HTTP error.
+  - @kenkaiiii/gg-ai@5.83.1
+  - @kenkaiiii/gg-agent@5.83.1
+  - @kenkaiiii/gg-core@5.83.1
+
+## 5.83.0
+
+### Minor Changes
+
+- Gemini API key login for accounts Code Assist no longer serves, per-provider compaction triggers from sourced evidence (MiMo, DeepSeek, Kimi and Qwen use their full windows; price-line caps for Grok, GPT-6, Gemini 3.1 Pro and MiniMax), the agent wakes on background failures instead of waiting for exit or a timeout, MiMo UltraSpeed needs paid-model confirmation, Grok sends x-grok-conv-id for prompt-cache hits, and Fable xhigh, Kimi K2.7 output caps and Gemini licence errors are fixed.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.0
+- @kenkaiiii/gg-agent@5.83.0
+- @kenkaiiii/gg-core@5.83.0
+
+## 5.82.0
+
+### Minor Changes
+
+- Add fast-mode models over subscription logins: Claude Opus 5.5 Fast (`speed: "fast"`, billed to Claude usage credits) and GPT-6 Astra/6.1 Sol/Luna Fast (Codex `service_tier: "priority"`), with a clear error when Claude usage credits are off.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.82.0
+- @kenkaiiii/gg-agent@5.82.0
+- @kenkaiiii/gg-core@5.82.0
+
+## 5.81.0
+
+### Minor Changes
+
+- Add a `/git/overview` sidecar route (changed files with line counts plus open GitHub issues and PRs), let `POST /thinking` set a specific level or turn thinking off, and mark live goal runs across processes so the app and `ggcoder acp` never resume a goal the other is running.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.81.0
+- @kenkaiiii/gg-agent@5.81.0
+- @kenkaiiii/gg-core@5.81.0
+
+## 5.80.1
+
+### Patch Changes
+
+- Load custom slash commands from every workspace root, so a goal's attached repos and folders added with `/add-dir` bring their own `.gg/commands`.
+  - @kenkaiiii/gg-ai@5.80.1
+  - @kenkaiiii/gg-agent@5.80.1
+  - @kenkaiiii/gg-core@5.80.1
+
+## 5.80.0
+
+### Minor Changes
+
+- Add GG Goals, Autopilot Ken and the desktop's session extras to `ggcoder acp`. ACP clients can now list, create, update, pause and delete goals and follow their workers (`_gg/goals/*`, `_gg/goal/*`, `_gg/goal_state`). They can also turn autopilot on and follow its review cycle (`_gg/autopilot/set`, `_gg/autopilot_state`, `_gg/autopilot_event`), steer a run mid-turn through a prompt queue (`_gg/queue`), read the checklist, answer the agent's questions (`_gg/ask_user`) and follow plan review (`_gg/plan_state`). Goal list rows now come from one summary shared with the desktop sidecar. The in-process grep now scans large trees on worker threads, rejects files with a byte prefilter, skips gitignored directories during the walk instead of after it, and raises its file cap from 10k to 100k, so it no longer hides matches beyond the first 10k files.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.80.0
+- @kenkaiiii/gg-agent@5.80.0
+- @kenkaiiii/gg-core@5.80.0
+
+## 5.79.4
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-core@5.79.4
+  - @kenkaiiii/gg-ai@5.79.4
+  - @kenkaiiii/gg-agent@5.79.4
+
+## 5.79.3
+
+### Patch Changes
+
+- Report the Steroids corpus size on disk, and give GG Goals' builder and checker workers the `steroids` tool with guidance to use it
+  - @kenkaiiii/gg-ai@5.79.3
+  - @kenkaiiii/gg-agent@5.79.3
+  - @kenkaiiii/gg-core@5.79.3
+
 ## 5.79.2
 
 ### Patch Changes

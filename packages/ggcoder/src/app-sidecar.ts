@@ -25,7 +25,12 @@ import { setStreamDiagnostic } from "@abukhaled/gg-agent";
 import { AgentSession } from "./core/agent-session.js";
 import { RunLifecycle } from "./core/run-lifecycle.js";
 import { RunClaim } from "./core/run-claim.js";
-import { shouldOfferPendingPlan } from "./core/plan-handoff.js";
+import { IdleWakeController } from "./core/idle-wake.js";
+import {
+  IMPLEMENT_PLAN_PROMPT as SHARED_IMPLEMENT_PLAN_PROMPT,
+  PLAN_SUBMITTED_FOR_REVIEW,
+  shouldOfferPendingPlan,
+} from "./core/plan-handoff.js";
 import {
   createChatAgent,
   parseChatAgentId,
@@ -68,6 +73,7 @@ import { ensureAppDirs, loadSavedSettings } from "./config.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import {
   getModel,
+  withoutPaidTier,
   getDefaultThinkingLevel,
   getContextWindow,
   registerRuntimeModels,
@@ -81,7 +87,6 @@ import { type RepoPolls, createRepoPolls } from "./app-sidecar/repo-polls.js";
 import { extractPlanSteps } from "./utils/plan-steps.js";
 import { getSupportedThinkingLevels, isThinkingLevelSupported } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
-import { loadCustomCommands } from "./core/custom-commands.js";
 import { pruneDoneTasksSync } from "./core/tasks-store.js";
 import { initLogger, log } from "./core/logger.js";
 import { installTerminationHandlers } from "./core/shutdown.js";
@@ -141,6 +146,9 @@ import type { SessionRouteContext } from "./app-sidecar/route-context.js";
 import { createHfPullManager } from "./app-sidecar/hf-pull-manager.js";
 import { keepAwake } from "./app-sidecar/keep-awake.js";
 import { createAutopilotRunner } from "./app-sidecar/autopilot-runner.js";
+
+/** Limit for re-reading git state in the background when git missed the usual 2 s. */
+const SLOW_GIT_READ_TIMEOUT_MS = 15_000;
 
 async function main(): Promise<void> {
   // Hidden persistent-worker dispatch must win before strict JSON/server parsing.
@@ -920,7 +928,7 @@ async function createSession(
         }
         setPendingPlan(planPath, content);
         broadcast("plan_exit", { planPath, content });
-        return "Plan submitted for user review. Wait for the user to approve, reject, or dismiss it before implementing.";
+        return PLAN_SUBMITTED_FOR_REVIEW;
       },
     });
   }
@@ -1032,7 +1040,8 @@ async function createSession(
   // follows the active model. A Goal window reads git from its attached
   // project folder, not the goal folder (see resolveGitCwd), and re-targets
   // when the goal's folders change (`retargetGit`).
-  let gitCwd = await resolveGitCwd(cwd, goal?.record ?? null);
+  const initialTarget = await resolveGitCwd(cwd, goal?.record ?? null);
+  let gitCwd = initialTarget.dir;
   const initialGit = await readGitState(gitCwd);
   let gitBranch: string | null = initialGit.branch;
   let gitIsRepo: boolean = initialGit.isRepo;
@@ -1353,6 +1362,9 @@ async function createSession(
   // Bumped by /cancel — a run whose cancel generation changed mid-flight was
   // canceled and earns no XP.
   let cancelGeneration = 0;
+  // Wakes an idle session for its own failed background work; set up once the
+  // run machinery below exists. Null outside the coding agent.
+  let idleWake: IdleWakeController | null = null;
   // Autopilot (auto-review) toggle for THIS window's project. Loaded from
   // gg-app.json on boot; flipped via POST /autopilot. When on, POST /prompt runs
   // runAutopilotCycle after the user's turn settles — Ken auto-reviews the work
@@ -1447,12 +1459,12 @@ async function createSession(
     broadcast("plan_review", plan);
   }
 
-  // Workflow (prompt-template) commands: built-in + the project's custom
-  // `.gg/commands/*.md`. Used to gate autopilot off command turns and to label
+  // Workflow (prompt-template) commands: built-in + the custom
+  // `.gg/commands/*.md` of every workspace root (a goal's attached repos too). Used to gate autopilot off command turns and to label
   // expanded templates in Ken's digests. Loaded fresh so a newly added custom
   // command is picked up without a restart (mirrors GET /commands).
   async function loadWorkflowCommandSpecs(): Promise<WorkflowCommandSpec[]> {
-    const custom = await loadCustomCommands(cwd).catch(() => []);
+    const custom = await session.loadCustomCommands().catch(() => []);
     return [
       ...PROMPT_COMMANDS.map((c) => ({ name: c.name, aliases: c.aliases, prompt: c.prompt })),
       ...custom.map((c) => ({ name: c.name, aliases: [] as string[], prompt: c.prompt })),
@@ -1493,21 +1505,26 @@ async function createSession(
     kenModelOverride = null;
   }
 
-  /** The model Ken uses next turn: the pin when set, else GG Coder's. */
+  /** The model Ken uses next turn: the pin when set, else GG Coder's. Ken never
+   *  follows GG onto a paid tier: he runs in the background, unwatched. */
   function kenCurrentModel(): { provider: Provider; model: string } {
     if (kenModelOverride) return kenModelOverride;
     const st = session.getState();
-    return { provider: st.provider, model: st.model };
+    return { provider: st.provider, model: withoutPaidTier(st.model) };
   }
 
   /** Footer payload: Ken's effective model + whether it's a pin. Merged into
    *  /state, the SSE ready frame, and every ken_model_change broadcast. */
   function kenStatePayload(): ReturnType<typeof effectiveKenModel> {
     const st = session.getState();
-    return effectiveKenModel(kenModelOverride, { provider: st.provider, model: st.model });
+    return effectiveKenModel(kenModelOverride, {
+      provider: st.provider,
+      model: withoutPaidTier(st.model),
+    });
   }
 
-  async function syncKenModel(provider: Provider, model: string): Promise<void> {
+  async function syncKenModel(provider: Provider, requested: string): Promise<void> {
+    const model = withoutPaidTier(requested);
     if (kenRunning) {
       pendingKenModel = { provider, model };
       return;
@@ -1582,7 +1599,9 @@ async function createSession(
   let kenAutoAbort = new AbortController();
   let pendingKenAutoModel: { provider: Provider; model: string } | null = null;
 
-  async function syncKenAutoModel(provider: Provider, model: string): Promise<void> {
+  async function syncKenAutoModel(provider: Provider, requested: string): Promise<void> {
+    // The autopilot reviewer runs every turn, unwatched: never on a paid tier.
+    const model = withoutPaidTier(requested);
     if (autopilotReviewing) {
       pendingKenAutoModel = { provider, model };
       return;
@@ -1628,6 +1647,8 @@ async function createSession(
 
   function abortOwnedWork(): void {
     cancelGeneration++;
+    // Stop means "stop acting on your own" — that includes background alerts.
+    idleWake?.noteStop();
     abort.abort();
     // An MCP tool call parked on user input is not cancelled by the signal —
     // the promise lives in the bridge. Release it, or the aborted turn's tool
@@ -1799,8 +1820,7 @@ async function createSession(
   // string the webview sends on a manual Accept (see PlanReviewModal's accept
   // handler in gg-app/src/App.tsx). Keep the two in lockstep so auto- and
   // manual approval produce identical implementation turns.
-  const IMPLEMENT_PLAN_PROMPT =
-    "The plan has been approved. Implement it now, following each step in order.";
+  const IMPLEMENT_PLAN_PROMPT = SHARED_IMPLEMENT_PLAN_PROMPT;
 
   // ── Stranded-queue drain ───────────────────────────────
   // A prompt POSTed while an autopilot cycle is between injected runs (build
@@ -1973,6 +1993,43 @@ async function createSession(
     },
   });
 
+  // ── Idle wake for background alerts ────────────────────────
+  // A background task that fails, or a child agent that finishes, after the
+  // agent ended its turn would otherwise wait for the user's next message.
+  // The coding agent only: chat agents start no background work, Motion owns
+  // its own render flow, and GG Goals drives its workers itself.
+  if (mode !== "chat" && mode !== "motion" && !goal) {
+    idleWake = new IdleWakeController({
+      isBusy: () =>
+        running ||
+        runClaim.active ||
+        autopilotActive ||
+        autopilotReviewing ||
+        drainingStrandedQueue ||
+        taskRunAll,
+      isBlocked: () => pendingPlanPath !== null,
+      hasPendingAlert: () => session.hasPendingBackgroundAlert(),
+      humanPromptSeq: () => session.getHumanPromptSeq(),
+      onSkip: (reason) =>
+        log("INFO", "app-sidecar", "background alert left for the next message", { reason }),
+      start: async () => {
+        // Same race guard as POST /prompt: claim synchronously or yield.
+        if (!runClaim.claim()) return;
+        try {
+          log("INFO", "app-sidecar", "starting a run for a background alert");
+          await runAgent("Background task update", async () => {
+            await session.continueFromNotifications();
+          });
+          await runStrandedQueue();
+        } finally {
+          runClaim.release();
+          offerPendingPlan();
+        }
+      },
+    });
+    session.onBackgroundAlert(() => idleWake?.trigger());
+  }
+
   // ── Provider auth (login) bridge ───────────────────────────
   // OAuth login functions are interactive (open a URL, sometimes prompt for a
   // pasted code). We run one at a time and surface every step over SSE so the
@@ -2033,11 +2090,15 @@ async function createSession(
           ? ((await auth.getCredentials(oauthKey))?.usageExhaustedUntil ?? 0)
           : 0;
         const oauthSidelined = hasOAuth && Date.now() < exhaustedUntil && hasApiKey;
-        const activeMethod = connectedMethods.includes("oauth")
-          ? oauthSidelined
-            ? ("apikey" as const)
-            : ("oauth" as const)
-          : connectedMethods[0];
+        // Gemini resolves the API key first (model registry authStorageKeys).
+        const keyFirst = p.value === "gemini" && hasApiKey;
+        const activeMethod = keyFirst
+          ? ("apikey" as const)
+          : connectedMethods.includes("oauth")
+            ? oauthSidelined
+              ? ("apikey" as const)
+              : ("oauth" as const)
+            : connectedMethods[0];
 
         // `methodDetails` is the server-side lookup table behind
         // `methodGuidance` — shipping both would duplicate every string on the
@@ -2134,28 +2195,48 @@ async function createSession(
   let gitTargetGeneration = 0;
   /**
    * A goal's attached folders changed: point the titlebar's git state at the
-   * new project folder. No-op when the target is unchanged; a newer call or
-   * teardown supersedes one still reading git.
+   * new project folder. No-op when the target is unchanged, unless `reread`
+   * asks for a fresh read of the same folder; a newer call or teardown
+   * supersedes one still reading git.
    */
-  async function retargetGit(): Promise<void> {
+  async function retargetGit(
+    options: { reread?: boolean; timeoutMs?: number } = {},
+  ): Promise<void> {
     const generation = ++gitTargetGeneration;
-    const next = await resolveGitCwd(cwd, goal?.record ?? null);
-    if (generation !== gitTargetGeneration || repoWatchStopped || next === gitCwd) return;
-    const state = await readGitState(next);
+    const read = { timeoutMs: options.timeoutMs };
+    const { dir: next } = await resolveGitCwd(cwd, goal?.record ?? null, (dir) =>
+      isGitRepo(dir, read),
+    );
     if (generation !== gitTargetGeneration || repoWatchStopped) return;
-    repoWatch.unsubscribe();
+    if (next === gitCwd && !options.reread) return;
+    const state = await readGitState(next, read);
+    if (generation !== gitTargetGeneration || repoWatchStopped) return;
+    const moved = next !== gitCwd || state.gitHubSlug !== gitHubSlug;
     gitCwd = next;
     gitBranch = state.branch;
     gitIsRepo = state.isRepo;
     gitDirtyFileCount = state.dirtyFileCount;
     gitHubSlug = state.gitHubSlug;
-    // The old repo's numbers don't apply; the new watchers fill these in.
-    gitHubIssues = null;
-    gitHubPRs = null;
-    gitHubCI = null;
-    projectHealthScan = null;
-    repoWatch = watchRepo(gitCwd);
+    if (moved) {
+      // The old repo's numbers don't apply; the new watchers fill these in.
+      repoWatch.unsubscribe();
+      gitHubIssues = null;
+      gitHubPRs = null;
+      gitHubCI = null;
+      projectHealthScan = null;
+      repoWatch = watchRepo(gitCwd);
+    }
     broadcast("extras", footerExtras());
+  }
+  // Git missed its 2 s limit at startup (a busy machine): the titlebar would
+  // show "not a repo" until the next run. Read again in the background with
+  // more time; window creation doesn't wait for it.
+  if (!initialTarget.settled || !initialGit.settled) {
+    retargetGit({ reread: true, timeoutMs: SLOW_GIT_READ_TIMEOUT_MS }).catch((err: unknown) => {
+      log("WARN", "app-sidecar", "slow git re-read failed", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
 
   const routeCtx: SessionRouteContext = {
@@ -2405,6 +2486,7 @@ async function createSession(
     // started. Otherwise they keep streaming tokens and running tools on a
     // session that is being torn down.
     abortOwnedWork();
+    idleWake?.dispose();
     cancelHfPull();
     releaseRunAwake?.();
     releaseRunAwake = null;

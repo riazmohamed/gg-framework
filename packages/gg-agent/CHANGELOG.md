@@ -1,5 +1,78 @@
 # @kenkaiiii/gg-agent
 
+## 5.83.5
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.5
+
+## 5.83.4
+
+### Patch Changes
+
+- Updated dependencies [420b1ad]
+  - @kenkaiiii/gg-ai@5.83.4
+
+## 5.83.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.3
+
+## 5.83.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.2
+
+## 5.83.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.1
+
+## 5.83.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.0
+
+## 5.82.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.82.0
+
+## 5.81.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.81.0
+
+## 5.80.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.80.1
+
+## 5.80.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.80.0
+
+## 5.79.4
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.79.4
+
+## 5.79.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.79.3
+
 ## 5.79.2
 
 ### Patch Changes

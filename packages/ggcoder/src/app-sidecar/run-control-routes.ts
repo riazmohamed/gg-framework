@@ -1,5 +1,5 @@
 import type http from "node:http";
-import type { Provider } from "@abukhaled/gg-ai";
+import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { findProbedModel, parseLocalModelId } from "@abukhaled/gg-core";
 import { getModel, getAllModels } from "../core/model-registry.js";
 import {
@@ -17,6 +17,38 @@ import {
   persistThinkingLevel,
 } from "./app-settings.js";
 import type { SessionRouteContext } from "./route-context.js";
+
+/**
+ * What a POST /thinking asks for. An empty body cycles to the next level (the
+ * footer's original click-to-cycle); `{"level": "<level>"}` sets that level and
+ * `{"level": null}` turns thinking off, so a picker can jump straight to one.
+ * A level the current model doesn't support is refused, not clamped.
+ */
+export function resolveThinkingRequest(
+  provider: Provider,
+  model: string,
+  current: ThinkingLevel | undefined,
+  raw: string,
+): { ok: true; level: ThinkingLevel | undefined } | { ok: false; error: string } {
+  if (raw.trim() === "") {
+    return { ok: true, level: getNextThinkingLevel(provider, model, current) };
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    return { ok: false, error: "invalid JSON body" };
+  }
+  if (typeof body !== "object" || body === null || !("level" in body)) {
+    return { ok: true, level: getNextThinkingLevel(provider, model, current) };
+  }
+  const level = (body as { level: unknown }).level;
+  if (level === null) return { ok: true, level: undefined };
+  if (typeof level !== "string") return { ok: false, error: "level must be a string or null" };
+  const match = getSupportedThinkingLevels(provider, model).find((l) => l === level);
+  if (!match) return { ok: false, error: `${model} doesn't support thinking level "${level}"` };
+  return { ok: true, level: match };
+}
 
 export function handleRunControlRoutes(
   ctx: SessionRouteContext,
@@ -39,7 +71,13 @@ export function handleRunControlRoutes(
         .filter((m) => m.provider === "local" || loggedIn.includes(m.provider))
         .map((m) => {
           if (m.provider !== "local") {
-            return { id: m.id, name: m.name, provider: m.provider };
+            // `billing` flags models that change what the user pays (fast modes).
+            return {
+              id: m.id,
+              name: m.name,
+              provider: m.provider,
+              ...(m.billing ? { billing: m.billing } : {}),
+            };
           }
           const probed = findProbedModel(ctx.localProbes, m.id);
           return {
@@ -65,8 +103,11 @@ export function handleRunControlRoutes(
     void readBody(req, res).then(async (raw) => {
       if (raw === null) return;
       let modelId: string;
+      let confirmPaid: boolean;
       try {
-        modelId = (JSON.parse(raw) as { model?: string }).model ?? "";
+        const body = JSON.parse(raw) as { model?: string; confirmPaid?: unknown };
+        modelId = body.model ?? "";
+        confirmPaid = body.confirmPaid === true;
       } catch {
         json(res, 400, { error: "invalid JSON body" });
         return;
@@ -74,6 +115,17 @@ export function handleRunControlRoutes(
       const target = getModel(modelId);
       if (!target) {
         json(res, 404, { error: `unknown model: ${modelId}` });
+        return;
+      }
+      // A model that spends real money (Claude fast mode bills usage credits)
+      // is never switched to implicitly: the caller must pass the user's
+      // explicit confirmation. Fails closed for every client of this route.
+      if (target.billing?.paid && !confirmPaid) {
+        json(res, 409, {
+          error: `${target.name} spends real money: ${target.billing.detail} Confirm before switching.`,
+          requiresPaidConfirmation: true,
+          billing: target.billing,
+        });
         return;
       }
       if (ctx.running) {
@@ -87,7 +139,7 @@ export function handleRunControlRoutes(
           return;
         }
       }
-      await ctx.session.switchModel(target.provider, target.id);
+      await ctx.session.switchModel(target.provider, target.id, { confirmPaid });
       // Ken follows GG Coder's model only while un-pinned; a user-set Ken
       // override survives GG model switches untouched.
       if (!ctx.kenModelOverride) {
@@ -171,6 +223,14 @@ export function handleRunControlRoutes(
         const target = getModel(modelId);
         if (!target) {
           json(res, 404, { error: `unknown model: ${modelId}` });
+          return;
+        }
+        // Ken and the autopilot reviewer run unwatched in the background, so
+        // they never run on a model that spends real money.
+        if (target.billing?.paid) {
+          json(res, 400, {
+            error: `${target.name} spends real money, so it's only for your main chat. Pick another model for Ken.`,
+          });
           return;
         }
         ctx.kenModelOverride = { provider: target.provider, model: target.id };
@@ -275,30 +335,43 @@ export function handleRunControlRoutes(
 
   if (method === "POST" && url === "/thinking") {
     // The in-flight request already carries its reasoning config, so a
-    // mid-run cycle cannot affect the turn the user is watching — it just
+    // mid-run change cannot affect the turn the user is watching — it just
     // persists a level the footer then reports for a run that never used it.
     // Locked like POST /model; the footer button is disabled to match.
-    if (ctx.running) {
-      json(res, 409, { error: "cannot change reasoning level while running" });
-      return true;
-    }
-    const st = ctx.session.getState();
-    const next = getNextThinkingLevel(st.provider, st.model, ctx.session.getThinkingLevel());
-    ctx.session.setThinkingLevel(next);
-    // Persist per-project so THIS window restores its thinking state on
-    // restart; keep the global write as a fallback (mirrors the CLI).
-    void saveProjectModelPrefs(ctx.cwd, {
-      provider: st.provider,
-      model: st.model,
-      thinkingEnabled: !!next,
-      thinkingLevel: next ?? undefined,
-    }).then(() => persistThinkingLevel(ctx.paths.settingsFile, next));
-    const payload = {
-      thinkingLevel: next ?? null,
-      supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
-    };
-    ctx.broadcast("thinking_change", payload);
-    json(res, 200, payload);
+    void readBody(req, res).then((raw) => {
+      if (raw === null) return;
+      if (ctx.running) {
+        json(res, 409, { error: "cannot change reasoning level while running" });
+        return;
+      }
+      const st = ctx.session.getState();
+      const resolved = resolveThinkingRequest(
+        st.provider,
+        st.model,
+        ctx.session.getThinkingLevel(),
+        raw,
+      );
+      if (!resolved.ok) {
+        json(res, 400, { error: resolved.error });
+        return;
+      }
+      const next = resolved.level;
+      ctx.session.setThinkingLevel(next);
+      // Persist per-project so THIS window restores its thinking state on
+      // restart; keep the global write as a fallback (mirrors the CLI).
+      void saveProjectModelPrefs(ctx.cwd, {
+        provider: st.provider,
+        model: st.model,
+        thinkingEnabled: !!next,
+        thinkingLevel: next ?? undefined,
+      }).then(() => persistThinkingLevel(ctx.paths.settingsFile, next));
+      const payload = {
+        thinkingLevel: next ?? null,
+        supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
+      };
+      ctx.broadcast("thinking_change", payload);
+      json(res, 200, payload);
+    });
     return true;
   }
 

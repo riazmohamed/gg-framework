@@ -430,6 +430,12 @@ export interface ModelOption {
   /** False when the local server didn't report a real context length (we guessed). */
   contextWindowKnown?: boolean;
   supportsThinking?: boolean;
+  /**
+   * Set when picking this model changes what the user pays (fast modes,
+   * MiMo UltraSpeed). `paid` means real money, never the plan;
+   * `standardModel` is what replaces it wherever it isn't carried over.
+   */
+  billing?: { label: string; detail: string; paid: boolean; standardModel?: string };
 }
 
 export interface SlashCommand {
@@ -1284,6 +1290,41 @@ export async function cycleThinking(): Promise<ThinkingState | null> {
   }
 }
 
+/**
+ * Set the reasoning level directly (null turns thinking off). Throws with the
+ * sidecar's message when the run is busy or the model doesn't support it.
+ */
+export async function setThinkingLevel(level: string | null): Promise<ThinkingState> {
+  return invoke<ThinkingState>("agent_set_thinking", { level });
+}
+
+export interface GitHubItem {
+  number: number;
+  title: string;
+  url: string;
+  author: string;
+  updatedAt: string;
+  draft?: boolean;
+}
+export interface ChangedFile {
+  path: string;
+  added: number | null;
+  removed: number | null;
+  status: "M" | "A" | "D" | "R";
+}
+export interface GitOverview {
+  /** null when GitHub couldn't be asked (no gh, not signed in, not GitHub). */
+  issues: GitHubItem[] | null;
+  pulls: GitHubItem[] | null;
+  changes: ChangedFile[];
+}
+
+/** The Git panel's issues, pull requests and changed files for this project. */
+export async function getGitOverview(): Promise<GitOverview> {
+  await waitForReady();
+  return invoke<GitOverview>("agent_git_overview");
+}
+
 /** List workflow (prompt-template) slash commands the agent can run. */
 export async function listCommands(): Promise<SlashCommand[]> {
   try {
@@ -1325,10 +1366,16 @@ export async function listModels(): Promise<ModelOption[] | null> {
  * rather than as a thrown IPC error — so unpack it here and let the caller
  * surface it.
  */
-export async function switchModel(model: string): Promise<SwitchModelResult | { error: string }> {
+export async function switchModel(
+  model: string,
+  options: { confirmPaid?: boolean } = {},
+): Promise<SwitchModelResult | { error: string }> {
   try {
+    // `confirmPaid` is only ever set from the explicit "spend real money"
+    // confirmation; the sidecar refuses a paid model without it.
     const res = await invoke<SwitchModelResult & { error?: string }>("agent_switch_model", {
       model,
+      confirmPaid: options.confirmPaid === true,
     });
     if (res.error) {
       await logError(`agent_switch_model refused: ${res.error}`);
@@ -2064,6 +2111,8 @@ export interface SteroidsStatus {
   version?: string;
   repos?: number;
   documents?: number;
+  /** Corpus size on disk as the CLI prints it, e.g. "2.0GB". */
+  diskSize?: string;
   path?: string;
   error?: string;
 }

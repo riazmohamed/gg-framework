@@ -10,15 +10,13 @@ import { getSafeToolEnv } from "./safe-env.js";
 import { resolveShell, type ResolveShellOpts } from "../core/shell.js";
 import { PersistentShell } from "../core/persistent-shell.js";
 import { isReadOnlyCommand, sleepOnlySeconds } from "./read-only-bash.js";
+import { backgroundWatchWarnings } from "./background-watch-lint.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
 import { isCatastrophicCommand, type WriteGuardSettings } from "../core/workspace-guard.js";
 import { checkDestructiveGit } from "../core/destructive-git-guard.js";
 import { shellThreatBlockMessage } from "../core/shell-threats.js";
 import { checkPackageInstall } from "../core/package-threats.js";
-import {
-  classifyVerificationCommand,
-  containsBoundedCheck,
-} from "../core/verification-evidence.js";
+import { classifyVerificationCommand } from "../core/verification-evidence.js";
 import { checkCommandPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import {
   prepareSandboxLaunch,
@@ -98,30 +96,21 @@ const GUESSED_WAIT_SECONDS = 10;
  * model can recover the lost portion with `read --offset` instead of
  * re-running the command. The offload is best-effort — a full disk or
  * permission error never fails the tool result.
+ *
+ * A check whose exit status cannot prove success (`npm test | grep x; git diff`)
+ * gets no note in its result. The host still refuses it as evidence; if the
+ * turn would end unverified, the session re-runs the check on its own
+ * (AgentSession.rerunRefusedCheck) and counts only that exit status. The note
+ * used to flag the command mid-task; on Haiku 5.5 the model re-ran
+ * the suite after it nearly every time, and spent thinking deciding whether
+ * the note was an injection, while the output it had was already correct.
+ * Removing it cut model requests 7% and input tokens 9% at an unchanged pass
+ * rate; time saved was within noise (bench/h2h/arena, haiku-confirm, 100
+ * paired trials, 2026-10-18).
  */
-export async function renderBashOutput(
-  rawOutput: string,
-  command?: string,
-  /** bash with pipefail (not the cmd.exe fallback): see classifyVerificationCommand. */
-  posixShell = false,
-): Promise<string> {
-  // Feedback only when the command wraps a real check. Exploration that merely
-  // mentions a verifier (`ls .venv/bin | grep ruff`) is not a verification
-  // attempt; nagging it made the model reshape harmless commands repeatedly.
-  // Showing the note only once per session was measured and rejected: it cut
-  // notes by a third but raised tool calls 27% (bench/h2h/DIRAC-FINDINGS.md).
-  const check =
-    command && containsBoundedCheck(command)
-      ? classifyVerificationCommand(command, { posixShell })
-      : undefined;
-  const feedback =
-    check?.candidate && !check.accepted && check.snapshotPreserveOnly
-      ? "\n\n[This mixed check/inspection chain cannot establish fresh verification; it can only preserve earlier successful checks. If the current changes are not already verified, run the check standalone or chain only checks with &&. Do not claim fresh verification from this shell exit status.]"
-      : check?.candidate && !check.accepted && !check.snapshotEligible
-        ? `\n\n[Verification evidence rejected: ${check.reason}. The output is still valid information; do not reshape this command to satisfy this note. When you need verification, run the check once as a standalone command (or chain only checks with &&) after your last edit, and do not claim verification from this shell exit status.]`
-        : "";
+export async function renderBashOutput(rawOutput: string): Promise<string> {
   const result = truncateTail(rawOutput);
-  if (!result.truncated) return result.content + feedback;
+  if (!result.truncated) return result.content;
   const overflowPath =
     Buffer.byteLength(rawOutput, "utf-8") > MAX_BYTES
       ? await writeOverflow(rawOutput, "bash").catch(() => null)
@@ -131,7 +120,7 @@ export async function renderBashOutput(
     : "";
   const c = compressToolOutput(rawOutput);
   const what = describeCompressed(rawOutput, c.content);
-  return `[${c.notice}${what ? ` ${what}` : ""}${overflowNotice}]\n${c.content}${feedback}`;
+  return `[${c.notice}${what ? ` ${what}` : ""}${overflowNotice}]\n${c.content}`;
 }
 
 const BashParams = z.object({
@@ -336,7 +325,7 @@ export function createBashTool(
             ? (text) => context.onUpdate?.({ type: "bash_progress", output: text, totalBytes: 0 })
             : undefined,
         );
-        const output = await renderBashOutput(res.output, command, !isCmdFallback);
+        const output = await renderBashOutput(res.output);
         const exitCode =
           res.exitCode === "TIMEOUT"
             ? `TIMEOUT (${timeoutMs ?? DEFAULT_TIMEOUT}ms)` +
@@ -359,6 +348,7 @@ export function createBashTool(
         }
         if (context.signal.aborted) return CANCELLED_BEFORE_START;
         const result = await processManager.start(command, cwd, launch, wakeRules);
+        const watchWarnings = backgroundWatchWarnings(command);
         return (
           `Background process started.\n` +
           `ID: ${result.id}\n` +
@@ -377,7 +367,8 @@ export function createBashTool(
               : `Wake conditions were NOT armed: this session has no notification path, so nothing will wake you automatically. Poll task_output periodically instead.\n`
             : "") +
           `Use task_output with id="${result.id}" to read output, ` +
-          `task_send to type input/answer prompts, task_stop to stop it.`
+          `task_send to type input/answer prompts, task_stop to stop it.` +
+          watchWarnings.map((warning) => `\nWarning: ${warning}`).join("")
         );
       }
 
@@ -465,7 +456,7 @@ export function createBashTool(
                 `ID: ${adopted.id}\n` +
                 `PID: ${adopted.pid}\n` +
                 `Log: ${adopted.logFile}\n` +
-                `You will be notified when it exits. Use task_output with id="${adopted.id}" ` +
+                `You will be notified when it exits or prints a failure. Use task_output with id="${adopted.id}" ` +
                 `(wait_ms to block until it exits) to read output, task_stop to stop it. ` +
                 `Pass an explicit timeout to have a command stopped instead.\n` +
                 (soFar ? `Output so far:\n${soFar}` : "No output so far."),
@@ -512,7 +503,7 @@ export function createBashTool(
           if (backgrounded) return;
 
           const rawOutput = Buffer.concat(chunks).toString("utf-8");
-          let output = await renderBashOutput(rawOutput, command, !shell.isCmdFallback);
+          let output = await renderBashOutput(rawOutput);
           if (outputCapped) {
             output =
               `[Output capped at ${MAX_OUTPUT_BYTES / 1024 / 1024} MB to prevent memory exhaustion]\n` +

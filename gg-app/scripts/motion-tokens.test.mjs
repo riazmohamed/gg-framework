@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 // and every script timer that waits on CSS motion stays equal to its token.
 // Animations are out of scope for the easing check on purpose: most are long
 // background loops (breathing, weather) that deliberately use keyword curves.
-const FILES = ["App.css", "glass.css", "ChecklistScreen.css", "ChatErrorNotice.css"];
+const FILES = ["App.css", "Deck.css", "ChecklistScreen.css", "ChatErrorNotice.css"];
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const sheets = FILES.map((name) => ({
   name,
@@ -16,10 +16,15 @@ const sheets = FILES.map((name) => ({
   ),
 }));
 
-/** [start, end) ranges of every `:root { … }` and `@property … { … }` block. */
+/**
+ * [start, end) ranges of every `:root { … }` and `@property … { … }` block,
+ * including the theme-scoped ones (`:root[data-theme="light"] { … }`).
+ */
 function definitionBlocks(css) {
   const ranges = [];
-  for (const m of css.matchAll(/:root\s*\{|@property\s+--[\w-]+\s*\{/g)) {
+  const root = String.raw`:root(?:\[[^\]]*\])?`;
+  const opener = new RegExp(String.raw`${root}(?:\s*,\s*${root})*\s*\{|@property\s+--[\w-]+\s*\{`, "g");
+  for (const m of css.matchAll(opener)) {
     ranges.push([m.index, css.indexOf("}", m.index) + 1]);
   }
   return ranges;
@@ -94,6 +99,9 @@ const MIRRORS = [
   ["TooltipLayer.tsx", "EXIT_MS", "--dur-exit", "equal"],
   ["EnhanceDissolve.tsx", "DISSOLVE_MS", "--dur-enhance-dissolve", "equal"],
   ["PlanReviewModal.tsx", "EXIT_FALLBACK_MS", "--dur-plan-out", "greater"],
+  ["AskBand.tsx", "HOLD_MS", "--dur-ask-hold", "equal"],
+  ["AskBand.tsx", "EXIT_MS", "--dur-strip-out", "equal"],
+  ["AskBand.tsx", "KEY_PRESS_MS", "--dur-press", "equal"],
   ["animated-height.ts", "DURATION_MS", "--dur-row", "equal"],
   ["animated-height.ts", "EASING", "--ease-out", "equal"],
   ["chat-layout-motion.ts", "DURATION_MS", "--dur-row", "equal"],

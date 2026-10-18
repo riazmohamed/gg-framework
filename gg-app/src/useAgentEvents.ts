@@ -24,7 +24,11 @@ import {
   withOpenAsks,
 } from "./ask-user";
 import { formatTokenCount } from "./ActivityBar";
-import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
+import type { LiveToolEntry } from "./LiveToolPanel";
+
+/** Recent tool calls kept for the live views (the floating current-tool line
+ *  and the goal world's coordinator). */
+const LIVE_TOOL_PANEL_ROWS = 3;
 import { type SubAgentLine } from "./SubAgentFeed";
 import { playSound } from "./sounds";
 import { findCompletedSteps, countPlanSteps } from "./plan-steps";

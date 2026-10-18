@@ -16,7 +16,6 @@ import {
 } from "../core/session-history.js";
 import { spawnedTasks } from "../tools/subagent-shared.js";
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
-import { loadCustomCommands } from "../core/custom-commands.js";
 import { downscaleForPreview, IMAGE_MEDIA_TYPES } from "../utils/image.js";
 import { readFileBounded } from "../tools/operations.js";
 import { json } from "./http.js";
@@ -73,7 +72,7 @@ export function handleHistoryRoutes(
     // ImageContent in the tool result, downsampling on the sidecar side and
     // extracting the path from the text block ("Generated image → /path").
     void (async () => {
-      const commandCandidates = [...PROMPT_COMMANDS, ...(await loadCustomCommands(ctx.cwd))];
+      const commandCandidates = [...PROMPT_COMMANDS, ...(await ctx.session.loadCustomCommands())];
       const messages = ctx.session.getMessages();
 
       // An Ideal hook is injected immediately after the assistant's candidate

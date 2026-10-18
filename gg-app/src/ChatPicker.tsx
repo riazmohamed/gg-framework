@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { theme } from "./theme";
 import {
   arrangeAllWindows,
@@ -14,10 +14,9 @@ import { motionWorkspacePath } from "./motion-workspace";
 import { Badge } from "./Badge";
 import { BackButton } from "./BackButton";
 import { ListSkeleton } from "./Skeleton";
+import { useCachedList } from "./useCachedList";
 import { RadioButton } from "./RadioButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
-import { MetalButton } from "./MetalButton";
-import { useWindowFocused } from "./useWindowFocused";
 
 interface Props {
   onChosen: (cwd: string) => void;
@@ -52,14 +51,34 @@ export function ChatPicker({
   mode = "chat",
 }: Props): React.ReactElement {
   const copy = COPY[mode];
-  const windowFocused = useWindowFocused();
   const [projectsRoot, setProjectsRoot] = useState("");
-  const [sessions, setSessions] = useState<RecentSession[]>([]);
-  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // Bumped by "Try again" to re-run the session load.
-  const [reloadNonce, setReloadNonce] = useState(0);
+  // Where this mode's sessions live, from Settings. Read on its own (not as
+  // part of the list load) so a kept list shown at once can still be opened.
+  const rootFor = useCallback(async (): Promise<string> => {
+    const settings = await getSettings();
+    const projects = settings?.projectsRoot.trim() ?? "";
+    if (!projects) throw new Error(copy.noRoot);
+    return mode === "motion" ? motionWorkspacePath(projects) : projects;
+  }, [copy, mode]);
+  useEffect(() => {
+    let cancelled = false;
+    void rootFor()
+      .then((root) => {
+        if (!cancelled) setProjectsRoot(root);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [rootFor]);
+  // Shown at once on a return visit, refreshed quietly (see useCachedList).
+  const sessionList = useCachedList<RecentSession>(`sessions:${mode}`, async () => {
+    const root = await rootFor();
+    await waitForReady();
+    return listSessions(root, mode === "motion" ? "motion" : "all");
+  });
+  const { items: sessions, loading, error } = sessionList;
   // Opening a chat failed; shown above the list so the click isn't silent.
   const [chooseError, setChooseError] = useState<string | null>(null);
 
@@ -78,35 +97,6 @@ export function ChatPicker({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    void getSettings()
-      .then(async (settings) => {
-        const projects = settings?.projectsRoot.trim() ?? "";
-        if (!projects) throw new Error(copy.noRoot);
-        const root = mode === "motion" ? motionWorkspacePath(projects) : projects;
-        if (!cancelled) setProjectsRoot(root);
-        await waitForReady();
-        return listSessions(root, mode === "motion" ? "motion" : "all");
-      })
-      .then((recent) => {
-        if (!cancelled) setSessions(recent);
-      })
-      .catch((reason: unknown) => {
-        if (!cancelled) {
-          setError(reason instanceof Error ? reason.message : copy.loadError);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [copy, mode, reloadNonce]);
 
   function choose(session?: RecentSession): void {
     if (busy || !projectsRoot) return;
@@ -128,14 +118,13 @@ export function ChatPicker({
         <span className="picker-title">{copy.title}</span>
         {!loading && !error && <Badge>{sessions.length}</Badge>}
         <span className="picker-head-actions">
-          <MetalButton
-            windowFocused={windowFocused}
+          <button
             className="btn btn-primary btn-sm"
             disabled={busy || loading || !projectsRoot}
             onClick={() => choose()}
           >
             {copy.newLabel}
-          </MetalButton>
+          </button>
           <RadioButton />
           <WindowLayoutButton />
         </span>
@@ -153,11 +142,7 @@ export function ChatPicker({
             <span style={{ color: theme.textMuted }}>{error}</span>
             {/* No projects folder is a settings problem, so retrying can't fix it. */}
             {error !== copy.noRoot && (
-              <button
-                type="button"
-                className="btn btn-sm btn-ghost"
-                onClick={() => setReloadNonce((n) => n + 1)}
-              >
+              <button type="button" className="btn btn-sm btn-ghost" onClick={sessionList.reload}>
                 Try again
               </button>
             )}
@@ -166,14 +151,9 @@ export function ChatPicker({
         {!loading && !error && sessions.length === 0 && (
           <div className="picker-empty">
             <span style={{ color: theme.textMuted }}>{copy.empty}</span>
-            <MetalButton
-              windowFocused={windowFocused}
-              className="btn btn-primary btn-sm"
-              disabled={busy}
-              onClick={() => choose()}
-            >
+            <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => choose()}>
               {copy.newLabel}
-            </MetalButton>
+            </button>
           </div>
         )}
         {!loading && !error && sessions.length > 0 && (

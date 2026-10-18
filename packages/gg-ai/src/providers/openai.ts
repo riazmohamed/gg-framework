@@ -40,6 +40,7 @@ import {
 } from "./reasoning-field.js";
 import { parseToolArguments } from "../utils/json.js";
 import { getEnvironment } from "../utils/env.js";
+import { PROVIDER_TRANSPORT_TIMEOUT_MS, providerFetch } from "../utils/provider-fetch.js";
 
 // Kimi K3's declared effort rungs (server-validated; anything else 400s).
 // Official alias mapping from Moonshot's K3 third-party-tools docs:
@@ -105,7 +106,7 @@ function extractOpenAIUsage(usage: OpenAI.CompletionUsage): {
  *  See anthropic.ts for rationale. Keyed by identity-relevant fields. */
 const openaiClientCache = new Map<string, OpenAI>();
 
-function createClient(options: StreamOptions): OpenAI {
+export function createClient(options: StreamOptions): OpenAI {
   const cacheKey = `${options.apiKey ?? ""}|${options.baseUrl ?? ""}|${JSON.stringify(options.defaultHeaders ?? {})}`;
 
   // Skip cache when a custom fetch is provided (tests, React Native, etc.).
@@ -117,7 +118,8 @@ function createClient(options: StreamOptions): OpenAI {
   const client = new OpenAI({
     apiKey: options.apiKey,
     ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
-    ...(options.fetch ? { fetch: options.fetch } : {}),
+    // Default transport lifts undici's 300s header/body caps (see provider-fetch.ts).
+    fetch: options.fetch ?? providerFetch,
     ...(options.defaultHeaders ? { defaultHeaders: options.defaultHeaders } : {}),
   });
 
@@ -277,8 +279,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     (params as unknown as Record<string, unknown>).reasoning_effort = "max";
   }
 
-  if (options.provider === "openai" && options.serviceTier) {
-    (params as unknown as Record<string, unknown>).service_tier = options.serviceTier;
+  // Fast mode on the public API is priority processing; an explicit tier wins.
+  const serviceTier = options.serviceTier ?? (options.speed === "fast" ? "priority" : undefined);
+  if (options.provider === "openai" && serviceTier) {
+    (params as unknown as Record<string, unknown>).service_tier = serviceTier;
   }
 
   if (isKimiK3) {
@@ -358,6 +362,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     try {
       const completion = (await client.chat.completions.create(requestParams, {
         signal: options.signal ?? undefined,
+        // The whole reply arrives in one response, so the SDK's 10min default
+        // would undercut the agent loop's 15min thinking cap for this call.
+        timeout: PROVIDER_TRANSPORT_TIMEOUT_MS,
       })) as OpenAI.ChatCompletion;
       yield* synthesizeEventsFromCompletion(completion, !!options.thinking, endpointKey);
       return completionToResponse(completion, endpointKey);
@@ -426,6 +433,11 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         thinkingAccum += reasoning.text;
         if (options.thinking) {
           yield { type: "thinking_delta", text: reasoning.text };
+        } else {
+          // Hidden reasoning is still proof of life. Without this, a model
+          // that always reasons (MiMo, Grok) looks silent to the agent loop's
+          // first-event watchdog while it thinks, and gets aborted mid-turn.
+          yield { type: "keepalive", reasoning: true };
         }
       }
 
@@ -752,7 +764,7 @@ function classifyOpenAICompatLimit(args: {
   return null;
 }
 
-function toError(err: unknown, provider: string = "openai"): ProviderError {
+export function toError(err: unknown, provider: string = "openai"): ProviderError {
   // Already classified (e.g. an in-stream gateway error frame). Re-wrapping via
   // the generic Error branch below would discard statusCode/resetsAt and demote
   // a 429 to an unclassified failure.

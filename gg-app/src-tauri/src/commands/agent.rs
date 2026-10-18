@@ -615,6 +615,24 @@ pub(crate) async fn agent_tasks(
     sidecar_json(res).await
 }
 
+/// Proxy: the Git panel's data. Open issues and PRs on the project's GitHub
+/// repo (null when `gh` can't answer), and the changed files with line counts.
+#[tauri::command]
+pub(crate) async fn agent_git_overview(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}/git/overview", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
 /// Proxy: the project health checklist (`.gg-checklist.json` joined with the
 /// built-in items and their current status). A corrupt record surfaces as Err.
 #[tauri::command]
@@ -856,18 +874,24 @@ pub(crate) async fn agent_models(
 }
 
 /// Proxy: switch the active model. Returns the new provider/model + thinking state.
+/// `confirm_paid` carries the user's explicit "yes, spend real money" for a
+/// model that bills usage credits; the sidecar refuses such a switch without it.
 #[tauri::command]
 pub(crate) async fn agent_switch_model(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     model: String,
+    confirm_paid: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/model", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "model": model }))
+        .json(&serde_json::json!({
+            "model": model,
+            "confirmPaid": confirm_paid.unwrap_or(false),
+        }))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -956,6 +980,26 @@ pub(crate) async fn agent_cycle_thinking(
     let res = client
         .post(format!("{}/thinking", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
+/// Proxy: set the reasoning level directly. `level: None` turns thinking off.
+/// The sidecar refuses a level the current model doesn't support (400).
+#[tauri::command]
+pub(crate) async fn agent_set_thinking(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    level: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/thinking", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "level": level }))
         .send()
         .await
         .map_err(|e| e.to_string())?;

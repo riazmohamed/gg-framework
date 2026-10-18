@@ -10,6 +10,7 @@ import {
 } from "@abukhaled/gg-agent";
 import {
   ProviderError,
+  resolveToolSchema,
   stream,
   type Message,
   type MessageProvenance,
@@ -36,7 +37,7 @@ import {
   type SlashCommandContext,
 } from "./slash-commands.js";
 import { PROMPT_COMMANDS, getPromptCommand } from "./prompt-commands.js";
-import { loadCustomCommands } from "./custom-commands.js";
+import { loadWorkspaceCustomCommands, type CustomCommand } from "./custom-commands.js";
 import { expandPromptCommand } from "./prompt-command-expansion.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage } from "./auth-storage.js";
@@ -157,7 +158,12 @@ import {
   withJudgeTimeout,
 } from "./semantic-loop-check.js";
 import { buildEnvDeltaMessage, buildLanguageUpdateMessage } from "./env-delta.js";
-import { wrapSteeringText, buildNotificationSteeringText, STEERING_PREFIX } from "./steering.js";
+import {
+  wrapSteeringText,
+  buildNotificationSteeringText,
+  buildIdleWakeNotificationText,
+  STEERING_PREFIX,
+} from "./steering.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
 import { VerificationGate, VERIFICATION_STATE_KIND } from "./verification-gate.js";
 import type { VerificationEvidence } from "./verification-evidence.js";
@@ -178,6 +184,65 @@ import { RunLoopMonitor } from "./agent-session/run-loop-monitor.js";
 import { VerificationTracker } from "./agent-session/verification-tracker.js";
 import { McpToolRegistry } from "./agent-session/mcp-tools.js";
 import { TranscriptMarkers } from "./agent-session/transcript-markers.js";
+
+// ── Output cap ─────────────────────────────────────────────
+
+/**
+ * The output cap to send on a request. A model's output ceiling can equal its
+ * whole window (Kimi K2.7 Code: 262,144 of 262,144), and providers that count
+ * prompt + max_tokens against the window reject every request with a real
+ * prompt. Cap it at the room the model's TOTAL window leaves once the context
+ * reaches this session's compaction trigger — the largest prompt it lets build
+ * up. The total window, not the route's: the ChatGPT/Codex route's 272K
+ * window is an input budget, and GPT-6's 128K output sits outside it.
+ */
+export function outputCapForRequest(options: {
+  provider: Provider;
+  model: string;
+  maxTokens: number;
+  threshold: number;
+  accountId?: string;
+}): number {
+  const totalWindow = getContextWindow(options.model, { provider: options.provider });
+  const { targetTokens } = resolveCompactionPolicy({
+    provider: options.provider,
+    model: options.model,
+    contextWindow: getContextWindow(options.model, {
+      provider: options.provider,
+      accountId: options.accountId,
+    }),
+    threshold: options.threshold,
+    accountId: options.accountId,
+  });
+  const room = totalWindow - targetTokens;
+  return room > 0 ? Math.min(options.maxTokens, room) : options.maxTokens;
+}
+
+// ── Paid models ────────────────────────────────────────────
+
+/**
+ * Reply for chat bridges (Telegram, agent home) that have no confirmation step.
+ * Generic on purpose: every paid model (Claude fast mode, MiMo UltraSpeed) is
+ * refused here, so the reason must not name one of them.
+ */
+export function paidModelRefusal(modelName: string): string {
+  return `${modelName} spends real money, so it can't be switched to from chat. Switch to it in the GG Coder app or CLI, where you confirm it.`;
+}
+
+/**
+ * Thrown by {@link AgentSession.switchModel} when the target model spends real
+ * money and the caller didn't pass the user's explicit confirmation.
+ */
+export class PaidModelConfirmationError extends Error {
+  readonly modelName: string;
+  readonly detail: string;
+  constructor(modelName: string, detail: string) {
+    super(`${modelName} spends real money. ${detail} Confirm before switching to it.`);
+    this.name = "PaidModelConfirmationError";
+    this.modelName = modelName;
+    this.detail = detail;
+  }
+}
 
 // ── Options ────────────────────────────────────────────────
 
@@ -258,6 +323,14 @@ export interface AgentSessionOptions {
    * resumable identity.
    */
   transient?: boolean;
+  /**
+   * Told when an agent loop starts (true) and when the outermost one ends
+   * (false), however it ended. Nested loops (a template prompt inside a run)
+   * don't repeat it. GG Goals uses it to tell other processes the goal is
+   * being worked on (`core/goal-run-marker.ts`). A throwing listener is
+   * ignored: it must never fail or wedge a run.
+   */
+  onRunActive?: (active: boolean) => void;
   /**
    * If true, `initialize()` returns WITHOUT waiting for MCP servers to connect —
    * the connection runs in the background and tools are appended when ready.
@@ -427,6 +500,10 @@ export interface AgentSessionState {
 
 // ── Agent Session ──────────────────────────────────────────
 
+/** A prompt that asks for the live web (see AgentSession.attachWebSearchIfAsked). */
+const WEB_INTENT =
+  /\b(?:web|internet|online|google|googling|website|look (?:it |this |that )?up|(?:latest|newest|current) (?:version|release|news|docs?|documentation)|release notes|news)\b/i;
+
 export class AgentSession {
   readonly eventBus = new EventBus();
   readonly slashCommands = new SlashCommandRegistry();
@@ -520,6 +597,8 @@ export class AgentSession {
   private deferredCompactionPending = false;
   /** Latest provider count, anchored to the assistant response it measured. */
   private providerContext: { usage: Usage; anchor: Message } | null = null;
+  /** See {@link toolDefinitionChars}. */
+  private toolCharsCache: { count: number; chars: number } | null = null;
   private originalRequest = "";
   // Messages queued by the user while a run is in flight. Drained at the
   // mid-loop steering boundary (user steering wins over the hooks), mirroring
@@ -531,6 +610,8 @@ export class AgentSession {
   // different message (or past the end) by the time the cancel arrives.
   private userQueue: Array<{ id: string; text: string; attachments: SessionAttachment[] }> = [];
   private queueSeq = 0;
+  /** Monotonic count of human-originated prompts; idle-wake budgets reset on it. */
+  private humanPromptSeq = 0;
   /** Instant interrupt: the running loop's preempt listeners, fired on queueMessage. */
   private steeringListeners = new Set<() => void>();
   private processManager?: ProcessManager;
@@ -674,9 +755,26 @@ export class AgentSession {
     return modelInfo?.maxOutputTokens ?? 16384;
   }
 
+  /** {@link outputCapForRequest} for this session's live model and settings. */
+  private requestMaxTokens(accountId?: string): number {
+    return outputCapForRequest({
+      provider: this.provider,
+      model: this.model,
+      maxTokens: this.maxTokens,
+      threshold: this.settingsManager.get("compactThreshold"),
+      accountId,
+    });
+  }
+
   async initialize(): Promise<void> {
     // Set model for accurate token estimation
     setEstimatorModel(this.model);
+
+    // The Anthropic transport needs the current Claude Code version for its
+    // User-Agent before the first request. Without a fresh on-disk cache that
+    // is an npm round-trip (~0.3–3s) on the user's first prompt; start it now
+    // so it overlaps session setup and the user's typing instead.
+    if (this.provider === "anthropic") void getClaudeCliUserAgent().catch(() => {});
 
     const paths = await ensureAppDirs();
 
@@ -957,7 +1055,6 @@ export class AgentSession {
       const helpCmd = this.slashCommands.get("help");
       if (helpCmd) {
         const registry = this.slashCommands;
-        const cwd = this.cwd;
         helpCmd.execute = async () => {
           const all = registry.getAll();
           const lines = all.map(
@@ -974,7 +1071,7 @@ export class AgentSession {
             }
           }
 
-          const customCmds = await loadCustomCommands(cwd);
+          const customCmds = await this.loadCustomCommands();
           if (customCmds.length > 0) {
             lines.push("", "Custom commands:");
             for (const cmd of customCmds) lines.push(`  /${cmd.name} — ${cmd.description}`);
@@ -1132,6 +1229,46 @@ export class AgentSession {
     );
   }
 
+  /**
+   * Whether provider-native web search rides along with this request.
+   *
+   * Anthropic's `web_search_20250305` server tool costs ~2.5k prefix tokens on
+   * every request (count_tokens: 6,628 vs 4,098 for the GG prefix without it),
+   * yet web search is reached in ~6% of sessions — the reason the client tool
+   * is deferred everywhere else. So on a tiered Anthropic session it is only
+   * attached once the model has promoted `web_search` (tool_search or a direct
+   * call). The server tool is appended last, so the tool block stays
+   * append-only. Untiered sessions and other providers keep it always on.
+   */
+  private nativeWebSearchOn(): boolean {
+    if (this.provider !== "anthropic") return true;
+    if (!this.deferredBuiltinToolNames.includes("web_search")) return true;
+    return this.tools.some((t) => t.name === "web_search");
+  }
+
+  /**
+   * A human prompt that plainly asks for the web gets native web search from
+   * its first request. Without this, an on-demand web_search costs an extra
+   * round trip (tool_search or a client search) before the native tool is
+   * attached — slower than the always-on tool it replaced for exactly the
+   * sessions that need it. Conservative on purpose: a miss only costs that
+   * one discovery turn, a false hit only the ~2.5k-token schema.
+   */
+  private attachWebSearchIfAsked(content: unknown): void {
+    if (this.provider !== "anthropic" || this.nativeWebSearchOn()) return;
+    const text =
+      typeof content === "string"
+        ? content
+        : Array.isArray(content)
+          ? content
+              .map((part) =>
+                part && typeof part === "object" && "text" in part ? String(part.text) : "",
+              )
+              .join(" ")
+          : "";
+    if (WEB_INTENT.test(text)) this.promoteDeferredBuiltin("web_search");
+  }
+
   /** Append a deferred built-in to the live tool list (append-only). */
   private promoteDeferredBuiltin(name: string): AgentTool | undefined {
     if (!this.deferredBuiltinToolNames.includes(name)) return undefined;
@@ -1194,7 +1331,7 @@ export class AgentSession {
     if (!parsed) return null;
     // GG Coder alone can resolve its prompt-template and project commands.
     const builtinPromptCmd = coderCommands ? getPromptCommand(parsed.name) : undefined;
-    const customCmds = coderCommands ? await loadCustomCommands(this.cwd) : [];
+    const customCmds = coderCommands ? await this.loadCustomCommands() : [];
     const customPromptCmd = !builtinPromptCmd
       ? customCmds.find((c) => c.name === parsed.name)
       : undefined;
@@ -1233,6 +1370,7 @@ export class AgentSession {
     options: PromptRunOptions = {},
   ): Promise<void> {
     this.prewarmController?.abort();
+    if (provenance.source === "human") this.humanPromptSeq += 1;
     await this.settlePostTurnCompaction();
     await this.adoptDeferredCheckpointBeforePrompt();
     const slash = await this.resolveSlashInput(content);
@@ -1261,6 +1399,7 @@ export class AgentSession {
     this.messages.push(userMessage);
     await this.persistMessage(userMessage);
     this.lastPersistedIndex = this.messages.length;
+    if (provenance.source === "human") this.attachWebSearchIfAsked(content);
 
     await this.runLoop(options);
   }
@@ -1274,10 +1413,12 @@ export class AgentSession {
    */
   async promptWithAttachments(text: string, attachments: SessionAttachment[]): Promise<void> {
     this.prewarmController?.abort();
+    this.humanPromptSeq += 1;
     await this.settlePostTurnCompaction();
     await this.adoptDeferredCheckpointBeforePrompt();
     const parts = this.buildAttachmentParts(text, attachments);
     if (parts.length === 0) return;
+    this.attachWebSearchIfAsked(text);
     const userMessage: Message = {
       role: "user",
       content: parts,
@@ -1866,6 +2007,8 @@ export class AgentSession {
 
     if (diagnosticMessages.length > 0) return diagnosticMessages;
 
+    await this.rerunRefusedCheck();
+
     if (
       shouldNudgePlanSubmission({
         enabled: this.opts.planSubmissionGate === true,
@@ -1907,16 +2050,68 @@ export class AgentSession {
     return null;
   }
 
+  /**
+   * The model often runs its tests inside a longer command (`npm test 2>&1 |
+   * tail; node -e '…'`) whose exit status belongs to a later part, so the
+   * tests can pass without counting. When the turn would end unverified that
+   * way, run that check once more on its own, through the same bash tool, and
+   * record its real exit status. No model turn and nothing in the transcript:
+   * only the run's verification status changes.
+   */
+  private async rerunRefusedCheck(): Promise<void> {
+    if (this.planModeRef.current || this.opts.signal?.aborted) return;
+    const check = this.verificationTracker.takeRefusedCheck();
+    if (!check) return;
+    const bash = this.tools.find((tool) => tool.name === "bash");
+    // An explicit timeout stops a stuck run instead of moving it to the
+    // background, which would leave a process for the next turn to collect.
+    const params = bash?.parameters.safeParse({ command: check.command, timeout: 120_000 });
+    if (!bash || !params?.success) return;
+    const startedAt = Date.now();
+    let passed = false;
+    try {
+      const result = await bash.execute(params.data, {
+        signal: this.opts.signal ?? new AbortController().signal,
+        toolCallId: `gg-recheck-${startedAt}`,
+      });
+      const text = typeof result === "string" ? result : result.content;
+      passed = typeof text === "string" && /^Exit code:\s*0(?:\s|$)/.test(text.trim());
+    } catch (error) {
+      if (isAbortError(error) || this.opts.signal?.aborted) return;
+      log("WARN", "verification", `Re-running a refused check failed: ${String(error)}`);
+    }
+    if (this.opts.signal?.aborted) return;
+    this.verificationTracker.recordRefusedCheckRerun(check, passed);
+    log("INFO", "verification", "Re-ran a check whose original exit status could not count", {
+      passed: String(passed),
+      durationMs: String(Date.now() - startedAt),
+    });
+    await this.persistVerificationState();
+  }
+
   /** Wraps the real run: cancels an in-flight cache prewarm and tracks run
    *  activity / last real request time for {@link prewarm}. */
   private async runLoop(options: PromptRunOptions = {}): Promise<void> {
     this.prewarmController?.abort();
     this.runLoopDepth++;
+    if (this.runLoopDepth === 1) this.notifyRunActive(true);
     try {
       await this.runLoopInner(options);
     } finally {
       this.runLoopDepth--;
       this.lastRealRequestAt = Date.now();
+      if (this.runLoopDepth === 0) this.notifyRunActive(false);
+    }
+  }
+
+  /** `opts.onRunActive`, never allowed to throw into the run. */
+  private notifyRunActive(active: boolean): void {
+    try {
+      this.opts.onRunActive?.(active);
+    } catch (err) {
+      log("WARN", "session", "onRunActive listener threw", {
+        message: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -1938,7 +2133,10 @@ export class AgentSession {
 
     // Reset self-correction hook state for this run; pin the latest user message
     // as the verbatim original request for post-compaction re-grounding.
-    const lastUser = [...this.messages].reverse().find((m) => m.role === "user");
+    // A status update that started an idle-wake run is not the user's request.
+    const lastUser = [...this.messages]
+      .reverse()
+      .find((m) => m.role === "user" && m.provenance?.kind !== "notification");
     this.resetHookState(requestTextForRegrounding(lastUser));
 
     // Resolve OAuth credentials and run agent loop.
@@ -2043,8 +2241,8 @@ export class AgentSession {
         provider: this.provider,
         model: this.model,
         tools: options.disableTools ? [] : this.tools,
-        webSearch: !options.disableTools,
-        maxTokens: this.maxTokens,
+        webSearch: options.disableTools ? false : () => this.nativeWebSearchOn(),
+        maxTokens: this.requestMaxTokens(accountId),
         maxTurns: this.opts.maxTurns,
         maxTurnExtensions: this.opts.maxTurnExtensions,
         // Plan mode caps effort at medium (Codex `plan_mode_reasoning_effort`
@@ -2107,7 +2305,7 @@ export class AgentSession {
                 this.planModeRef.current || options.capThinking
                   ? clampThinkingForPlanMode(this.thinkingLevel)
                   : this.thinkingLevel,
-              webSearch: !options.disableTools,
+              webSearch: !options.disableTools && this.nativeWebSearchOn(),
               supportsImages: modelInfo?.supportsImages,
               promptCacheKey: this.getPromptCacheKey(),
             },
@@ -2161,8 +2359,16 @@ export class AgentSession {
             if (anchor?.role === "assistant") {
               this.providerContext = { usage: { ...transformOpts.usage }, anchor };
               // Feed the authoritative usage back into the token estimator so
-              // char-based estimates track this session's real tokenizer.
-              calibrateEstimatorFromUsage(messages.slice(0, anchorIndex), transformOpts.usage);
+              // char-based estimates track this session's real tokenizer. The
+              // provider's count includes the tool definitions sent with the
+              // request, so their characters must be counted too — without
+              // them a short history reads as ~2 chars/token and drags the
+              // shared ratio down for every session in the process.
+              calibrateEstimatorFromUsage(
+                messages.slice(0, anchorIndex),
+                transformOpts.usage,
+                options.disableTools ? 0 : this.toolDefinitionChars(),
+              );
             }
           }
 
@@ -2214,12 +2420,13 @@ export class AgentSession {
                   compactedToolCalls: String(pruneResult.compactedToolCalls),
                   freedTokens: String(pruneResult.freedTokens),
                 });
-                // The turn's own usage also counted the pruned content — estimate
-                // the (now smaller) history so the freed tokens actually defer
-                // the LLM compaction.
-                activeTokens = calculateActiveContextTokens(messages, {
-                  pendingMessages: transformOpts.pendingMessages,
-                });
+                // The measured size counted the pruned content, so take the
+                // freed tokens off it. Never swap the provider's count for a
+                // whole-history estimate here: that estimate rides a shared
+                // chars-per-token ratio, and it once read a 234K-token MiMo
+                // context (23% of 1M) as ~400K and compacted it against a 340K
+                // trigger.
+                activeTokens = Math.max(0, activeTokens - pruneResult.freedTokens);
               }
             }
 
@@ -2425,7 +2632,21 @@ export class AgentSession {
     this.maybeCompactPostTurn(creds);
   }
 
-  async switchModel(provider: string, model: string): Promise<void> {
+  /**
+   * Switch the session's model. A model that spends real money (Claude fast
+   * mode bills usage credits) is refused unless `confirmPaid` carries the
+   * user's explicit yes, so no caller can switch onto one by accident: every
+   * path (app, CLI, editors, chat bridges, RPC) fails closed by default.
+   */
+  async switchModel(
+    provider: string,
+    model: string,
+    options: { confirmPaid?: boolean } = {},
+  ): Promise<void> {
+    const target = getModel(model);
+    if (target?.billing?.paid && options.confirmPaid !== true && model !== this.model) {
+      throw new PaidModelConfirmationError(target.name, target.billing.detail);
+    }
     // The model-switch note is appended to `this.messages`; settle any
     // background compaction first so the note cannot be swapped out.
     await this.settlePostTurnCompaction();
@@ -2492,7 +2713,12 @@ export class AgentSession {
       // Add/remove client-side web_search tool based on provider.
       // Anthropic has native server-side web search; all other providers need the client tool.
       const hasWebSearch = this.tools.some((t) => t.name === "web_search");
-      if (this.provider === "anthropic" && hasWebSearch) {
+      if (this.deferredBuiltinToolNames.includes("web_search")) {
+        // Tiered: the client tool lives in the catalog for every provider and,
+        // once promoted, is swapped for the native server tool by the Anthropic
+        // transport. Nothing to add or remove — doing so would either load the
+        // schema eagerly or take away a capability the model already has.
+      } else if (this.provider === "anthropic" && hasWebSearch) {
         // Switching TO anthropic — remove client-side web_search (server-side handles it)
         this.tools = this.tools.filter((t) => t.name !== "web_search");
       } else if (this.provider !== "anthropic" && !hasWebSearch) {
@@ -3283,6 +3509,75 @@ export class AgentSession {
     this.notifications.enqueue("goal", id, text, { terminal: true });
   }
 
+  /**
+   * Observe urgent background alerts — a background task failed or exited
+   * non-zero, or a child agent finished — as they are queued. Hosts use this to
+   * wake an idle session (see {@link continueFromNotifications}); a live run
+   * already receives them at its next steering boundary. Returns unsubscribe.
+   */
+  onBackgroundAlert(listener: () => void): () => void {
+    return this.notifications.onUrgent(() => listener());
+  }
+
+  /**
+   * Characters of the tool definitions sent with every request (name,
+   * description, JSON schema), for estimator calibration. Cached by tool count:
+   * the tool array is append-only.
+   */
+  private toolDefinitionChars(): number {
+    if (this.toolCharsCache?.count === this.tools.length) return this.toolCharsCache.chars;
+    let chars = 0;
+    for (const tool of this.tools) {
+      chars += tool.name.length + tool.description.length;
+      try {
+        chars += JSON.stringify(resolveToolSchema(tool)).length;
+      } catch {
+        // A schema that cannot be serialized is not sent either.
+      }
+    }
+    this.toolCharsCache = { count: this.tools.length, chars };
+    return chars;
+  }
+
+  /** True while an urgent background alert is waiting to be delivered. */
+  hasPendingBackgroundAlert(): boolean {
+    return this.notifications.hasUrgent();
+  }
+
+  /** Monotonic count of human-originated prompts this session has run. */
+  getHumanPromptSeq(): number {
+    return this.humanPromptSeq;
+  }
+
+  /**
+   * Start a run from pending background notifications, for a session that had
+   * already finished its turn. The notifications become one hidden runtime
+   * message (never shown as something the user typed), and the agent decides
+   * whether they need action. Returns false, starting nothing, when no urgent
+   * alert is pending — a live run may have delivered it in the meantime.
+   */
+  async continueFromNotifications(): Promise<boolean> {
+    if (!this.notifications.hasUrgent()) return false;
+    this.prewarmController?.abort();
+    await this.settlePostTurnCompaction();
+    await this.adoptDeferredCheckpointBeforePrompt();
+    const notified = this.notifications.drain();
+    if (notified.length === 0) return false;
+    const message: Message = {
+      role: "user",
+      content: buildIdleWakeNotificationText(notified.map((entry) => entry.text)),
+      provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+    };
+    log("INFO", "notifications", "Starting a run from background alerts", {
+      count: String(notified.length),
+    });
+    this.messages.push(message);
+    await this.persistMessage(message);
+    this.lastPersistedIndex = this.messages.length;
+    await this.runLoop();
+    return true;
+  }
+
   /** This session's sub-agents (workers), newest-state, including ones restored after a restart. */
   listSubAgents(): SubAgentSnapshot[] {
     return this.subAgentManager?.list() ?? [];
@@ -3356,6 +3651,15 @@ export class AgentSession {
   /** Extra workspace roots added with `/add-dir`, in the order added. */
   getAdditionalRoots(): string[] {
     return [...this.additionalRoots];
+  }
+
+  /**
+   * The custom `.gg/commands` slash commands this session can run: the
+   * project's, then those of every added root (a goal's attached repos too).
+   * Read fresh, so a new command file is picked up without a restart.
+   */
+  loadCustomCommands(): Promise<CustomCommand[]> {
+    return loadWorkspaceCustomCommands([this.cwd, ...this.additionalRoots]);
   }
 
   /**
@@ -3821,9 +4125,17 @@ export class AgentSession {
     if (!text.trim()) return { enhanced: text, segments: [{ kind: "text", text }] };
     // Keep credentials and settings on the model selected at click time, even
     // if the user switches models while credential resolution is pending.
-    const { provider, model, thinkingLevel, maxTokens, baseUrl } = this;
+    const { provider, model, thinkingLevel, baseUrl } = this;
+    const threshold = this.settingsManager.get("compactThreshold");
     const creds = await this.authStorage.resolveCredentials(provider, {
       storageKeys: this.currentAuthStorageKeys(),
+    });
+    const maxTokens = outputCapForRequest({
+      provider,
+      model,
+      maxTokens: this.maxTokens,
+      threshold,
+      accountId: creds.accountId,
     });
     // Cheap, best-effort stack detection from the project root so terminology is
     // idiomatic to the user's stack. Never throws (returns "" on any failure).
@@ -3939,8 +4251,8 @@ export class AgentSession {
         model: this.model,
         messages,
         tools: this.tools,
-        webSearch: true,
-        maxTokens: this.maxTokens,
+        webSearch: this.nativeWebSearchOn(),
+        maxTokens: this.requestMaxTokens(creds.accountId),
         thinking: this.planModeRef.current
           ? clampThinkingForPlanMode(this.thinkingLevel)
           : this.thinkingLevel,
@@ -4286,7 +4598,7 @@ export class AgentSession {
 
   private createSlashCommandContext(): SlashCommandContext {
     return {
-      switchModel: (provider, model) => this.switchModel(provider, model),
+      switchModel: (provider, model, options) => this.switchModel(provider, model, options),
       compact: (focus?: string) => this.compact(undefined, "manual", focus),
       newSession: () => this.newSession(),
       listSessions: async () => {

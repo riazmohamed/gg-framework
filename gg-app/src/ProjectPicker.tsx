@@ -18,12 +18,11 @@ import {
 import { Badge } from "./Badge";
 import { sourceStyle } from "./source-style";
 import { ListSkeleton } from "./Skeleton";
+import { useCachedList } from "./useCachedList";
 import { BackButton } from "./BackButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
 import { RadioButton } from "./RadioButton";
 import { NewProjectModal } from "./NewProjectModal";
-import { MetalButton } from "./MetalButton";
-import { useWindowFocused } from "./useWindowFocused";
 import { toast } from "./toast";
 
 /**
@@ -47,6 +46,12 @@ interface Props {
   onClose?: () => void;
 }
 
+/** A stand-in for a project not yet discovered: its folder name and path. */
+function projectFromPath(path: string): DiscoveredProject {
+  const name = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+  return { name, path, lastActiveDisplay: "", sources: [] };
+}
+
 /**
  * Full-window project chooser shown when a window has no project yet. Lists
  * every known project (ggcoder/Claude Code/Codex). Selecting one reveals its
@@ -58,18 +63,31 @@ export function ProjectPicker({
   initialProjectPath,
   onClose,
 }: Props): React.ReactElement {
-  const windowFocused = useWindowFocused();
-  const [projects, setProjects] = useState<DiscoveredProject[]>([]);
-  const [loading, setLoading] = useState(true);
-  // Project discovery failed; shown instead of "No projects yet".
-  const [loadError, setLoadError] = useState(false);
-  const [reloadNonce, setReloadNonce] = useState(0);
-  const [selected, setSelected] = useState<DiscoveredProject | null>(null);
-  const [sessions, setSessions] = useState<RecentSession[]>([]);
-  const [sessionsLoading, setSessionsLoading] = useState(false);
+  // Both lists are shown at once on a return visit and refreshed quietly
+  // (see useCachedList). Discovery failing shows "Couldn't load" instead of
+  // "No projects yet", but only when there's no earlier list to show.
+  const projectList = useCachedList<DiscoveredProject>("projects", async () => {
+    // The window's sidecar serves project discovery; wait for it before asking.
+    await waitForReady();
+    return listProjects();
+  });
+  const { items: projects, loading } = projectList;
+  const loadError = projectList.error !== null;
+  // Deep-linked from an open project, the picker starts in that project's
+  // sessions at once: its name comes from the path, and the list loads behind
+  // it. Waiting for discovery first flashed "Choose a project" (and its Open
+  // existing / New project buttons) on every trip back from a session.
+  const [selected, setSelected] = useState<DiscoveredProject | null>(() =>
+    initialProjectPath ? projectFromPath(initialProjectPath) : null,
+  );
+  const sessionList = useCachedList<RecentSession>(
+    selected ? `sessions:project:${selected.path}` : null,
+    () => (selected ? listSessions(selected.path) : Promise.resolve([])),
+  );
+  const { items: sessions, loading: sessionsLoading } = sessionList;
   // Listing the selected project's sessions failed; shown instead of
   // "No previous sessions".
-  const [sessionsError, setSessionsError] = useState(false);
+  const sessionsError = sessionList.error !== null;
   const [busy, setBusy] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [projectsRoot, setProjectsRoot] = useState("");
@@ -112,33 +130,16 @@ export function ProjectPicker({
     };
   }, []);
 
+  // Deep-linked: once discovery answers, swap the placeholder for the real
+  // project (name, sources). Not among them: fall back to the project list.
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setLoadError(false);
-    // The window's sidecar serves project discovery; wait for it before asking.
-    void waitForReady()
-      .then(() => listProjects())
-      .then((p) => {
-        if (cancelled) return;
-        setProjects(p);
-        setLoading(false);
-        // Deep-link straight to the current project's sessions when asked.
-        if (initialProjectPath) {
-          const match = p.find((proj) => proj.path === initialProjectPath);
-          if (match) openProject(match);
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setLoadError(true);
-        setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadNonce]);
+    if (!initialProjectPath || loading || loadError) return;
+    const match = projects.find((proj) => proj.path === initialProjectPath);
+    setSelected((open) => {
+      if (open?.path !== initialProjectPath) return open;
+      return match ?? null;
+    });
+  }, [initialProjectPath, loading, loadError, projects]);
 
   /**
    * Drop a project from the list and persist the decision. Removed optimistically
@@ -146,17 +147,14 @@ export function ProjectPicker({
    * would leave the row sitting there for a visible beat.
    */
   function hideProject(project: DiscoveredProject): void {
-    let index = -1;
-    setProjects((prev) => {
-      index = prev.findIndex((p) => p.path === project.path);
-      return prev.filter((p) => p.path !== project.path);
-    });
+    const index = projects.findIndex((p) => p.path === project.path);
+    projectList.setItems((prev) => prev.filter((p) => p.path !== project.path));
     void setProjectHidden(project.path, true).catch(() => {
       // Persisting failed, so the row is still real: put it back at its old
       // position rather than leaving the list disagreeing with what the next
       // launch will show. Rows are sorted by recency server-side, so restoring
       // by index preserves that order without duplicating the sort here.
-      setProjects((prev) => {
+      projectList.setItems((prev) => {
         if (prev.some((p) => p.path === project.path)) return prev;
         const next = [...prev];
         next.splice(index < 0 ? next.length : index, 0, project);
@@ -167,19 +165,7 @@ export function ProjectPicker({
 
   function openProject(project: DiscoveredProject): void {
     setSelected(project);
-    setSessions([]);
     setResumeError(null);
-    setSessionsError(false);
-    setSessionsLoading(true);
-    void listSessions(project.path)
-      .then((s) => {
-        setSessions(s);
-        setSessionsLoading(false);
-      })
-      .catch(() => {
-        setSessionsError(true);
-        setSessionsLoading(false);
-      });
   }
 
   function choose(cwd: string, sessionPath?: string): void {
@@ -274,14 +260,13 @@ export function ProjectPicker({
         )}
         <span className="picker-head-actions">
           {selected ? (
-            <MetalButton
-              windowFocused={windowFocused}
+            <button
               className="btn btn-primary btn-sm"
               disabled={busy}
               onClick={() => choose(selected.path)}
             >
               {"+ New session"}
-            </MetalButton>
+            </button>
           ) : (
             <>
               <button
@@ -292,13 +277,9 @@ export function ProjectPicker({
               >
                 {"Open existing"}
               </button>
-              <MetalButton
-                windowFocused={windowFocused}
-                className="btn btn-primary btn-sm"
-                onClick={() => setShowNew(true)}
-              >
+              <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
                 {"+ New project"}
-              </MetalButton>
+              </button>
             </>
           )}
           <RadioButton />
@@ -312,11 +293,7 @@ export function ProjectPicker({
           {!loading && loadError && (
             <div className="picker-empty" role="alert">
               <span style={{ color: theme.textMuted }}>Couldn't load your projects.</span>
-              <button
-                type="button"
-                className="btn btn-sm btn-ghost"
-                onClick={() => setReloadNonce((n) => n + 1)}
-              >
+              <button type="button" className="btn btn-sm btn-ghost" onClick={projectList.reload}>
                 Try again
               </button>
             </div>
@@ -333,13 +310,9 @@ export function ProjectPicker({
                 >
                   {"Open existing"}
                 </button>
-                <MetalButton
-                  windowFocused={windowFocused}
-                  className="btn btn-primary btn-sm"
-                  onClick={() => setShowNew(true)}
-                >
+                <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
                   {"+ New project"}
-                </MetalButton>
+                </button>
               </span>
             </div>
           )}
@@ -396,11 +369,7 @@ export function ProjectPicker({
           {sessionsError && (
             <div className="picker-error" role="alert">
               <span>Couldn't load this project's sessions.</span>{" "}
-              <button
-                type="button"
-                className="btn btn-sm btn-ghost"
-                onClick={() => openProject(selected)}
-              >
+              <button type="button" className="btn btn-sm btn-ghost" onClick={sessionList.reload}>
                 Try again
               </button>
             </div>
@@ -409,14 +378,13 @@ export function ProjectPicker({
           {!sessionsLoading && !sessionsError && sessions.length === 0 && (
             <div className="picker-empty">
               <span style={{ color: theme.textMuted }}>No previous sessions yet.</span>
-              <MetalButton
-                windowFocused={windowFocused}
+              <button
                 className="btn btn-primary btn-sm"
                 disabled={busy}
                 onClick={() => choose(selected.path)}
               >
                 {"+ New session"}
-              </MetalButton>
+              </button>
             </div>
           )}
           {!sessionsLoading && sessions.length > 0 && (

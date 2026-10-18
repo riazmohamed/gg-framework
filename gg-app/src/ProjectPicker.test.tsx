@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   getSettings,
@@ -72,6 +72,10 @@ async function renderSessionList(sessions: RecentSession[]): Promise<void> {
   render(<ProjectPicker onChosen={vi.fn()} initialProjectPath={PROJECT.path} />);
   await screen.findByText(sessions[0]!.preview);
 }
+
+// Pickers keep their last list per window (useCachedList); each test starts
+// from a first visit.
+beforeEach(() => sessionStorage.clear());
 
 afterEach(() => {
   cleanup();
@@ -229,5 +233,27 @@ describe("ProjectPicker session list", () => {
     // `busy` must be released, or every later click is silently ignored.
     const row = screen.getByText(FOREIGN_SESSION.preview).closest("button");
     expect(row?.hasAttribute("disabled")).toBe(false);
+  });
+});
+
+describe("ProjectPicker returning from a session", () => {
+  it("opens straight on the project's sessions, never flashing the project list", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    // Discovery hasn't answered yet: the first paint is all there is.
+    waitForReadyMock.mockReturnValue(new Promise(() => {}));
+    render(<ProjectPicker onChosen={vi.fn()} initialProjectPath={PROJECT.path} />);
+    expect(screen.getByText("ui-test")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "+ New session" })).toBeTruthy();
+    expect(screen.queryByText("Choose a project")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open existing" })).toBeNull();
+  });
+
+  it("falls back to the project list when the path isn't a known project", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listProjectsMock.mockResolvedValue([OTHER_PROJECT]);
+    render(<ProjectPicker onChosen={vi.fn()} initialProjectPath="/Users/dev/gone" />);
+    expect(await screen.findByText("Choose a project")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open existing" })).toBeTruthy();
   });
 });

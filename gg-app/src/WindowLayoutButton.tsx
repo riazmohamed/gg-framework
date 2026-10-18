@@ -11,7 +11,14 @@ import { theme } from "./theme";
  * Windows/Linux use an in-webview fallback to avoid embedded-webview popup
  * regressions that can open a list without allowing a selection.
  */
-export function WindowLayoutButton({ onArrange }: { onArrange?: () => void }): React.ReactElement {
+export function WindowLayoutButton({
+  onArrange,
+  label,
+}: {
+  onArrange?: () => void;
+  /** Show a text label beside the icon (the deck's ⋯ keypad). */
+  label?: string;
+}): React.ReactElement {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -86,6 +93,7 @@ export function WindowLayoutButton({ onArrange }: { onArrange?: () => void }): R
       <span className="winlayout">
         <span className="winlayout-icon-btn btn btn-ghost btn-sm btn-nav-icon" aria-hidden="true">
           <AppWindowIcon size={16} />
+          {label && <span className="winlayout-label">{label}</span>}
         </span>
         <select
           className="winlayout-select"
@@ -123,6 +131,7 @@ export function WindowLayoutButton({ onArrange }: { onArrange?: () => void }): R
         onClick={() => setOpen((current) => !current)}
       >
         <AppWindowIcon size={16} />
+        {label && <span className="winlayout-label">{label}</span>}
       </button>
       {open && (
         <>

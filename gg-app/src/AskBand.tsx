@@ -21,6 +21,20 @@ import type { AskOption, AskQuestion, AskUserPrompt } from "./ask-user";
  * early can still be changed while the rest are being decided.
  */
 
+/**
+ * The pick that completes the band holds its fill for HOLD_MS, then the card
+ * dissolves out over EXIT_MS before the answer is sent (sending moves the
+ * answer to the end of the chat, so without the beat the chosen row was never
+ * seen filled: the card just vanished under the pointer). Equal to
+ * `--dur-ask-hold` / `--dur-strip-out` in App.css (the exit shares the composer
+ * strips' speed, so the chat column has one leaving speed);
+ * scripts/motion-tokens.test.mjs enforces it.
+ */
+const HOLD_MS = 160;
+const EXIT_MS = 220;
+/** A number key's press dip on its row. Equal to `--dur-press` in App.css. */
+const KEY_PRESS_MS = 100;
+
 const Check = (): React.ReactElement => (
   <svg
     className="ask-check"
@@ -97,7 +111,9 @@ function Question({
   index,
   numbered,
   answer,
+  draft,
   onAnswer,
+  onDraft,
   onTypeInstead,
 }: {
   question: AskQuestion;
@@ -105,12 +121,14 @@ function Question({
   index: number;
   numbered: boolean;
   answer: string | string[] | undefined;
+  /** A multi-select's picks not yet sent. Owned by the band, whose footer sends them. */
+  draft: string[] | undefined;
   onAnswer: (value: string | string[]) => void;
+  onDraft: (picks: string[]) => void;
   onTypeInstead: () => void;
 }): React.ReactElement {
   const options = question.options ?? [];
   const multi = question.kind === "multi";
-  const [draft, setDraft] = useState<string[]>();
 
   // A question that asks for information (a URL, a name) has nothing to click:
   // it gets its own field right under the question, so the answer is typed
@@ -127,10 +145,10 @@ function Question({
     if (value && value !== saved) onAnswer(value);
   };
 
-  // A multi-select parks its picks locally: "two of these three" is not an
-  // answer until the user says they are done, and nothing else in the band can
-  // tell a half-made selection from a finished one. Every other kind answers on
-  // the click itself, so its selection IS `answer`.
+  // A multi-select parks its picks in the band's drafts: "two of these three" is
+  // not an answer until the user says they are done, and nothing else in the
+  // band can tell a half-made selection from a finished one. Every other kind
+  // answers on the click itself, so its selection IS `answer`.
   //
   // `draft` starts undefined and only exists once the user touches a checkbox,
   // so an already-answered multi (restored from history, or re-rendered while
@@ -141,7 +159,7 @@ function Question({
   const isOn = (value: string): boolean => (multi ? picked.includes(value) : answer === value);
   const toggle = (value: string): void => {
     const next = picked.includes(value) ? picked.filter((v) => v !== value) : [...picked, value];
-    setDraft(next);
+    onDraft(next);
     // Already confirmed once: keep the committed answer in step with what is on
     // screen, or a later question's answer would commit the band with the stale
     // selection while the rows show the new one.
@@ -220,7 +238,12 @@ function Question({
     <div
       className="ask-subq"
       data-ask-question={question.id}
-      {...(answer !== undefined ? { "data-ask-answered": true } : {})}
+      // A multi-select with picks counts as answered for the keyboard: the
+      // number keys and the hint move on to the next question while its picks
+      // wait for the footer.
+      {...(answer !== undefined || (multi && picked.length > 0)
+        ? { "data-ask-answered": true }
+        : {})}
     >
       <p className="ask-subq-q">
         {numbered && <span className="ask-subq-num">{index}</span>}
@@ -263,22 +286,6 @@ function Question({
             {saved && shown.trim() === saved ? "Answered" : "Answer"}
           </button>
         </form>
-      )}
-      {/* The one control the band keeps. A multi-select is the only kind whose
-          selection cannot commit itself: "Tests and Build" and "Tests, so far"
-          look identical, so something has to mark the end of picking. Every
-          other kind commits on the option click and needs no button. */}
-      {multi && (
-        <div className="ask-foot">
-          <button
-            type="button"
-            className="btn btn-sm btn-primary"
-            disabled={picked.length === 0}
-            onClick={() => onAnswer(picked)}
-          >
-            {picked.length === 0 ? "Choose at least one" : `Confirm ${picked.length} selected`}
-          </button>
-        </div>
       )}
     </div>
   );
@@ -330,12 +337,60 @@ export function AskBand({
   const [settledAtMount] = useState(done || Boolean(cancelled));
   const settleClass = settledAtMount ? "" : " dissolve-in";
 
+  // Multi-select picks not yet sent, by question id. They live here, not in
+  // each question, because the one button that sends them sits at the foot of
+  // the whole band: it used to sit under the multi-select itself, so in a band
+  // of four the send was hiding under question two.
+  const [drafts, setDrafts] = useState<Record<string, string[]>>({});
+
+  // The answer that completes the band, held for the commit beat (see HOLD_MS).
+  // The ref owns the timer so the parent re-rendering mid-beat (streaming does)
+  // cannot restart it, and an unmount mid-beat still sends what was picked.
+  const [committing, setCommitting] = useState<Answers | null>(null);
+  const commitRef = useRef<{ delta: Answers; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const onAnswerRef = useRef(onAnswer);
+  useEffect(() => {
+    onAnswerRef.current = onAnswer;
+  });
+  useEffect(
+    () => () => {
+      const pending = commitRef.current;
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      commitRef.current = null;
+      onAnswerRef.current(pending.delta);
+    },
+    [],
+  );
+
+  const report = (delta: Answers): void => {
+    if (commitRef.current) return;
+    const merged = { ...answers, ...delta };
+    const completes = questions.every((q) => merged[q.id] !== undefined);
+    // No animation engine (jsdom) means no exit to wait for. Reduced motion
+    // still gets the beat: its CSS swaps the dissolve for a plain fade.
+    const immediate = typeof Element.prototype.animate !== "function";
+    if (!completes || immediate) {
+      onAnswer(delta);
+      return;
+    }
+    const timer = setTimeout(() => {
+      commitRef.current = null;
+      onAnswerRef.current(delta);
+    }, HOLD_MS + EXIT_MS);
+    commitRef.current = { delta, timer };
+    setCommitting(delta);
+  };
+
   // Number accelerators + type-to-open. Both are deliberately inert while the
   // user is typing anywhere else (the composer is a focused textarea), so the
   // band never steals a keystroke meant for the prompt box.
   useEffect(() => {
     if (done || cancelled) return;
     const onKey = (e: KeyboardEvent): void => {
+      // Mid commit beat the answer is already decided; a second key must not
+      // change it or open the composer under a card that is leaving.
+      if (commitRef.current) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       // The target is the document itself when nothing is focused, so this
       // cannot assume an Element.
@@ -367,6 +422,10 @@ export function AskBand({
         const button = options[Number(e.key) - 1];
         if (button) {
           e.preventDefault();
+          // A scripted click never matches :active, so a number key would pick
+          // with no press at all; this gives its row the same dip a click has.
+          button.setAttribute("data-key-press", "");
+          setTimeout(() => button.removeAttribute("data-key-press"), KEY_PRESS_MS);
           button.click();
         }
         return;
@@ -417,11 +476,40 @@ export function AskBand({
   // Several questions are numbered so the accelerator keys have something to
   // refer to; a lone question needs no "1.".
   const numbered = questions.length > 1;
-  const hint = keyHint(questions.find((q) => answers[q.id] === undefined));
+  const shown: Answers = committing ? { ...answers, ...committing } : answers;
+  const picksOf = (q: AskQuestion): string[] => drafts[q.id] ?? [];
+  // What the band would send now: committed answers plus every multi-select
+  // that has picks.
+  const isSettled = (q: AskQuestion): boolean =>
+    shown[q.id] !== undefined || (q.kind === "multi" && picksOf(q).length > 0);
+  const hint = keyHint(questions.find((q) => !isSettled(q)));
+
+  // The footer exists only when the band holds a multi-select: that is the one
+  // kind whose selection cannot commit itself ("Tests and Build" and "Tests,
+  // so far" look identical). Every other band sends on its last pick.
+  const multis = questions.filter((q) => q.kind === "multi");
+  const remaining = questions.filter((q) => !isSettled(q)).length;
+  const sendPicks = (): void => {
+    const delta: Answers = {};
+    for (const q of multis) {
+      const picks = drafts[q.id];
+      if (picks && picks.length > 0) delta[q.id] = picks;
+    }
+    report(delta);
+  };
+  const lone = questions.length === 1 ? questions[0] : undefined;
+  const footLabel = lone
+    ? picksOf(lone).length === 0
+      ? "Choose at least one"
+      : `Confirm ${picksOf(lone).length} selected`
+    : remaining > 0
+      ? `Answer ${remaining} more to send`
+      : "Send answers";
 
   return (
     <div
-      className="ask-band"
+      className={`ask-band${committing ? " is-committing" : ""}`}
+      inert={committing !== null}
       ref={bandRef}
       role="group"
       aria-label="GG Coder needs your answer"
@@ -439,12 +527,26 @@ export function AskBand({
           question={q}
           index={i + 1}
           numbered={numbered}
-          answer={answers[q.id]}
-          onAnswer={(value) => onAnswer({ [q.id]: value })}
+          answer={shown[q.id]}
+          draft={drafts[q.id]}
+          onAnswer={(value) => report({ [q.id]: value })}
+          onDraft={(picks) => setDrafts((current) => ({ ...current, [q.id]: picks }))}
           onTypeInstead={() => onTypeInstead(q.id)}
         />
       ))}
       {hint && <p className="ask-hint">{hint}</p>}
+      {multis.length > 0 && (
+        <div className="ask-foot">
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            disabled={remaining > 0}
+            onClick={sendPicks}
+          >
+            {footLabel}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

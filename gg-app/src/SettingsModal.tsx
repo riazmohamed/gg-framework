@@ -13,10 +13,11 @@ import {
 } from "./agent";
 import { toast } from "./toast";
 import { SoundButton } from "./SoundButton";
+import { AppearancePicker } from "./AppearancePicker";
 import { HomeBackgroundButton } from "./HomeBackgroundButton";
 import { KeepAwakeButton } from "./KeepAwakeButton";
 import { SettingsSection } from "./settings-section";
-import { SettingsHeaderAction } from "./settings-header";
+import { useSettingsPageReady } from "./settings-ready";
 
 interface Props {
   onClose: () => void;
@@ -27,16 +28,26 @@ interface Props {
 export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
   const embedded = useModalEmbedState() === "embed";
   const [projectsRoot, setProjectsRoot] = useState("");
+  // What's on disk, so the page saves only a real change and can put the
+  // field back after an empty entry or a failed save.
+  const [savedRoot, setSavedRoot] = useState("");
   const [busy, setBusy] = useState(false);
   const [permissions, setPermissions] = useState<PermissionsStatus | null>(null);
+  const [settingsRead, setSettingsRead] = useState(false);
+  // On the Settings page, wait for the folder and the Permissions card so the
+  // page doesn't paint without them and then shift.
+  useSettingsPageReady(settingsRead && permissions !== null);
 
   useEffect(() => {
     // Native (Rust) read — no sidecar wait needed.
     void getSettings()
       .then((s) => {
-        if (s) setProjectsRoot(s.projectsRoot);
+        if (!s) return;
+        setProjectsRoot(s.projectsRoot);
+        setSavedRoot(s.projectsRoot);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setSettingsRead(true));
   }, []);
 
   // The permission is granted OUTSIDE the app (System Settings), so re-check
@@ -52,7 +63,35 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
 
   async function browse(): Promise<void> {
     const picked = await open({ directory: true, multiple: false, title: "Projects folder" });
-    if (typeof picked === "string") setProjectsRoot(picked);
+    if (typeof picked !== "string") return;
+    setProjectsRoot(picked);
+    if (embedded) void persist(picked);
+  }
+
+  /**
+   * The Settings page has no Save: like every other setting there, the folder
+   * saves as soon as it's chosen (Browse) or the field is left. An empty entry
+   * is never saved; the field goes back to the saved folder.
+   */
+  async function persist(value: string): Promise<void> {
+    const root = value.trim();
+    if (!root) {
+      setProjectsRoot(savedRoot);
+      return;
+    }
+    if (root === savedRoot || busy) return;
+    setBusy(true);
+    try {
+      await saveSettings(root);
+      setSavedRoot(root);
+      setProjectsRoot(root);
+      onSaved?.(root);
+    } catch (e) {
+      setProjectsRoot(savedRoot);
+      toast(`Couldn't save: ${e instanceof Error ? e.message : String(e)}`, "error");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function save(): Promise<void> {
@@ -71,24 +110,12 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
     }
   }
 
-  // On the Settings screen this is the General tab; the screen already says
-  // "Settings".
-  const saveButton = (
-    <button
-      // In the Settings header it matches the nav bars' small buttons.
-      className={embedded ? "btn btn-primary btn-sm" : "modal-btn primary"}
-      disabled={busy}
-      onClick={() => void save()}
-    >
-      {busy ? "Saving\u2026" : "Save"}
-    </button>
-  );
-
   return (
     <Modal title={embedded ? "General" : "Settings"} onClose={onClose}>
-      {/* Columns only on the Settings screen; in the dialog they are
-          transparent (see .settings-cols in App.css). */}
-      <div className="settings-cols">
+      {/* On the Settings screen: a grid of equal cards, two side by side
+          where there's room (see .settings-grid in Deck.css). In the dialog
+          the wrapper is transparent and the cards stack. */}
+      <div className="settings-cols settings-grid">
         <div className="settings-col">
           {permissions?.applicable && (
             <SettingsSection title="Permissions" description="Full Disk Access for GG Coder.">
@@ -106,6 +133,14 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
               </div>
             </SettingsSection>
           )}
+          <SettingsSection
+            title="Appearance"
+            description="Light or dark. Auto follows your computer's setting. Applies to every window."
+          >
+            <div className="modal-row">
+              <AppearancePicker />
+            </div>
+          </SettingsSection>
           <SettingsSection
             title="Effects"
             description="Sounds, and the home screen's moving background."
@@ -125,7 +160,6 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
           </SettingsSection>
         </div>
         <div className="settings-col">
-          {embedded && <SettingsHeaderAction>{saveButton}</SettingsHeaderAction>}
           <SettingsSection
             title="Project folder"
             description="Where new projects are created."
@@ -142,17 +176,27 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
                 value={projectsRoot}
                 placeholder="/Users/you/gg-projects"
                 onChange={(e) => setProjectsRoot(e.target.value)}
+                onBlur={embedded ? (e) => void persist(e.currentTarget.value) : undefined}
+                onKeyDown={
+                  embedded
+                    ? (e) => {
+                        if (e.key === "Enter") e.currentTarget.blur();
+                      }
+                    : undefined
+                }
               />
               <button className="modal-btn" onClick={() => void browse()}>
                 {"Browse\u2026"}
               </button>
             </div>
           </SettingsSection>
-          {/* On the page, Save sits in the screen's header bar instead. */}
+          {/* The dialog saves on Save; the page saves as you go (see persist). */}
           {!embedded && (
             <div className="modal-actions">
               <ModalDismissButton onClick={onClose}>Cancel</ModalDismissButton>
-              {saveButton}
+              <button className="modal-btn primary" disabled={busy} onClick={() => void save()}>
+                {busy ? "Saving\u2026" : "Save"}
+              </button>
             </div>
           )}
         </div>

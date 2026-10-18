@@ -21,7 +21,7 @@ export function WorkingBeam({
         size={size}
         colorVariant="colorful"
         strength={0.7}
-        theme="dark"
+        theme="auto"
         aria-hidden="true"
       >
         <div className="working-beam-surface" />

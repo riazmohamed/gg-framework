@@ -4,7 +4,6 @@ import { useDialogFocus } from "./dialog-focus";
 import { theme } from "./theme";
 import { Markdown } from "./Markdown";
 import { ShimmerText } from "./ShimmerText";
-import { GgFace } from "./GgFace";
 import { CritterLine } from "./CritterLine";
 import { PlanCritters } from "./PlanCritters";
 import { hashKey, pickCritter } from "./critter-sprites";
@@ -142,7 +141,6 @@ export function PlanReviewModal({
           <div className="statusrow">
             <div className="activity-summary">
               <span className="statusrow-left" role="status" aria-live="polite" aria-atomic="true">
-                <GgFace mood="curious" size={21} />
                 <span className="activity-label-reveal">
                   {kenReviewing ? (
                     <ShimmerText base={theme.ken} bright={theme.text}>

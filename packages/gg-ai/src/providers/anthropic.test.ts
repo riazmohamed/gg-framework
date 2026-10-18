@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { ProviderError } from "../errors.js";
+import { ProviderError, formatError, isHardBillingMessage, isUsageLimitError } from "../errors.js";
 import type { StreamEvent } from "../types.js";
 import { streamAnthropic, fineGrainedToolStreamingEnabled } from "./anthropic.js";
 import { stream as unifiedStream } from "../stream.js";
@@ -227,6 +227,48 @@ describe("streamAnthropic request shaping", () => {
     expect(params.model).toBe("claude-sonnet-4-5");
     expect(params.stream).toBe(true);
   });
+
+  it.each([
+    { label: "fast-mode id", model: "claude-opus-5-5-fast", baseUrl: undefined, fast: true },
+    { label: "standard id", model: "claude-opus-5-5", baseUrl: undefined, fast: false },
+    {
+      label: "fast-mode id via a gateway",
+      model: "claude-opus-5-5-fast",
+      baseUrl: "https://gateway.example.com",
+      fast: false,
+    },
+  ])("sends fast mode only for a $label on the first-party API", async (route) => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const sdk = Anthropic as unknown as { nextError: Error | null; nextEvents: unknown[] | null };
+    sdk.nextError = null;
+    sdk.nextEvents = [
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ];
+    const result = unifiedStream({
+      provider: "anthropic",
+      model: route.model,
+      ...(route.baseUrl ? { baseUrl: route.baseUrl } : {}),
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-ant-oat-test",
+    });
+    for await (const _event of result) {
+      /* consume */
+    }
+    const [params, requestOptions] = createMock.mock.calls.at(-1) as [
+      Record<string, unknown>,
+      { headers?: Record<string, string> },
+    ];
+    expect(params.model).toBe("claude-opus-5-5");
+    const beta = requestOptions.headers?.["anthropic-beta"] ?? "";
+    if (route.fast) {
+      expect(params.speed).toBe("fast");
+      expect(beta.split(",")).toContain("fast-mode-2026-02-01");
+    } else {
+      expect(params).not.toHaveProperty("speed");
+      expect(beta).not.toContain("fast-mode");
+    }
+  });
 });
 
 describe("streamAnthropic non-streaming fallback", () => {
@@ -442,6 +484,109 @@ describe("streamAnthropic error normalization", () => {
       message: "Claude usage limit reached",
       resetsAt,
     } satisfies Partial<ProviderError>);
+  });
+
+  it.each([
+    { reason: "out_of_credits", headline: "Your Claude usage credits have run out" },
+    { reason: "overage_not_provisioned", headline: "Claude usage credits are turned off" },
+    { reason: "org_spend_cap_reached", headline: "Claude usage credit limit reached" },
+    { reason: "member_level_disabled", headline: "Claude usage credits are off for your account" },
+    { reason: undefined, headline: "Fast mode needs Claude usage credits" },
+  ])(
+    "names the fast-mode usage-credits refusal ($reason), never a plan limit",
+    async ({ reason, headline }) => {
+      const { default: Anthropic } = await import("@anthropic-ai/sdk");
+      const AnthropicMock = Anthropic as unknown as {
+        APIError: new (
+          status: number | undefined,
+          error: unknown,
+          message: string,
+          requestID?: string | null,
+          type?: string | null,
+        ) => Error;
+        nextError: Error | null;
+        nextEvents: unknown[] | null;
+      };
+      AnthropicMock.nextEvents = null;
+      const err = new AnthropicMock.APIError(
+        429,
+        {
+          type: "error",
+          error: { type: "rate_limit_error", message: "Usage credits are required for fast mode." },
+        },
+        "429 Too Many Requests",
+        "req_fast_credits",
+        "rate_limit_error",
+      );
+      // Live Anthropic (2026-10-15) sends this refusal with the reason header and
+      // a far-off unified reset, which alone would read as a spent plan.
+      Object.assign(err, {
+        headers: new Headers({
+          "anthropic-ratelimit-unified-reset": String(Math.floor(Date.now() / 1000) + 86_400),
+          ...(reason ? { "anthropic-ratelimit-unified-overage-disabled-reason": reason } : {}),
+        }),
+      });
+      AnthropicMock.nextError = err;
+
+      const result = unifiedStream({
+        provider: "anthropic",
+        model: "claude-opus-5-5-fast",
+        messages: [{ role: "user", content: "hi" }],
+        apiKey: "sk-ant-oat-test",
+      });
+
+      const rejection = await result.response.catch((e: unknown) => e);
+      expect(rejection).toMatchObject({
+        statusCode: 429,
+        message: `Fast mode unavailable (${reason ?? "unknown"}): ${headline}.`,
+        hint: expect.stringContaining("Claude Opus 5.5 (standard speed)"),
+      });
+      expect(isUsageLimitError(rejection)).toBe(false);
+      expect(isHardBillingMessage((rejection as Error).message)).toBe(true);
+      expect(formatError(rejection).headline).toBe(`${headline}.`);
+    },
+  );
+
+  it("ignores the overage reason header on a standard-speed plan limit", async () => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      APIError: new (
+        status: number | undefined,
+        error: unknown,
+        message: string,
+        requestID?: string | null,
+        type?: string | null,
+      ) => Error;
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextEvents = null;
+    const err = new AnthropicMock.APIError(
+      429,
+      { type: "error", error: { type: "rate_limit_error", message: "Rate limited." } },
+      "429 Too Many Requests",
+      "req_plan_limit",
+      "rate_limit_error",
+    );
+    Object.assign(err, {
+      headers: new Headers({
+        "anthropic-ratelimit-unified-status": "rejected",
+        "anthropic-ratelimit-unified-overage-disabled-reason": "out_of_credits",
+      }),
+    });
+    AnthropicMock.nextError = err;
+
+    const result = unifiedStream({
+      provider: "anthropic",
+      model: "claude-opus-5-5",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-ant-test",
+    });
+
+    await expect(result.response).rejects.toMatchObject({
+      statusCode: 429,
+      message: "Claude usage limit reached",
+    });
   });
 
   it("treats a 429 without unified-rejected headers as a plain provider error", async () => {
