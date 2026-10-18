@@ -128,6 +128,7 @@ import type { CacheTouch } from "../core/cache-expiry.js";
 import type { KeepAwake } from "../core/keep-awake.js";
 import { createUsageCommand } from "./tui-usage.js";
 import { createGitCommand } from "./tui-git.js";
+import { paidSwitchHint, unconfirmedPaidSwitch } from "./paid-model-switch.js";
 import { createImportCommand } from "./tui-import.js";
 import { createEnhanceCommand, type EnhanceRoute } from "./tui-enhance.js";
 import { createUsageService } from "../app-sidecar/usage.js";
@@ -2238,6 +2239,8 @@ export function App(props: AppProps) {
           switchModel: (target) => {
             const value = resolveModelTarget(target, MODELS);
             if (!value) return `Unknown model: ${target}. Use /model to pick one.`;
+            const paid = unconfirmedPaidSwitch(value, currentModelRef.current, false);
+            if (paid) return paidSwitchHint(paid, target);
             handleModelSelectRef.current(value);
             return null;
           },
@@ -2329,9 +2332,15 @@ export function App(props: AppProps) {
           }
         };
         const context: SlashCommandContext = {
-          switchModel: async (provider, model) => {
+          switchModel: async (provider, model, options) => {
             const value = resolveModelTarget(provider ? `${provider}:${model}` : model, MODELS);
             if (!value) throw new Error(`Unknown model: ${model}`);
+            const paid = unconfirmedPaidSwitch(
+              value,
+              currentModelRef.current,
+              options?.confirmPaid === true,
+            );
+            if (paid) throw paid;
             handleModelSelectRef.current(value);
           },
           compact: async () => {},
