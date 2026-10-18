@@ -127,6 +127,7 @@ import {
 import type { CacheTouch } from "../core/cache-expiry.js";
 import type { KeepAwake } from "../core/keep-awake.js";
 import { createUsageCommand } from "./tui-usage.js";
+import { createGitCommand } from "./tui-git.js";
 import { createImportCommand } from "./tui-import.js";
 import { createEnhanceCommand, type EnhanceRoute } from "./tui-enhance.js";
 import { createUsageService } from "../app-sidecar/usage.js";
@@ -2113,6 +2114,7 @@ export function App(props: AppProps) {
           sendPrompt: (display, prompt) => sendPromptRef.current(display, prompt),
         }),
         createUsageCommand(() => usageServiceRef.current?.subscriptionUsage ?? null),
+        createGitCommand({ cwd: () => cwdRef.current }),
         createImportCommand({
           sessionsDir: props.sessionsDir,
           cwd: () => cwdRef.current,
