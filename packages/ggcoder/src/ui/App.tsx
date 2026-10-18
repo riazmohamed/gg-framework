@@ -71,7 +71,7 @@ import {
 import { SettingsManager, type Settings } from "../core/settings-manager.js";
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
 import { getAnnouncedLanguages, markLanguagesAnnounced } from "../core/setup-history.js";
-import { loadCustomCommands, type CustomCommand } from "../core/custom-commands.js";
+import { loadWorkspaceCustomCommands, type CustomCommand } from "../core/custom-commands.js";
 import { detectLanguages, type LanguageId } from "../core/language-detector.js";
 import { detectVerifyCommands } from "../core/verify-commands.js";
 import type { Skill } from "../core/skills.js";
@@ -819,12 +819,18 @@ export function App(props: AppProps) {
     return () => stopPeriodicUpdateCheck();
   }, [props.version]);
 
-  // Load custom commands from .gg/commands/ and ~/.gg/commands/. Keep polling so
-  // commands copied in while the TUI is already open appear in slash completion
-  // without requiring a restart.
+  // Load custom commands from .gg/commands/ of the project and every /add-dir
+  // root (the project's win), plus ~/.gg/commands/. Keep polling so commands
+  // copied in while the TUI is already open, or a root added since, appear in
+  // slash completion without requiring a restart. The roots array is shared
+  // and mutated in place by /add-dir, so it is read fresh on each load.
+  const loadCustomCommands = useCallback(
+    () => loadWorkspaceCustomCommands([props.cwd, ...(props.additionalRoots ?? [])]),
+    [props.cwd, props.additionalRoots],
+  );
   const [customCommands, setCustomCommands] = useState<CustomCommand[]>([]);
   const reloadCustomCommands = useCallback(async (): Promise<CustomCommand[]> => {
-    const commands = await loadCustomCommands(props.cwd).catch((err: unknown) => {
+    const commands = await loadCustomCommands().catch((err: unknown) => {
       log(
         "WARN",
         "command",
@@ -834,11 +840,11 @@ export function App(props: AppProps) {
     });
     setCustomCommands(commands);
     return commands;
-  }, [props.cwd]);
+  }, [loadCustomCommands]);
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
-      const commands = await loadCustomCommands(props.cwd).catch((err: unknown) => {
+      const commands = await loadCustomCommands().catch((err: unknown) => {
         log(
           "WARN",
           "command",
@@ -856,7 +862,7 @@ export function App(props: AppProps) {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [props.cwd]);
+  }, [loadCustomCommands]);
 
   useEffect(() => {
     currentToolsRef.current = currentTools;
