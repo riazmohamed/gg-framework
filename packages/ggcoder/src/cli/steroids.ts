@@ -58,7 +58,8 @@ export function formatSteroidsStatus(status: SteroidsStatus): string[] {
   if (status.error) {
     lines.push(`It did not run: ${status.error}`, "Reinstall with: ogcoder steroids install");
   } else if (status.connected) {
-    lines.push(`Corpus: ${status.repos ?? 0} repos, ${status.documents ?? 0} documents.`);
+    const size = status.diskSize ? `, ${status.diskSize} on disk` : "";
+    lines.push(`Corpus: ${status.repos ?? 0} repos, ${status.documents ?? 0} documents${size}.`);
   } else {
     lines.push("The corpus is empty. Run /steroids inside ogcoder to add repos.");
   }
