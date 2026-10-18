@@ -57,6 +57,7 @@ import { getGitBranch } from "../utils/git.js";
 import { getAuthStorageKeys, getModel, getVideoByteLimit } from "../core/model-registry.js";
 import { SessionManager, type TurnMetricPayload } from "../core/session-manager.js";
 import { describeUserInput, log } from "../core/logger.js";
+import { gitOverviewText } from "./tui-git.js";
 import {
   getPendingUpdate,
   startPeriodicUpdateCheck,
@@ -1997,6 +1998,13 @@ export function App(props: AppProps) {
         return;
       }
 
+      // /git — changed files, open PRs and issues (the desktop Deck's Git panel).
+      if (trimmed === "/git") {
+        const text = await gitOverviewText({ cwd: () => props.cwd });
+        setLiveItems((prev) => [...prev, { kind: "info", text, id: getId() }]);
+        return;
+      }
+
       // /rewind — open the checkpoint picker (needs React state + the store).
       if (trimmed === "/rewind") {
         const store = props.checkpointStore;
@@ -2498,6 +2506,12 @@ export function App(props: AppProps) {
       { name: "clear", aliases: [], description: "Clear session", sectionTitle: "built-in" },
       { name: "theme", aliases: ["t"], description: "Switch theme", sectionTitle: "built-in" },
       { name: "tasks", aliases: [], description: "Open task manager", sectionTitle: "built-in" },
+      {
+        name: "git",
+        aliases: [],
+        description: "Changed files, open pull requests and issues",
+        sectionTitle: "built-in",
+      },
       {
         name: "eyes-view",
         aliases: ["ev"],
