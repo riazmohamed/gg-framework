@@ -31,6 +31,15 @@ afterEach(() => {
 });
 
 describe("loadSavedSettings", () => {
+  it("defaults packageCooldownDays to 2 and accepts 0..365 only", () => {
+    expect(loadSavedSettings(tempSettingsPath()).packageCooldownDays).toBe(2);
+    const settingsPath = tempSettingsPath();
+    fs.writeFileSync(settingsPath, JSON.stringify({ packageCooldownDays: 0 }), "utf-8");
+    expect(loadSavedSettings(settingsPath).packageCooldownDays).toBe(0);
+    fs.writeFileSync(settingsPath, JSON.stringify({ packageCooldownDays: 900 }), "utf-8");
+    expect(loadSavedSettings(settingsPath).packageCooldownDays).toBe(2);
+  });
+
   it("defaults trustedProjects to an empty array", () => {
     const settings = loadSavedSettings(tempSettingsPath());
     expect(settings.trustedProjects).toEqual([]);

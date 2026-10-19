@@ -48,6 +48,8 @@ export interface SavedSettings {
   /** Repo paths individually trusted for project-scope MCP (the per-repo
    *  complement to the global `trustProjectMcpServers`). */
   trustedProjects: string[];
+  /** Release-age cooldown (days) for package installs the agent runs; 0 disables. Default 2. */
+  packageCooldownDays: number;
   /** Max concurrent subagents per resolved child model (1–4). Unset = global limit only. */
   subagentMaxPerModel?: number;
   /** Days to keep session transcripts before startup pruning. 0 disables. */
@@ -101,6 +103,7 @@ export function loadSavedSettings(
     sessionRetentionDays: 30,
     trustProjectMcpServers: false,
     trustedProjects: [],
+    packageCooldownDays: 2,
   };
   try {
     const raw = JSON.parse(fsSync.readFileSync(filePath, "utf-8"));
@@ -151,6 +154,14 @@ export function loadSavedSettings(
       raw.sessionRetentionDays >= 0
     ) {
       result.sessionRetentionDays = raw.sessionRetentionDays;
+    }
+    if (
+      typeof raw.packageCooldownDays === "number" &&
+      Number.isFinite(raw.packageCooldownDays) &&
+      raw.packageCooldownDays >= 0 &&
+      raw.packageCooldownDays <= 365
+    ) {
+      result.packageCooldownDays = raw.packageCooldownDays;
     }
     if (raw.speedProfile === "optimized" || raw.speedProfile === "baseline") {
       result.speedProfile = raw.speedProfile;
