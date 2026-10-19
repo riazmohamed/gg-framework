@@ -185,6 +185,7 @@ import { normalizeMessageImages } from "./message-images.js";
 import { loadStreamRules } from "./stream-rules.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import {
   resolveSessionToolResultCharLimit,
