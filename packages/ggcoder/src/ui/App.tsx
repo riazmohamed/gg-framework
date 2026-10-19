@@ -61,6 +61,7 @@ import {
   type GitHubIdentity,
 } from "../utils/github-identity.js";
 import { getAuthStorageKeys, getModel, getVideoByteLimit, MODELS } from "../core/model-registry.js";
+import { tuiOutputCap } from "./output-cap.js";
 import { SessionManager, type TurnMetricPayload } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
 import {
@@ -1081,7 +1082,13 @@ export function App(props: AppProps) {
       model: currentModel,
       tools: currentTools,
       webSearch: props.webSearch,
-      maxTokens: props.maxTokens,
+      maxTokens: tuiOutputCap({
+        provider: currentProvider,
+        model: currentModel,
+        fallback: props.maxTokens,
+        threshold: settingsRef.current?.get("compactThreshold"),
+        accountId: activeAccountId,
+      }),
       supportsImages: getModel(currentModel)?.supportsImages ?? true,
       supportsVideo: getModel(currentModel)?.supportsVideo ?? false,
       thinking: thinkingLevel,
