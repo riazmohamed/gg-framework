@@ -81,6 +81,7 @@ import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { matchPromptCommand } from "./core/prompt-command-expansion.js";
 import { createTools } from "./tools/index.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
+import { startThreatFeedSync } from "./core/threat-feed.js";
 import { spawnedTasks, type SpawnedTaskArgs } from "./tools/subagent-shared.js";
 import { CheckpointStore } from "./core/checkpoint-store.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
@@ -725,6 +726,7 @@ async function runInkTUI(opts: {
     getModel: () => activeModel,
     getThinkingLevel: () => activeThinkingLevel,
     getMaxPerModel: () => opts.subagentMaxPerModel,
+    getPackageCooldownDays: () => savedSettings.packageCooldownDays,
   });
 
   // MCP startup can involve `npx` installing/booting servers. Do it after the
@@ -1028,6 +1030,9 @@ async function runInkTUI(opts: {
       .catch(() => {});
     // Sweep recoverable full tool outputs (~/.gg/tool-output/) older than 48h.
     void cleanupToolOutputs().catch(() => {});
+    // Daily malicious-package feed (OSV MAL-, npm + PyPI): deferred, background,
+    // fail-silent; at most one sync a day (core/threat-feed.ts).
+    startThreatFeedSync();
   }
 
   await renderApp({
