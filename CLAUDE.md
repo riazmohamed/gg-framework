@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Last updated:** 2026-10-19 — the TUI now sends each model's real output-token cap (`ui/output-cap.ts`, see **CLI parity**) instead of a flat 16K. Last sync from main: 2026-10-18 (main@ab6e10b8). Spine **5.83.5** (`@abukhaled` scope), gg-app **v0.93.6**. Per-sync history lives in `git log` (`docs: update CLAUDE.md after app-update sync` commits). This file keeps only what is true now.
+**Last updated:** 2026-10-19 — synced main@623ff71f (the **gg-safe** security layer, below) and ported its session-side pieces to the TUI (see **CLI parity**). Spine **5.84.2** (`@abukhaled` scope), gg-app **v0.94.2**. Per-sync history lives in `git log` (`docs: update CLAUDE.md after app-update sync` commits). This file keeps only what is true now.
 
 **Branch merge checklist (re-check on every sync from main):**
 
@@ -12,6 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Accept upstream deletions** of retired packages (`gg-boss`, `gg-editor*`, `gg-voice`, `ggcoder-eyes`, `gg-pixel*`), `bench/`, `experiments/`, Error Mom and Ideal Review. Do not resurrect them.
 - **Tests that read `~/.gg`** must use `useFakeHome`. Upstream custom-command count tests need it added on this branch.
 - **Known non-failures:** `core/agent-session-diagnostics.test.ts` fails when `pnpm` is a corepack shim (environment-only). `agent-session-subagent-policy.test.ts` and `gg-app/scripts/stage-node.test.mjs` are flaky under full-suite load. An `ERR_MODULE_NOT_FOUND: tslib` after install is fixed by `pnpm install --force`.
+- **New upstream files import `@kenkaiiii/gg-core` directly** (2026-10-19: `package-threats.ts`, `threat-feed.ts`). `git grep "kenkaiiii/gg-"` after every merge. gg-safe's model-facing strings say "GG Coder"; left as upstream wrote them.
 - **Upstream remote:** if `git pull origin main` brings nothing, compare with `git log main..upstream/main` (KenKaiii) and fast-forward from there.
 - **CLI parity:** port terminal-suited gg-app features each sync (see **CLI parity with gg-app**).
 
@@ -207,12 +208,14 @@ Built 2026-10-09, plus local models, `hf` and `steroids` on 2026-10-11 and four 
 | Deck Git panel (2026-10-18) | `/git`: changed files with line counts, open PRs and issues | `tui-git.ts` over `utils/git-overview.ts` + `getGitHubRepoSlug` |
 | Paid-model confirmation (2026-10-18) | picker asks to confirm; a typed `/model <paid>` is refused until `--confirm-paid` | `ModelSelector.tsx` (from main) and `paid-model-switch.ts`, throwing the same `PaidModelConfirmationError` |
 | Steroids disk size (2026-10-18) | `ogcoder steroids` prints the corpus size on disk | `cli/steroids.ts` reading `probeSteroids().diskSize` |
+| gg-safe cooldown + feed (2026-10-19) | `packageCooldownDays` honoured by the TUI's bash tool; daily threat feed synced at startup | `config.ts` `SavedSettings.packageCooldownDays`, `startThreatFeedSync` in `cli.ts` |
+| gg-safe notices (2026-10-19) | infected-lockfile line + hidden agent note, `⚠ Blocked for safety (rule) · target` rows, don't-install list | `ui/safety-watch.ts` over `installed-threats` / `blocked-packages-file` / `parseSafetyBlock`; created once in `cli.ts` so remounts keep it |
 | Per-model output cap (2026-10-19) | each turn requests the model's own `maxOutputTokens`, trimmed to fit beside the compaction trigger (was a flat 16K, so long replies kept hitting the limit) | `ui/output-cap.ts` over `outputCapForRequest`, used in `App.tsx` |
 
 Not ported, and why: `/schedule`, `@`-file search and autopilot/`@ken` (sidecar- or webview-only
 logic, awkward in a terminal; ask first); the chat agents, GG Motion and GG Goals (whole separate
 workspaces; GG Goals is a candidate for an `ogcoder goal` mode, ask first); sound, radio, XP/rank, What's New, notes, window layout and Disk Access permissions
-(desktop-only), plus the update banner and goal farm map. The Deck's model and Usage panels are already `/model` and `/usage`; the Settings About page, farm sounds, Ken status pill and ask_user motion are desktop-only. Gemini API-key login and background-failure wakes reached the CLI through shared code (`cli/auth.ts`, `core/process-manager.ts`). Nothing else terminal-suited is left to port as of 2026-10-18.
+(desktop-only), plus the update banner and goal farm map. The Deck's model and Usage panels are already `/model` and `/usage`; the Settings About page, farm sounds, Ken status pill and ask_user motion are desktop-only. Gemini API-key login and background-failure wakes reached the CLI through shared code (`cli/auth.ts`, `core/process-manager.ts`). Blocked-skill warnings and MCP hidden-tool lines (`ogcoder mcp list`) came from upstream directly. Still open: the interactive `ogcoder mcp` dashboard does not render a row's `warning` yet. Nothing else terminal-suited is left to port as of 2026-10-19.
 
 Fixed on the way (2026-10-11): `ogcoder sessions` showed "(no prompt)" for gzipped cold sessions
 and the summary text for compacted ones, because it re-read each file as plain JSONL; it now uses
@@ -536,6 +539,11 @@ Both tools are **deferred-tier** (`DEFERRED_TOOL_NAMES`): reaching for a compone
 enough that neither schema belongs in the cached prefix, and the index line is what keeps the
 capability discoverable. Guidance lives in the bundled `evidence-led-ui` skill; the live harness,
 `bench/ui-library-real-flow/`, was deleted upstream on 2026-10-18.
+
+## gg-safe Security Layer (2026-10-19 sync)
+
+Upstream's supply-chain and action guards, all local and fail-open on network errors:
+`core/package-threats.ts` (malware, typosquat, provenance downgrade and serious-flaw rules for installs; HIGH/CRITICAL-flawed versions move to the newest fixed release in the same major), `core/package-cooldown.ts` (versions younger than `packageCooldownDays`, default 2, are hidden from installs), `core/threat-feed.ts` (daily OSV `MAL-` feed for npm and PyPI, `startThreatFeedSync`), `core/action-threats.ts` (exfil, auto-run config writes, AI CLIs with safety off; `parseSafetyBlock` reads the rule from a tool result's `Blocked … (rule)` prefix), `core/skill-scan.ts` (`discoverSkillsWithBlocked` keeps unsafe skills out), `core/mcp/tool-guard.ts` (hides unsafe MCP tools; `hiddenToolMessage`), `core/installed-threats.ts` (lockfile scan for packages flagged after install) and `core/blocked-packages-file.ts` (a managed "don't install" block in the project's CLAUDE.md/AGENTS.md). `AgentSession` emits `security_block` / `security_notice` on the event bus; the TUI's equivalent is `ui/safety-watch.ts`.
 
 ## Redaction-Placeholder Guard (`tools/redaction-guard.ts`)
 
