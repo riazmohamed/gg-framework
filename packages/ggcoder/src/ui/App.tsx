@@ -55,6 +55,7 @@ import { isEyesActive } from "@abukhaled/ggcoder-eyes";
 import { createModelRouter } from "../core/model-router.js";
 import { getGitBranch } from "../utils/git.js";
 import { getAuthStorageKeys, getModel, getVideoByteLimit } from "../core/model-registry.js";
+import { tuiOutputCap } from "./output-cap.js";
 import { SessionManager, type TurnMetricPayload } from "../core/session-manager.js";
 import { describeUserInput, log } from "../core/logger.js";
 import { gitOverviewText } from "./tui-git.js";
@@ -960,7 +961,13 @@ export function App(props: AppProps) {
       model: currentModel,
       tools: currentTools,
       webSearch: props.webSearch,
-      maxTokens: props.maxTokens,
+      maxTokens: tuiOutputCap({
+        provider: currentProvider,
+        model: currentModel,
+        fallback: props.maxTokens,
+        threshold: settingsRef.current?.get("compactThreshold"),
+        accountId: activeAccountId,
+      }),
       supportsImages: getModel(currentModel)?.supportsImages ?? true,
       supportsVideo: getModel(currentModel)?.supportsVideo ?? false,
       thinking: thinkingLevel,
