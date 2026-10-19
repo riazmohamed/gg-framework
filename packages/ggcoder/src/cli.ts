@@ -82,6 +82,7 @@ import { matchPromptCommand } from "./core/prompt-command-expansion.js";
 import { createTools } from "./tools/index.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
 import { startThreatFeedSync } from "./core/threat-feed.js";
+import { createTuiSafetyWatch } from "./ui/safety-watch.js";
 import { spawnedTasks, type SpawnedTaskArgs } from "./tools/subagent-shared.js";
 import { CheckpointStore } from "./core/checkpoint-store.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
@@ -758,6 +759,9 @@ async function runInkTUI(opts: {
   const askUserHost = createTuiAskUserHost();
   // Hold off idle system sleep while a run is in flight (`keepAwake` setting).
   const keepAwake = new KeepAwake({ enabled: savedSettings.keepAwake });
+  // Installed-malware lockfile watch and safety-block rows (AgentSession's
+  // gg-safe bookkeeping, for the TUI's own loop).
+  const safetyWatch = createTuiSafetyWatch({ cwd });
 
   const toolNames = tools.map((tool) => tool.name);
   const systemPrompt = applyAsyncSubagentPolicy(
@@ -1068,6 +1072,7 @@ async function runInkTUI(opts: {
     askUserHost,
     elicitHost,
     keepAwake,
+    safetyWatch,
     idealReviewEnabled: opts.idealReviewEnabled,
     rebuildReadTool,
     clearReadTracker,

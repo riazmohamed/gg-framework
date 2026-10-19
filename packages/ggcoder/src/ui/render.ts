@@ -4,6 +4,7 @@ import type { TuiAskUserHost } from "./ask-user-host.js";
 import type { TuiElicitHost } from "./mcp-elicit-host.js";
 import type { CacheTouch } from "../core/cache-expiry.js";
 import type { KeepAwake } from "../core/keep-awake.js";
+import type { TuiSafetyWatch } from "./safety-watch.js";
 import { log } from "@abukhaled/gg-core";
 import { render, type Instance as InkInstance } from "ink";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
@@ -86,6 +87,8 @@ export interface RenderAppConfig {
   elicitHost?: TuiElicitHost;
   /** Idle-sleep guard held while a run is in flight. */
   keepAwake?: KeepAwake;
+  /** gg-safe lockfile watch + block rows; outlives remounts. */
+  safetyWatch?: TuiSafetyWatch;
   rebuildReadTool?: (model: string) => AgentTool;
   /** Forgets every file read; run when a reset replaces the conversation. */
   clearReadTracker?: () => void;
@@ -613,6 +616,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             askUserHost: config.askUserHost,
             elicitHost: config.elicitHost,
             keepAwake: config.keepAwake,
+            safetyWatch: config.safetyWatch,
             rebuildReadTool: config.rebuildReadTool,
             connectInitialMcpTools: config.connectInitialMcpTools,
             planCallbacks: config.planCallbacks,
