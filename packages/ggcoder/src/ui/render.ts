@@ -1,5 +1,6 @@
 import React from "react";
 import wrapAnsi from "wrap-ansi";
+import type { TuiSafetyWatch } from "./safety-watch.js";
 import { log } from "@abukhaled/gg-core";
 import { render, type Instance as InkInstance } from "ink";
 import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
@@ -72,6 +73,8 @@ export interface RenderAppConfig {
   planModeRef?: { current: boolean };
   skills?: Skill[];
   checkpointStore?: CheckpointStore;
+  /** gg-safe lockfile watch + block rows; outlives remounts. */
+  safetyWatch?: TuiSafetyWatch;
   rebuildReadTool?: (model: string) => AgentTool;
   /** Forgets every file read; run when a reset replaces the conversation. */
   clearReadTracker?: () => void;
@@ -592,6 +595,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             planModeRef: config.planModeRef,
             skills: config.skills,
             checkpointStore: config.checkpointStore,
+            safetyWatch: config.safetyWatch,
             rebuildReadTool: config.rebuildReadTool,
             connectInitialMcpTools: config.connectInitialMcpTools,
             planCallbacks: config.planCallbacks,

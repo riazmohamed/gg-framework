@@ -85,6 +85,7 @@ import { createTools } from "./tools/index.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
 import { pruneDiagnosticsRecords } from "./core/internal-diagnostics.js";
 import { startThreatFeedSync } from "./core/threat-feed.js";
+import { createTuiSafetyWatch } from "./ui/safety-watch.js";
 import { spawnedTasks, type SpawnedTaskArgs } from "./tools/subagent-shared.js";
 import { CheckpointStore, pruneCheckpointSessions } from "./core/checkpoint-store.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
@@ -783,6 +784,10 @@ async function runInkTUI(opts: {
     return initialMcpConnectPromise;
   };
 
+  // Installed-malware lockfile watch and safety-block rows (AgentSession's
+  // gg-safe bookkeeping, for the TUI's own loop).
+  const safetyWatch = createTuiSafetyWatch({ cwd });
+
   const toolNames = tools.map((tool) => tool.name);
   const systemPrompt = applyAsyncSubagentPolicy(
     await buildSystemPrompt(
@@ -1123,6 +1128,7 @@ async function runInkTUI(opts: {
     planModeRef,
     skills,
     checkpointStore: checkpointRef.current ?? undefined,
+    safetyWatch,
     idealReviewEnabled: opts.idealReviewEnabled,
     rebuildReadTool,
     clearReadTracker,

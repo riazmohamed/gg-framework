@@ -102,6 +102,7 @@ import type { TerminalHistoryPrinter } from "./terminal-history.js";
 import { buildUserContentWithAttachments } from "./prompt-routing.js";
 import { submitPromptCommand } from "./submit-prompt-command.js";
 import { handleUiSlashCommand } from "./submit-slash-commands.js";
+import type { TuiSafetyWatch } from "./safety-watch.js";
 import { buildLoopBreakMessage, evaluateLoopBreak } from "../core/loop-breaker.js";
 import { buildRegroundingMessage } from "../core/regrounding.js";
 import { getNextThinkingLevel, isThinkingLevelSupported } from "./thinking-level.js";
@@ -230,6 +231,8 @@ export interface AppProps {
   skills?: Skill[];
   /** Per-session file checkpoint store backing the /rewind command. */
   checkpointStore?: CheckpointStore;
+  /** gg-safe lockfile watch + block rows; outlives remounts. */
+  safetyWatch?: TuiSafetyWatch;
   /** Rebuild the `read` tool for a model (reuses the read tracker). Used on
    *  model switch so the tool's video capability tracks the active model. */
   rebuildReadTool?: (model: string) => AgentTool;
@@ -954,6 +957,7 @@ export function App(props: AppProps) {
     });
   }, [currentProvider, currentModel, props.loggedInProviders, props.credentialsByProvider]);
 
+  const safetyWatchRef = useRef(props.safetyWatch);
   const agentLoop = useAgentLoop(
     messagesRef,
     {
@@ -1305,8 +1309,10 @@ export function App(props: AppProps) {
           isError: boolean,
           durationMs: number,
           details?: unknown,
+          args?: unknown,
         ) => {
           recordToolEnd(sessionStatsRef.current, name, isError, durationMs);
+          safetyWatchRef.current?.toolEnd(name, args, result, details);
           setLiveToolFeed((prev) =>
             prev.map((entry) =>
               entry.id === toolCallId
@@ -2259,6 +2265,27 @@ export function App(props: AppProps) {
   );
 
   const handleDoubleExit = useDoublePress(setExitPending, showSessionSummaryAndExit);
+
+  // gg-safe: infected-package notices and safety-block rows land in the
+  // transcript; the agent's notes are appended only between runs (like the
+  // `/add-dir` env note), since the loop owns the history mid-run.
+  const safetyWatch = props.safetyWatch;
+  useEffect(() => {
+    if (!safetyWatch) return;
+    const deliver = (): void => {
+      if (!agentLoopRef.current?.isRunning) messagesRef.current.push(...safetyWatch.takeNotes());
+    };
+    return safetyWatch.attach({
+      onInfo: (text) => setLiveItems((prev) => [...prev, { kind: "info", text, id: getId() }]),
+      onNote: deliver,
+    });
+  }, [safetyWatch]);
+  useEffect(() => {
+    if (agentLoop.isRunning || !safetyWatch) return;
+    void safetyWatch.runEnd().then(() => {
+      if (!agentLoopRef.current?.isRunning) messagesRef.current.push(...safetyWatch.takeNotes());
+    });
+  }, [agentLoop.isRunning, safetyWatch]);
 
   const handleAbort = useCallback(() => {
     if (agentLoop.isRunning) {
