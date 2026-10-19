@@ -50,6 +50,11 @@ export function handleSessionRoutes(
       mode: ctx.mode,
       chatAgent: ctx.chatAgent,
       goal: goalStatePayload(ctx),
+      // Skills the safety scan kept out; the app shows each once (toast).
+      blockedSkills: ctx.session.getBlockedSkills(),
+      installedThreats: ctx.session
+        .getInstalledThreats()
+        .map(({ key, message }) => ({ key, message })),
       // Questions still waiting on the user, for a window rebuilding its
       // transcript (history has the tool call, not the open card).
       openAskPrompts: ctx.asks.openPrompts(),
@@ -144,6 +149,11 @@ export function handleSessionRoutes(
           // window must stay a goal (live bug: after a daemon restart it fell
           // back to a plain project screen).
           goal: goalStatePayload(ctx),
+          // Skills the safety scan kept out; the app shows each once (toast).
+          blockedSkills: ctx.session.getBlockedSkills(),
+          installedThreats: ctx.session
+            .getInstalledThreats()
+            .map(({ key, message }) => ({ key, message })),
           // The questions this daemon can still take an answer to. After a
           // daemon restart the app's open cards belong to a run that died;
           // it closes any not listed here instead of leaving a dead button.

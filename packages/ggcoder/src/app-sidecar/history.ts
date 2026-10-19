@@ -41,6 +41,8 @@ export interface HistoryEntryForWire {
   error?: AppErrorPayload;
   /** Webview-copy info row marker (e.g. the video-capability warning). */
   infoKind?: "video_warning";
+  /** Safety-block chat row (persisted `security` app marker). */
+  security?: { rule: string; target: string };
   toolImages?: Array<{ src: string; path?: string }>;
   subagentGroup?: Array<{
     agentName?: string;

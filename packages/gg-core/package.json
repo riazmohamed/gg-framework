@@ -1,6 +1,6 @@
 {
   "name": "@abukhaled/gg-core",
-  "version": "5.83.5",
+  "version": "5.84.2",
   "type": "module",
   "description": "Provider-agnostic, UI-free shared foundation: model registry, auth, paths, telegram, voice",
   "license": "MIT",

@@ -26,6 +26,18 @@ import {
 import { EventBus } from "./event-bus.js";
 import { flagUntrustedToolResult } from "./injection-detect.js";
 import {
+  sameStamp,
+  scanProjectLockfiles,
+  stampProjectLockfiles,
+  type InstalledThreat,
+  type LockfileStamp,
+} from "./installed-threats.js";
+import { onThreatFeedUpdated } from "./threat-feed.js";
+import type { PackageCheckOptions } from "./package-threats.js";
+import { parseSafetyBlock } from "./action-threats.js";
+import { recordBlockedPackages } from "./blocked-packages-file.js";
+import type { BlockedPackage } from "./shell-threats.js";
+import {
   COMPLETION_REVIEW_STATE_KIND,
   type CompletionReview,
   type CompletionReviewRequest,
@@ -75,7 +87,7 @@ import {
   removeWorkspaceRoot,
   type WorkspaceRootResult,
 } from "./workspace-roots.js";
-import { discoverSkills, type Skill } from "./skills.js";
+import { discoverSkillsWithBlocked, type BlockedSkill, type Skill } from "./skills.js";
 import { ensureAppDirs } from "../config.js";
 import {
   buildSubAgentSystemPrompt,
@@ -456,6 +468,21 @@ export interface AgentSessionOptions {
    */
   skills?: readonly Skill[];
   /**
+   * Background check of the project's lockfiles for packages flagged as
+   * malware after install. Default on, except under vitest.
+   */
+  installedPackageWatch?: boolean;
+  /** Delay before the first installed-package check (default 5 s). */
+  installedPackageWatchDelayMs?: number;
+  /** Options for the installed-package check (tests inject fetch/feed). */
+  installedPackageCheck?: PackageCheckOptions;
+  /**
+   * Record refused packages in the project's instruction file (AGENTS.md /
+   * CLAUDE.md) so later sessions know them. Default on for project sessions,
+   * except under vitest.
+   */
+  blockedPackagesFile?: boolean;
+  /**
    * Mode-specific defaults for prompt byte budgets. The user's `contextLimits`
    * setting still overrides these. Motion raises its skill-catalog budget
    * because its skill set is a fixed, bundled one (never untrusted files).
@@ -504,6 +531,57 @@ export interface AgentSessionState {
 const WEB_INTENT =
   /\b(?:web|internet|online|google|googling|website|look (?:it |this |that )?up|(?:latest|newest|current) (?:version|release|news|docs?|documentation)|release notes|news)\b/i;
 
+/** Distinct security rows one run may add to the chat (and session file). */
+const MAX_SECURITY_ROWS_PER_RUN = 20;
+
+/**
+ * A chat row's target: first line, no control or bidi-override characters
+ * (they could make a command look like another), at most 120 chars.
+ */
+export function securityRowTarget(raw: string): string {
+  const first = (raw.slice(0, 1024).split(/\r?\n/, 1)[0] ?? "")
+    // eslint-disable-next-line no-control-regex -- stripping control characters is the point
+    .replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .trim();
+  return first.length > 120 ? `${first.slice(0, 119)}\u2026` : first;
+}
+
+/** Not the home folder or a filesystem root (those are never a project). */
+export function isScannableProjectDir(dir: string, home: string = os.homedir()): boolean {
+  const resolved = path.resolve(dir);
+  if (path.parse(resolved).root === resolved) return false;
+  const norm = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
+  return !home || norm(path.resolve(home)) !== norm(resolved);
+}
+
+/**
+ * Windows on the same project in this process share one in-flight scan
+ * (session start and a feed update otherwise fire N identical scans).
+ */
+const inflightLockfileScans = new Map<
+  string,
+  Promise<{ stamp: LockfileStamp; found: InstalledThreat[] }>
+>();
+
+function sharedLockfileScan(
+  cwd: string,
+  options: PackageCheckOptions | undefined,
+): Promise<{ stamp: LockfileStamp; found: InstalledThreat[] }> {
+  const run = async (): Promise<{ stamp: LockfileStamp; found: InstalledThreat[] }> => {
+    const stamp = await stampProjectLockfiles(cwd);
+    const found = stamp.size === 0 ? [] : await scanProjectLockfiles(cwd, options);
+    return { stamp, found };
+  };
+  // Test-specific check options are never shared.
+  if (options) return run();
+  const key = path.resolve(cwd);
+  const existing = inflightLockfileScans.get(key);
+  if (existing) return existing;
+  const promise = run().finally(() => inflightLockfileScans.delete(key));
+  inflightLockfileScans.set(key, promise);
+  return promise;
+}
+
 export class AgentSession {
   readonly eventBus = new EventBus();
   readonly slashCommands = new SlashCommandRegistry();
@@ -537,6 +615,18 @@ export class AgentSession {
     | ((toolCalls: readonly ToolCall[], toolResults: readonly ToolResult[]) => Promise<void>)
     | undefined;
   private skills: Skill[] = [];
+  /** Skills discovery refused to load (safety scan); shown to the user, named by the skill tool. */
+  private blockedSkills: BlockedSkill[] = [];
+  /** Lockfile entries now known to be malware (background check), for the app/CLI to show. */
+  private installedThreats: InstalledThreat[] = [];
+  private installedWatchStop: (() => void) | undefined;
+  private installedStamp: LockfileStamp | undefined;
+  private installedScanRunning = false;
+  private installedWatchStopped = false;
+  /** rule\0target of the security rows already shown this run. */
+  private securityRowsThisRun = new Set<string>();
+  /** Project session (code mode): the only kind that writes the "don't install" list. */
+  private projectSession = false;
   private cacheKeyLogged = false;
   // ── Self-correction hook state (mirrors the TUI's useAgentLoop refs) ──
   // Reset at the start of every run; observed from the event stream; read by
@@ -793,6 +883,12 @@ export class AgentSession {
     this.sessionManager = new SessionManager(this.opts.sessionRootDir ?? paths.sessionsDir);
 
     const projectCustomization = this.opts.projectCustomization !== false;
+    // A real project folder: not Motion (own skills), not GG Goals (goal notes
+    // folder, agentContext "none"), not chat (no project customization).
+    this.projectSession =
+      projectCustomization &&
+      !this.opts.skills &&
+      (this.opts.agentContext ?? "project") === "project";
     // A sub-agent worker never creates them: the session that owns the
     // project does. GG Goals' workers work in the user's attached folders,
     // which mustn't gain empty .gg folders as a side effect.
@@ -806,10 +902,13 @@ export class AgentSession {
     if (this.opts.skills) {
       this.skills = [...this.opts.skills];
     } else if (projectCustomization) {
-      this.skills = await discoverSkills({
+      const discovery = await discoverSkillsWithBlocked({
         globalSkillsDir: paths.skillsDir,
         projectDir: this.cwd,
       });
+      this.skills = discovery.skills;
+      this.blockedSkills = discovery.blocked;
+      this.startInstalledPackageWatch();
     } else {
       this.skills = [];
     }
@@ -840,6 +939,7 @@ export class AgentSession {
       shareWorkspaceRoots: this.opts.shareRootsWithSubAgents,
       defaultSubAgent: this.opts.defaultSubAgent,
       skills: this.skills,
+      blockedSkills: this.blockedSkills,
       contextLimits: this.contextLimits,
       provider: this.provider,
       model: this.model,
@@ -849,6 +949,7 @@ export class AgentSession {
         allowOutsideWorkspaceWrites: this.settingsManager.get("allowOutsideWorkspaceWrites"),
         additionalRoots: this.additionalRoots,
       }),
+      getPackageCooldownDays: () => this.settingsManager.get("packageCooldownDays"),
       getNetworkPolicy: () => ({
         mode: this.settingsManager.get("networkMode"),
         allow: this.settingsManager.get("networkAllow"),
@@ -1515,6 +1616,7 @@ export class AgentSession {
     this.opts.completionReview?.begin(originalRequest);
     this.lspManager?.clearPendingDiagnostics();
     this.loopMonitor.reset();
+    this.securityRowsThisRun.clear();
     this.verificationTracker.resetRun();
     this.regroundingInjected = false;
     this.runStartedAt = Date.now();
@@ -1558,6 +1660,8 @@ export class AgentSession {
         const call = this.verificationTracker.getToolCall(event.toolCallId);
         const name = call?.name ?? "";
         const args = call?.args;
+        const safetyRule = parseSafetyBlock(event.result);
+        if (safetyRule) this.recordSafetyBlock(safetyRule, name, args, event.details);
         this.loopMonitor.recordToolEnd(name, args, event.result, event.isError);
         const verificationChanged = await this.verificationTracker.recordToolCallEnd(
           event,
@@ -2504,6 +2608,12 @@ export class AgentSession {
         }
       } finally {
         this.activeLoopMessages = null;
+        // An in-flight compaction rebinds `this.messages` to the compacted array
+        // while the loop keeps appending to `loopMessages`. Resync on every exit
+        // — a failed or aborted run included — or the session silently drops
+        // this run's post-compaction messages (they are still on disk) and the
+        // next prompt replays a history the provider may reject.
+        this.messages = loopMessages;
       }
     };
 
@@ -3364,6 +3474,121 @@ export class AgentSession {
     const loaded = await this.sessionManager.load(this.sessionPath);
     this.setSessionPath(loaded.path);
     return this.sessionManager.listBranches(loaded.entries);
+  }
+
+  /** Skills the safety scan kept out of this session, for the app/CLI to show. */
+  getBlockedSkills(): readonly BlockedSkill[] {
+    return this.blockedSkills;
+  }
+
+  /** Installed packages (project lockfiles) now known to be malware. */
+  getInstalledThreats(): readonly InstalledThreat[] {
+    return this.installedThreats;
+  }
+
+  /**
+   * Background check of the project's lockfiles for packages flagged as
+   * malware after they were installed: shortly after start, after each daily
+   * threat-feed update, and after a run that changed a lockfile. Never awaited
+   * by anything; a new hit is shown to the user once (security_notice) and told
+   * to the agent at its next turn. Off under vitest unless a test opts in.
+   */
+  private startInstalledPackageWatch(): void {
+    const enabled = this.opts.installedPackageWatch ?? !process.env.VITEST;
+    // Workers share their parent's project: the parent session watches it.
+    if (!enabled || !this.projectSession || this.opts.subagentWorker || this.installedWatchStop) {
+      return;
+    }
+    // The home folder or a filesystem root is not a project: never scan it.
+    if (!isScannableProjectDir(this.cwd)) return;
+    const delay = this.opts.installedPackageWatchDelayMs ?? 5_000;
+    const timer = setTimeout(() => void this.scanInstalledPackages(), delay);
+    timer.unref?.();
+    const offFeed = onThreatFeedUpdated(() => void this.scanInstalledPackages());
+    const offDone = this.eventBus.on("agent_done", () => void this.rescanIfLockfilesChanged());
+    this.installedWatchStop = () => {
+      this.installedWatchStopped = true;
+      clearTimeout(timer);
+      offFeed();
+      offDone();
+    };
+  }
+
+  private async rescanIfLockfilesChanged(): Promise<void> {
+    if (!this.installedStamp || this.installedWatchStopped) return;
+    const stamp = await stampProjectLockfiles(this.cwd);
+    if (!sameStamp(stamp, this.installedStamp)) await this.scanInstalledPackages();
+  }
+
+  /**
+   * A guard refused a tool call: a lasting chat row (live event + persisted
+   * marker, so a reopened session shows it too) and, for packages, an entry in
+   * the project's "don't install" list. All fire-and-forget; never blocks.
+   */
+  private recordSafetyBlock(rule: string, toolName: string, args: unknown, details: unknown): void {
+    const a = (args ?? {}) as Record<string, unknown>;
+    const raw = String(a.command ?? a.input ?? a.file_path ?? a.path ?? a.url ?? toolName);
+    this.emitSecurityRow(rule, securityRowTarget(raw));
+    const packages = (details as { safetyBlock?: { packages?: BlockedPackage[] } } | undefined)
+      ?.safetyBlock?.packages;
+    if (packages?.length) this.recordBlockedList(packages);
+  }
+
+  /**
+   * One row per distinct block per run: an agent retrying the same blocked
+   * install 30 times leaves one row, and a run hitting 100 blocks leaves at
+   * most MAX_SECURITY_ROWS_PER_RUN (the session file stays small).
+   */
+  private emitSecurityRow(rule: string, target: string): void {
+    const key = `${rule}\0${target}`;
+    if (this.securityRowsThisRun.has(key)) return;
+    if (this.securityRowsThisRun.size >= MAX_SECURITY_ROWS_PER_RUN) return;
+    this.securityRowsThisRun.add(key);
+    this.eventBus.emit("security_block", { rule, target });
+    void this.persistAppMarker("security", { rule, target }).catch(() => {});
+  }
+
+  private recordBlockedList(packages: readonly BlockedPackage[]): void {
+    const enabled = this.opts.blockedPackagesFile ?? !process.env.VITEST;
+    if (!enabled || !this.projectSession) return;
+    void recordBlockedPackages(this.cwd, packages).then(
+      (file) => {
+        if (file) log("INFO", "blocked-packages", `recorded blocked packages in ${file}`);
+      },
+      (err: unknown) =>
+        log("WARN", "blocked-packages", `could not record blocked packages: ${String(err)}`),
+    );
+  }
+
+  /** Exposed for tests; safe to call any time (one scan at a time, never throws). */
+  async scanInstalledPackages(): Promise<void> {
+    if (this.installedScanRunning || this.installedWatchStopped) return;
+    this.installedScanRunning = true;
+    try {
+      const { stamp, found } = await sharedLockfileScan(this.cwd, this.opts.installedPackageCheck);
+      // Disposed mid-scan: no late events.
+      if (this.installedWatchStopped) return;
+      this.installedStamp = stamp;
+      const known = new Set(this.installedThreats.map((t) => t.key));
+      this.installedThreats = found;
+      for (const threat of found) {
+        if (known.has(threat.key)) continue;
+        log("WARN", "installed-threats", threat.message);
+        this.notify(`installed-threat:${threat.file}`, threat.agentText);
+        this.eventBus.emit("security_notice", { key: threat.key, message: threat.message });
+        this.emitSecurityRow(
+          "installed-malware",
+          securityRowTarget(
+            `${threat.packages.join(", ")} in ${path.relative(this.cwd, threat.file) || threat.file}`,
+          ),
+        );
+        this.recordBlockedList(threat.blocked);
+      }
+    } catch (err) {
+      log("WARN", "installed-threats", `installed-package check failed: ${String(err)}`);
+    } finally {
+      this.installedScanRunning = false;
+    }
   }
 
   getState(): AgentSessionState {
@@ -4353,6 +4578,7 @@ export class AgentSession {
     // First and synchronous: nothing below may delay this, or a hung teardown
     // step leaves background commands running after the app has quit.
     this.stopBackgroundProcesses();
+    this.installedWatchStop?.();
     // Quiesce any in-flight post-turn compaction BEFORE tearing down state:
     // the background compact() snapshots and replaces `this.messages`, so
     // letting it run past this point would checkpoint a near-empty history
