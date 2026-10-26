@@ -10,11 +10,12 @@ import {
   withEyesClosed,
   type WakeMode,
 } from "./WakeScreen";
-import { CRITTERS } from "./critter-sprites";
+import { CRITTER_CELLS, CRITTERS, renderCritterFrame } from "./critter-sprites";
 import {
   BIOMES,
   DECOR_COLS,
   TERRAIN_FLOOR_ROW,
+  TERRAIN_PX,
   TERRAIN_ROWS,
   renderTerrain,
 } from "./critter-terrain";
@@ -58,7 +59,7 @@ describe("clearSpot", () => {
     (_id, biome) => {
       const spot = clearSpot(biome);
       const floor = TERRAIN_ROWS - TERRAIN_FLOOR_ROW;
-      const half = 7; // the critter is 14 cells wide
+      const half = 9; // the critter is 18 cells wide
       for (const p of renderTerrain(biome).props) {
         if (p.layer === "sunk" || p.bottom - floor >= 18) continue;
         // Compare on the repeating strip, from the spot's point of view.
@@ -90,6 +91,13 @@ describe("withEyesClosed", () => {
       expect(closed.rows).toHaveLength(c.rows.length);
       expect(closed.rows).not.toEqual(c.rows);
       closed.rows.forEach((row, i) => expect(row).toHaveLength(c.rows[i]?.length ?? -1));
+    },
+  );
+
+  it.each(CRITTERS.map((c) => [c.id, c] as const))(
+    "%s: renders its blink as its own image, not the cached open eyes",
+    (_id, c) => {
+      expect(renderCritterFrame(withEyesClosed(c), 0)).not.toBe(renderCritterFrame(c, 0));
     },
   );
 });
@@ -134,6 +142,13 @@ describe("WakeScreen", () => {
     expect(container.querySelector(".wake-critter img")).not.toBeNull();
     expect(container.querySelector(".critter-terrain")).not.toBeNull();
     expect(container.querySelector("canvas")).toBeNull();
+  });
+
+  it("sizes the critter's box to its sprite, so it is never squashed", () => {
+    const { container } = render(<WakeScreen random={fixed(0.3)} />);
+    const scene = container.querySelector<HTMLElement>(".wake-scene");
+    expect(scene?.style.getPropertyValue("--wake-critter")).toBe(`${CRITTER_CELLS * TERRAIN_PX}px`);
+    expect(container.querySelector(".wake-critter .critter-shadow")).not.toBeNull();
   });
 
   it("hops and replies when the critter is poked, then goes back to its line", () => {

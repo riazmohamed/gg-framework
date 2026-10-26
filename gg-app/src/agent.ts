@@ -559,6 +559,93 @@ export async function getProgress(): Promise<ProgressSnapshot> {
   return invoke<ProgressSnapshot>("agent_progress");
 }
 
+// ── Trophies ─────────────────────────────────────────────────────────────
+
+export type TrophyTier = "bronze" | "silver" | "gold" | "platinum";
+
+/** One trophy, as the sidecar computed it. Secret, unearned ones arrive redacted. */
+export interface Trophy {
+  id: string;
+  title: string;
+  tier: TrophyTier;
+  category: string;
+  description: string;
+  hint: string;
+  goal: number;
+  current: number;
+  /** ISO time it was earned, or null. */
+  unlockedAt: string | null;
+  secret: boolean;
+}
+
+export interface TrophySnapshot {
+  trophies: Trophy[];
+  categories: Array<{ id: string; label: string }>;
+  earned: number;
+  total: number;
+  /** Ids earned by the event this frame came from (empty on a plain refresh). */
+  unlocked: string[];
+  eventNonce: string | null;
+  /** True only on the frame sent to the window whose action earned them. */
+  origin?: boolean;
+}
+
+/** Every trophy, earned or not (initial paint; live updates ride `trophies` frames). */
+export async function getTrophies(): Promise<TrophySnapshot> {
+  await waitForReady();
+  return invoke<TrophySnapshot>("agent_trophies");
+}
+
+export interface RoyaleStatus {
+  linked: boolean;
+  serverUrl: string;
+}
+
+/** GG Royale link state (app-wide, daemon-level). */
+export async function royaleStatus(): Promise<RoyaleStatus> {
+  await waitForReady();
+  const r = await invoke<{ linked?: unknown; serverUrl?: unknown }>("agent_royale_status");
+  return {
+    linked: r.linked === true,
+    serverUrl: typeof r.serverUrl === "string" ? r.serverUrl : "",
+  };
+}
+
+export interface RoyaleSummary {
+  claimable: number;
+  streak: number;
+  playing: number;
+}
+
+/** GG Royale badge counts; null when unlinked or the server is unreachable. */
+export async function royaleSummary(): Promise<RoyaleSummary | null> {
+  await waitForReady();
+  const r = await invoke<unknown>("agent_royale_summary");
+  if (typeof r !== "object" || r === null) return null;
+  const o = r as Record<string, unknown>;
+  const n = (v: unknown): number =>
+    typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0;
+  return { claimable: n(o.claimable), streak: n(o.streak), playing: n(o.playing) };
+}
+
+/**
+ * Link if needed (opening GG Royale IS the opt-in) and get a fresh one-time
+ * sign-in URL for the game page, which the app embeds full-window.
+ */
+export async function openRoyale(): Promise<string> {
+  await waitForReady();
+  const url = await invoke<unknown>("agent_royale_open");
+  if (typeof url !== "string" || !/^https?:\/\//.test(url))
+    throw new Error("GG Royale sent no page URL");
+  return url;
+}
+
+/** Forget this device's GG Royale link. */
+export async function unlinkRoyale(): Promise<void> {
+  await waitForReady();
+  await invoke("agent_royale_unlink");
+}
+
 /** Non-2xx sidecar errors throw from the proxy; also reject a malformed body. */
 function keepAwakeEnabled(result: { enabled?: unknown; error?: unknown }): boolean {
   if (typeof result.enabled === "boolean") return result.enabled;

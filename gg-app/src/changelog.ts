@@ -22,6 +22,55 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.96.3",
+    date: "2026-10-25",
+    items: [
+      "The little critter that greets you on a fresh window got a glow-up. Its speech bubble is now proper chunky pixel art in the same `m5x7` lettering and stepped tail the `GG Royale` critters talk in, and the critter itself stands at its true size with a shadow underneath instead of looking squished.",
+      "Your built-in malware guard now stays sharp on `Windows` too. I fixed a sneaky case where a quick refresh of the daily threat feed could leave GG holding yesterday's list, so freshly flagged bad packages get caught the moment they land.",
+    ],
+  },
+  {
+    version: "0.96.2",
+    date: "2026-10-25",
+    items: [
+      "This is a whole new level for GG Coder. I raced it against `19` other coding agents on the same model, `Claude Code` included, and GG finished first on speed and used the least of every single one of them. Your agent now makes each change in one clean move and already knows your project's files before it starts, so a typical task lands about `21%` faster than last version while burning less of your plan. The fastest coding agent I have ever tested.",
+    ],
+  },
+  {
+    version: "0.96.1",
+    date: "2026-10-24",
+    items: [
+      "Heads up on `Gemini`: Google is suspending accounts for using their Gemini subscription through third-party harnesses. That's any third-party tool, not just GG Coder. I'm not supporting that trash here, so Gemini is gone from the login list, the model picker and startup. If you were signed in, GG simply moves you to another provider and your account stays safe.",
+      "Grok subscription chats are back. xAI started rejecting older clients with an `HTTP 426` error, so I updated GG to speak their latest `Grok CLI` version and your Grok plan works again right away.",
+      "Your agent now reads routine command output in far fewer tokens. Long `git log` and `git status` output, folder listings and all-green test runs get trimmed down to just the facts, so every session runs a little cheaper and a little faster. Failures always come through in full.",
+    ],
+  },
+  {
+    version: "0.96.0",
+    date: "2026-10-24",
+    items: [
+      "Welcome to `GG Royale`, an online blackjack table built right into GG Coder. You play with chips you earn by actually coding: finished runs, commits, bugs you squash and deploys that go live all pay out, and you can sit at a table with other players and chat. There is no real money anywhere. Linking only shares that something happened, never your code, files or prompts, and you can wipe all your Royale data any time.",
+      "Home got a full pixel-art makeover. A hand-lettered gold `GG Coder` title now sits over an evening clearing in the pines that follows your local time of day, with drifting mist, sunbeams and fireflies, plus chunky new plate buttons and tooltips to match. Even this `What's new` window now opens beside a little campfire.",
+      "No more two-minute stalls when the AI goes quiet. If a reply hasn't started when it should, GG quietly fires a backup request and takes whichever answers first, so a stuck request costs you seconds instead of a long `Retrying…`, and a slow but healthy reply is never cut off.",
+      "I sharpened the built-in skills GG leans on for security, privacy law, databases, UI design, speed and debugging. They are leaner, more up to date and kick in at the right moments, so you get better answers with less wasted effort.",
+    ],
+  },
+  {
+    version: "0.95.0",
+    date: "2026-10-21",
+    items: [
+      "Trophies are here, and there are `144` of them to hunt. Every one you earn teaches you something GG can do, from your first slash command and a polished `Enhance` prompt all the way up to a `365`-day streak. Each unlock lands in the corner as a card that charges up, crackles with light and spins over, with its own sound, then files itself away. Open the context key on the deck and hit the trophy button beside your level to see what you've won, what's still out there and exactly how to get it. Everyone starts from zero today, so the race is wide open.",
+    ],
+  },
+  {
+    version: "0.94.3",
+    date: "2026-10-21",
+    items: [
+      "No more surprise sign-outs. When several windows refreshed your login at the same moment, one could wipe out the fresh login another had just saved, and every chat suddenly said `Not logged in`. Now GG notices the newer login and keeps using it, so your sessions stay connected through the night.",
+      "GG keeps its flight recorder running no matter how long the app stays open. It used to go quiet after just `15 minutes` when the log file was nearly full, so when something went wrong a day later there was nothing to look at. Now it rolls over to a fresh file and keeps recording, so I can track down real problems fast.",
+    ],
+  },
+  {
     version: "0.94.2",
     date: "2026-10-19",
     items: [

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 // and every script timer that waits on CSS motion stays equal to its token.
 // Animations are out of scope for the easing check on purpose: most are long
 // background loops (breathing, weather) that deliberately use keyword curves.
-const FILES = ["App.css", "Deck.css", "ChecklistScreen.css", "ChatErrorNotice.css"];
+const FILES = ["App.css", "Deck.css", "ChecklistScreen.css", "ChatErrorNotice.css", "Trophies.css"];
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const sheets = FILES.map((name) => ({
   name,
@@ -23,7 +23,10 @@ const sheets = FILES.map((name) => ({
 function definitionBlocks(css) {
   const ranges = [];
   const root = String.raw`:root(?:\[[^\]]*\])?`;
-  const opener = new RegExp(String.raw`${root}(?:\s*,\s*${root})*\s*\{|@property\s+--[\w-]+\s*\{`, "g");
+  const opener = new RegExp(
+    String.raw`${root}(?:\s*,\s*${root})*\s*\{|@property\s+--[\w-]+\s*\{`,
+    "g",
+  );
   for (const m of css.matchAll(opener)) {
     ranges.push([m.index, css.indexOf("}", m.index) + 1]);
   }
@@ -109,6 +112,9 @@ const MIRRORS = [
   ["transcript-motion.ts", "EASE_OUT", "--ease-out", "equal"],
   ["transcript-motion.ts", "EASE_IN", "--ease-in", "equal"],
   ["critter-fx.ts", "POP", "--ease-pop", "equal"],
+  ["TrophyUnlock.tsx", "EASE_OUT", "--ease-out", "equal"],
+  ["TrophyUnlock.tsx", "EASE_EXPO", "--ease-expo", "equal"],
+  ["TrophyUnlock.tsx", "EASE_IN", "--ease-in", "equal"],
 ];
 
 describe("motion tokens", () => {

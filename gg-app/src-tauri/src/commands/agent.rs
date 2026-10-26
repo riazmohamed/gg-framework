@@ -156,6 +156,22 @@ pub(crate) async fn agent_progress(
     sidecar_json(res).await
 }
 
+/// Proxy: every trophy, earned or not. Daemon-level like progress (trophies
+/// are app-wide), so no session header.
+#[tauri::command]
+pub(crate) async fn agent_trophies(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let res = client
+        .get(format!("{}/trophies", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
 /// Proxy: the app-wide "keep computer awake while the agent works" setting.
 /// Daemon-level (one OS assertion for every window), so no session header.
 #[tauri::command]

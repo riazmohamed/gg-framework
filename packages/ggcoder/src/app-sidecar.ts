@@ -16,7 +16,7 @@ import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { environmentSecrets, formatChatError, redactValue } from "@abukhaled/gg-ai";
 import type { AddressInfo } from "node:net";
 import { createAppErrorPayload } from "./app-error.js";
@@ -42,7 +42,11 @@ import { createMotionAgentSession } from "./motion-agent/motion-agent.js";
 import { buildJiwaTools, JiwaStore } from "./chat-agents/jiwa.js";
 import { buildMemoryTools, MemoryStore } from "./chat-agents/memory.js";
 import { buildKenSystemPrompt, buildKenAutopilotSystemPrompt } from "./core/ken-prompt.js";
-import { countAssistantMessages, type WorkflowCommandSpec } from "./core/autopilot-gate.js";
+import {
+  countAssistantMessages,
+  extractTurnToolCalls,
+  type WorkflowCommandSpec,
+} from "./core/autopilot-gate.js";
 import { describeRunVerification, describeTurnVerification } from "./core/run-status.js";
 import { validateKenModelPref, effectiveKenModel, type KenModelPref } from "./core/ken-model.js";
 import type { RunOutcome } from "./core/session-manager.js";
@@ -70,7 +74,7 @@ import {
   type AuthMethodMeta,
   type AuthProviderMeta,
 } from "./core/auth-providers.js";
-import { ensureAppDirs, loadSavedSettings } from "./config.js";
+import { VERSION, ensureAppDirs, loadSavedSettings } from "./config.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import {
   getModel,
@@ -120,6 +124,11 @@ import {
 } from "./app-sidecar/app-settings.js";
 import { KEN_ALLOWED_TOOLS } from "./app-sidecar/ken-context.js";
 import { type ProgressManager, createProgressManager } from "./app-sidecar/progress-manager.js";
+import { createRoyale } from "./app-sidecar/royale.js";
+import { classifyFixedCheck } from "./app-sidecar/royale-bug.js";
+import { detectDeploy } from "./app-sidecar/royale-deploy.js";
+import { type TrophyManager, createTrophyManager } from "./app-sidecar/trophy-manager.js";
+import { localTrophyDate } from "./core/trophies/engine.js";
 import { handleSessionRoutes } from "./app-sidecar/session-routes.js";
 import { handleGoalRoutes } from "./app-sidecar/goal-routes.js";
 import { readGitState, resolveGitCwd } from "./app-sidecar/git-target.js";
@@ -301,10 +310,34 @@ async function main(): Promise<void> {
   // XP/rank progress — loaded once per daemon; awards fan out to every window.
   // Each frame is tagged `origin: true` only for the session that earned the
   // XP, so that window alone plays sounds/chips while the rest just re-render.
-  const progress = await createProgressManager(paths.agentDir, (snapshot, originId) => {
-    for (const ctx of sessions.values())
-      ctx.broadcast("progress", { ...snapshot, origin: ctx.id === originId });
-  });
+  // GG Royale (opt-in, web-hosted game mode): only "a run finished / N commits".
+  const royale = createRoyale({ agentDir: paths.agentDir, version: VERSION });
+  const progress = await createProgressManager(
+    paths.agentDir,
+    (snapshot, originId) => {
+      for (const ctx of sessions.values())
+        ctx.broadcast("progress", { ...snapshot, origin: ctx.id === originId });
+    },
+    (outcome) => royale.reportRun(outcome),
+  );
+
+  // Trophies — daemon-level like progress. XP totals (commits, streak, level)
+  // come from the progress snapshot rather than being counted twice.
+  const trophies = await createTrophyManager(
+    () => {
+      const p = progress.snapshot();
+      return {
+        prompts: p.totals.prompts,
+        commits: p.totals.commits,
+        linesShipped: p.totals.linesShipped,
+        level: p.level,
+      };
+    },
+    (snapshot, originId) => {
+      for (const ctx of sessions.values())
+        ctx.broadcast("trophies", { ...snapshot, origin: ctx.id === originId });
+    },
+  );
 
   const { subscriptionUsage } = createUsageService(auth);
 
@@ -378,6 +411,7 @@ async function main(): Promise<void> {
               auth,
               paths,
               progress,
+              trophies,
               memoryStore,
               jiwaStore,
               broadcastAll,
@@ -460,6 +494,54 @@ async function main(): Promise<void> {
     // session exists; per-session callers still work through the same endpoint.
     if (method === "GET" && url === "/progress") {
       daemonJson(res, 200, progress.snapshot());
+      return;
+    }
+
+    // Trophies are app-wide too: earned anywhere, shown in every window.
+    if (method === "GET" && url === "/trophies") {
+      daemonJson(res, 200, trophies.snapshot());
+      return;
+    }
+
+    // GG Royale link state is app-wide (one device link), so no session header.
+    if (method === "GET" && url === "/royale") {
+      void royale
+        .status()
+        .then((status) => daemonJson(res, 200, status))
+        .catch((err: unknown) =>
+          daemonJson(res, 500, { error: err instanceof Error ? err.message : String(err) }),
+        );
+      return;
+    }
+    if (method === "GET" && url === "/royale/summary") {
+      // summary() never throws; null = unlinked or unreachable.
+      void royale.summary().then((summary) => daemonJson(res, 200, summary));
+      return;
+    }
+    if (method === "POST" && url === "/royale/open") {
+      void daemonReadBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        try {
+          daemonJson(res, 200, await royale.open());
+        } catch (err) {
+          log("WARN", "app-sidecar", "royale open failed", {
+            message: err instanceof Error ? err.message : String(err),
+          });
+          daemonJson(res, 502, { error: err instanceof Error ? err.message : String(err) });
+        }
+      });
+      return;
+    }
+    if (method === "POST" && url === "/royale/unlink") {
+      void daemonReadBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        try {
+          await royale.unlink();
+          daemonJson(res, 200, { ok: true });
+        } catch (err) {
+          daemonJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        }
+      });
       return;
     }
 
@@ -563,6 +645,7 @@ async function createSession(
     auth: AuthStorage;
     paths: Awaited<ReturnType<typeof ensureAppDirs>>;
     progress: ProgressManager;
+    trophies: TrophyManager;
     memoryStore: MemoryStore;
     jiwaStore: JiwaStore;
     /** Fan one frame out to EVERY window, not just this session's. */
@@ -590,6 +673,7 @@ async function createSession(
   const {
     auth,
     progress,
+    trophies,
     memoryStore,
     jiwaStore,
     broadcastAll,
@@ -828,6 +912,7 @@ async function createSession(
     if (started) {
       goal = { dir: current.dir, record: started };
       broadcast("goal_state", { id: started.id, phase: goalPhase(started) });
+      void trophies.count("goalsStarted", opts.id);
     }
   };
   const askUserTool = createAskUserTool(async (request) => {
@@ -1304,7 +1389,10 @@ async function createSession(
   session.eventBus.on("hook_armed", (d) => broadcast("hook_armed", d));
   session.eventBus.on("subagent_state", (d) => broadcast("subagent_state", d));
   session.eventBus.on("compaction_start", (d) => broadcast("compaction_start", d));
-  session.eventBus.on("compaction_end", (d) => broadcast("compaction_end", d));
+  session.eventBus.on("compaction_end", (d) => {
+    broadcast("compaction_end", d);
+    if (d.compacted) void trophies.count("compactions", opts.id);
+  });
   // Cold-prompt-cache notice: push the fresh TTL anchor + context size whenever
   // a run or compaction settles. Expiry itself is time-based, so the webview
   // also re-reads `cacheExpiry` from /state when the user returns or types.
@@ -1709,6 +1797,7 @@ async function createSession(
     const runStartedAt = Date.now();
     const cancelGenAtStart = cancelGeneration;
     const assistantsBeforeRun = countAssistantMessages(session.getMessages());
+    const messagesBeforeRun = session.getMessages().length;
     let runSucceeded = false;
     broadcast("run_start", {
       text: label,
@@ -1743,7 +1832,31 @@ async function createSession(
         countAssistantMessages(session.getMessages()) > assistantsBeforeRun
       ) {
         // Fire-and-forget — XP must never delay or break run teardown.
-        void progress.awardRun(cwd, runStartedAt, opts.id);
+        // Trophies follow the award so they see this run's commits and level.
+        const st = session.getState();
+        const runFacts = {
+          mode,
+          chatAgent: mode === "chat" ? chatAgent : undefined,
+          goal: goal !== null,
+          provider: st.provider,
+          model: st.model,
+          tools: extractTurnToolCalls(session.getMessages(), messagesBeforeRun),
+          durationMs: Date.now() - runStartedAt,
+          hour: new Date().getHours(),
+          day: new Date().getDay(),
+          date: localTrophyDate(new Date()),
+          // A hash, so the trophies file never holds project paths.
+          project: createHash("sha256").update(path.resolve(cwd)).digest("hex").slice(0, 16),
+        };
+        const runMessages = session.getMessages().slice(messagesBeforeRun);
+        void progress
+          .awardRun(cwd, runStartedAt, opts.id, classifyFixedCheck(runMessages), {
+            // GG Royale: a goal's working run, and a successful deploy.
+            goalId: goal?.record.id ?? null,
+            workers: runFacts.tools.some((t) => t.name === "spawn_agent"),
+            deployed: detectDeploy(runMessages),
+          })
+          .then(() => trophies.recordRun(runFacts, opts.id));
       }
       // A run may have switched branches, changed files, or spawned/finished
       // background tasks. Refresh the workspace extras once it settles.
@@ -2276,6 +2389,7 @@ async function createSession(
     kenStatePayload,
     footerExtras,
     progress,
+    trophies,
     memoryStore,
     jiwaStore,
     get clientSeq() {

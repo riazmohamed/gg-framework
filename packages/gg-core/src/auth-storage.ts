@@ -10,6 +10,7 @@ import { refreshKimiToken } from "./oauth/kimi.js";
 import { refreshXaiToken } from "./oauth/xai.js";
 import { withFileLock } from "./file-lock.js";
 import { log } from "./logger.js";
+import { isHiddenProvider } from "./hidden-providers.js";
 
 type AuthData = Record<string, OAuthCredentials>;
 
@@ -276,6 +277,9 @@ export class AuthStorage {
    * satisfies it.
    */
   async hasProviderAuth(provider: string): Promise<boolean> {
+    // A hidden provider counts as not connected, so pickers and startup skip
+    // it even when old credentials are still on disk.
+    if (isHiddenProvider(provider)) return false;
     await this.ensureFresh();
     const dual = dualAuthProvider(provider);
     if (dual) {
@@ -741,9 +745,26 @@ export class AuthStorage {
           /invalid_grant|invalid_token|invalid.*refresh/i.test(msg) ||
           /unauthorized/i.test(msg);
         if (isAuthFailure) {
-          delete latest[provider];
-          this.data = latest;
-          await atomicWriteFile(this.filePath, JSON.stringify(latest, null, 2));
+          // Re-read before deleting. The refresh ran over the network while
+          // the file lock can be broken by a waiter (5s wait vs 30s request);
+          // a sibling may have refreshed with this grant or re-logged in
+          // meanwhile, so the rejection only proves OUR token is dead.
+          // Writing the pre-request snapshot back would erase their fresh
+          // login and sign every window out.
+          const current = await readAuthData(this.filePath);
+          const currentCreds = current[provider];
+          if (currentCreds && currentCreds.refreshToken !== latestCreds.refreshToken) {
+            log(
+              "WARN",
+              "auth",
+              `${provider} token refresh was rejected, but another gg process already saved a newer credential — adopting it instead of signing out`,
+            );
+            this.data = current;
+            return currentCreds;
+          }
+          delete current[provider];
+          this.data = current;
+          await atomicWriteFile(this.filePath, JSON.stringify(current, null, 2));
           throw new NotLoggedInError(provider);
         }
         throw err;

@@ -181,6 +181,7 @@ export function handleRunControlRoutes(
       // the footer's context meter rescales immediately.
       ctx.broadcast("extras", ctx.footerExtras());
       json(res, 200, { provider: target.provider, model: target.id, ...payload });
+      void ctx.trophies.count("modelSwitches", ctx.sessionId);
     });
     return true;
   }
@@ -241,6 +242,7 @@ export function handleRunControlRoutes(
           provider: target.provider,
           model: target.id,
         });
+        void ctx.trophies.count("kenPins", ctx.sessionId);
       }
       const payload = ctx.kenStatePayload();
       ctx.broadcast("ken_model_change", payload);
@@ -281,6 +283,7 @@ export function handleRunControlRoutes(
         ...(cancelled ? { cancelledId: id } : {}),
       });
       json(res, 200, { cancelled, queued });
+      if (cancelled) void ctx.trophies.count("queueCancels", ctx.sessionId);
     });
     return true;
   }
@@ -303,6 +306,7 @@ export function handleRunControlRoutes(
       // Push the updated task list right away rather than waiting for the poll.
       ctx.broadcast("tasks", { tasks: ctx.session.listBackgroundProcesses() });
       json(res, 200, { message });
+      void ctx.trophies.count("processKills", ctx.sessionId);
     });
     return true;
   }
@@ -329,6 +333,7 @@ export function handleRunControlRoutes(
         ...(body.cwd ? { cwd: body.cwd } : {}),
       });
       json(res, result.ok ? 200 : 400, result);
+      if (result.ok) void ctx.trophies.count("transcriptImports", ctx.sessionId);
     });
     return true;
   }
@@ -371,6 +376,7 @@ export function handleRunControlRoutes(
       };
       ctx.broadcast("thinking_change", payload);
       json(res, 200, payload);
+      void ctx.trophies.count("thinkingChanges", ctx.sessionId);
     });
     return true;
   }
@@ -426,6 +432,7 @@ export function handleRunControlRoutes(
         runState: ctx.runLifecycle.state,
         drained,
       });
+      if (result.status === "cancelled") void ctx.trophies.count("cancels", ctx.sessionId);
     })().catch((error) => {
       ctx.broadcast("cancel_failed", { error: "cancel_failed", runState: ctx.runLifecycle.state });
       json(res, 500, {
@@ -454,6 +461,7 @@ export function handleRunControlRoutes(
         ctx.broadcast("session_reset", {});
         // The new conversation's file, so a daemon restart reopens it.
         json(res, 200, { ok: true, sessionPath: ctx.session.getState().sessionPath ?? null });
+        void ctx.trophies.count("newSessions", ctx.sessionId);
       })
       .catch((err) => {
         json(res, 500, { error: err instanceof Error ? err.message : String(err) });
@@ -509,6 +517,7 @@ export function handleRunControlRoutes(
         ctx.broadcast("session_reset", { planTotal });
         ctx.broadcast("plan_progress", ctx.planProgressPayload());
         json(res, 200, { ok: true, planTotal });
+        void ctx.trophies.count("plansApproved", ctx.sessionId);
       } catch (err) {
         json(res, 500, { error: err instanceof Error ? err.message : String(err) });
       }

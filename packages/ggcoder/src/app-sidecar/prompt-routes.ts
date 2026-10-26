@@ -1,4 +1,6 @@
 import type http from "node:http";
+import fs from "node:fs/promises";
+import path from "node:path";
 import {
   isWorkflowCommandText,
   countAssistantMessages,
@@ -14,6 +16,55 @@ import { saveAutopilot } from "./app-settings.js";
 import { lastAssistantText, buildKenContext } from "./ken-context.js";
 import { keepAwake } from "./keep-awake.js";
 import type { SessionRouteContext } from "./route-context.js";
+import { mentionedPaths, slashCommandName } from "../core/trophies/engine.js";
+
+/**
+ * Count a sent prompt toward trophies: a slash command (and whether it's the
+ * user's own), Enhance, images, `@file` mentions that point at real files,
+ * and steering. Best-effort and off the request path.
+ */
+async function recordPromptTrophies(
+  ctx: SessionRouteContext,
+  input: { text: string; attachments: number; enhanced: boolean; steer: boolean; expands: boolean },
+): Promise<void> {
+  try {
+    const name = input.attachments === 0 ? slashCommandName(input.text) : null;
+    const command = name && (input.expands || name === "add-dir") ? name : null;
+    const customCommand =
+      command !== null &&
+      !PROMPT_COMMANDS.some((c) => c.name === command || c.aliases.includes(command)) &&
+      (await ctx.session.loadCustomCommands()).some((c) => c.name.toLowerCase() === command);
+    const root = path.resolve(ctx.cwd);
+    let fileMentions = 0;
+    for (const rel of mentionedPaths(input.text)) {
+      const abs = path.resolve(root, rel);
+      // Only paths inside the project count; the check is a stat, nothing is read.
+      if (abs !== root && !abs.startsWith(root + path.sep)) continue;
+      if (
+        await fs.stat(abs).then(
+          () => true,
+          () => false,
+        )
+      )
+        fileMentions++;
+    }
+    await ctx.trophies.recordPrompt(
+      {
+        command,
+        customCommand,
+        enhanced: input.enhanced,
+        attachments: input.attachments,
+        fileMentions,
+        steer: input.steer,
+      },
+      ctx.sessionId,
+    );
+  } catch (err) {
+    log("DEBUG", "app-sidecar", "prompt trophies failed", {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
 
 export function handlePromptRoutes(
   ctx: SessionRouteContext,
@@ -142,6 +193,14 @@ export function handlePromptRoutes(
           const count = ctx.session.queueMessage(text, prepared);
           ctx.broadcast("queued", { count, messages: ctx.session.listQueuedMessages() });
           json(res, 202, { queued: true, count });
+          void recordPromptTrophies(ctx, {
+            text,
+            attachments: attachments.length,
+            enhanced: Array.isArray(meta?.enhancements) && meta.enhancements.length > 0,
+            // A scheduled prompt that queued behind a run isn't the user steering.
+            steer: meta?.scheduled !== true,
+            expands: false,
+          });
           return;
         }
         // Claim the run NOW, synchronously. Everything below this line may
@@ -166,6 +225,17 @@ export function handlePromptRoutes(
         // later bubble with the wrong `/name`.
         const expandsToTemplate =
           attachments.length === 0 && (await ctx.session.willExpandPromptTemplate(text));
+        if (meta?.scheduled === true) {
+          void ctx.trophies.count("scheduledRuns", ctx.sessionId);
+        } else {
+          void recordPromptTrophies(ctx, {
+            text,
+            attachments: attachments.length,
+            enhanced: Array.isArray(meta?.enhancements) && meta.enhancements.length > 0,
+            steer: false,
+            expands: expandsToTemplate,
+          });
+        }
         // Webview display hint for this prompt's user bubble (kenSent shimmer
         // label / enhancer highlight segments / the `/name` a command was typed
         // as). Anchored +1 so it attaches to the user message the prompt below
@@ -253,6 +323,7 @@ export function handlePromptRoutes(
         if (decision.start) {
           log("INFO", "app-sidecar", "autopilot cycle starting", { kind: decision.kind });
           await ctx.runAutopilotCycle(text);
+          if (!ctx.autopilotCancelled) void ctx.trophies.count("autopilotReviews", ctx.sessionId);
         } else {
           ctx.broadcast("autopilot_ignored", { reason: decision.reason });
           log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
@@ -319,7 +390,10 @@ export function handlePromptRoutes(
         // resume (advisory custom entry, never an LLM message). Reply is Ken's
         // last assistant message; skip persistence if he produced nothing.
         const reply = lastAssistantText(ken.getMessages());
-        if (reply.trim()) await ctx.session.persistKenTurn(text, reply);
+        if (reply.trim()) {
+          await ctx.session.persistKenTurn(text, reply);
+          void ctx.trophies.count("kenQuestions", ctx.sessionId);
+        }
       } catch (err) {
         ctx.broadcastError("ken_error", "ken run failed", err);
       } finally {
@@ -362,6 +436,7 @@ export function handlePromptRoutes(
       }
       ctx.autopilot = enabled;
       await saveAutopilot(ctx.cwd, enabled);
+      if (enabled) void ctx.trophies.count("autopilotOn", ctx.sessionId);
       log("INFO", "app-sidecar", "autopilot toggled", { enabled: String(enabled) });
       ctx.broadcast("autopilot", { autopilot: enabled });
       json(res, 200, { autopilot: enabled });

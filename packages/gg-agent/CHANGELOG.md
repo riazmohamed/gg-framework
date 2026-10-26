@@ -1,5 +1,46 @@
 # @kenkaiiii/gg-agent
 
+## 5.86.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.86.3
+
+## 5.86.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.86.2
+
+## 5.86.1
+
+### Patch Changes
+
+- Updated dependencies [1c91814]
+  - @kenkaiiii/gg-ai@5.86.1
+
+## 5.86.0
+
+### Minor Changes
+
+- Hedge a late first stream event with one duplicate request when the prompt prefix is provably warm, so a hung provider request no longer costs ~2 minutes of retrying; add the GG Royale sidecar endpoints (linking, bug-fixed and deploy signals); refresh the bundled skills.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.86.0
+
+## 5.85.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.85.0
+
+## 5.84.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.84.3
+
 ## 5.84.2
 
 ### Patch Changes

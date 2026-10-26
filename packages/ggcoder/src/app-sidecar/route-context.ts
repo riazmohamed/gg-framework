@@ -15,6 +15,7 @@ import type { ServeController } from "../modes/serve-mode.js";
 import type { GitHubCI } from "../utils/github-ci.js";
 import type { ProjectHealth } from "../core/project-health-score.js";
 import type { ProgressManager } from "./progress-manager.js";
+import type { TrophyManager } from "./trophy-manager.js";
 import type { HfPullState, SseClient, WorkspaceMode } from "./session-types.js";
 import type { Provider } from "@abukhaled/gg-ai";
 import type {
@@ -50,6 +51,7 @@ export interface SessionRouteContext {
     additionalRoots: string[];
   };
   readonly progress: ProgressManager;
+  readonly trophies: TrophyManager;
   readonly memoryStore: MemoryStore;
   readonly jiwaStore: JiwaStore;
   clientSeq: number;

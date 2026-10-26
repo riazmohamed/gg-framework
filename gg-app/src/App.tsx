@@ -143,6 +143,7 @@ const GoalPicker = lazy(() =>
 );
 import { BackButton } from "./BackButton";
 import { HomeScreen } from "./HomeScreen";
+import { RoyaleScreen } from "./RoyaleScreen";
 import { SettingsModal } from "./SettingsModal";
 import { initialEntryView, type EntryView } from "./app-entry-view";
 import {
@@ -157,6 +158,8 @@ import { useWindowFocused } from "./useWindowFocused";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 import { formatWorkspaceTitle } from "./workspace-title";
 import { useProgress } from "./useProgress";
+import { useTrophies } from "./useTrophies";
+import { TrophyUnlock } from "./TrophyUnlock";
 import { SettingsScreen, type SettingsTabId } from "./SettingsScreen";
 import { PromptSendProvider } from "./Markdown";
 import { TranscriptSkeleton } from "./Skeleton";
@@ -190,6 +193,7 @@ import { usePromptHistory } from "./usePromptHistory";
 import { usePromptEnhance } from "./usePromptEnhance";
 import "./App.css";
 import "./Deck.css";
+import "./Trophies.css";
 
 const DEFAULT_INPUT_PLACEHOLDER = "Type a message, / commands, @ files, @Ken for help";
 const INPUT_PLACEHOLDERS = [
@@ -217,7 +221,7 @@ const PLACEHOLDER_SHUFFLE_FRAME_MS = 24;
 // video analysis. Shared by the live send path and history restore so the
 // resumed transcript matches the live one exactly.
 const VIDEO_CAPABILITY_WARNING =
-  "This model can't watch video directly. The agent can still extract frames or audio with ffmpeg if needed — switch to a video-capable model (Gemini, Kimi, MiniMax) for native video analysis.";
+  "This model can't watch video directly. The agent can still extract frames or audio with ffmpeg if needed — switch to a video-capable model (Kimi, MiniMax, MiMo) for native video analysis.";
 
 function shufflePlaceholderFrame(target: string, frame: number): string {
   const revealCount = Math.ceil((target.length * frame) / PLACEHOLDER_SHUFFLE_FRAMES);
@@ -267,6 +271,7 @@ function App(): React.ReactElement {
   // shared setItems/nextId pattern as useKenMentor.
   const { autopilotReviewing, handleAutopilotEvent } = useAutopilot({ setItems, nextId });
   const { snapshot: progress, levelUp, levelUpNonce, levelUpOrigin } = useProgress();
+  const trophies = useTrophies();
   const [, setRankCelebrateNonce] = useState<string | null>(null);
   const [xpChips, setXpChips] = useState<Array<{ id: string; label: string }>>([]);
   const lastProgressXpRef = useRef<number | null>(null);
@@ -490,9 +495,13 @@ function App(): React.ReactElement {
   const [restoreChecked, setRestoreChecked] = useState(false);
   // Every window starts from the mode-neutral home screen before choosing Code or Chat.
   const [entryView, setEntryView] = useState<EntryView>(initialEntryView(isSecondaryWindow));
+  // GG Royale has faded in over Home (Home holds its Royale plate down until then).
+  const [royaleShown, setRoyaleShown] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>("general");
   // Re-open the matching session picker over an already-open workspace.
   const [showPicker, setShowPicker] = useState(false);
+  // GG Royale over a workspace (from the Deck's Royale key); Back returns here.
+  const [showRoyale, setShowRoyale] = useState(false);
   // Bumped on each workspace/session choice to force re-hydration.
   const [hydrateNonce, setHydrateNonce] = useState(0);
   const { activity, handleActivityEvent } = useTaskActivity(hydrateNonce);
@@ -2489,7 +2498,10 @@ function App(): React.ReactElement {
         className={`app${windowFocused ? " window-focused" : ""}`}
         style={{ background: theme.background }}
       >
-        {entryView === "home" ? (
+        {/* GG Royale opens OVER Home (as it does over a workspace), so Home
+            stays put underneath while the game fades in, and Back fades
+            straight back to it. */}
+        {entryView === "home" || entryView === "royale" ? (
           <HomeScreen
             onProjects={() =>
               showScreen(() => {
@@ -2515,6 +2527,8 @@ function App(): React.ReactElement {
                 setEntryView("motion");
               })
             }
+            onRoyale={() => showScreen(() => setEntryView("royale"))}
+            royaleShown={royaleShown}
             onSettings={(tab) =>
               showScreen(() => {
                 setSettingsTab(tab ?? "general");
@@ -2558,6 +2572,19 @@ function App(): React.ReactElement {
             // Every window can return to the mode-neutral home screen.
             onClose={() => showScreen(() => setEntryView("home"))}
           />
+        )}
+        {entryView === "royale" && (
+          <div className="royale-overlay">
+            <RoyaleScreen
+              onShown={() => setRoyaleShown(true)}
+              onClose={() =>
+                showScreen(() => {
+                  setRoyaleShown(false);
+                  setEntryView("home");
+                })
+              }
+            />
+          </div>
         )}
         {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
         <Toaster />
@@ -2952,8 +2979,10 @@ function App(): React.ReactElement {
                       ),
                     }
                   : undefined,
+              // Goal windows show the attached project's score too (Usage →
+              // Project Health), so the breakdown must open there as well.
               health:
-                workspaceMode === "code" && !state?.goal
+                workspaceMode === "code"
                   ? {
                       title: "Project Health",
                       body: (
@@ -2995,6 +3024,8 @@ function App(): React.ReactElement {
                   : undefined,
             }}
             progress={progress}
+            trophies={trophies.snapshot}
+            onOpenRoyale={() => showScreen(() => setShowRoyale(true))}
             usageExtras={
               windowTotal > 1 &&
               windowIndex !== null && (
@@ -3178,6 +3209,14 @@ function App(): React.ReactElement {
         />
       )}
 
+      {/* GG Royale over this workspace, full window. The session keeps running
+          underneath; Back comes straight back to it. */}
+      {showRoyale && (
+        <div className="royale-overlay">
+          <RoyaleScreen onClose={() => showScreen(() => setShowRoyale(false))} />
+        </div>
+      )}
+
       {/* Settings reached from the menu-bar tray. Rendered in every view branch
           (Home, picker, workspace) because the tray targets a WINDOW and can't
           know which of the three it is showing. */}
@@ -3186,6 +3225,18 @@ function App(): React.ReactElement {
       {/* Workspace toasts (saved transcript, Remote on/off, rank-up) need their
           own host: the one in the Home/Settings branch isn't mounted here. */}
       <Toaster />
+
+      {/* One trophy at a time, in the order earned; it files itself into the
+          deck's trophies key, so it only plays where the deck is. */}
+      {trophies.queue[0] && (
+        <TrophyUnlock
+          key={trophies.queue[0].id}
+          trophy={trophies.queue[0]}
+          snapshot={trophies.snapshot}
+          onOpenTrophies={() => setDeckPanel("trophies")}
+          onDone={trophies.shift}
+        />
+      )}
     </div>
   );
 }

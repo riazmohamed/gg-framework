@@ -1,5 +1,50 @@
 # @kenkaiiii/gg-core
 
+## 5.86.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.86.3
+
+## 5.86.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.86.2
+
+## 5.86.1
+
+### Patch Changes
+
+- 1c91814: Fix Grok subscription (OAuth) chats failing with HTTP 426: report Grok CLI version 1.0.67, since xAI's chat proxy now rejects clients below 1.0.13.
+- 1c91814: Remove Gemini from login lists, model pickers and startup. Google is suspending accounts that use their Gemini subscription through third-party harnesses (any of them, not just GG Coder), so GG Coder no longer supports signing in to Gemini. Existing stored credentials are left untouched but are no longer used.
+- Updated dependencies [1c91814]
+  - @kenkaiiii/gg-ai@5.86.1
+
+## 5.86.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.86.0
+
+## 5.85.0
+
+### Minor Changes
+
+- Add Trophies: 144 achievements earned by using GG Coder, from a first slash command to a 365-day streak. The app sidecar records them in `~/.gg/trophies.json` (counting only what happens from now on), serves `GET /trophies`, and broadcasts a `trophies` event when one is earned. `getAppPaths()` gains `trophiesFile`.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.85.0
+
+## 5.84.3
+
+### Patch Changes
+
+- dd2c2e6: Stop a rejected OAuth token refresh from signing every window out: re-read auth.json before deleting the credential, and adopt a newer login that another gg process saved while the refresh was in flight.
+- dd2c2e6: Keep long-lived processes logging: rotate the debug log mid-run when the shared file fills, and count the 10 MB cap against this process's own writes instead of the whole file. The app daemon previously went dark within minutes when it started next to a nearly full log.
+  - @kenkaiiii/gg-ai@5.84.3
+
 ## 5.84.2
 
 ### Patch Changes

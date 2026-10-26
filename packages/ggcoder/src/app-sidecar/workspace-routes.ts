@@ -174,6 +174,7 @@ export function handleWorkspaceRoutes(
       { toolDetail: parseToolDetail(query.get("tools")) },
     );
     json(res, 200, { filename, markdown });
+    void ctx.trophies.count("exports", ctx.sessionId);
     return true;
   }
 

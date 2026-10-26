@@ -14,6 +14,7 @@ import {
   providerStorageKeys,
   readStoredBaseUrlSync,
 } from "./auth-storage.js";
+import { isHiddenProvider } from "./hidden-providers.js";
 
 const refreshOpenAIToken = vi.hoisted(() => vi.fn());
 vi.mock("./oauth/openai.js", () => ({ refreshOpenAIToken }));
@@ -219,6 +220,50 @@ describe("AuthStorage — shared-file concurrency", () => {
     expect(refreshed.accessToken).toBe("token-fresh");
     expect(refreshOpenAIToken).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps a sibling's newer login when its own refresh is rejected mid-request", async () => {
+    const filePath = await tempAuthFile();
+    tmpFiles.push(filePath);
+    const session = new AuthStorage(filePath);
+    await session.setCredentials("openai", oauthCreds("token-a"));
+    await session.setCredentials("anthropic", oauthCreds("anthropic-token"));
+
+    // While this refresh is in flight, a sibling (which broke the file lock)
+    // refreshes the same grant and saves token-b; ours is then rejected as reused.
+    refreshOpenAIToken.mockImplementation(async () => {
+      const disk = JSON.parse(await fs.readFile(filePath, "utf-8"));
+      disk.openai = oauthCreds("token-b");
+      await fs.writeFile(filePath, JSON.stringify(disk));
+      throw new Error("OpenAI token refresh failed (400): invalid_grant");
+    });
+
+    const recovered = await session.resolveCredentials("openai", { forceRefresh: true });
+
+    // Deleting from the pre-request snapshot used to wipe token-b from disk and
+    // sign every window out ("Not logged in"), forcing a manual re-login.
+    expect(recovered.accessToken).toBe("token-b");
+    const onDisk = JSON.parse(await fs.readFile(filePath, "utf-8"));
+    expect(onDisk.openai.accessToken).toBe("token-b");
+    expect(onDisk.anthropic.accessToken).toBe("anthropic-token");
+  });
+
+  it("still signs out when the rejected refresh token is the one on disk", async () => {
+    const filePath = await tempAuthFile();
+    tmpFiles.push(filePath);
+    const session = new AuthStorage(filePath);
+    await session.setCredentials("openai", oauthCreds("token-a"));
+    await session.setCredentials("anthropic", oauthCreds("anthropic-token"));
+    refreshOpenAIToken.mockRejectedValue(
+      new Error("OpenAI token refresh failed (400): invalid_grant"),
+    );
+
+    await expect(session.resolveCredentials("openai", { forceRefresh: true })).rejects.toThrow(
+      NotLoggedInError,
+    );
+    const onDisk = JSON.parse(await fs.readFile(filePath, "utf-8"));
+    expect(onDisk.openai).toBeUndefined();
+    expect(onDisk.anthropic.accessToken).toBe("anthropic-token");
+  });
 });
 
 describe("AuthStorage — proactive refresh threshold (kimi-code parity)", () => {
@@ -357,7 +402,8 @@ describe("AuthStorage — Xiaomi dual credential (Token Plan vs. API Credits)", 
     const picked = await both.resolveCredentials("gemini", { storageKeys: keys });
     // The key carries the public API base URL — the transport routes on it.
     expect(picked).toMatchObject({ accessToken: "aistudio-key", baseUrl: GEMINI_API_KEY_BASE_URL });
-    expect(await both.hasProviderAuth("gemini")).toBe(true);
+    // Credentials still resolve while Gemini is hidden; it just isn't "connected".
+    expect(await both.hasProviderAuth("gemini")).toBe(!isHiddenProvider("gemini"));
 
     // OAuth only, and expired: reached through the list, it must still refresh.
     const oauthOnly = await makeStorage();
@@ -378,7 +424,20 @@ describe("AuthStorage — Xiaomi dual credential (Token Plan vs. API Credits)", 
     // API key only satisfies hasProviderAuth too.
     const keyOnly = await makeStorage();
     await keyOnly.setCredentials(GEMINI_API_KEY, oauthCreds("k", ""));
-    expect(await keyOnly.hasProviderAuth("gemini")).toBe(true);
+    expect(await keyOnly.hasProviderAuth("gemini")).toBe(!isHiddenProvider("gemini"));
+  });
+
+  it("reports a hidden provider as not connected even with credentials on disk", async () => {
+    // Pickers and startup filter on hasProviderAuth, so this is what keeps a
+    // hidden provider (Gemini, for now) out of them for users with old logins.
+    expect(isHiddenProvider("gemini")).toBe(true);
+    const storage = await makeStorage();
+    await storage.setCredentials("gemini", oauthCreds("oauth-token"));
+    await storage.setCredentials(GEMINI_API_KEY, oauthCreds("k", ""));
+    expect(await storage.hasProviderAuth("gemini")).toBe(false);
+    // Other providers are unaffected.
+    await storage.setCredentials("anthropic", oauthCreds("a"));
+    expect(await storage.hasProviderAuth("anthropic")).toBe(true);
   });
 
   it("resolveCredentials prefers the first storageKey, falling back to the next when only that's configured", async () => {

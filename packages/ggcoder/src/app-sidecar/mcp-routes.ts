@@ -86,6 +86,7 @@ export function handleMcpRoutes(
         if (scope === "project") {
           await ctx.session.trustProject(targetCwd);
         }
+        void ctx.trophies.count("mcpServersAdded", ctx.sessionId);
         json(res, 200, {
           ok: true,
           name: config.name,

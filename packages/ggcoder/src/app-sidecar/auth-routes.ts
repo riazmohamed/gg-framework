@@ -254,6 +254,7 @@ export function handleAuthRoutes(
         return;
       }
       json(res, 200, { ok: true });
+      if (result.action === "answer") void ctx.trophies.count("questionsAnswered", ctx.sessionId);
     });
     return true;
   }

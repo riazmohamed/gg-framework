@@ -66,6 +66,7 @@ export function handleIntegrationRoutes(
           endpoint: { id: endpoint.id, label: endpoint.label },
           ...ctx.localStatePayload(),
         });
+        void ctx.trophies.count("localEndpoints", ctx.sessionId);
       } catch (err) {
         // Validation errors are the user's typo, not a system fault — 400 with
         // the exact reason, and nothing in the transcript.
@@ -158,6 +159,7 @@ export function handleIntegrationRoutes(
       }
       try {
         json(res, 200, await ctx.startHfPull(repo));
+        void ctx.trophies.count("modelsPulled", ctx.sessionId);
       } catch (err) {
         const status =
           err instanceof Error && "status" in err && typeof err.status === "number"
@@ -223,6 +225,7 @@ export function handleIntegrationRoutes(
       }
       await saveTelegramConfig({ botToken, userId });
       json(res, 200, { ok: true, userId, username: verified.username ?? null });
+      void ctx.trophies.count("telegramSetups", ctx.sessionId);
     });
     return true;
   }
@@ -260,6 +263,7 @@ export function handleIntegrationRoutes(
         ctx.broadcast("serve_change", { running: true });
         log("INFO", "app-sidecar", "serve started", { userId: cfg.userId });
         json(res, 200, { running: true });
+        void ctx.trophies.count("remoteStarts", ctx.sessionId);
       } catch (err) {
         ctx.serveController = null;
         json(res, 400, { error: err instanceof Error ? err.message : String(err) });

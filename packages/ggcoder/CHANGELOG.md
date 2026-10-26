@@ -1,5 +1,71 @@
 # @kenkaiiii/ggcoder
 
+## 5.86.3
+
+### Patch Changes
+
+- Fix the threat feed cache serving a stale feed when a rewrite keeps the same file mtime (coarse Windows timestamps).
+  - @kenkaiiii/gg-ai@5.86.3
+  - @kenkaiiii/gg-agent@5.86.3
+  - @kenkaiiii/gg-core@5.86.3
+
+## 5.86.2
+
+### Patch Changes
+
+- ba10f31: Faster code changes: when a POSIX `bash` is available, the prompt now asks for each change in one command that writes only what's new (heredoc for a small file, an asserted replace for a few lines of a bigger one, appended tests) and ends with the test command. It replaces the "prefer edit over write" line and the scripted-edit rule; without bash, or under the cmd.exe fallback, those stay. The Environment section also lists the project's files once per session (shallowest 60, from `git ls-files`), so the first call reads the right files instead of listing them. On Claude Haiku 5.5 this ran the benchmark suite about 21% faster on about 19% less usage, with no whole-file rewrites of a one-line fix in a 700-line file.
+  - @kenkaiiii/gg-ai@5.86.2
+  - @kenkaiiii/gg-agent@5.86.2
+  - @kenkaiiii/gg-core@5.86.2
+
+## 5.86.1
+
+### Patch Changes
+
+- 1c91814: Remove Gemini from login lists, model pickers and startup. Google is suspending accounts that use their Gemini subscription through third-party harnesses (any of them, not just GG Coder), so GG Coder no longer supports signing in to Gemini. Existing stored credentials are left untouched but are no longer used.
+- 1c91814: Trim routine boilerplate from small bash output: `git log` headers fold to one line per commit, `git status` drops its `(use "git …")` hints, `ls -l` states a shared owner/group once, and all-green vitest/jest runs list a count instead of every passing file. Failing runs, file lists and anything that doesn't match these shapes pass through unchanged.
+- Updated dependencies [1c91814]
+- Updated dependencies [1c91814]
+  - @kenkaiiii/gg-core@5.86.1
+  - @kenkaiiii/gg-ai@5.86.1
+  - @kenkaiiii/gg-agent@5.86.1
+
+## 5.86.0
+
+### Minor Changes
+
+- Hedge a late first stream event with one duplicate request when the prompt prefix is provably warm, so a hung provider request no longer costs ~2 minutes of retrying; add the GG Royale sidecar endpoints (linking, bug-fixed and deploy signals); refresh the bundled skills.
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-agent@5.86.0
+  - @kenkaiiii/gg-ai@5.86.0
+  - @kenkaiiii/gg-core@5.86.0
+
+## 5.85.0
+
+### Minor Changes
+
+- Add Trophies: 144 achievements earned by using GG Coder, from a first slash command to a 365-day streak. The app sidecar records them in `~/.gg/trophies.json` (counting only what happens from now on), serves `GET /trophies`, and broadcasts a `trophies` event when one is earned. `getAppPaths()` gains `trophiesFile`.
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-core@5.85.0
+  - @kenkaiiii/gg-ai@5.85.0
+  - @kenkaiiii/gg-agent@5.85.0
+
+## 5.84.3
+
+### Patch Changes
+
+- Updated dependencies [dd2c2e6]
+- Updated dependencies [dd2c2e6]
+  - @kenkaiiii/gg-core@5.84.3
+  - @kenkaiiii/gg-ai@5.84.3
+  - @kenkaiiii/gg-agent@5.84.3
+
 ## 5.84.2
 
 ### Patch Changes

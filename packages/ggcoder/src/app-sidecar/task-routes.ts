@@ -128,6 +128,10 @@ export function handleTaskRoutes(
         return;
       }
       json(res, 200, { current: getCurrentStation() });
+      void ctx.trophies.record(
+        { count: { radioPlays: 1 }, add: { radioStations: [station] } },
+        ctx.sessionId,
+      );
     });
     return true;
   }
@@ -151,6 +155,7 @@ export function handleTaskRoutes(
       }
       json(res, 202, { accepted: true });
       void ctx.runTasks(id, all);
+      void ctx.trophies.count("tasksRun", ctx.sessionId);
     });
     return true;
   }
