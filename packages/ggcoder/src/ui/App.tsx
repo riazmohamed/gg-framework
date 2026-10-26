@@ -60,7 +60,13 @@ import {
   formatGitHubIdentity,
   type GitHubIdentity,
 } from "../utils/github-identity.js";
-import { getAuthStorageKeys, getModel, getVideoByteLimit, MODELS } from "../core/model-registry.js";
+import {
+  getAuthStorageKeys,
+  getListedModels,
+  getModel,
+  getVideoByteLimit,
+  MODELS,
+} from "../core/model-registry.js";
 import { tuiOutputCap } from "./output-cap.js";
 import { SessionManager, type TurnMetricPayload } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
@@ -2380,7 +2386,9 @@ export function App(props: AppProps) {
           },
           getModelList: () =>
             `Current: ${currentProviderRef.current}:${currentModelRef.current}\n\nAvailable models:\n` +
-            MODELS.map((m) => `  ${m.provider}:${m.id} — ${m.name} (${m.costTier})`).join("\n"),
+            getListedModels()
+              .map((m) => `  ${m.provider}:${m.id} — ${m.name} (${m.costTier})`)
+              .join("\n"),
           quit: showSessionSummaryAndExit,
           branch: async () => "Use /rewind to go back to an earlier point.",
           listBranches: async () => "Use /rewind to go back to an earlier point.",
