@@ -22,6 +22,30 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.98.2",
+    date: "2026-11-01",
+    items: [
+      "Signing in with your Claude account just got sturdier. GG Coder now always speaks to Anthropic as a current Claude Code, even on a first launch with no internet, so `Opus 5.5` never gets turned away for an outdated version.",
+    ],
+  },
+  {
+    version: "0.98.1",
+    date: "2026-10-31",
+    items: [
+      "No more getting bounced back with `Set a workspace folder first` on a fresh install. Settings now tells you when the default folder isn't saved yet, and one press of `Enter` locks it in so Code, Chat and Motion open right up.",
+    ],
+  },
+  {
+    version: "0.98.0",
+    date: "2026-10-31",
+    items: [
+      "GG Coder now runs on `Linux`. Grab the `.deb` for Ubuntu and Debian or the `.rpm` for Fedora, install it, and you get the exact same app as on Mac and Windows, with updates landing right inside the app.",
+      "Ken's activity bar now looks just like the main one, with the same `Stop` key and the tool panel toggle right beside it, so keeping an eye on him or cutting him off takes one click.",
+      "Home feels right at every size. The mode plates and tagline grow together in big windows and all `five` modes stay on one tidy row even in the smallest window.",
+      "`Notes` in the side panel now wrap properly instead of running off the edge, so long notes stay readable.",
+    ],
+  },
+  {
     version: "0.97.5",
     date: "2026-10-28",
     items: [
