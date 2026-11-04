@@ -9,6 +9,7 @@ import {
   type AgentState,
   type BackgroundTask,
   type CacheExpiryStatus,
+  type InboxItem,
   type ModelOption,
   type ProjectTask,
   type QueuedMessage,
@@ -1410,6 +1411,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           endStreamingText();
           subagentGroupIdRef.current = null;
           subagentGroupByAgentRef.current.clear();
+          break;
+        case "inbox":
+          // The app inbox changed (core/app-inbox.ts): a message arrived or left.
+          setState((s) => (s ? { ...s, inbox: (d.items as InboxItem[] | undefined) ?? [] } : s));
           break;
         case "cache_expiry":
           // Live cold-cache status pushed after a run, compaction or model

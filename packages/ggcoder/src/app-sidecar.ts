@@ -158,6 +158,7 @@ import { handleWorkspaceRoutes } from "./app-sidecar/workspace-routes.js";
 import { handleHistoryRoutes } from "./app-sidecar/history-routes.js";
 import { handlePromptRoutes } from "./app-sidecar/prompt-routes.js";
 import { handleTaskRoutes } from "./app-sidecar/task-routes.js";
+import { inboxDir, listInbox } from "./core/app-inbox.js";
 import { handleRunControlRoutes } from "./app-sidecar/run-control-routes.js";
 import { handleAuthRoutes } from "./app-sidecar/auth-routes.js";
 import { handleIntegrationRoutes } from "./app-sidecar/integration-routes.js";
@@ -2478,6 +2479,22 @@ async function createSession(
   };
   scheduleTasksPoll(1500);
 
+  // The app inbox (core/app-inbox.ts): other local tools leave messages for the
+  // window open on this project. Files have no event source, so poll and push
+  // only changes; the webview reads the first snapshot from /state.
+  let lastInboxJson = "[]";
+  // Made here so tools can tell this app reads an inbox before they write to it.
+  await fs.mkdir(inboxDir(paths.agentDir), { recursive: true }).catch(() => {});
+  const inboxPoll = setInterval(() => {
+    const items = listInbox(inboxDir(paths.agentDir), cwd);
+    const next = JSON.stringify(items);
+    if (next !== lastInboxJson) {
+      lastInboxJson = next;
+      broadcast("inbox", { items });
+    }
+  }, 3000);
+  inboxPoll.unref?.();
+
   // Keep the dirty count, GitHub issue/PR counts and CI current while idle
   // (they change outside the agent: editor saves, commits, teammates). Branch/
   // repo state already refreshes after agent runs. The pollers are shared with
@@ -2841,6 +2858,7 @@ async function createSession(
     asks.cancelAll();
     tasksPollStopped = true;
     if (tasksPoll) clearTimeout(tasksPoll);
+    clearInterval(inboxPoll);
     repoWatchStopped = true;
     repoWatch.unsubscribe();
     // Stop the Telegram serve loop + dispose its per-chat sessions.

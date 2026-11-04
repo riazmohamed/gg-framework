@@ -35,6 +35,8 @@ import {
   switchKenModel,
   listCommands,
   cancelQueued,
+  removeInboxItem,
+  type InboxItem,
   type PromptMeta,
   type QueuedMessage,
   listHistory,
@@ -1621,6 +1623,25 @@ function App(): React.ReactElement {
   /** Ordered queue events own both pending rows and cancelled transcript bubbles. */
   function handleCancelQueued(id: string): void {
     void cancelQueued(id);
+  }
+
+  // App inbox. A message that could not be sent stays in the inbox for another try.
+  async function handleInbox(item: InboxItem, send: boolean): Promise<void> {
+    if (send && !submitText(item.text, undefined, { keepInput: true })) {
+      toast("GG isn't ready yet. The message is still in the inbox.", "error");
+      return;
+    }
+    const left = await removeInboxItem(item.id);
+    if (left === null) {
+      toast(
+        send
+          ? "Sent, but it stayed in the inbox. Dismiss it there."
+          : "Couldn't update the inbox. Try again.",
+        "error",
+      );
+      return;
+    }
+    setState((s) => (s ? { ...s, inbox: left } : s));
   }
 
   function pickSlashCommand(cmd: SlashCommand): void {
@@ -3295,6 +3316,8 @@ function App(): React.ReactElement {
                   visibleQueuedMessages={visibleQueuedMessages}
                   sendCount={sendCount}
                   handleCancelQueued={handleCancelQueued}
+                  onSendInbox={(item) => handleInbox(item, true)}
+                  onDismissInbox={(item) => handleInbox(item, false)}
                   enhanceAnim={enhanceAnim}
                   onEnhanceAnimDone={onEnhanceAnimDone}
                   enhancement={enhancement}

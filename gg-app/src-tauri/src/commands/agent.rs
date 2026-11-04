@@ -720,6 +720,25 @@ pub(crate) async fn agent_delete_task(
     sidecar_json(res).await
 }
 
+/// Proxy: drop one app inbox message (sent or dismissed). Returns `{ removed, items }`.
+#[tauri::command]
+pub(crate) async fn agent_inbox_remove(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/inbox/remove", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
 /// Proxy: accept the pending plan — bakes its `## Steps` into the system prompt
 /// so the agent emits `[DONE:n]` progress markers while implementing. Call
 /// before sending the "implement it now" prompt.

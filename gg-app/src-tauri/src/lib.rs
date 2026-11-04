@@ -207,6 +207,7 @@ pub fn run() {
             commands::agent::agent_git_overview,
             commands::agent::agent_run_tasks,
             commands::agent::agent_delete_task,
+            commands::agent::agent_inbox_remove,
             commands::agent::agent_cycle_thinking,
             commands::agent::agent_set_thinking,
             commands::agent::agent_prewarm,

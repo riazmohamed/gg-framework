@@ -233,6 +233,28 @@ export interface AgentState {
   /** Cold-prompt-cache status (sidecar /state + `cache_expiry` event). Null when
    *  the route has no known cache TTL or the chat is empty; absent on older sidecars. */
   cacheExpiry?: CacheExpiryStatus | null;
+  /** Messages other local tools left for this project (sidecar /state + `inbox` event). */
+  inbox?: InboxItem[];
+}
+
+/** Mirrors ggcoder `core/app-inbox.ts` InboxItem. */
+export interface InboxItem {
+  id: string;
+  from: string;
+  title: string;
+  text: string;
+  createdAt: number;
+}
+
+/** Drop one inbox message once it has been sent or dismissed. Returns what is left, or null on failure. */
+export async function removeInboxItem(id: string): Promise<InboxItem[] | null> {
+  try {
+    const res = await invoke<{ items?: InboxItem[] }>("agent_inbox_remove", { id });
+    return res.items ?? [];
+  } catch (e) {
+    await logError(`agent_inbox_remove failed: ${String(e)}`);
+    return null;
+  }
 }
 
 /** Mirrors ggcoder `core/cache-expiry.ts` CacheExpiryStatus. */
