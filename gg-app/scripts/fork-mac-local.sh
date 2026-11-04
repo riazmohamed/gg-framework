@@ -7,9 +7,9 @@
 #
 #   fork-mac-local.sh build        merge + build + stage, if anything changed
 #   fork-mac-local.sh install      install the staged build (waits for GG Coder to close)
-#   fork-mac-local.sh run          build then install: what the background job runs
+#   fork-mac-local.sh run          what the background job runs: build at most every 3 hours, then install
 #   fork-mac-local.sh restore      put the app from before the last install back
-#   fork-mac-local.sh install-job  run `run` every 3 hours (launchd)
+#   fork-mac-local.sh install-job  run `run` every 15 minutes (launchd)
 #   fork-mac-local.sh remove-job
 #
 # State: ~/.gg/fork-mac (FORK_MAC_HOME). Target app: FORK_MAC_APP.
@@ -116,6 +116,18 @@ build() {
   echo "$(date '+%F %T') staged $version" >> "$STATE/events.log"
 }
 
+run() {
+  local now last
+  now="$(date +%s)"
+  last="$(cat "$STATE/last-check" 2>/dev/null || echo 0)"
+  # Ken's repo every 3 hours; the 15-minute runs in between only install once GG Coder is closed.
+  if (( now - last >= ${FORK_MAC_CHECK_S:-10800} )); then
+    echo "$now" > "$STATE/last-check"
+    build || return 1
+  fi
+  install
+}
+
 install() {
   local staged="$STATE/staged/GG Coder.app" version
   if [[ ! -d "$staged" ]]; then
@@ -166,7 +178,7 @@ install_job() {
 <dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key><array><string>$SCRIPT</string><string>run</string></array>
-  <key>StartInterval</key><integer>10800</integer>
+  <key>StartInterval</key><integer>900</integer>
   <key>RunAtLoad</key><true/>
   <key>LowPriorityIO</key><true/>
   <key>Nice</key><integer>10</integer>
@@ -178,7 +190,7 @@ install_job() {
 EOF
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  echo "Installed $LABEL: runs every 3 hours"
+  echo "Installed $LABEL: checks every 15 minutes, builds at most every 3 hours"
 }
 
 remove_job() {
@@ -190,7 +202,7 @@ remove_job() {
 case "${1:-}" in
   build) lock; build ;;
   install) lock; install ;;
-  run) lock; build && install ;;
+  run) lock; run ;;
   restore) lock; restore ;;
   install-job) install_job ;;
   remove-job) remove_job ;;
