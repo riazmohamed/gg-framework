@@ -1,0 +1,193 @@
+name: Release (fork, macOS)
+
+# Fork-only. Keeps Riaz's macOS GG Coder current with upstream while carrying
+# the fork's own commits (the app inbox) on the `og-mac` branch:
+#   1. merge upstream (KenKaiii/gg-framework) main into og-mac,
+#   2. if that changed anything since the last fork build, build the arm64 app,
+#      ad-hoc signed (the fork has no Apple certificate), with updater artifacts
+#      signed by the fork's own key,
+#   3. publish it as an `og-mac-v*` release and point the `og-mac-latest`
+#      release's latest.json at it. Installed fork apps poll that file
+#      (gg-app/src-tauri/tauri.fork-mac.conf.json), so they update themselves.
+# Neither release is marked "latest", so the Windows fork feed
+# (releases/latest, release-windows.yml) is untouched.
+#
+# Lives on the default branch because scheduled workflows only run from there.
+# A merge conflict or failed check stops the run before anything is pushed or
+# published; GitHub emails the failure.
+#
+# Version: upstream major.minor, patch = upstream_patch * 100 + fork_build, so a
+# fork build sorts above the upstream version it is based on and below the
+# next one (upstream 0.102.1 -> 0.102.101, 0.102.102; upstream 0.102.2 -> 0.102.201).
+#
+# Secrets: TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD (fork key).
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-mac
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-14
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: og-mac
+          fetch-depth: 0
+
+      - name: Merge upstream main
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/KenKaiii/gg-framework.git
+          git fetch --no-tags upstream main
+          git merge --no-edit upstream/main
+          upstream=$(node -p "require('./gg-app/package.json').version")
+          [[ "$upstream" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo "Unexpected version $upstream" >&2; exit 1; }
+          major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
+          base=$((patch * 100))
+          git fetch --tags --force origin
+          last=0
+          for tag in $(git tag -l "og-mac-v$major.$minor.*"); do
+            p=${tag##*.}
+            if (( p > base && p < base + 100 && p - base > last )); then last=$((p - base)); fi
+          done
+          if (( last > 0 )) && git diff --quiet "og-mac-v$major.$minor.$((base + last))" HEAD; then
+            echo "Nothing new since og-mac-v$major.$minor.$((base + last))"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="$major.$minor.$((base + last + 1))"
+          printf '{"version":"%s"}\n' "$version" > gg-app/src-tauri/tauri.release-version.conf.json
+          echo "Building $version on upstream $upstream"
+          echo "build=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+
+      - name: Check signing secrets
+        if: steps.merge.outputs.build == 'true'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            [[ -n "${!name:-}" ]] || { echo "Missing release secret: $name" >&2; exit 1; }
+          done
+
+      - uses: pnpm/action-setup@v6
+        if: steps.merge.outputs.build == 'true'
+
+      - uses: actions/setup-node@v7
+        if: steps.merge.outputs.build == 'true'
+        with:
+          node-version: 22.x
+          cache: pnpm
+
+      - name: Install Rust stable
+        if: steps.merge.outputs.build == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.merge.outputs.build == 'true'
+        with:
+          workspaces: gg-app/src-tauri
+
+      - name: Install and build
+        if: steps.merge.outputs.build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm --filter gg-app stage:node
+          pnpm --filter gg-app bundle:sidecar
+          node gg-app/scripts/smoke-sidecar.mjs
+
+      - name: Inbox tests
+        if: steps.merge.outputs.build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd packages/ggcoder && pnpm exec vitest run src/core/app-inbox.test.ts src/app-sidecar/inbox-routes.test.ts)
+          (cd gg-app && pnpm exec vitest run src/InboxBar.test.tsx)
+
+      # Ad-hoc ("-"): no timestamp, which needs a real identity.
+      - name: Sign nested binaries ad-hoc
+        if: steps.merge.outputs.build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r f; do
+            if file "$f" | grep -q Mach-O; then
+              codesign --force --options runtime --entitlements gg-app/src-tauri/entitlements.plist --sign - "$f"
+            fi
+          done < <(find gg-app/src-tauri/binaries gg-app/src-tauri/sidecar -type f)
+
+      - name: Build app
+        if: steps.merge.outputs.build == 'true'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd gg-app
+          pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg \
+            --config src-tauri/tauri.fork-mac.conf.json \
+            --config src-tauri/tauri.release-version.conf.json
+          codesign --verify --deep --strict "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/GG Coder.app"
+
+      - name: Push og-mac and publish
+        if: steps.merge.outputs.build == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.merge.outputs.version }}
+          UPSTREAM: ${{ steps.merge.outputs.upstream }}
+        run: |
+          set -euo pipefail
+          out=dist-release
+          mkdir -p "$out"
+          b=gg-app/src-tauri/target/aarch64-apple-darwin/release/bundle
+          cp "$b/macos/GG Coder.app.tar.gz" "$out/GG-Coder_${VERSION}_aarch64.app.tar.gz"
+          cp "$b/macos/GG Coder.app.tar.gz.sig" "$out/GG-Coder_${VERSION}_aarch64.app.tar.gz.sig"
+          cp "$b"/dmg/*.dmg "$out/GG-Coder_${VERSION}_aarch64.dmg"
+          tag="og-mac-v$VERSION"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag/GG-Coder_${VERSION}_aarch64.app.tar.gz"
+          node -e '
+            const fs = require("fs");
+            const [version, url, sig, file] = process.argv.slice(1);
+            fs.writeFileSync(file, JSON.stringify({
+              version, notes: "Fork build of upstream GG Coder for macOS, with the app inbox.",
+              pub_date: new Date().toISOString(),
+              platforms: { "darwin-aarch64": { signature: fs.readFileSync(sig, "utf8").trim(), url } },
+            }, null, 2));
+          ' "$VERSION" "$url" "$out/GG-Coder_${VERSION}_aarch64.app.tar.gz.sig" "$out/latest.json"
+          git push origin HEAD:og-mac
+          gh release create "$tag" --target "$(git rev-parse HEAD)" --latest=false \
+            --title "GG Coder (fork, macOS) $tag" \
+            --notes "Upstream gg-app $UPSTREAM plus the fork's app inbox. Ad-hoc signed. Installed fork apps update to this automatically." \
+            "$out/GG-Coder_${VERSION}_aarch64.dmg" "$out/GG-Coder_${VERSION}_aarch64.app.tar.gz" \
+            "$out/GG-Coder_${VERSION}_aarch64.app.tar.gz.sig" "$out/latest.json"
+          gh release view og-mac-latest >/dev/null 2>&1 || gh release create og-mac-latest --latest=false \
+            --title "GG Coder (fork, macOS) update feed" \
+            --notes "Holds latest.json for installed fork macOS apps. Do not delete." --target "$(git rev-parse HEAD)"
+          gh release upload og-mac-latest "$out/latest.json" --clobber
