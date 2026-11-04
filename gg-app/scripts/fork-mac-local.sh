@@ -65,7 +65,8 @@ steps() {
   # No updater artifacts: they need the fork's private key, which is not on this Mac.
   local conf="gg-app/src-tauri/tauri.local-version.conf.json"
   printf '{"version":"%s","bundle":{"createUpdaterArtifacts":false}}\n' "$version" > "$conf"
-  trap 'rm -f "$REPO/$conf"' EXIT
+  # Expanded now: `conf` is local and gone by the time the trap runs.
+  trap "rm -f '$REPO/$conf'" EXIT
   (cd gg-app && pnpm tauri build --target aarch64-apple-darwin --bundles app \
     --config src-tauri/tauri.fork-mac.conf.json --config src-tauri/tauri.local-version.conf.json)
   codesign --verify --deep --strict "$BUILT"
