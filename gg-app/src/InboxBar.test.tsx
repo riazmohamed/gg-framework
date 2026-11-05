@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InboxItem } from "./agent";
 import { InboxBar } from "./InboxBar";
@@ -22,7 +22,7 @@ describe("InboxBar", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("offers the oldest message and counts the rest", () => {
+  it("offers the oldest message and counts the rest", async () => {
     const onSend = vi.fn();
     render(
       <InboxBar
@@ -33,17 +33,22 @@ describe("InboxBar", () => {
       />,
     );
     expect(screen.getByText("Autopilot: Fix the export (1 more waiting)")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    // The button settles its busy state after the handler resolves.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
     expect(onSend).toHaveBeenCalledWith(item("1", "Fix the export"));
   });
 
-  it("holds Send during a run but still allows Dismiss", () => {
+  it("holds Send during a run but still allows Dismiss", async () => {
     const onSend = vi.fn();
     const onDismiss = vi.fn();
     render(<InboxBar items={[item("1", "Fix")]} running onSend={onSend} onDismiss={onDismiss} />);
     const send = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
     expect(send.disabled).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    });
     expect(onDismiss).toHaveBeenCalledOnce();
     expect(onSend).not.toHaveBeenCalled();
   });
