@@ -45,6 +45,11 @@ lock() {
   trap 'rm -rf "$STATE/lock"' EXIT
 }
 
+# ps, not pgrep: pgrep -f misses the app from some shells.
+app_running() {
+  ps -axo command= | grep -qF "$APP_DEST/Contents/MacOS/gg-app"
+}
+
 # Run as its own process so `set -e` stops at the first failing step.
 steps() {
   local version="$1"
@@ -150,7 +155,7 @@ install() {
     return 0
   fi
   version="$(cat "$STATE/staged/version")"
-  if pgrep -qf "$APP_DEST/Contents/MacOS/gg-app"; then
+  if app_running; then
     if [[ ! -f "$STATE/staged/told" ]]; then
       say "GG Coder $version is ready. It installs the next time GG Coder is closed"
       touch "$STATE/staged/told"
@@ -172,7 +177,7 @@ install() {
 
 restore() {
   [[ -d "$STATE/previous/GG Coder.app" ]] || { echo "No previous app to restore"; return 1; }
-  if pgrep -qf "$APP_DEST/Contents/MacOS/gg-app"; then
+  if app_running; then
     echo "Close GG Coder first"
     return 1
   fi
