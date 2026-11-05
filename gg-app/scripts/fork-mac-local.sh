@@ -74,12 +74,27 @@ steps() {
 
 build() {
   cd "$REPO"
-  if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  # set -e does not apply inside a function called from `||`, so every git step is checked.
+  local dirty
+  if ! dirty="$(git status --porcelain --untracked-files=no 2>&1)"; then
+    say "Fork build skipped: git can't read $REPO ($dirty)"
+    return 1
+  fi
+  if [[ -n "$dirty" ]]; then
     say "Fork build skipped: $REPO has uncommitted changes"
     return 1
   fi
-  git fetch -q --no-tags upstream main
-  if ! git merge-base --is-ancestor upstream/main HEAD; then
+  if ! git fetch -q --no-tags upstream main >> "$STATE/build.log" 2>&1; then
+    say "Fork build skipped: couldn't fetch Ken's repo. It retries in 3 hours"
+    return 1
+  fi
+  local ancestor=0
+  git merge-base --is-ancestor upstream/main HEAD || ancestor=$?
+  if (( ancestor > 1 )); then
+    say "Fork build skipped: git failed comparing with Ken's repo. See $STATE/build.log"
+    return 1
+  fi
+  if (( ancestor == 1 )); then
     if ! git merge -q --no-edit upstream/main >> "$STATE/build.log" 2>&1; then
       git merge --abort || true
       say "Ken's latest release clashes with the inbox code. Fork updates are paused until it is fixed"
