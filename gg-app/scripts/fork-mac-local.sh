@@ -45,9 +45,12 @@ lock() {
   trap 'rm -rf "$STATE/lock"' EXIT
 }
 
-# ps, not pgrep: pgrep -f misses the app from some shells.
+# ps, not pgrep: pgrep -f misses the app from some shells. Not `ps | grep -q`: with
+# pipefail, grep -q quitting early makes ps fail, and the app reads as closed.
 app_running() {
-  ps -axo command= | grep -qF "$APP_DEST/Contents/MacOS/gg-app"
+  local procs
+  procs="$(ps -axo command=)" || return 0  # can't tell: treat as running
+  [[ "$procs" == *"$APP_DEST/Contents/MacOS/gg-app"* ]]
 }
 
 # Run as its own process so `set -e` stops at the first failing step.
@@ -155,6 +158,10 @@ install() {
     return 0
   fi
   version="$(cat "$STATE/staged/version")"
+  if [[ ! -x "$staged/Contents/MacOS/gg-app" ]] || ! codesign --verify --deep --strict "$staged" 2>/dev/null; then
+    say "The staged GG Coder $version is incomplete or badly signed. Not installing it"
+    return 1
+  fi
   if app_running; then
     if [[ ! -f "$STATE/staged/told" ]]; then
       say "GG Coder $version is ready. It installs the next time GG Coder is closed"
