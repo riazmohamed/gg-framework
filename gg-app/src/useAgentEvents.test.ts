@@ -1093,12 +1093,45 @@ describe("useAgentEvents", () => {
       );
       hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "r1", isError: false }));
     });
-    expect(getItems().filter((it) => it.kind === "generating_image")).toHaveLength(1);
+    const placeholders = getItems().filter((it) => it.kind === "generating_image");
+    expect(placeholders).toHaveLength(1);
+    expect(placeholders[0]).toMatchObject({ prompt: "a cat", gif: false });
 
     act(() => {
       hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "g1", isError: false }));
     });
     expect(getItems().filter((it) => it.kind === "generating_image")).toHaveLength(0);
+  });
+
+  it("shows a generated GIF as an animated image in the transcript", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_start", {
+          toolCallId: "g1",
+          name: "generate_image",
+          args: { prompt: "x", gif: {} },
+        }),
+      );
+    });
+    expect(getItems().find((it) => it.kind === "generating_image")).toMatchObject({ gif: true });
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_end", {
+          toolCallId: "g1",
+          isError: false,
+          details: {
+            imagePreviews: [
+              { base64: "R0lGODlhAQ", mediaType: "image/gif", path: "/p/.gg/generated/a.gif" },
+            ],
+          },
+        }),
+      );
+    });
+    const images = getItems().find((it) => it.kind === "images");
+    expect(images).toMatchObject({
+      images: [{ src: "data:image/gif;base64,R0lGODlhAQ", path: "/p/.gg/generated/a.gif" }],
+    });
   });
 
   it("turn_end accumulates output tokens across turns", () => {
@@ -1225,6 +1258,16 @@ describe("useAgentEvents", () => {
     // The approved marker lands in the transcript (rendered as a Ken bubble).
     const marker = getItems().find((i) => i.kind === "autopilot");
     expect(marker).toMatchObject({ kind: "autopilot", phase: "plan_approved" });
+  });
+
+  it("counts steps the model skipped marking before a later [DONE:n]", () => {
+    const { hook, deps } = setup();
+    deps.planTotalRef.current = 15;
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "[DONE:2] Step 3 now. " }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Step 7 done. [DONE:7]" }));
+    });
+    expect([...deps.planDoneRef.current].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 
   it("uses sidecar plan progress as the authoritative live-file snapshot", () => {

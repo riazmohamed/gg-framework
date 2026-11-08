@@ -25,7 +25,6 @@ import {
   setCritterModel,
   sendPrompt,
   sendKenPrompt,
-  cancelKen,
   setAutopilot,
   cancel,
   newSession,
@@ -38,6 +37,8 @@ import {
   type PromptMeta,
   type QueuedMessage,
   listHistory,
+  listShellSuggestions,
+  type ShellSuggestion,
   listTasks,
   type ChecklistEntry,
   runTask,
@@ -143,7 +144,6 @@ const GoalPicker = lazy(() =>
 );
 import { BackButton } from "./BackButton";
 import { HomeScreen } from "./HomeScreen";
-import { WorldScreen } from "./WorldScreen";
 import { SettingsModal } from "./SettingsModal";
 import { initialEntryView, type EntryView } from "./app-entry-view";
 import {
@@ -169,7 +169,13 @@ import { countPlanSteps } from "./plan-steps";
 import { toast } from "./toast";
 import { takeNewBlockedSkillMessages } from "./blocked-skills";
 import { collapseSecurityRows, takeNewSecurityNotices } from "./security-notices";
-import { toWire, type PendingAttachment } from "./attachments";
+import {
+  MAX_ATTACHMENT_BYTES,
+  attachmentBytes,
+  attachmentChips,
+  toWire,
+  type PendingAttachment,
+} from "./attachments";
 import { TranscriptRow } from "./TranscriptRow";
 import { nextId, lastIssuedId, type Item } from "./transcript-item";
 import { useTranscriptScroll } from "./useTranscriptScroll";
@@ -187,10 +193,12 @@ import { useChromeToggles } from "./useChromeToggles";
 import { useTranscriptExport } from "./useTranscriptExport";
 import { useWindowOrder } from "./useWindowOrder";
 import { dropHiddenFocus } from "./hidden-focus";
-import { Composer } from "./Composer";
+import { Composer, type ShellMenu } from "./Composer";
 import { UpdateBanner } from "./UpdateBanner";
 import { usePromptHistory } from "./usePromptHistory";
 import { usePromptEnhance } from "./usePromptEnhance";
+import { shellCommandFromInput, shellItemFromHistory, useShellRuns } from "./useShellRuns";
+import { filterShellSuggestions, shellEnterPicks } from "./shell-menu";
 import "./App.css";
 import "./Deck.css";
 import "./Trophies.css";
@@ -199,18 +207,23 @@ const DEFAULT_INPUT_PLACEHOLDER = "Type a message, / commands, @ files, @Ken for
 const INPUT_PLACEHOLDERS = [
   DEFAULT_INPUT_PLACEHOLDER,
   "Need a second opinion? Ask @Ken",
+  "Start with ! to run a command, like !git status",
   "Stuck on what to do next? Ask @Ken",
   DEFAULT_INPUT_PLACEHOLDER,
+  "Run tests yourself with !pnpm test, then ask GG to fix them",
   "Want a second set of eyes? Ask @Ken",
   "Unsure how to proceed? Ask @Ken",
+  "!ls runs in this project. GG sees the output next message",
   "Need a quick review? Ask @Ken",
 ] as const;
 const RUNNING_INPUT_PLACEHOLDERS = [
   "Agent is working. Add a follow-up if you want",
   "Got another thought? Queue it here",
+  "Run a command while you wait, like !git diff",
   "Agent is on it. You can stack the next note",
   "Thinking ahead? Drop the next instruction",
   "Keep going. Your next message will queue up",
+  "Check something yourself with !, it won't interrupt GG",
 ] as const;
 const INPUT_PLACEHOLDER_INTERVAL_MS = 12_000;
 const PLACEHOLDER_SHUFFLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -226,7 +239,7 @@ const VIDEO_CAPABILITY_WARNING =
 function shufflePlaceholderFrame(target: string, frame: number): string {
   const revealCount = Math.ceil((target.length * frame) / PLACEHOLDER_SHUFFLE_FRAMES);
   return Array.from(target, (char, index) => {
-    if (index < revealCount || /\s|[.,?/@]/.test(char)) return char;
+    if (index < revealCount || /\s|[.,?/@!]/.test(char)) return char;
     const pick = Math.floor(Math.random() * PLACEHOLDER_SHUFFLE_CHARS.length);
     return PLACEHOLDER_SHUFFLE_CHARS[pick];
   }).join("");
@@ -273,6 +286,12 @@ function App(): React.ReactElement {
   const lastProgressXpRef = useRef<number | null>(null);
   const [confettiNonce, setConfettiNonce] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  const [shellSuggestions, setShellSuggestions] = useState<ShellSuggestion[]>([]);
+  const [shellIndex, setShellIndex] = useState(0);
+  // The input the `!` picker was closed for (Esc or a pick); it reopens on edit.
+  const [shellMenuDismissedFor, setShellMenuDismissedFor] = useState<string | null>(null);
+  // The input the user last moved the picker's highlight for (↑/↓).
+  const [shellNavigatedFor, setShellNavigatedFor] = useState<string | null>(null);
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [displayPlaceholder, setDisplayPlaceholder] = useState(DEFAULT_INPUT_PLACEHOLDER);
   const displayPlaceholderRef = useRef(DEFAULT_INPUT_PLACEHOLDER);
@@ -491,40 +510,9 @@ function App(): React.ReactElement {
   const [restoreChecked, setRestoreChecked] = useState(false);
   // Every window starts from the mode-neutral home screen before choosing Code or Chat.
   const [entryView, setEntryView] = useState<EntryView>(initialEntryView(isSecondaryWindow));
-  // World has faded in over Home (Home holds its World plate down until then).
-  const [worldShown, setWorldShown] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>("general");
   // Re-open the matching session picker over an already-open workspace.
   const [showPicker, setShowPicker] = useState(false);
-  // World over whatever this window shows (Home, a picker or a workspace); Back returns to it. ONE World layer for
-  // every screen (see worldLayer below), so switching screens under it (the in-game computer opening a project)
-  // never reloads the game.
-  const [showWorld, setShowWorld] = useState(false);
-  // The in-game computer: this window's own GG Coder over World (WorldScreen.tsx).
-  const [worldComputer, setWorldComputer] = useState(false);
-  // In the computer the app keeps its full-window layout and is scaled into the space between World's top bar and
-  // Stand up (.app-in-monitor reads --mon-tf).
-  const monitorOpen = showWorld && worldComputer;
-  useEffect(() => {
-    if (!monitorOpen) return;
-    const root = document.documentElement;
-    const fit = (): void => {
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-      const top = 52;
-      const bottom = 64;
-      const k = Math.max(0.5, Math.min((w - 40) / w, (h - top - bottom) / h));
-      // scaled about the window's centre (.app-in-monitor's transform-origin), then shifted into the free band
-      const dy = top + (h - top - bottom - k * h) / 2 - (h - k * h) / 2;
-      root.style.setProperty("--mon-tf", `translateY(${dy.toFixed(1)}px) scale(${k.toFixed(4)})`);
-    };
-    fit();
-    window.addEventListener("resize", fit);
-    return () => {
-      window.removeEventListener("resize", fit);
-      root.style.removeProperty("--mon-tf");
-    };
-  }, [monitorOpen]);
   // Bumped on each workspace/session choice to force re-hydration.
   const [hydrateNonce, setHydrateNonce] = useState(0);
   const { activity, handleActivityEvent } = useTaskActivity(hydrateNonce);
@@ -1018,11 +1006,26 @@ function App(): React.ReactElement {
   // state (its render + other handlers use it) and passes the setters +
   // cross-cutting refs in. App consumes `handleEvent` (for the SSE subscription)
   // and the two helpers it still calls directly (`pushItem`, `endStreamingText`).
+  const focusComposer = useCallback(() => inputRef.current?.focus(), []);
+  const shellRuns = useShellRuns({ setItems, nextId, liveText, focusComposer, toast });
+  const {
+    shellTrusted,
+    refreshShellTrust,
+    revokeShellTrust,
+    submitShell,
+    markShellShared,
+    handleShellEvent,
+  } = shellRuns;
+  const shellActions = useMemo(
+    () => ({ confirm: shellRuns.confirm, stop: shellRuns.stop }),
+    [shellRuns.confirm, shellRuns.stop],
+  );
   const { handleEvent, pushItem, endStreamingText } = useAgentEvents({
     setItems,
     nextId,
     handleKenEvent,
     handleAutopilotEvent,
+    handleShellEvent,
     handleActivityEvent,
     setState,
     setTasks,
@@ -1105,6 +1108,8 @@ function App(): React.ReactElement {
       // Hydrate the transcript when resuming an existing session — the webview
       // only sees live SSE events, so past messages must be fetched explicitly.
       const history = await listHistory();
+      const pendingShellRuns = Array.isArray(st?.pendingShellRuns) ? st.pendingShellRuns : [];
+      void refreshShellTrust();
       if (history.length > 0) {
         // A freshly hydrated session lands at the bottom (newest message).
         stickToBottomRef.current = true;
@@ -1181,6 +1186,7 @@ function App(): React.ReactElement {
                 };
               if (h.infoKind === "video_warning")
                 return { kind: "info", id: nextId(), text: VIDEO_CAPABILITY_WARNING };
+              if (h.shell) return shellItemFromHistory(h.shell, nextId(), pendingShellRuns);
               // Ken "Send to GG Coder" prompts: restore the shimmer label, not the
               // full prompt body (matches live).
               if (h.kenSent && h.role === "user")
@@ -1219,6 +1225,9 @@ function App(): React.ReactElement {
                 command: h.command || label !== null,
                 ...(label !== null ? { label } : {}),
                 images: h.images && h.images.length > 0 ? h.images : undefined,
+                ...(h.attachments && h.attachments.length > 0
+                  ? { attachments: h.attachments }
+                  : {}),
                 ...(parsed && parsed.files.length > 0 ? { files: parsed.files } : {}),
                 ...(h.enhancements && h.enhancements.length > 0
                   ? { enhancements: h.enhancements }
@@ -1264,7 +1273,7 @@ function App(): React.ReactElement {
       setLiveFromId(lastIssuedId() + 1);
       setHydrated(true);
     }
-  }, [stickToBottomRef]);
+  }, [stickToBottomRef, refreshShellTrust]);
 
   useEffect(() => {
     const unsub = subscribe(handleEvent);
@@ -1481,7 +1490,54 @@ function App(): React.ReactElement {
   // `@`-mention picker: open whenever a mention token is active and the search
   // returned at least one file. Clamp the highlighted row to the result count.
   // Never open while `@Ken` is active — that token addresses Ken, not a file.
-  const mentionOpen = mention !== null && fileMatches.length > 0 && !kenActive;
+  // `!cmd`: the input runs a command instead of messaging the agent.
+  const shellMode = workspaceMode === "code" && shellCommandFromInput(input) !== null;
+  // Entering `!` loads the picker's commands (history counts change per run).
+  useEffect(() => {
+    if (!shellMode) return;
+    let live = true;
+    void listShellSuggestions().then((list) => {
+      if (live) setShellSuggestions(list);
+    });
+    return () => {
+      live = false;
+    };
+  }, [shellMode]);
+  const shellMatches = useMemo(
+    () => (shellMode ? filterShellSuggestions(shellSuggestions, input.slice(1)) : []),
+    [shellMode, shellSuggestions, input],
+  );
+  const shellMenu: ShellMenu | null =
+    shellMatches.length > 0 && shellMenuDismissedFor !== input
+      ? {
+          matches: shellMatches,
+          activeIndex: shellIndex % shellMatches.length,
+          setActiveIndex: setShellIndex,
+          navigate: (delta) => {
+            const n = shellMatches.length;
+            setShellIndex((i) => (((i + delta) % n) + n) % n);
+            setShellNavigatedFor(input);
+          },
+          enterPicks: shellEnterPicks(input, shellNavigatedFor),
+          pick: (s) => {
+            const next = `!${s.command}`;
+            setInput(next);
+            setShellIndex(0);
+            // A picked command is complete: close the picker until the user edits it.
+            setShellMenuDismissedFor(next);
+            requestAnimationFrame(() => {
+              const el = inputRef.current;
+              if (!el) return;
+              el.focus();
+              el.setSelectionRange(next.length, next.length);
+            });
+          },
+          dismiss: () => setShellMenuDismissedFor(input),
+          trusted: shellTrusted,
+          revokeTrust: () => void revokeShellTrust(),
+        }
+      : null;
+  const mentionOpen = mention !== null && fileMatches.length > 0 && !kenActive && !shellMode;
   const clampedFileIndex = fileMatches.length > 0 ? fileIndex % fileMatches.length : 0;
   // Footer background-tasks indicator only shows while something is actually
   // running (exited tasks shouldn't keep the bar item around).
@@ -1663,6 +1719,7 @@ function App(): React.ReactElement {
     const disposition = submitDisposition(trimmed, readyRef.current, running);
     if (disposition === "ignore") return false;
     chatLayout.capture();
+    markShellShared();
     // A send that supersedes an open question is consumed the moment it lands
     // (the sidecar releases the parked call), so it must not wear the queued
     // look for the one frame before that, nor open the queued strip below the
@@ -2213,6 +2270,21 @@ function App(): React.ReactElement {
     if (!readyRef.current) return;
     if (!trimmed && attachments.length === 0 && mentionedPaths.length === 0) return;
 
+    // `!cmd` runs a command for the user, in the project folder, with no agent
+    // turn. Attachments and file chips stay in the composer for the next message.
+    const shellCommand = workspaceMode === "code" ? shellCommandFromInput(input) : null;
+    if (shellCommand !== null) {
+      if (!shellCommand) return;
+      chatLayout.capture();
+      recordHistory(trimmed);
+      stickToBottomRef.current = true;
+      submitShell(shellCommand, state?.cwd ?? "");
+      setInput("");
+      setSlashIndex(0);
+      setMention(null);
+      return;
+    }
+
     // `/schedule` registers a recurring prompt instead of sending anything now.
     // An invalid draft is refused outright — sending it would run the raw command
     // text as a prompt — and the hint above the composer already says why.
@@ -2271,11 +2343,23 @@ function App(): React.ReactElement {
       return;
     }
 
+    // Over this the sidecar refuses the whole request, so stop here with the draft intact.
+    const totalBytes = attachmentBytes(attachments);
+    if (totalBytes > MAX_ATTACHMENT_BYTES) {
+      const mb = (bytes: number): number => Math.ceil(bytes / (1024 * 1024));
+      toast(
+        `Attachments are too big to send (${mb(totalBytes)} MB). The limit is ${mb(MAX_ATTACHMENT_BYTES)} MB per message.`,
+        "error",
+      );
+      return;
+    }
+
     chatLayout.capture();
     // The strips this send clears (chips, the cold-cache notice) must leave in
     // the bubble's commit, or their fold resizes the transcript mid-move.
     setSendCount((n) => n + 1);
     recordHistory(trimmed);
+    markShellShared();
     // Read BEFORE the dismissal clears the band: a prompt that supersedes a
     // question is consumed as soon as it lands, so it must neither flash the
     // queued look on the way in nor open the queued strip below the transcript
@@ -2314,6 +2398,7 @@ function App(): React.ReactElement {
         text: trimmed,
         command: isWorkflowCommand(trimmed),
         images: queuedImgs.length > 0 ? queuedImgs : undefined,
+        attachments: attachmentChips(attachments),
         files: mentionedPaths.length > 0 ? mentionedPaths : undefined,
         enhancements: sentEnhancements,
         queued: showsQueuedBubble("queue", supersedesQuestion) ? true : undefined,
@@ -2339,6 +2424,7 @@ function App(): React.ReactElement {
       text: trimmed,
       command: isWorkflowCommand(trimmed),
       images: imgPreviews.length > 0 ? imgPreviews : undefined,
+      attachments: attachmentChips(attachments),
       files: mentionedPaths.length > 0 ? mentionedPaths : undefined,
       enhancements: sentEnhancements,
     });
@@ -2515,53 +2601,14 @@ function App(): React.ReactElement {
     );
   }
 
-  // World (one layer for every screen, so changing screen under it never reloads the game) and the in-game
-  // computer: while it's open this window's GG Coder sits inside a monitor over World (.app-in-monitor).
-  // World's Back always lands on GG Coder's Home screen (owner), never on whatever the in-game computer was last
-  // showing. A session opened there keeps running and is one click away from Home.
-  const closeWorld = (): void =>
-    showScreen(() => {
-      setShowWorld(false);
-      setWorldShown(false);
-      setWorldComputer(false);
-      setShowPicker(false);
-      setNeedsProject(true);
-      setEntryView("home");
-    });
-  const onWorldComputer = (open: boolean): void => {
-    setWorldComputer(open);
-    // The computer always boots to GG Coder's Home screen (owner), whatever this window was showing: the same way
-    // the app's own Back gets there (a running session carries on underneath and is one click away again).
-    if (open) {
-      setShowPicker(false);
-      setNeedsProject(true);
-      setEntryView("home");
-    }
-  };
-  const inMonitor = monitorOpen ? " app-in-monitor" : "";
-  const worldLayer = showWorld ? (
-    <div className="world-overlay">
-      <WorldScreen
-        player={progress}
-        onShown={() => setWorldShown(true)}
-        onClose={closeWorld}
-        computer={worldComputer}
-        onComputer={onWorldComputer}
-      />
-    </div>
-  ) : null;
-
   if (needsProject) {
     return (
       <>
         <div
-          className={`app${windowFocused ? " window-focused" : ""}${inMonitor}`}
+          className={`app${windowFocused ? " window-focused" : ""}`}
           style={{ background: theme.background }}
         >
-          {/* World opens OVER Home (as it does over a workspace), so Home
-            stays put underneath while the game fades in, and Back fades
-            straight back to it. */}
-          {entryView === "home" || entryView === "world" ? (
+          {entryView === "home" ? (
             <HomeScreen
               onProjects={() =>
                 showScreen(() => {
@@ -2587,11 +2634,6 @@ function App(): React.ReactElement {
                   setEntryView("motion");
                 })
               }
-              // On the in-game computer World is already open behind it: World just stands the player up.
-              onWorld={() =>
-                worldComputer ? setWorldComputer(false) : showScreen(() => setShowWorld(true))
-              }
-              worldShown={worldShown}
               onSettings={(tab) =>
                 showScreen(() => {
                   setSettingsTab(tab ?? "general");
@@ -2639,7 +2681,6 @@ function App(): React.ReactElement {
           {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
           <Toaster />
         </div>
-        {worldLayer}
       </>
     );
   }
@@ -2663,7 +2704,7 @@ function App(): React.ReactElement {
     return (
       <>
         <div
-          className={`app${windowFocused ? " window-focused" : ""}${inMonitor}`}
+          className={`app${windowFocused ? " window-focused" : ""}`}
           style={{ background: theme.background }}
         >
           {workspaceMode === "chat" ? (
@@ -2681,7 +2722,6 @@ function App(): React.ReactElement {
           {/* Tray Settings can toast a save failure over the picker. */}
           <Toaster />
         </div>
-        {worldLayer}
       </>
     );
   }
@@ -2706,7 +2746,7 @@ function App(): React.ReactElement {
   return (
     <>
       <div
-        className={`app${isFileDragOver ? " app-file-dragover" : ""}${windowFocused ? " window-focused" : ""}${goalWorldOpen ? " goal-world-open" : ""}${inMonitor}`}
+        className={`app${isFileDragOver ? " app-file-dragover" : ""}${windowFocused ? " window-focused" : ""}${goalWorldOpen ? " goal-world-open" : ""}`}
         data-glow={glowState}
         style={{ background: theme.background, ...glowStyle }}
         onDragEnter={handleWindowDragEnter}
@@ -2895,6 +2935,7 @@ function App(): React.ReactElement {
                             onContentGrow={maybeScrollToBottom}
                             onAskAnswer={answerAsk}
                             onAskType={typeAskInstead}
+                            shellActions={shellActions}
                           />
                         );
                         // Zero-height landing spot for "You have new chats". A flat
@@ -3081,7 +3122,6 @@ function App(): React.ReactElement {
               }}
               progress={progress}
               trophies={trophies.snapshot}
-              onOpenWorld={() => showScreen(() => setShowWorld(true))}
               usageExtras={
                 windowTotal > 1 &&
                 windowIndex !== null && (
@@ -3132,7 +3172,6 @@ function App(): React.ReactElement {
                   <KenActivityBar
                     runStartTs={kenRunStartTs}
                     tokens={kenTokens}
-                    onCancel={() => void cancelKen()}
                     toolsHidden={toolsHidden}
                     onToggleTools={toggleTools}
                   />
@@ -3149,7 +3188,6 @@ function App(): React.ReactElement {
                     thinkingAccumMs={thinkingAccumMs}
                     planTotal={workspaceMode !== "code" ? 0 : planTotal}
                     planDone={workspaceMode !== "code" ? 0 : Math.min(planDone.size, planTotal)}
-                    onCancel={requestCancel}
                     toolsHidden={toolsHidden}
                     hasToolFeed={liveToolFeed.length > 0}
                     onToggleTools={toggleTools}
@@ -3202,7 +3240,9 @@ function App(): React.ReactElement {
                   enhancement={enhancement}
                   setEnhancement={setEnhancement}
                   enhancing={enhancing}
-                  enhanceHintVisible={enhanceHintVisible}
+                  enhanceHintVisible={enhanceHintVisible && !shellMode}
+                  shellMode={shellMode}
+                  shellMenu={shellMenu}
                   runEnhance={runEnhance}
                   kenActive={kenActive}
                   kenInputParts={kenInputParts}
@@ -3285,7 +3325,6 @@ function App(): React.ReactElement {
           />
         )}
       </div>
-      {worldLayer}
     </>
   );
 }

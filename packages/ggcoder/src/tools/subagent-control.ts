@@ -1,7 +1,11 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import type { SubAgentManager } from "../core/subagent-manager.js";
-import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
+import type { SubAgentManager, SubAgentSnapshot } from "../core/subagent-manager.js";
+import {
+  isPlanModeActive,
+  isReadOnlyAgent,
+  planModeAgentRestriction,
+} from "../core/runtime-mode.js";
 import { renderAgentRoster } from "./subagent-shared.js";
 import { AcceptanceChecksParam } from "../core/acceptance-checks.js";
 import { ACTIVE_LIMIT, DEFAULT_WAIT_MS, MAX_WAIT_MS } from "../core/subagent-manager.js";
@@ -12,12 +16,72 @@ function json(value: unknown): { content: string } {
   return { content: JSON.stringify(value) };
 }
 
+/**
+ * What the parent model sees of a child. The full snapshot (timestamps,
+ * session ids, provider, collected flag, token split) is UI/persistence
+ * state; resent in every later request it only costs tokens. The
+ * transcript path rides once, on the result that carries the output.
+ */
+function spawnView(s: SubAgentSnapshot) {
+  return {
+    agent_id: s.agent_id,
+    task_name: s.task_name,
+    state: s.state,
+    ...(s.agent_name && { agent_name: s.agent_name }),
+    ...(s.model && { model: s.model }),
+    ...(s.cwd && { cwd: s.cwd }),
+    ...(s.error && { error: s.error }),
+  };
+}
+
+function waitView(s: SubAgentSnapshot) {
+  return {
+    agent_id: s.agent_id,
+    task_name: s.task_name,
+    state: s.state,
+    turn_count: s.turn_count,
+    tool_use_count: s.tool_use_count,
+    ...(s.current_activity && { current_activity: s.current_activity }),
+    ...(s.output !== undefined && { output: s.output }),
+    ...(s.error && { error: s.error }),
+    ...(s.acceptance && { acceptance: s.acceptance }),
+    ...(s.receipt && { receipt: s.receipt }),
+    ...(s.child_session_path && { transcript: s.child_session_path }),
+    ...(s.cwd && { cwd: s.cwd }),
+    ...(s.recovered && { recovered: true }),
+  };
+}
+
+function listView(s: SubAgentSnapshot) {
+  return {
+    agent_id: s.agent_id,
+    task_name: s.task_name,
+    state: s.state,
+    elapsed_ms: s.elapsed_ms,
+    turn_count: s.turn_count,
+    tool_use_count: s.tool_use_count,
+    token_usage: { input: s.token_usage.input, output: s.token_usage.output },
+    ...(s.current_activity && { current_activity: s.current_activity }),
+    ...(s.agent_name && { agent_name: s.agent_name }),
+    ...(s.model && { model: s.model }),
+    ...(s.acceptance && { acceptance: s.acceptance }),
+  };
+}
+
 export function createSubAgentControlTools(
   manager: SubAgentManager,
   planModeRef?: { current: boolean },
 ): AgentTool[] {
-  const blocked = (name: string) =>
-    isPlanModeActive(planModeRef) ? planModeRestriction(name) : undefined;
+  const agentNamed = (name: string | undefined) =>
+    name === undefined ? undefined : manager.agents.find((agent) => agent.name === name);
+  // Plan mode lets only read-only children run (see isReadOnlyAgent); an
+  // unnamed or unknown child counts as able to edit.
+  const blocked = (tool: string, agentNames: readonly (string | undefined)[]) =>
+    isPlanModeActive(planModeRef) && !agentNames.every((name) => isReadOnlyAgent(agentNamed(name)))
+      ? planModeAgentRestriction(tool, manager.agents)
+      : undefined;
+  const childAgent = (agentId: string) =>
+    manager.list().find((child) => child.agent_id === agentId)?.agent_name;
 
   // Constrain `agent` to the real roster when one exists: a name the model
   // invented then fails schema validation, which it can correct, instead of
@@ -66,7 +130,10 @@ export function createSubAgentControlTools(
     parameters: spawnParams,
     executionMode: "parallel",
     async execute(args) {
-      const restriction = blocked("spawn_agent");
+      const restriction = blocked(
+        "spawn_agent",
+        args.tasks.map((t) => t.agent ?? manager.defaultAgent),
+      );
       if (restriction) return restriction;
       // Each spawn runs its limit and duplicate-name checks and registers its
       // worker before its first await, so starting them together cannot
@@ -84,7 +151,7 @@ export function createSubAgentControlTools(
       );
       const results = settled.map((result, index) =>
         result.status === "fulfilled"
-          ? result.value
+          ? spawnView(result.value)
           : {
               task_name: args.tasks[index]?.task_name,
               error: result.reason instanceof Error ? result.reason.message : String(result.reason),
@@ -104,7 +171,7 @@ export function createSubAgentControlTools(
     description: "Queue steering into a running child agent without starting another turn.",
     parameters: messageParams,
     async execute(args) {
-      const restriction = blocked("send_message");
+      const restriction = blocked("send_message", [childAgent(args.agent_id)]);
       if (restriction) return restriction;
       return json({
         agent_id: args.agent_id,
@@ -123,9 +190,9 @@ export function createSubAgentControlTools(
     description: "Start another turn in an idle child while preserving that child's context.",
     parameters: followupParams,
     async execute(args) {
-      const restriction = blocked("followup_task");
+      const restriction = blocked("followup_task", [childAgent(args.agent_id)]);
       if (restriction) return restriction;
-      return json(await manager.followup(args.agent_id, args.task, args.checks));
+      return json(spawnView(await manager.followup(args.agent_id, args.task, args.checks)));
     },
   };
 
@@ -150,7 +217,12 @@ export function createSubAgentControlTools(
       "task_output).",
     parameters: waitParams,
     async execute(args) {
-      return json(await manager.wait(args.agent_ids, args.condition, args.timeout_ms));
+      const { timed_out, agents } = await manager.wait(
+        args.agent_ids,
+        args.condition,
+        args.timeout_ms,
+      );
+      return json({ timed_out, agents: agents.map(waitView) });
     },
   };
 
@@ -161,7 +233,7 @@ export function createSubAgentControlTools(
       "List child IDs, task names, lifecycle states, activity, turns, tools, and token totals.",
     parameters: listParams,
     async execute() {
-      return json(manager.list().map(({ output: _output, error: _error, ...summary }) => summary));
+      return json(manager.list().map(listView));
     },
   };
 
@@ -172,7 +244,7 @@ export function createSubAgentControlTools(
       "Interrupt a child's current turn while retaining its context for a later follow-up.",
     parameters: interruptParams,
     async execute(args) {
-      return json(await manager.interrupt(args.agent_id));
+      return json(waitView(await manager.interrupt(args.agent_id)));
     },
   };
 

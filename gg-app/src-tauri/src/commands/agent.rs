@@ -253,7 +253,7 @@ pub(crate) async fn agent_prompt(
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    client
+    let res = client
         .post(format!("{}/prompt", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({
@@ -264,7 +264,26 @@ pub(crate) async fn agent_prompt(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    Ok(())
+    let status = res.status();
+    let body = if status.is_success() {
+        None
+    } else {
+        res.json::<serde_json::Value>().await.ok()
+    };
+    prompt_result(status, body.as_ref())
+}
+
+/// A refused prompt (too large, empty, run still stopping) must reach the
+/// webview as an error so it restores the draft instead of looking sent.
+pub(crate) fn prompt_result(
+    status: reqwest::StatusCode,
+    body: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(sidecar_error_message(status, body))
+    }
 }
 
 pub(crate) async fn sidecar_get_json(
@@ -855,6 +874,90 @@ pub(crate) async fn agent_autopilot_set(
     sidecar_json(res).await
 }
 
+/// Proxy: run a command the user typed as `!cmd` in this window's project.
+/// `confirmed` is true only after the user approved this exact command; the
+/// sidecar refuses unconfirmed runs unless the project is trusted.
+#[tauri::command]
+pub(crate) async fn agent_shell_run(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    id: String,
+    command: String,
+    confirmed: bool,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/shell/run", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "id": id, "command": command, "confirmed": confirmed }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
+/// Proxy: stop a running `!cmd` and everything it started.
+#[tauri::command]
+pub(crate) async fn agent_shell_cancel(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/shell/cancel", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
+/// Proxy: the `!` picker's commands for this project (history first, most used).
+#[tauri::command]
+pub(crate) async fn agent_shell_suggestions(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}/shell/suggestions", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
+/// Proxy: read (`trusted: None`) or set whether this project runs the user's
+/// `!` commands without asking. Returns `{ trusted }`.
+#[tauri::command]
+pub(crate) async fn agent_shell_trust(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    trusted: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let url = format!("{}/shell/trust", sidecar_base(port));
+    let req = match trusted {
+        Some(value) => client
+            .post(url)
+            .json(&serde_json::json!({ "trusted": value })),
+        None => client.get(url),
+    };
+    let res = req
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
 /// Proxy: list workflow (prompt-template) slash commands.
 #[tauri::command]
 pub(crate) async fn agent_commands(
@@ -1094,6 +1197,24 @@ pub(crate) async fn agent_remove_plugin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_result_rejects_refused_prompts() {
+        assert_eq!(prompt_result(reqwest::StatusCode::ACCEPTED, None), Ok(()));
+        let too_large = serde_json::json!({ "error": "request body too large" });
+        assert_eq!(
+            prompt_result(reqwest::StatusCode::PAYLOAD_TOO_LARGE, Some(&too_large)),
+            Err("request body too large".to_string())
+        );
+        let stopping = serde_json::json!({
+            "error": "run_cancelling",
+            "message": "The last run is still stopping.",
+        });
+        assert_eq!(
+            prompt_result(reqwest::StatusCode::CONFLICT, Some(&stopping)),
+            Err("The last run is still stopping.".to_string())
+        );
+    }
 
     #[test]
     fn cancel_response_accepts_acknowledged_success() {

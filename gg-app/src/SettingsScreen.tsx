@@ -25,7 +25,7 @@ import {
 } from "./settings-header";
 import {
   waitForReady,
-  authStatus,
+  hasModelSource,
   getServeStatus,
   startServe,
   stopServe,
@@ -119,7 +119,12 @@ export function SettingsScreen({ onClose, initialTab = "general" }: Props): Reac
       >
         <SettingsReadyProvider hold={gate.hold}>
           <SettingsHeaderProvider slots={{ status: statusSlot, actions: actionsSlot }}>
-            <div className={`settings-page ${switched ? "is-switching" : "is-entering"}`}>
+            <div
+              className={`settings-page ${switched ? "is-switching" : "is-entering"}${
+                // The providers page fills the window: its brain sits in the middle.
+                tab === "providers" ? " is-fill" : ""
+              }`}
+            >
               {tab === "general" && (
                 <EmbeddedModal>
                   <SettingsModal
@@ -183,8 +188,7 @@ function RemotePage(): React.ReactElement {
     try {
       if (!serving) {
         // The bot hands messages to an agent, so serving needs a provider.
-        const providers = await authStatus();
-        if (!providers.some((p) => p.connected)) {
+        if (!(await hasModelSource())) {
           toast("Connect an AI provider first.", "warning");
           return;
         }

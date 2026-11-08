@@ -1,4 +1,5 @@
 import type http from "node:http";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import type { ToolResultContent } from "@kenkaiiii/gg-ai";
 import { restoreAppErrorPayload } from "../app-error.js";
@@ -16,7 +17,7 @@ import {
 } from "../core/session-history.js";
 import { spawnedTasks } from "../tools/subagent-shared.js";
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
-import { downscaleForPreview, IMAGE_MEDIA_TYPES } from "../utils/image.js";
+import { animatedPreview, downscaleForPreview, IMAGE_MEDIA_TYPES } from "../utils/image.js";
 import { readFileBounded } from "../tools/operations.js";
 import { json } from "./http.js";
 import { type HistoryEntryForWire, detectHookKind } from "./history.js";
@@ -52,6 +53,37 @@ export function restoredWorkerRows(
     },
   ];
 }
+
+/**
+ * An animated preview for a restored generate_image GIF, read from its file:
+ * the session only persists the first frame as a still, which would freeze it.
+ * Null when the result is not a GIF or the file has gone.
+ */
+export async function restoredGifPreview(
+  toolName: string | undefined,
+  imgPath: string | undefined,
+): Promise<string | null> {
+  if (toolName !== "generate_image" || !imgPath) return null;
+  if (path.extname(imgPath).toLowerCase() !== ".gif") return null;
+  const info = await stat(imgPath).catch(() => null);
+  if (!info?.isFile()) return null;
+  // Reopening a chat re-renders every GIF in it; resize each file once.
+  const key = `${imgPath}\0${info.mtimeMs}\0${info.size}`;
+  const cached = gifPreviewCache.get(key);
+  if (cached) return cached;
+  const raw = await readFileBounded(imgPath).catch(() => null);
+  if (!raw || raw.subarray(0, 4).toString("latin1") !== "GIF8") return null;
+  const preview = await animatedPreview(raw);
+  const src = `data:${preview.mediaType};base64,${preview.buffer.toString("base64")}`;
+  gifPreviewCache.set(key, src);
+  if (gifPreviewCache.size > GIF_PREVIEW_CACHE_SIZE) {
+    gifPreviewCache.delete(gifPreviewCache.keys().next().value!);
+  }
+  return src;
+}
+
+const GIF_PREVIEW_CACHE_SIZE = 32;
+const gifPreviewCache = new Map<string, string>();
 
 export function handleHistoryRoutes(
   ctx: SessionRouteContext,
@@ -229,6 +261,22 @@ export function handleHistoryRoutes(
           } else if (marker.kind === "error" && typeof d.headline === "string") {
             const error = restoreAppErrorPayload(d);
             if (error) history.push({ role: "assistant", text: "", error });
+          } else if (marker.kind === "shell" && typeof d.command === "string") {
+            history.push({
+              role: "assistant",
+              text: "",
+              shell: {
+                runId: typeof d.runId === "string" ? d.runId : "",
+                command: d.command,
+                cwd: typeof d.cwd === "string" ? d.cwd : "",
+                exitCode: typeof d.exitCode === "number" ? d.exitCode : null,
+                durationMs: typeof d.durationMs === "number" ? d.durationMs : 0,
+                cancelled: d.cancelled === true,
+                output: typeof d.output === "string" ? d.output : "",
+                truncated: d.truncated === true,
+                ...(typeof d.error === "string" ? { error: d.error } : {}),
+              },
+            });
           } else if (marker.kind === "interrupted_run") {
             // Rendered as an error row: the run's tools already changed the
             // repo, so the user needs to see it and decide what to do. We
@@ -283,6 +331,11 @@ export function handleHistoryRoutes(
               for (const block of imageBlocks) {
                 if (block.type !== "image") continue;
                 const imgPath = imgPaths[blockIndex++];
+                const animated = await restoredGifPreview(toolNameById.get(tr.toolCallId), imgPath);
+                if (animated) {
+                  toolImages.push({ src: animated, path: imgPath });
+                  continue;
+                }
                 const previewBuf = await downscaleForPreview(Buffer.from(block.data, "base64"));
                 toolImages.push({
                   src: `data:${block.mediaType};base64,${previewBuf.toString("base64")}`,
@@ -355,12 +408,13 @@ export function handleHistoryRoutes(
             // the user never saw while working.
             if (
               (!msg.provenance || (!restored.autopilotInjected && !restored.notification)) &&
-              (text.trim() || restored.images.length > 0)
+              (text.trim() || restored.images.length > 0 || restored.attachments.length > 0)
             ) {
               history.push({
                 role: "user",
                 text: command ?? text,
                 images: restored.images,
+                ...(restored.attachments.length > 0 ? { attachments: restored.attachments } : {}),
                 hook,
                 command: command !== null,
                 compacted,

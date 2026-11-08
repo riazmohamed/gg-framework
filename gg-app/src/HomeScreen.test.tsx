@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { error as logError } from "@tauri-apps/plugin-log";
-import { authStatus, getSettings } from "./agent";
+import { getSettings, hasModelSource } from "./agent";
 import { HomeScreen } from "./HomeScreen";
 
 vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(async () => undefined) }));
@@ -11,7 +11,6 @@ vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn(async () => "1.0.0") }
 vi.mock("./AsciiLogo", () => ({ AsciiLogo: () => null }));
 vi.mock("./HomeScenery", () => ({ HomeScenery: () => null, withScenery: (b: unknown) => b }));
 vi.mock("./HomeCritters", () => ({ HomeCritters: () => null }));
-vi.mock("./RankBadge", () => ({ RankBadge: () => null }));
 vi.mock("./ScorecardModal", () => ({ ScorecardModal: () => null }));
 vi.mock("./update", () => ({ useAppUpdate: () => ({ status: "idle" }) }));
 vi.mock("./toast", () => ({ toast: vi.fn() }));
@@ -19,7 +18,7 @@ vi.mock("./agent", () => ({
   openUrl: vi.fn(),
   waitForReady: vi.fn(async () => undefined),
   getSettings: vi.fn(),
-  authStatus: vi.fn(),
+  hasModelSource: vi.fn(),
   openWhatsNewWindow: vi.fn(),
   getProgress: vi.fn(async () => null),
   setRemoteActive: vi.fn(),
@@ -34,7 +33,7 @@ afterEach(() => {
 describe("HomeScreen", () => {
   it("logs a failed setup check instead of swallowing it", async () => {
     vi.mocked(getSettings).mockRejectedValue(new Error("settings unreadable"));
-    vi.mocked(authStatus).mockResolvedValue([]);
+    vi.mocked(hasModelSource).mockResolvedValue(false);
 
     render(
       <HomeScreen
@@ -42,7 +41,6 @@ describe("HomeScreen", () => {
         onGoals={vi.fn()}
         onChat={vi.fn()}
         onMotion={vi.fn()}
-        onWorld={vi.fn()}
         onSettings={vi.fn()}
       />,
     );
@@ -55,16 +53,7 @@ describe("HomeScreen", () => {
 
   it("offers Motion beside Code and Chat and opens it once set up", async () => {
     vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
-    vi.mocked(authStatus).mockResolvedValue([
-      {
-        value: "anthropic",
-        label: "Anthropic",
-        description: "",
-        methods: [],
-        connected: true,
-        connectedMethods: [],
-      },
-    ]);
+    vi.mocked(hasModelSource).mockResolvedValue(true);
     const onMotion = vi.fn();
 
     render(
@@ -73,7 +62,6 @@ describe("HomeScreen", () => {
         onGoals={vi.fn()}
         onChat={vi.fn()}
         onMotion={onMotion}
-        onWorld={vi.fn()}
         onSettings={vi.fn()}
       />,
     );
@@ -90,16 +78,7 @@ describe("HomeScreen", () => {
 
   it("orders the workspaces Code, Goals, Chat, Motion and opens Goals", async () => {
     vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
-    vi.mocked(authStatus).mockResolvedValue([
-      {
-        value: "anthropic",
-        label: "Anthropic",
-        description: "",
-        methods: [],
-        connected: true,
-        connectedMethods: [],
-      },
-    ]);
+    vi.mocked(hasModelSource).mockResolvedValue(true);
     const onGoals = vi.fn();
 
     render(
@@ -108,7 +87,6 @@ describe("HomeScreen", () => {
         onGoals={onGoals}
         onChat={vi.fn()}
         onMotion={vi.fn()}
-        onWorld={vi.fn()}
         onSettings={vi.fn()}
       />,
     );
@@ -129,7 +107,7 @@ describe("HomeScreen", () => {
 
   it("shows the running version beside What's new, not in the update corner", async () => {
     vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
-    vi.mocked(authStatus).mockResolvedValue([]);
+    vi.mocked(hasModelSource).mockResolvedValue(false);
 
     const { container } = render(
       <HomeScreen
@@ -137,7 +115,6 @@ describe("HomeScreen", () => {
         onGoals={vi.fn()}
         onChat={vi.fn()}
         onMotion={vi.fn()}
-        onWorld={vi.fn()}
         onSettings={vi.fn()}
       />,
     );
@@ -152,7 +129,7 @@ describe("HomeScreen", () => {
 
   it("shows Goals with no Beta tag and leaves the byline to Settings", async () => {
     vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
-    vi.mocked(authStatus).mockResolvedValue([]);
+    vi.mocked(hasModelSource).mockResolvedValue(false);
 
     render(
       <HomeScreen
@@ -160,7 +137,6 @@ describe("HomeScreen", () => {
         onGoals={vi.fn()}
         onChat={vi.fn()}
         onMotion={vi.fn()}
-        onWorld={vi.fn()}
         onSettings={vi.fn()}
       />,
     );
@@ -180,50 +156,5 @@ describe("HomeScreen", () => {
     expect(screen.getByRole("button", { name: "Chat" }).hasAttribute("aria-describedby")).toBe(
       false,
     );
-  });
-
-  it("offers World after Motion, never dimmed, and enters it", async () => {
-    // No folder and no provider: the workspace modes are dimmed, World isn't.
-    vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "", configured: false });
-    vi.mocked(authStatus).mockResolvedValue([]);
-    const onWorld = vi.fn();
-    render(
-      <HomeScreen
-        onProjects={vi.fn()}
-        onGoals={vi.fn()}
-        onChat={vi.fn()}
-        onMotion={vi.fn()}
-        onWorld={onWorld}
-        onSettings={vi.fn()}
-      />,
-    );
-    const motion = screen.getByRole("button", { name: "Motion" });
-    const world = screen.getByRole("button", { name: "World" });
-    expect(motion.compareDocumentPosition(world) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    await waitFor(() => expect(motion.getAttribute("aria-disabled")).toBe("true"));
-    expect(world.getAttribute("aria-disabled")).toBeNull();
-    fireEvent.click(world);
-    await waitFor(() => expect(onWorld).toHaveBeenCalledOnce());
-  });
-
-  it("holds the World plate down from the click until World is on screen", async () => {
-    vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "", configured: false });
-    vi.mocked(authStatus).mockResolvedValue([]);
-    const props = {
-      onProjects: vi.fn(),
-      onGoals: vi.fn(),
-      onChat: vi.fn(),
-      onMotion: vi.fn(),
-      onWorld: vi.fn(),
-      onSettings: vi.fn(),
-    };
-    const { rerender } = render(<HomeScreen {...props} />);
-    const world = screen.getByRole("button", { name: "World" });
-    expect(world.getAttribute("aria-busy")).toBeNull();
-    fireEvent.click(world);
-    await waitFor(() => expect(props.onWorld).toHaveBeenCalledOnce());
-    expect(world.getAttribute("aria-busy")).toBe("true");
-    rerender(<HomeScreen {...props} worldShown />);
-    await waitFor(() => expect(world.getAttribute("aria-busy")).toBeNull());
   });
 });

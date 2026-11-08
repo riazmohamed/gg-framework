@@ -33,7 +33,7 @@ import { type SubAgentLine } from "./SubAgentFeed";
 import { playSound } from "./sounds";
 import { takeNewSecurityNotices, withSecurityRow } from "./security-notices";
 import { toast } from "./toast";
-import { findCompletedSteps, countPlanSteps } from "./plan-steps";
+import { findCompletedSteps, countPlanSteps, stepsDoneThrough } from "./plan-steps";
 import type { PendingAttachment } from "./attachments";
 import type { Item } from "./App";
 import { readChatError } from "./chat-error";
@@ -99,6 +99,8 @@ export interface AgentEventsDeps {
   handleKenEvent: (e: SidecarEvent) => boolean;
   /** Autopilot event delegate — consulted first; autopilot events early-return. */
   handleAutopilotEvent: (e: SidecarEvent) => boolean;
+  /** The user's own `!` commands: consulted first; their events early-return. */
+  handleShellEvent?: (e: SidecarEvent) => boolean;
   /** Whole-task status sees events before delegates consume their frames. */
   handleActivityEvent?: (e: SidecarEvent) => void;
 
@@ -153,6 +155,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     nextId,
     handleKenEvent,
     handleAutopilotEvent,
+    handleShellEvent,
     handleActivityEvent,
     setState,
     setTasks,
@@ -570,6 +573,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       // Autopilot (auto-review) events are owned by the useAutopilot hook; same
       // early-return so they never touch the build-session handling below.
       if (handleAutopilotEvent(e)) return;
+      if (handleShellEvent?.(e)) return;
       const d = e.data as Record<string, unknown>;
       switch (e.type) {
         case "ready": {
@@ -655,9 +659,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const done = findCompletedSteps(assistantTextRef.current);
           if (done.length > 0) {
             const next = new Set(planDoneRef.current);
-            for (const n of done) {
-              if (n >= 1 && n <= planTotalRef.current) next.add(n);
-            }
+            for (const n of stepsDoneThrough(done, planTotalRef.current)) next.add(n);
             if (next.size !== planDoneRef.current.size) {
               planDoneRef.current = next;
               setPlanDone(next);
@@ -740,7 +742,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           if (name === "generate_image") {
             const prompt = typeof args.prompt === "string" ? args.prompt : "generating image…";
             endStreamingText();
-            pushItem({ kind: "generating_image", id: nextId(), prompt, toolCallId });
+            pushItem({
+              kind: "generating_image",
+              id: nextId(),
+              prompt,
+              toolCallId,
+              gif: typeof args.gif === "object" && args.gif !== null,
+              startedAt: Date.now(),
+            });
           }
           break;
         }
@@ -1467,6 +1476,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     [
       handleKenEvent,
       handleAutopilotEvent,
+      handleShellEvent,
       handleActivityEvent,
       appendAssistant,
       pushItem,

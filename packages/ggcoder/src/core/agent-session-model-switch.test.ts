@@ -66,20 +66,23 @@ beforeEach(async () => {
     );
   await fs.mkdir(path.join(tempHome, ".gg"), { recursive: true });
   await fs.writeFile(
-    path.join(tempHome, ".gg", "claude-code-version.json"),
-    JSON.stringify({ version: "2.1.75", fetchedAt: Date.now() }),
-  );
-  await fs.writeFile(
     path.join(tempHome, ".gg", "auth.json"),
     JSON.stringify({
-      gemini: {
-        accessToken: "test-gemini-token",
-        refreshToken: "test-gemini-refresh",
+      "gemini-api": {
+        accessToken: "test-gemini-key",
+        refreshToken: "",
         expiresAt: Date.now() + 3_600_000,
-        projectId: "test-google-project",
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta",
       },
-      anthropic: { accessToken: "t", refreshToken: "t", expiresAt: Date.now() + 3_600_000 },
-      openai: { accessToken: "t", refreshToken: "t", expiresAt: Date.now() + 3_600_000 },
+      anthropic: { accessToken: "t", refreshToken: "", expiresAt: Date.now() + 3_600_000 },
+      "openai-chatgpt": {
+        accessToken: "t",
+        refreshToken: "t",
+        expiresAt: Date.now() + 3_600_000,
+        accountId: "user-sub",
+        clientId: "oaiapp_test",
+        baseUrl: "https://api.openai.com/v1",
+      },
       moonshot: { accessToken: "t", refreshToken: "", expiresAt: Date.now() + 3_600_000 },
     }),
   );
@@ -148,12 +151,8 @@ describe("AgentSession model switch", () => {
           thinking: "high",
           maxTokens: getModel(model)?.maxOutputTokens ?? 16384,
         });
-        if (provider === "anthropic") {
-          expect(request.userAgent).toMatch(/^claude-cli\//);
-        }
-        if (provider === "gemini") {
-          expect(request.projectId).toBe("test-google-project");
-        }
+        expect(request).not.toHaveProperty("userAgent");
+        expect(request).not.toHaveProperty("projectId");
       }
     } finally {
       await session.dispose();

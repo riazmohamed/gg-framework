@@ -27,6 +27,8 @@ let daemon: Daemon | undefined;
 let port = 0;
 let token = "";
 const openStreams: http.IncomingMessage[] = [];
+// Removed after the daemon exits: Windows refuses to delete a folder it still has open.
+const extraDirs: string[] = [];
 
 /** Start the daemon on an ephemeral port and wait for its listening handshake. */
 async function startDaemon(): Promise<void> {
@@ -181,7 +183,7 @@ beforeEach(async () => {
   await startDaemon();
 });
 
-afterEach(async () => {
+afterEach(async ({ task }) => {
   for (const stream of openStreams.splice(0)) stream.destroy();
   const runningDaemon = daemon;
   daemon = undefined;
@@ -195,10 +197,19 @@ afterEach(async () => {
       runningDaemon.kill("SIGKILL");
     });
   }
+  // A daemon-side hang (seen once on Windows CI) leaves no trace in the test output.
+  if (task.result?.state === "fail") await printSidecarLogTail();
   const removeOptions = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 };
   await fs.rm(tmpHome, removeOptions);
   await fs.rm(tmpProject, removeOptions);
+  for (const dir of extraDirs.splice(0)) await fs.rm(dir, removeOptions);
 });
+
+async function printSidecarLogTail(): Promise<void> {
+  const logFile = path.join(tmpHome, ".gg", "gg-app-sidecar.log");
+  const text = await fs.readFile(logFile, "utf-8").catch(() => "(no sidecar log)");
+  console.error(`--- ${logFile} (last 200 lines) ---\n${text.split("\n").slice(-200).join("\n")}`);
+}
 
 describe("loopback daemon auth", () => {
   it("rejects requests without the per-launch token", async () => {
@@ -320,7 +331,7 @@ describe("a model that spends real money", () => {
       path.join(tmpHome, ".gg", "auth.json"),
       JSON.stringify({
         anthropic: {
-          accessToken: "sk-ant-oat-fake-for-tests",
+          accessToken: "sk-ant-api03-test",
           refreshToken: "fake-refresh",
           expiresAt: Date.now() + 86_400_000,
         },
@@ -434,12 +445,12 @@ describe("connecting a provider", () => {
 });
 
 describe("OAuth login across windows", () => {
-  /** Park an Anthropic OAuth flow at its "paste the code" step in one window. */
+  /** Park a Continue with ChatGPT flow at its "paste the callback" step in one window. */
   async function startParkedLogin(session: string): Promise<{ types: string[] }> {
     const stream = await openEventStream(session);
     const started = await request("POST", "/auth/oauth/start", {
       session,
-      body: { provider: "anthropic" },
+      body: { provider: "openai" },
     });
     expect(started.status).toBe(202);
     // The flow opens a browser URL, then blocks on the pasted code.
@@ -471,24 +482,20 @@ describe("OAuth login across windows", () => {
     // guard cannot see across windows; the daemon-wide one must.
     const second = await request("POST", "/auth/oauth/start", {
       session: windowB,
-      body: { provider: "anthropic" },
+      body: { provider: "openai" },
     });
     expect(second.status).toBe(409);
     expect(String(second.json.error)).toContain("another window");
   }, 90_000);
 
-  it("allows a different provider to log in concurrently", async () => {
+  it("refuses a sign-in for a provider that connects with a key only", async () => {
     const windowA = await createSession();
-    const windowB = await createSession();
-    await startParkedLogin(windowA);
-
-    // The guard is per provider, not a global lock: connecting Anthropic in
-    // one window must not block connecting OpenAI in another.
+    // xAI offers SuperGrok / X Premium only in partner apps: an API key is the way in.
     const other = await request("POST", "/auth/oauth/start", {
-      session: windowB,
-      body: { provider: "openai" },
+      session: windowA,
+      body: { provider: "xai" },
     });
-    expect(other.status).toBe(202);
+    expect(other.status).toBe(400);
   }, 90_000);
 
   it("reports a failed login only to the window that attempted it", async () => {
@@ -497,10 +504,10 @@ describe("OAuth login across windows", () => {
     const streamB = await openEventStream(windowB);
     const streamA = await startParkedLogin(windowA);
 
-    // A malformed code fails the state check locally — no network needed.
+    // A callback from another attempt fails the state check locally — no network needed.
     const sent = await request("POST", "/auth/oauth/code", {
       session: windowA,
-      body: { code: "bogus#mismatch" },
+      body: { code: "http://127.0.0.1:1455/auth/callback?code=bogus&state=mismatch" },
     });
     expect(sent.status).toBe(200);
     await waitFor(() => streamA.types.includes("auth_error"));
@@ -517,7 +524,7 @@ describe("OAuth login across windows", () => {
 
     await request("POST", "/auth/oauth/code", {
       session: windowA,
-      body: { code: "bogus#mismatch" },
+      body: { code: "http://127.0.0.1:1455/auth/callback?code=bogus&state=mismatch" },
     });
     await waitFor(() => streamA.types.includes("auth_error"));
 
@@ -525,15 +532,15 @@ describe("OAuth login across windows", () => {
     // would be permanently unloggable until the app restarts.
     const retry = await request("POST", "/auth/oauth/start", {
       session: windowB,
-      body: { provider: "anthropic" },
+      body: { provider: "openai" },
     });
     expect(retry.status).toBe(202);
   }, 90_000);
 });
 
 /**
- * Providers that accept subscription OAuth AND an API key (Kimi, Grok) hold two
- * independent credentials. The app renders a per-method comparison and per-method
+ * OpenAI takes the ChatGPT plan sign-in AND an API key: two independent
+ * credentials. The app renders a per-method comparison and per-method
  * disconnect from this payload, so a single "connected" bit is not enough.
  */
 describe("dual-auth providers (OAuth + API key)", () => {
@@ -546,88 +553,354 @@ describe("dual-auth providers (OAuth + API key)", () => {
     return found!;
   }
 
-  it("offers Grok both methods, with guidance and the priority rule", async () => {
+  it("offers OpenAI both methods, with guidance and the priority rule", async () => {
     const session = await createSession();
-    const xai = await providerStatus(session, "xai");
+    const openai = await providerStatus(session, "openai");
 
-    expect(xai.methods).toEqual(["oauth", "apikey"]);
-    expect(xai.connected).toBe(false);
-    expect(xai.connectedMethods).toEqual([]);
+    expect(openai.methods).toEqual(["oauth", "apikey"]);
+    expect(openai.connected).toBe(false);
+    expect(openai.connectedMethods).toEqual([]);
     // The UI cannot invent this copy — the choice changes what the user is billed.
-    const guidance = xai.methodGuidance as { method: string; billing: string }[];
-    expect(guidance.map((g) => g.method)).toEqual(["oauth", "apikey"]);
-    expect(String(xai.priorityNote)).toMatch(/first/i);
+    const guidance = openai.methodGuidance as { method: string; label: string }[];
+    expect(guidance.map((g) => g.label)).toEqual(["Continue with ChatGPT", "OpenAI API key"]);
+    expect(String(openai.priorityNote)).toMatch(/first/i);
+    // Grok is key-only now.
+    expect((await providerStatus(session, "xai")).methods).toEqual(["apikey"]);
   }, 90_000);
 
   it("reports which method is connected and which one requests will use", async () => {
     const session = await createSession();
     await request("POST", "/auth/apikey", {
       session,
-      body: { provider: "xai", key: "xai-test-key" },
+      body: { provider: "openai", key: "sk-test-key" },
     });
 
-    const xai = await providerStatus(session, "xai");
-    expect(xai.connected).toBe(true);
-    // Key only: it is both connected and active, and OAuth is still on offer.
-    expect(xai.connectedMethods).toEqual(["apikey"]);
-    expect(xai.activeMethod).toBe("apikey");
-    expect(xai.oauthExhaustedUntil).toBeUndefined();
+    const openai = await providerStatus(session, "openai");
+    expect(openai.connected).toBe(true);
+    // Key only: it is both connected and active, and the plan is still on offer.
+    expect(openai.connectedMethods).toEqual(["apikey"]);
+    expect(openai.activeMethod).toBe("apikey");
+    expect(openai.oauthExhaustedUntil).toBeUndefined();
   }, 90_000);
 
   it("disconnects one method without dropping the other", async () => {
     const session = await createSession();
-    // Write both credentials directly: an OAuth login needs a real browser, and
+    // Write both credentials directly: a sign-in needs a real browser, and
     // what matters here is the two-credential state the app has to manage.
     await fs.writeFile(
       path.join(tmpHome, ".gg", "auth.json"),
       JSON.stringify({
-        xai: { accessToken: "key", refreshToken: "", expiresAt: Date.now() + 1_000_000 },
-        "xai-oauth": {
-          accessToken: "oauth",
+        openai: { accessToken: "key", refreshToken: "", expiresAt: Date.now() + 1_000_000 },
+        "openai-chatgpt": {
+          accessToken: "plan",
           refreshToken: "r",
           expiresAt: Date.now() + 1_000_000,
-          baseUrl: "https://cli-chat-proxy.grok.com/v1",
+          accountId: "user-sub",
+          clientId: "oaiapp_test",
+          baseUrl: "https://api.openai.com/v1",
         },
       }),
     );
 
-    const both = await providerStatus(session, "xai");
+    const both = await providerStatus(session, "openai");
     expect(both.connectedMethods).toEqual(["oauth", "apikey"]);
-    // Both on file → the subscription is what actually gets used.
+    // Both on file → the plan is what actually gets used.
     expect(both.activeMethod).toBe("oauth");
 
-    // Dropping a spent API key must not sign the user out of the subscription.
+    // Dropping a spent API key must not sign the user out of the plan.
     const out = await request("POST", "/auth/logout", {
       session,
-      body: { provider: "xai", method: "apikey" },
+      body: { provider: "openai", method: "apikey" },
     });
     expect(out.status).toBe(200);
 
-    const after = await providerStatus(session, "xai");
+    const after = await providerStatus(session, "openai");
     expect(after.connectedMethods).toEqual(["oauth"]);
     expect(after.connected).toBe(true);
   }, 90_000);
 
-  // Gemini is hidden (gg-core hidden-providers.ts): Google no longer serves
-  // personal accounts over sign-in. Restore the dual-method test from git
-  // history ("adds a Gemini API key beside the Google sign-in") when un-hiding.
-  it("hides Gemini from the provider list and the model picker, even with a login on disk", async () => {
+  it("asks to reconnect a retired sign-in and never counts it as a key", async () => {
     const session = await createSession();
     await fs.writeFile(
       path.join(tmpHome, ".gg", "auth.json"),
       JSON.stringify({
+        openai: {
+          accessToken: "codex",
+          refreshToken: "r",
+          expiresAt: Date.now() + 1_000_000,
+          accountId: "acct",
+        },
         gemini: { accessToken: "oauth", refreshToken: "r", expiresAt: Date.now() + 1_000_000 },
         "gemini-api": { accessToken: "k", refreshToken: "", expiresAt: Date.now() + 1_000_000 },
       }),
     );
+    const openai = await providerStatus(session, "openai");
+    expect(openai.connected).toBe(false);
+    expect(openai.connectedMethods).toEqual([]);
+    expect(String(openai.reauthMessage)).toMatch(/Continue with ChatGPT/);
+
+    // Gemini is listed again, on its AI Studio key.
+    const gemini = await providerStatus(session, "gemini");
+    expect(gemini.methods).toEqual(["apikey"]);
+    expect(gemini.connectedMethods).toEqual(["apikey"]);
+    expect(String(gemini.reauthMessage)).toMatch(/Gemini API key/);
+
+    // Dismissing removes only the retired entry.
+    await request("POST", "/auth/logout", {
+      session,
+      body: { provider: "gemini", method: "legacy" },
+    });
+    const saved = JSON.parse(await fs.readFile(path.join(tmpHome, ".gg", "auth.json"), "utf-8"));
+    expect(saved.gemini).toBeUndefined();
+    expect(saved["gemini-api"]).toBeDefined();
+  }, 90_000);
+
+  it("marks models the connected keys can't run, with the key they need", async () => {
+    const session = await createSession();
+    const key = (accessToken: string) => ({
+      accessToken,
+      refreshToken: "",
+      expiresAt: Date.now() + 1_000_000,
+    });
+    await fs.writeFile(
+      path.join(tmpHome, ".gg", "auth.json"),
+      JSON.stringify({
+        moonshot: key("sk-moonshot"),
+        xiaomi: { ...key("tp-key"), baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1" },
+      }),
+    );
+    const res = await request("GET", "/models", { session });
+    const models = res.json.models as { id: string; unavailable?: string }[];
+    const reason = (id: string) => models.find((m) => m.id === id)?.unavailable;
+    // K2.8 Preview is served on the Kimi Code plan endpoint only.
+    expect(reason("kimi-for-coding")).toBe("Needs a Kimi Code plan key");
+    // UltraSpeed runs on API Credits only.
+    expect(reason("mimo-v2.6-pro-ultraspeed")).toBe("Needs an API Credits key");
+    // Models any connected key runs carry no reason.
+    expect(reason("kimi-k3")).toBeUndefined();
+    expect(reason("mimo-v2.6-flash")).toBeUndefined();
+  }, 90_000);
+
+  it("counts a stale Ollama credential only while Ollama serves models", async () => {
+    const session = await createSession();
+    await fs.writeFile(
+      path.join(tmpHome, ".gg", "auth.json"),
+      JSON.stringify({
+        "local:ollama": {
+          accessToken: "local",
+          refreshToken: "",
+          expiresAt: Date.now() + 1_000_000,
+          baseUrl: "http://127.0.0.1:11434/v1",
+        },
+      }),
+    );
+    // Holds whether or not this machine happens to be running Ollama.
+    const local = await request("POST", "/local/scan", { session });
+    const ollama = (
+      local.json.endpoints as { id: string; reachable: boolean; models: unknown[] }[]
+    ).find((e) => e.id === "ollama");
+    const status = await request("GET", "/auth/status", { session });
+    expect(status.json.localConnected).toBe(Boolean(ollama?.reachable && ollama.models.length));
+  }, 90_000);
+
+  it("counts a user-added local endpoint as connected without listing it as a tile", async () => {
+    const session = await createSession();
+    const added = await request("POST", "/local/endpoints", {
+      session,
+      body: { baseUrl: "http://127.0.0.1:9/v1", label: "Offline GW", apiKey: "sk-gateway" },
+    });
+    expect(added.status).toBe(200);
     const status = await request("GET", "/auth/status", { session });
     expect(status.status).toBe(200);
-    const values = (status.json.providers as { value: string }[]).map((p) => p.value);
-    expect(values).not.toContain("gemini");
-    expect(values).toContain("xai");
+    expect(status.json.localConnected).toBe(true);
+    const providers = status.json.providers as { value: string; connected: boolean }[];
+    expect(providers.map((p) => p.value)).not.toContain("local");
+    expect(providers.some((p) => p.connected)).toBe(false);
+  }, 90_000);
+});
 
-    const models = await request("GET", "/models", { session });
-    const providers = (models.json.models as { provider: string }[]).map((m) => m.provider);
-    expect(providers).not.toContain("gemini");
+describe("saved local model across restarts", () => {
+  it("restores a local-only user's saved model once discovery finds it", async () => {
+    const gateway = http.createServer((req, res) => {
+      res.writeHead(req.url === "/v1/models" ? 200 : 404, { "content-type": "application/json" });
+      res.end(req.url === "/v1/models" ? JSON.stringify({ data: [{ id: "free-model" }] }) : "{}");
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    const gatewayPort = (gateway.address() as { port: number }).port;
+    try {
+      let session = await createSession();
+      const added = await request("POST", "/local/endpoints", {
+        session,
+        body: { baseUrl: `http://127.0.0.1:${gatewayPort}/v1`, label: "GW" },
+      });
+      expect(added.status).toBe(200);
+      const saved = `local/${(added.json.endpoint as { id: string }).id}/free-model`;
+      expect((await request("POST", "/model", { session, body: { model: saved } })).status).toBe(
+        200,
+      );
+
+      const running = daemon!;
+      await new Promise<void>((resolve) => {
+        running.once("close", () => resolve());
+        running.kill("SIGKILL");
+      });
+      await startDaemon();
+      session = await createSession();
+
+      // Boot picks a model before discovery; the saved one returns after the scan.
+      let model = "";
+      for (const deadline = Date.now() + 15_000; model !== saved && Date.now() < deadline;) {
+        model = String((await request("GET", "/state", { session })).json.model);
+        if (model !== saved) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(model).toBe(saved);
+    } finally {
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    }
+  }, 90_000);
+});
+
+describe("starting a goal by typing", () => {
+  it("starts a briefing goal when the user types to start it, not when they ask (#133)", async () => {
+    const session = await createSession();
+    const created = await request("POST", "/goals", {
+      session,
+      body: { name: "Typed start", goal: "Write hello.txt", context: [tmpProject] },
+    });
+    expect(created.status).toBe(200);
+    const goalDir = path.join(tmpHome, ".gg", "goals", (created.json.goal as { id: string }).id);
+    const opened = await request("POST", "/session", { body: { mode: "code", cwd: goalDir } });
+    const goalSession = opened.json.sessionId as string;
+    const startedAt = async (): Promise<unknown> =>
+      (
+        JSON.parse(await fs.readFile(path.join(goalDir, "goal.json"), "utf8")) as {
+          startedAt?: unknown;
+        }
+      ).startedAt;
+
+    await request("POST", "/prompt", {
+      session: goalSession,
+      body: { text: "Should we start the goal now?" },
+    });
+    expect(await startedAt()).toBeUndefined();
+
+    await request("POST", "/prompt", {
+      session: goalSession,
+      body: { text: "Start the goal now" },
+    });
+    expect(typeof (await startedAt())).toBe("string");
+  }, 90_000);
+});
+
+describe("a new window after picking a local model", () => {
+  it("opens on the saved local model in a folder it has never seen (#133)", async () => {
+    const gateway = http.createServer((req, res) => {
+      res.writeHead(req.url === "/v1/models" ? 200 : 404, { "content-type": "application/json" });
+      res.end(req.url === "/v1/models" ? JSON.stringify({ data: [{ id: "free-model" }] }) : "{}");
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    const gatewayPort = (gateway.address() as { port: number }).port;
+    const otherFolder = await fs.mkdtemp(path.join(os.tmpdir(), "gg-other-folder-"));
+    extraDirs.push(otherFolder);
+    try {
+      let session = await createSession();
+      const added = await request("POST", "/local/endpoints", {
+        session,
+        body: { baseUrl: `http://127.0.0.1:${gatewayPort}/v1`, label: "GW" },
+      });
+      const saved = `local/${(added.json.endpoint as { id: string }).id}/free-model`;
+      expect((await request("POST", "/model", { session, body: { model: saved } })).status).toBe(
+        200,
+      );
+
+      const running = daemon!;
+      await new Promise<void>((resolve) => {
+        running.once("close", () => resolve());
+        running.kill("SIGKILL");
+      });
+      await startDaemon();
+      // A goal window, or any project opened for the first time, has no per-folder pick.
+      const opened = await request("POST", "/session", {
+        body: { mode: "code", cwd: otherFolder },
+      });
+      expect(opened.status).toBe(200);
+      session = opened.json.sessionId as string;
+
+      let model = "";
+      for (const deadline = Date.now() + 15_000; model !== saved && Date.now() < deadline;) {
+        model = String((await request("GET", "/state", { session })).json.model);
+        if (model !== saved) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(model).toBe(saved);
+    } finally {
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    }
+  }, 90_000);
+});
+
+describe("a run started right at boot", () => {
+  it("waits for the saved local model instead of running on the fallback (#133)", async () => {
+    const chatModels: string[] = [];
+    let slowModels = false;
+    const gateway = http.createServer((req, res) => {
+      if (req.url === "/v1/models") {
+        // Slower than the prompt below, like a goal's kickoff beating the scan.
+        setTimeout(
+          () => {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ data: [{ id: "free-model" }] }));
+          },
+          slowModels ? 700 : 0,
+        );
+        return;
+      }
+      if (req.url === "/v1/chat/completions") {
+        let body = "";
+        req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+        req.on("end", () => {
+          chatModels.push(String((JSON.parse(body) as { model?: unknown }).model));
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          const chunk = (d: unknown): void => void res.write(`data: ${JSON.stringify(d)}\n\n`);
+          chunk({ id: "x", choices: [{ index: 0, delta: { role: "assistant", content: "ok" } }] });
+          chunk({ id: "x", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+          res.end("data: [DONE]\n\n");
+        });
+        return;
+      }
+      res.writeHead(404).end("{}");
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    const gatewayPort = (gateway.address() as { port: number }).port;
+    try {
+      let session = await createSession();
+      const added = await request("POST", "/local/endpoints", {
+        session,
+        body: { baseUrl: `http://127.0.0.1:${gatewayPort}/v1`, label: "GW" },
+      });
+      const saved = `local/${(added.json.endpoint as { id: string }).id}/free-model`;
+      expect((await request("POST", "/model", { session, body: { model: saved } })).status).toBe(
+        200,
+      );
+
+      const running = daemon!;
+      await new Promise<void>((resolve) => {
+        running.once("close", () => resolve());
+        running.kill("SIGKILL");
+      });
+      slowModels = true;
+      await startDaemon();
+      session = await createSession();
+      expect((await request("POST", "/prompt", { session, body: { text: "hi" } })).status).toBe(
+        202,
+      );
+
+      for (const deadline = Date.now() + 15_000; chatModels.length === 0;) {
+        if (Date.now() > deadline) throw new Error("the prompt never reached the local model");
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(chatModels[0]).toBe("free-model");
+    } finally {
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    }
   }, 90_000);
 });

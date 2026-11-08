@@ -22,6 +22,155 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.107.0",
+    date: "2026-11-08",
+    items: [
+      "Home now has a `Weekly poll`, and you get a say in what I build next. Pick the feature you want most, watch the bars fill as everyone votes, and change your mind any time that week. Your vote is anonymous.",
+      "Claude on your subscription now stays warm between messages. I keep one live `Claude Code` session per chat instead of starting fresh every time, so replies kick off faster, and a message you send mid-run slips straight into the work Claude is already doing.",
+      "Plans tick themselves off reliably again. Every finished step lands on the `progress` bar as Claude goes, so a plan never sits at `0/8` while the work is actually getting done.",
+      "I retired `GG World` to keep GG Coder lean and focused on your work. Fewer moving parts, a lighter app, more speed where it counts.",
+    ],
+  },
+  {
+    version: "0.106.2",
+    date: "2026-11-08",
+    items: [
+      "Messages you send while Claude is mid-task now show up right where they belong. On a `Claude` subscription, the `Queued` label clears the moment Claude picks your message up, and a message you fire off just as a run wraps is kept safe for the next one.",
+    ],
+  },
+  {
+    version: "0.106.1",
+    date: "2026-11-08",
+    items: [
+      "Claude on your subscription now grabs the right tool on the very first try. When it reaches for `web search`, `web fetch` or a `screenshot`, it just works instead of stumbling once and retrying, so your runs go smoother and waste less of your plan.",
+    ],
+  },
+  {
+    version: "0.106.0",
+    date: "2026-11-07",
+    items: [
+      "Connecting your AI accounts got a clean upgrade. `Continue with ChatGPT` now uses OpenAI's official sign-in, and you can add an OpenAI `API key` too, which steps in automatically if your plan's usage runs out. Kimi, xAI and Gemini now connect with an `API key`, and if you used an older sign-in, the app asks you once to reconnect. That's it.",
+      "The model picker now tells you upfront what you can run. Any model your plan or keys don't cover is greyed out with a short note saying exactly what it needs.",
+      "Plan review now feels like part of the chat. `Accept plan` and `Reject` sit right beside send, so you can give feedback or decide in one spot.",
+      "Image generation now runs on OpenAI's Image API with `GPT Image 2.6`. Add an OpenAI API key and you're set.",
+    ],
+  },
+  {
+    version: "0.105.0",
+    date: "2026-11-07",
+    items: [
+      "I refreshed how your `Claude` account connects so your Claude models keep running smoothly. One quick thing: if you use Claude, open `AI Providers` and sign in to Anthropic once more. You can now connect with an Anthropic `API key` too.",
+      "`GPT-6.1 Terra` just landed, with a Fast mode that runs `1.5x` quicker. It is light, cheap and climbs all the way up to `Ultra` when you want it to really think.",
+    ],
+  },
+  {
+    version: "0.104.1",
+    date: "2026-11-06",
+    items: [
+      "A quick follow-up so your `Mac` gets this update too. The smarter `Plan Mode`, the one red Stop button and Ken's fresh look now land on Mac, Windows and Linux together.",
+    ],
+  },
+  {
+    version: "0.104.0",
+    date: "2026-11-06",
+    items: [
+      "`Plan Mode` got a full glow-up. It now kicks in on its own for the big, careful jobs and stays out of your way on quick fixes. It researches the real code first, asks you when something is unclear, and can send read-only helpers like `researcher` to dig in parallel. Plans land under a gold pixel title with crisp pixel ticks as each step is done.",
+      "Stopping is now one big red button. The send key turns red and pulses while GG, `Autopilot` or Ken is working, and one click stops whichever of them is busy. No more hunting for a tiny Stop link.",
+      "Ken has a fresh look. Your `@Ken` messages are solid teal bubbles, and his replies come with his little pixel face and name on top, so you always know who is talking.",
+    ],
+  },
+  {
+    version: "0.103.1",
+    date: "2026-11-05",
+    items: [
+      "A quick follow-up so every platform gets the new `GIF` maker, playing GIF previews and image `download` button at the same time. I also hardened the release pipeline so updates land on Mac, Windows and Linux together.",
+    ],
+  },
+  {
+    version: "0.103.0",
+    date: "2026-11-05",
+    items: [
+      "Your agent can now make real animated `GIFs`. Just ask for a frog walking or a rocket blasting off and it draws every frame and stitches them into a looping GIF that plays right in your chat, even after you reopen it. It already knows it can make images and GIFs the moment your `OpenAI` account is connected, so no more hand-coded animations.",
+      "Waiting on an image is actually fun now. A glowing dot board fills in as your picture develops, with a live progress pill, and you can click it to play `Snake` while you wait.",
+      "Every image in your chat now has a little `download` button in its corner. Click it, pick any folder, and the full-size original is yours.",
+    ],
+  },
+  {
+    version: "0.102.3",
+    date: "2026-11-05",
+    items: [
+      "The `AI Providers` page is now a living brain. Every provider sits in its own bank grouped by country, and the moment you connect one a glowing nerve shoots out of its card and plugs straight into a `3D` brain that lights up as you wire in more. It looks great in a tiny window or full screen, and connecting your models has never felt this good.",
+    ],
+  },
+  {
+    version: "0.102.2",
+    date: "2026-11-05",
+    items: [
+      "Drop in a `PDF` or `EPUB` and GG Coder actually reads it now. I taught the agent to open books, papers and docs as plain text, raised the limit to `100 MB` per message, and if a file is ever too big you get a clear heads-up with your draft still waiting, instead of a message that silently goes nowhere.",
+      "Your attachments finally show up where you sent them. Every file and video now sits right inside your message with its name, stays there when you reopen the chat, and the paperclip button happily picks any file type, not just pictures and videos.",
+    ],
+  },
+  {
+    version: "0.102.1",
+    date: "2026-11-04",
+    items: [
+      "OpenRouter just got way more flexible. Point your key at any compatible gateway with an optional base URL, then hit `Sync models` to swap in exactly what that endpoint serves, complete with real context sizes, image support and effort levels. Pick `max` and you now get `max`, no sneaky downgrades.",
+      "Local models now run at their true size. Pin a `context length` on any custom endpoint in Local models, and llama.cpp servers tell GG Coder their real window by themselves, so long chats stop getting cut short.",
+      "Radio finally knows when to stop. If the app crashes or gets force-quit, the next launch silences the leftover player, and on Windows hitting stop now really stops the music.",
+      "The `Update` key looks sharp again. I lined its version number up perfectly with the label, so it sits neat and tidy right where it belongs.",
+    ],
+  },
+  {
+    version: "0.102.0",
+    date: "2026-11-04",
+    items: [
+      "MiniMax just got a serious upgrade. `MiniMax M3.1 Flash` is now the default, it works on MiniMax plan keys, and you pick how hard it thinks, from quick to `max`. Your key now finds its own region by itself, whether it came from the global or the China site, and plan problems finally say MiniMax instead of pretending to be Anthropic.",
+      "Xiaomi `Token Plan` keys from Europe and China now just work. I made GG Coder find the cluster that issued your key instead of rejecting it as invalid and throwing it away.",
+      "`GG Goals` now starts when you tell it to, even on small local models. Type `start the goal now` and it goes, a new window opens straight on your saved local model, and one bad setting can no longer wipe the rest of your preferences.",
+    ],
+  },
+  {
+    version: "0.101.0",
+    date: "2026-11-04",
+    items: [
+      "Local models just grew up. The tile is now `Local models`, and LM Studio, llama.cpp, vLLM or any OpenAI-compatible gateway is one `Add endpoint` away, with or without a key. I made GG Coder learn the real context size each model runs with, bring your saved local model back after a restart, group the picker by server, and open your workspace even if local models are all you use.",
+      "Long sessions got leaner and cheaper. On Claude, web search now runs off to the side so whole result pages stop piling into your chat, web pages are read in tidy chunks that can jump straight to a `#section`, and giant command output gets trimmed at `30 KB`. I also stopped busy tool loops from rebuilding the cache, so you wait less and spend less.",
+    ],
+  },
+  {
+    version: "0.100.1",
+    date: "2026-11-03",
+    items: [
+      "No more surprise crashes on `macOS 27`. A new macOS hiccup, often set off by the Siri button over selected text, could close GG Coder out of nowhere. I fixed it so the app shrugs it off and keeps running, and if anything ever does go wrong, the real reason now lands in the log so I can squash it fast.",
+    ],
+  },
+  {
+    version: "0.100.0",
+    date: "2026-11-02",
+    items: [
+      "I put a terminal right inside the chat. Start your message with `!`, like `!git status`, and it runs in your project with live output, a Stop button and the exit code, while errors show up in their own colour. A picker lists the commands you use most and the ones that fit your project, GG Coder sees the output with your next message, and nothing ever runs without your OK unless you pick `Always allow` for that project.",
+      "Images in replies actually show up now. I fixed it so when GG Coder points at a screenshot or picture on your computer, you see the real image right in the chat instead of a broken question mark, and one click opens it full size.",
+    ],
+  },
+  {
+    version: "0.99.1",
+    date: "2026-11-01",
+    items: [
+      "Picking up an old chat just works again. If GG Coder had searched the web earlier in a conversation, reopening it after the last update could bounce back with an `HTTP 400` error. I fixed it, so every saved chat continues right where you left off.",
+      "Helpers report back once, cleanly. After you collect a helper's result, you no longer get a second \"it's done\" ping, and the app now clears out checkpoint folders older than `30 days` on startup, freeing up to `51 MB` on a busy machine.",
+    ],
+  },
+  {
+    version: "0.99.0",
+    date: "2026-11-01",
+    items: [
+      "Long sessions just got a lot snappier. I now tidy conversations up at `400k` tokens instead of letting them balloon toward a million, and pulling in a new tool mid-chat no longer throws away the prompt cache, so replies start sooner and cost less.",
+      "Really long sessions keep their memory now. When a giant conversation gets summarized, I shrink and retry instead of falling back to a thin file list, so GG Coder still knows your goal and everything it already did.",
+      "Everyday tools are faster. `find` runs up to `49x` quicker in big repos, helpers spin up sooner, and their reports land with the answer on top instead of cut off at the end.",
+      "GG Coder now cleans up after itself. Old checkpoints, diagnostics and helper leftovers clear out after `30 days`, logs are about a third smaller, and your prompts never get written into debug logs.",
+    ],
+  },
+  {
     version: "0.98.2",
     date: "2026-11-01",
     items: [

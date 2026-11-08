@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { error as logError } from "@tauri-apps/plugin-log";
 import { HomeTitle } from "./HomeTitle";
@@ -16,7 +16,7 @@ import type { SettingsTabId } from "./SettingsScreen";
 import {
   waitForReady,
   getSettings,
-  authStatus,
+  hasModelSource,
   openWhatsNewWindow,
   setRemoteActive,
   getServeStatus,
@@ -35,13 +35,6 @@ interface Props {
   onGoals: () => void;
   onChat: () => void;
   onMotion: () => void;
-  /** Shows World full-window. */
-  onWorld: () => void;
-  /**
-   * World is on screen (it fades in over Home once the game is ready).
-   * Until then the World plate stays pressed, so the click visibly took.
-   */
-  worldShown?: boolean;
   /** Opens full-screen Settings, optionally on a given tab. */
   onSettings: (tab?: SettingsTabId) => void;
   /**
@@ -54,8 +47,7 @@ interface Props {
 
 /**
  * App entry screen: the shimmering GG Coder banner over the primary actions.
- * Code, Chat and Motion require a configured workspace folder and connected AI provider;
- * World (the local game) needs neither, so it is never dimmed;
+ * Code, Goals, Chat and Motion require a configured workspace folder and connected AI provider;
  * everything else lives in full-screen Settings (the bottom-right gear).
  */
 export function HomeScreen({
@@ -63,24 +55,16 @@ export function HomeScreen({
   onGoals,
   onChat,
   onMotion,
-  onWorld,
-  worldShown = false,
   onSettings,
   refreshSignal = 0,
 }: Props): React.ReactElement {
   const [folderSet, setFolderSet] = useState(false);
-  const [providerCount, setProviderCount] = useState(0);
+  const [providerConnected, setProviderConnected] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
   // The version row stays hidden until the version is read, so What's new
   // never shifts sideways when the number arrives.
   const [versionRead, setVersionRead] = useState(false);
   const appUpdate = useAppUpdate();
-  const worldNoteId = useId();
-  // Held down from the moment World starts opening until it's on screen.
-  const [worldOpening, setWorldOpening] = useState(false);
-  useEffect(() => {
-    if (worldShown) setWorldOpening(false);
-  }, [worldShown]);
 
   useEffect(() => {
     void getVersion()
@@ -93,12 +77,12 @@ export function HomeScreen({
     // Settings + auth are read NATIVELY (Rust) — do them first, WITHOUT waiting on
     // the sidecar, so the workspace gate never stays dimmed just because the
     // agent is slow/crashed.
-    const [settings, providers] = await Promise.all([getSettings(), authStatus()]);
+    const [settings, connected] = await Promise.all([getSettings(), hasModelSource()]);
     // Prefer the explicit `configured` flag; fall back to a non-empty root so an
     // older sidecar (one that predates the flag) degrades to "set" instead of
     // dimming forever.
     setFolderSet(settings?.configured ?? Boolean(settings?.projectsRoot));
-    setProviderCount(providers.filter((p) => p.connected).length);
+    setProviderConnected(connected);
     // Keep the macOS tray's Remote label in step with the sidecar (it may have
     // respawned). Best-effort, and never blocks the native reads above.
     void waitForReady()
@@ -121,7 +105,7 @@ export function HomeScreen({
     if (refreshSignal > 0) void refresh().catch(logSetupCheckFailure);
   }, [refreshSignal]);
 
-  const ready = folderSet && providerCount > 0;
+  const ready = folderSet && providerConnected;
 
   function handleWorkspace(open: () => void): void {
     if (ready) {
@@ -133,7 +117,7 @@ export function HomeScreen({
     if (!folderSet) {
       toast("Set a workspace folder first.", "warning");
       onSettings("general");
-    } else if (providerCount === 0) {
+    } else if (!providerConnected) {
       toast("Connect an AI provider first.", "warning");
       onSettings("providers");
     }
@@ -210,36 +194,8 @@ export function HomeScreen({
             onClick={() => handleWorkspace(onMotion)}
           />
         </PixelTip>
-        {/* World: the local 3D game, full-window in this window; new, so it
-            carries a New tag. */}
-        <div className="home-action-slot">
-          <PixelTip text="World: a cozy 3D hangout for coders, with your coding level and an optional online save.">
-            <PlateButton
-              className={`home-action${worldOpening ? " is-loading" : ""}`}
-              label={worldOpening ? "Loading" : "World"}
-              held={worldOpening}
-              aria-describedby={worldNoteId}
-              onClick={() => {
-                setWorldOpening(true);
-                onWorld();
-              }}
-            />
-          </PixelTip>
-          {/* While World loads (it takes a moment to build the scene), the tag shows three pulsing pixel dots, so
-              Home never looks frozen. */}
-          <span id={worldNoteId} className={`home-action-beta${worldOpening ? " is-loading" : ""}`}>
-            {worldOpening ? (
-              <span className="home-loading-dots" aria-label="Loading World">
-                <i />
-                <i />
-                <i />
-              </span>
-            ) : (
-              "New"
-            )}
-          </span>
-        </div>
       </div>
+      {/* The owner's weekly feature poll, on the What's new board. */}
       {/* Settings: a GG Royale pixel gear. */}
       <PixelTip text="Settings: AI providers, your projects folder, and more.">
         <PixelIconButton

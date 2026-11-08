@@ -91,6 +91,7 @@ describe("model registry invariants", () => {
       "claude-opus-5-5-fast",
       "gpt-6-astra-fast",
       "gpt-6.1-sol-fast",
+      "gpt-6.1-terra-fast",
       "gpt-6-luna-fast",
     ]);
     for (const id of fastIds) {
@@ -392,21 +393,29 @@ describe("model registry context windows", () => {
       contextWindow: 262_144,
       maxThinkingLevel: "high",
     });
-    // K2.8 Preview only exists on the Kimi sign-in endpoint, and is never
+    // K2.8 Preview only exists on the Kimi Code plan endpoint, and is never
     // mislabelled with the K2.7 name it replaced behind the rolling alias.
     expect(getModel("kimi-for-coding")).toMatchObject({
       name: "Kimi K2.8 Preview",
       contextWindow: 1_048_576,
       maxThinkingLevel: "max",
-      authStorageKeys: ["moonshot-oauth"],
+      authStorageKeys: ["kimi-code"],
     });
-    expect(getAuthStorageKeys("moonshot", "kimi-for-coding")).toEqual(["moonshot-oauth"]);
+    expect(getAuthStorageKeys("moonshot", "kimi-for-coding")).toEqual(["kimi-code"]);
+    // The other Kimi models take the plan key first, then a Moonshot key.
+    for (const id of ["kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"]) {
+      expect(getAuthStorageKeys("moonshot", id), id).toEqual(["kimi-code", "moonshot"]);
+    }
+    expect(getAuthStorageKeys("gemini", "gemini-3.8-flash")).toEqual(["gemini-api"]);
     expect(getContextWindow("kimi-k3", { provider: "moonshot" })).toBe(1_048_576);
   });
 
-  it("starts Kimi K3 at the endpoint's declared default effort, kimi-code-style", () => {
-    // Kimi For Coding OAuth endpoint declares default_effort "high" …
+  it("starts Kimi K3 at the endpoint's declared default effort", () => {
+    // The Kimi Code plan endpoint (either host) declares default_effort "high" …
     expect(getDefaultThinkingLevel("kimi-k3", { baseUrl: "https://api.kimi.com/coding/v1" })).toBe(
+      "high",
+    );
+    expect(getDefaultThinkingLevel("kimi-k3", { baseUrl: "https://api.kimi.ai/coding/v1" })).toBe(
       "high",
     );
     // … the public Moonshot API declares "max" …
@@ -499,16 +508,20 @@ describe("model registry context windows", () => {
     }
   });
 
-  it("defaults MiniMax to the multimodal M3 with a 1M context window", () => {
+  it("defaults MiniMax to M3.1 Flash, the model plan keys cover, and keeps M3", () => {
     expect(getDefaultModel("minimax")).toMatchObject({
-      id: "MiniMax-M3",
-      name: "MiniMax M3",
+      id: "MiniMax-M3.1-Flash",
+      name: "MiniMax M3.1 Flash",
       provider: "minimax",
       contextWindow: 1_000_000,
       supportsImages: true,
       supportsVideo: true,
+      maxThinkingLevel: "max",
     });
-    expect(getModelsForProvider("minimax").map((model) => model.id)).toEqual(["MiniMax-M3"]);
+    expect(getModelsForProvider("minimax").map((model) => model.id)).toEqual([
+      "MiniMax-M3.1-Flash",
+      "MiniMax-M3",
+    ]);
     expect(getContextWindow("MiniMax-M3", { provider: "minimax" })).toBe(1_000_000);
   });
 
@@ -729,5 +742,21 @@ describe("runtime model registry", () => {
     registerRuntimeModels([local]);
 
     expect(getDefaultModel("local")).toBe(local);
+  });
+});
+
+describe("GPT-6.1 Terra", () => {
+  it("matches the Codex catalog: 500K Codex window, low default, Ultra ladder", () => {
+    expect(getModel("gpt-6.1-terra")).toMatchObject({
+      provider: "openai",
+      contextWindow: 1_050_000,
+      codexContextWindow: 500_000,
+      defaultThinkingLevel: "low",
+      maxThinkingLevel: "ultra",
+      costTier: "medium",
+    });
+    expect(getModel("gpt-6.1-terra-fast")?.billing).toBeDefined();
+    // Sol stays the OpenAI default.
+    expect(getDefaultModel("openai").id).toBe("gpt-6.1-sol");
   });
 });

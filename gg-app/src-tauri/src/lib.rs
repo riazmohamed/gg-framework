@@ -51,6 +51,8 @@ mod auth;
 mod commands;
 mod daemon;
 mod events;
+#[cfg(target_os = "macos")]
+mod macos_event_guard;
 mod paths;
 mod process;
 mod settings;
@@ -85,9 +87,23 @@ fn install_rustls_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// Record panics in gg-app.log: a GUI app's stderr goes nowhere, and a panic
+/// on the AppKit main thread aborts with a crash report that omits the message.
+fn install_panic_log_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        log::error!("[panic] {info}\n{backtrace}");
+        default_hook(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_rustls_provider();
+    install_panic_log_hook();
+    #[cfg(target_os = "macos")]
+    macos_event_guard::install();
 
     // Per-launch daemon auth token (see `Daemon::token`). The shared reqwest
     // client attaches it as a default header so all ~60 proxy call sites are
@@ -146,6 +162,8 @@ pub fn run() {
             commands::files::read_dropped_file_attachment,
             commands::files::open_project_path,
             commands::files::open_image_data,
+            commands::files::read_chat_image,
+            commands::files::save_chat_image,
             commands::files::open_url,
             commands::agent::agent_state,
             commands::agent::agent_memories,
@@ -154,11 +172,8 @@ pub fn run() {
             commands::agent::agent_delete_jiwa,
             commands::agent::agent_progress,
             commands::agent::agent_trophies,
-            commands::world::agent_world_get,
-            commands::world::agent_world_put,
-            commands::world::agent_world_delete,
-            commands::world::agent_world_live,
-            commands::world::agent_world_account_delete,
+            commands::poll::agent_poll_get,
+            commands::poll::agent_poll_vote,
             commands::agent::agent_keep_awake_get,
             commands::agent::agent_keep_awake_set,
             commands::agent::agent_usage,
@@ -167,6 +182,10 @@ pub fn run() {
             commands::agent::agent_ken_prompt,
             commands::agent::agent_ken_cancel,
             commands::agent::agent_autopilot_set,
+            commands::agent::agent_shell_run,
+            commands::agent::agent_shell_cancel,
+            commands::agent::agent_shell_trust,
+            commands::agent::agent_shell_suggestions,
             commands::agent::agent_accept_plan,
             commands::agent::agent_new_session,
             commands::agent::agent_history,
@@ -219,11 +238,14 @@ pub fn run() {
             settings::app_create_project,
             auth::app_auth_status,
             auth::app_auth_apikey,
+            auth::app_auth_baseurl,
+            auth::app_auth_baseurl,
             auth::app_auth_logout,
             commands::agent_admin::agent_telegram_get,
             commands::agent_admin::agent_telegram_save,
             commands::agent_admin::agent_local,
             commands::agent_admin::agent_local_scan,
+            commands::agent_admin::agent_openrouter_catalog,
             commands::agent_admin::agent_local_endpoint_add,
             commands::agent_admin::agent_local_endpoint_remove,
             commands::agent_admin::agent_hf_search,

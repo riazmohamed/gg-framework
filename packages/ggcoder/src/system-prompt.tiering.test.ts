@@ -71,6 +71,29 @@ describe("tool tiering in the system prompt", () => {
     expect(prompt).toContain("On demand (call by name;");
   });
 
+  it("tells the agent it can make images and GIFs only when OpenAI is connected", async () => {
+    const cwd = await makeProject();
+    const core = ["read", "edit", "bash", "tool_search"];
+    const build = (deferred: string[]) =>
+      buildSystemPrompt(
+        cwd,
+        undefined,
+        false,
+        undefined,
+        core,
+        undefined,
+        "anthropic",
+        undefined,
+        deferred,
+      );
+    // generate_image is only registered (and so deferred) with OpenAI auth.
+    const connected = await build(["web_fetch", "generate_image"]);
+    expect(connected).toMatch(/- \*\*generate_image\*\*: Make images and animated GIFs/);
+    expect(connected).toContain("not code");
+    const disconnected = await build(["web_fetch"]);
+    expect(disconnected).not.toContain("generate_image");
+  });
+
   it("keeps cross-tool steering without repeating live tool descriptions", async () => {
     const cwd = await makeProject();
     const prompt = await buildSystemPrompt(cwd, [], false, undefined, ["edit", "write"]);
@@ -203,6 +226,22 @@ describe("tool tiering in the system prompt", () => {
   });
 });
 
+describe("parallel tool-call steering", () => {
+  it("tells a bash-equipped agent that non-shell calls in one reply run in parallel", () => {
+    const steering = buildToolSteering(["bash", "read", "grep", "steroids"]);
+    expect(steering).toContain(
+      "Calls in one reply run in parallel, except shell commands and edits",
+    );
+    expect(steering).not.toContain("reads/searches");
+  });
+
+  it("keeps the read/search batching line for agents without bash", () => {
+    const steering = buildToolSteering(["read", "grep"]);
+    expect(steering).toContain("Batch independent reads/searches in one turn");
+    expect(steering).not.toContain("Calls in one reply run in parallel");
+  });
+});
+
 describe("one-command change steering", () => {
   let previousGgBash: string | undefined;
   beforeEach(() => {
@@ -263,5 +302,26 @@ describe("Environment file list", () => {
     const cwd = await makeProject();
     const prompt = await buildSystemPrompt(cwd, [], false, undefined, ["bash"]);
     expect(prompt).not.toContain("- Files (");
+  });
+});
+
+describe("plan mode steering", () => {
+  it("says when to enter plan mode, and that small changes skip it", () => {
+    const steering = buildToolSteering(["read", "bash", "enter_plan"]);
+    expect(steering).toContain("Call `enter_plan` first only when the request needs research");
+    expect(steering).toContain("Go straight to work on small or clear changes");
+    expect(buildToolSteering(["read", "bash"])).not.toContain("enter_plan");
+  });
+});
+
+describe("plan mode research tools", () => {
+  it("names steroids and web research only when the session can reach them", async () => {
+    const { renderPlanModeSection } = await import("./system-prompt.js");
+    const full = renderPlanModeSection(["read", "bash", "steroids", "web_search"]);
+    expect(full).toContain("`steroids` for how real projects solve it");
+    expect(full).toContain("the web for current docs");
+    const bare = renderPlanModeSection(["read", "bash"]);
+    expect(bare).toContain("Use read/search tools and read-only bash;");
+    expect(bare).not.toContain("steroids");
   });
 });

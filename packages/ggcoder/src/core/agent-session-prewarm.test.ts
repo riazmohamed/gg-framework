@@ -66,14 +66,10 @@ beforeEach(async () => {
     );
   await fs.mkdir(path.join(tempHome, ".gg"), { recursive: true });
   await fs.writeFile(
-    path.join(tempHome, ".gg", "claude-code-version.json"),
-    JSON.stringify({ version: "2.1.75", fetchedAt: Date.now() }),
-  );
-  await fs.writeFile(
     path.join(tempHome, ".gg", "auth.json"),
     JSON.stringify({
       anthropic: { accessToken: "t", refreshToken: "t", expiresAt: Date.now() + 3_600_000 },
-      openai: { accessToken: "t", refreshToken: "t", expiresAt: Date.now() + 3_600_000 },
+      openai: { accessToken: "t", refreshToken: "", expiresAt: Date.now() + 3_600_000 },
     }),
   );
 });
@@ -131,7 +127,6 @@ describe("AgentSession.prewarm", () => {
         "cacheRetention",
         "promptCacheKey",
         "transportSessionId",
-        "userAgent",
       ]) {
         // The loop takes webSearch as a per-request getter (native search can
         // be attached mid-run); parity is about the value the request carries.
@@ -149,8 +144,8 @@ describe("AgentSession.prewarm", () => {
     }
   }, 30_000);
 
-  it("warms the language-pack system prompt the first real turn will send", async () => {
-    // Default (non-custom) prompt in a TypeScript project: style packs are
+  it("warms the language-aware system prompt the first real turn will send", async () => {
+    // Default (non-custom) prompt in a TypeScript project: verify commands are
     // detected at run start, so a prewarm that skipped detection warmed a
     // shorter system block and the real turn missed the whole cached history.
     const project = await fs.mkdtemp(path.join(os.tmpdir(), "agent-prewarm-ts-"));
@@ -177,7 +172,7 @@ describe("AgentSession.prewarm", () => {
 
       await session.prompt("next question");
       const [realMessages] = agentLoopMock.mock.calls[0] as [Message[]];
-      expect(String(warmSystem?.content)).toContain("### TypeScript");
+      expect(String(warmSystem?.content)).toContain("tsc --noEmit");
       expect(warmSystem).toEqual(realMessages[0]);
     } finally {
       await session.dispose();

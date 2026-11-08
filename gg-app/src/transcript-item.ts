@@ -1,4 +1,4 @@
-import type { AskUserPrompt, PromptSegment } from "./agent";
+import type { AskUserPrompt, AttachmentChip, PromptSegment } from "./agent";
 import type { ChatErrorItem } from "./chat-error";
 import type { HookKind, VerificationReason } from "./HookNotice";
 import type { PlanDecision } from "./PlanDecisionNotice";
@@ -20,6 +20,8 @@ export type Item =
       command?: boolean;
       label?: string;
       images?: string[];
+      // Attached files and videos (images show in `images`).
+      attachments?: AttachmentChip[];
       files?: string[];
       // Corrected-term segments from the prompt enhancer, when this message was
       // sent unedited straight after an enhance. Drives the highlighted bubble.
@@ -59,7 +61,16 @@ export type Item =
   | { kind: "images"; id: number; images: TranscriptImage[]; caption?: string }
   // Image generation in progress — a shimmering square placeholder that gets
   // replaced by the final image when the tool result arrives.
-  | { kind: "generating_image"; id: number; prompt: string; toolCallId: string }
+  | {
+      kind: "generating_image";
+      id: number;
+      prompt: string;
+      toolCallId: string;
+      /** An animated GIF was asked for. */
+      gif: boolean;
+      /** Date.now() when the call started, for the progress estimate. */
+      startedAt: number;
+    }
   // Plan-mode entry banner (ASCII logo + optional reason).
   | { kind: "plan"; id: number; reason: string }
   // What the user did with a reviewed plan: an amber critter row.
@@ -81,6 +92,9 @@ export type Item =
       /** Soft deadline passed: the agent went on; an answer is still delivered late. */
       deferred?: boolean;
     }
+  // A command the user ran themselves (`!cmd`). Its output streams through the
+  // live-text store while it runs; `output` holds it once finished.
+  | ShellItem
   // A task kicked off from the Tasks modal (shown at the top of its session).
   | { kind: "task"; id: number; title: string }
   // Sub-agents delegated in a turn — a live, in-chat feed of each one's tools.
@@ -120,3 +134,25 @@ let idSeq = 0;
 export const nextId = (): number => ++idSeq;
 /** The most recently issued transcript item id. */
 export const lastIssuedId = (): number => idSeq;
+
+export type ShellItem = {
+  kind: "shell";
+  id: number;
+  runId: string;
+  command: string;
+  cwd: string;
+  /** confirm: waiting for Run/Cancel. declined: the user said no. failed: never started. */
+  status: "confirm" | "declined" | "running" | "done" | "failed";
+  output: string;
+  startedAt?: number;
+  exitCode?: number | null;
+  durationMs?: number;
+  cancelled?: boolean;
+  /** Live: output stopped showing past the cap. Restored: only the last lines were saved. */
+  truncated?: boolean;
+  /** Rebuilt from the saved session rather than run in this window. */
+  restored?: boolean;
+  error?: string;
+  /** The output went to the agent with a message the user sent. */
+  shared?: boolean;
+};

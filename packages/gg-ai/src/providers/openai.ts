@@ -25,7 +25,7 @@ import {
   toOpenAIMessages,
   toGlmReasoningEffort,
   toLocalReasoningEffort,
-  toOpenAIReasoningEffort,
+  effortForRequest,
   toOpenAIToolChoice,
   toOpenAITools,
 } from "./transform.js";
@@ -41,6 +41,7 @@ import {
 import { parseToolArguments } from "../utils/json.js";
 import { getEnvironment } from "../utils/env.js";
 import { PROVIDER_TRANSPORT_TIMEOUT_MS, providerFetch } from "../utils/provider-fetch.js";
+import { localBearerKey } from "../local-api-key.js";
 
 // Kimi K3's declared effort rungs (server-validated; anything else 400s).
 // Official alias mapping from Moonshot's K3 third-party-tools docs:
@@ -115,12 +116,21 @@ export function createClient(options: StreamOptions): OpenAI {
     if (cached) return cached;
   }
 
+  // A keyless local endpoint gets no Authorization header (null drops the SDK's bearer).
+  const omitAuth = options.provider === "local" && localBearerKey(options.apiKey) === undefined;
+  const defaultHeaders = omitAuth
+    ? { ...options.defaultHeaders, Authorization: null }
+    : options.defaultHeaders;
   const client = new OpenAI({
     apiKey: options.apiKey,
     ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
     // Default transport lifts undici's 300s header/body caps (see provider-fetch.ts).
     fetch: options.fetch ?? providerFetch,
-    ...(options.defaultHeaders ? { defaultHeaders: options.defaultHeaders } : {}),
+    // The agent loop owns retries (classified backoff, Retry-After, UI retry
+    // events). The SDK default of 2 silent retries stacked under it: one 5xx
+    // cost up to 3 hidden requests plus SDK sleeps before the loop even saw it.
+    maxRetries: 0,
+    ...(defaultHeaders ? { defaultHeaders } : {}),
   });
 
   if (!options.fetch) {
@@ -220,7 +230,13 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     ...(options.topP != null && !hasFixedKimiSampling ? { top_p: options.topP } : {}),
     ...(options.stop ? { stop: options.stop } : {}),
     ...(options.thinking && !usesThinkingParam && !isKimiK3 && !isKimiK27 && !isLocal
-      ? { reasoning_effort: toOpenAIReasoningEffort(options.thinking, options.model) }
+      ? {
+          reasoning_effort: effortForRequest(
+            options.thinking,
+            options.model,
+            options.thinkingLevels,
+          ),
+        }
       : {}),
     ...(options.tools?.length
       ? {

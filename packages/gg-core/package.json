@@ -1,16 +1,29 @@
 {
   "name": "@kenkaiiii/gg-core",
-  "version": "5.87.3",
+  "version": "5.95.3",
   "type": "module",
-  "description": "Provider-agnostic, UI-free shared foundation: model registry, auth, paths, telegram, voice",
-  "license": "MIT",
+  "description": "Model registry, sign-in and stored credentials, and local model discovery for apps built on gg-ai. No UI, no agent loop.",
+  "author": "Ken Kai",
+  "keywords": [
+    "llm",
+    "ai",
+    "model-registry",
+    "oauth",
+    "ollama",
+    "local-models"
+  ],
+  "license": "AGPL-3.0-only",
   "engines": {
     "node": ">=22"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kenkaiiii/gg-framework.git",
+    "url": "git+https://github.com/KenKaiii/gg-framework.git",
     "directory": "packages/gg-core"
+  },
+  "homepage": "https://github.com/KenKaiii/gg-framework/tree/main/packages/gg-core#readme",
+  "bugs": {
+    "url": "https://github.com/KenKaiii/gg-framework/issues"
   },
   "exports": {
     ".": {
@@ -33,7 +46,8 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsup",

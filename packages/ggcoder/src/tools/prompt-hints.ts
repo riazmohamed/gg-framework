@@ -33,13 +33,13 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "Read/record project checks with evidence and scope; re-record an item after fixing it. No unasked audits.",
   tasks: "Task list; only if asked.",
   ask_user: "Ask the user via clickable options; mark your pick `recommended`.",
-  enter_plan: "Plan mode.",
   exit_plan: "Submit a plan.",
   subagent: "Blocking child agent.",
   skill: "Load a named skill's instructions.",
   tool_search: "Load on-demand and integration tools by capability.",
-  generate_image: "Images; only if asked.",
-  steroids: "Real-repo examples.",
+  generate_image:
+    "Make images and animated GIFs (OpenAI); use it, not code, when asked for a picture or GIF.",
+  steroids: "Current open-source code, when it may be newer than your training.",
 };
 
 /**
@@ -51,6 +51,8 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
  */
 export const TOOL_STEERING_CLAUSES: ReadonlyArray<{
   needs: readonly string[];
+  /** Skip the clause when any of these tools is active. */
+  without?: readonly string[];
   /** Render only when changes go through one POSIX `bash` command (true) or not (false). */
   oneCommandChanges?: boolean;
   text: string;
@@ -78,7 +80,20 @@ export const TOOL_STEERING_CLAUSES: ReadonlyArray<{
     text: "To orient, combine `ls`/`find`/`rg`/`cat` in one `bash` call.",
   },
   {
+    // A fact, not a rule: the model can't see how calls execute. Told only to
+    // batch "reads/searches", race lanes made one steroids call per reply and
+    // packed reads into bash loops instead (agent-race, 2026-11-03).
+    needs: ["bash"],
+    text: "Calls in one reply run in parallel, except shell commands and edits (run in listed order); batch independent work.",
+  },
+  {
+    // Planning costs a review round-trip, so it is for work that needs it.
+    needs: ["enter_plan"],
+    text: "Call `enter_plan` first only when the request needs research and careful step-by-step work (several files, real risk, or an unclear approach). Go straight to work on small or clear changes; planning slows them down.",
+  },
+  {
     needs: ["read", "grep"],
+    without: ["bash"],
     text: "Batch independent reads/searches in one turn; they run in parallel.",
   },
 ];
@@ -101,6 +116,7 @@ export function buildToolSteering(activeTools: readonly string[], posixShell = t
   return TOOL_STEERING_CLAUSES.filter(
     (c) =>
       c.needs.every((n) => active.has(n)) &&
+      !(c.without ?? []).some((n) => active.has(n)) &&
       (c.oneCommandChanges === undefined || c.oneCommandChanges === oneCommand),
   )
     .map((c) => c.text)

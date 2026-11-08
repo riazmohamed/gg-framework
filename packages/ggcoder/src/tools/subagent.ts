@@ -6,13 +6,18 @@ import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { mcpServersForAgent, type AgentDefinition } from "../core/agents.js";
 import { log } from "../core/logger.js";
 import { isModelUnavailableError } from "../core/model-unavailable.js";
+import { writeOverflowSync } from "./overflow.js";
 import { ReceiptRecorder } from "../core/subagent-receipt.js";
 import {
   AcceptanceChecksParam,
   formatCheckResults,
   verifyAcceptanceChecks,
 } from "../core/acceptance-checks.js";
-import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
+import {
+  isPlanModeActive,
+  isReadOnlyAgent,
+  planModeAgentRestriction,
+} from "../core/runtime-mode.js";
 import {
   boundSubAgentOutput,
   childSubAgentEnv,
@@ -24,6 +29,7 @@ import {
   subAgentCacheKey,
   subAgentThinkingLevel,
   type SubAgentTokenUsage,
+  SUB_AGENT_BLOCKING_OUTPUT_CHARS,
   SUB_AGENT_MAX_OUTPUT_CHARS,
   SUB_AGENT_MAX_STDERR_CHARS,
   SUB_AGENT_MAX_TURNS,
@@ -92,10 +98,6 @@ export function createSubAgentTool(
     // generically by the loop's shorter default before that can happen.
     timeoutMs: SUB_AGENT_TIMEOUT_MS + 30_000,
     async execute(args, context) {
-      if (isPlanModeActive(planModeRef)) {
-        return planModeRestriction("subagent");
-      }
-
       if (currentSubAgentDepth() >= MAX_BLOCKING_SUBAGENT_DEPTH) {
         return {
           content: `Sub-agent nesting limit reached (${MAX_BLOCKING_SUBAGENT_DEPTH}). Complete this task in the current agent.`,
@@ -119,9 +121,17 @@ export function createSubAgentTool(
           content: `Unknown agent: "${args.agent}". Available agents: ${agents.map((a) => a.name).join(", ") || "none"}`,
         };
       }
+      if (isPlanModeActive(planModeRef) && !isReadOnlyAgent(agentDef)) {
+        return planModeAgentRestriction("subagent", agents);
+      }
       const useModel = selection.model;
       const parentCacheKey = getParentCacheKey?.();
-      const childCacheKey = subAgentCacheKey(parentCacheKey, useModel, agentDef?.name ?? "default");
+      const childCacheKey = subAgentCacheKey(
+        parentCacheKey,
+        useModel,
+        agentDef?.name ?? "default",
+        context.toolCallId,
+      );
       const subCacheKey = childCacheKey ?? "(unset)";
 
       const buildCliArgs = (model: string): string[] => {
@@ -356,7 +366,14 @@ export function createSubAgentTool(
               model,
             });
 
-            const body = boundSubAgentOutput(textOutput);
+            const fullOutputPath =
+              textOutput.length > SUB_AGENT_BLOCKING_OUTPUT_CHARS
+                ? tryWriteOverflow(textOutput)
+                : undefined;
+            const body = boundSubAgentOutput(textOutput, {
+              maxChars: SUB_AGENT_BLOCKING_OUTPUT_CHARS,
+              fullOutputPath,
+            });
             const checksBlock = formatCheckResults(
               verifyAcceptanceChecks(args.checks ?? [], receipt.snapshot(), cwd),
             );
@@ -470,6 +487,15 @@ function shortenPath(filePath: string): string {
   const parts = filePath.split("/");
   if (parts.length <= 3) return filePath;
   return "…/" + parts.slice(-2).join("/");
+}
+
+/** Best-effort offload of a long report; a full disk never fails the tool. */
+function tryWriteOverflow(content: string): string | undefined {
+  try {
+    return writeOverflowSync(content, "subagent");
+  } catch {
+    return undefined;
+  }
 }
 
 function truncateStr(s: string, max: number): string {

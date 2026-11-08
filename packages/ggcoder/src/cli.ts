@@ -74,14 +74,16 @@ import { SessionManager, type TurnMetricPayload } from "./core/session-manager.j
 import { ensureAppDirs, getAppPaths, loadSavedSettings, projectScopeAllowed } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
+import { streamDiagLevel } from "./core/stream-diag-level.js";
 import { setProviderDiagnostic } from "@kenkaiiii/gg-ai";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { matchPromptCommand } from "./core/prompt-command-expansion.js";
 import { createTools } from "./tools/index.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
+import { pruneDiagnosticsRecords } from "./core/internal-diagnostics.js";
 import { spawnedTasks, type SpawnedTaskArgs } from "./tools/subagent-shared.js";
-import { CheckpointStore } from "./core/checkpoint-store.js";
+import { CheckpointStore, pruneCheckpointSessions } from "./core/checkpoint-store.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import {
   createCompactedSessionCheckpoint,
@@ -395,7 +397,7 @@ function main(): void {
     if (p === "gemini") return "gemini-3.1-flash-lite";
     if (p === "glm") return "glm-5.3";
     if (p === "moonshot") return "kimi-k3";
-    if (p === "minimax") return "MiniMax-M3";
+    if (p === "minimax") return "MiniMax-M3.1-Flash";
     if (p === "deepseek") return "deepseek-v4-pro";
     if (p === "huggingface") return "moonshotai/Kimi-K2.7-Code";
     if (p === "openrouter") return "qwen/qwen3.8-max";
@@ -465,9 +467,8 @@ async function runInkTUI(opts: {
 
   // Wire stream stall diagnostics into the debug log
   setStreamDiagnostic((phase, data) => {
-    // A session stuck on the non-streaming fallback costs real money and real
-    // latency; it does not belong in the INFO noise floor.
-    const level = phase === "non_streaming_session" ? "WARN" : "INFO";
+    const level = streamDiagLevel(phase, data);
+    if (level === null) return;
     log(level, "stream", phase, data as Record<string, unknown>);
   });
   setProviderDiagnostic((phase, data) => {
@@ -492,7 +493,7 @@ async function runInkTUI(opts: {
   // mimo-v2.6-pro-ultraspeed) since a user may hold either or both.
   const credentialsByProvider: Record<
     string,
-    { accessToken: string; accountId?: string; projectId?: string; baseUrl?: string }
+    { accessToken: string; accountId?: string; baseUrl?: string }
   > = {};
   const expiredProviders: Provider[] = [];
   for (const p of loggedInProviders) {
@@ -510,7 +511,6 @@ async function runInkTUI(opts: {
         credentialsByProvider[key] = {
           accessToken: resolved.accessToken,
           accountId: resolved.accountId,
-          projectId: resolved.projectId,
           baseUrl: resolved.baseUrl,
         };
         resolvedAny = true;
@@ -595,7 +595,6 @@ async function runInkTUI(opts: {
   const creds = {
     accessToken: cached.accessToken,
     accountId: cached.accountId,
-    projectId: cached.projectId,
     refreshToken: "", // not needed downstream; SDK only uses accessToken
     expiresAt: Number.POSITIVE_INFINITY,
   };
@@ -751,6 +750,7 @@ async function runInkTUI(opts: {
           model,
           contextWindow,
           threshold: savedSettings.compactThreshold,
+          compactAtTokens: savedSettings.compactAtTokens,
           accountId: creds.accountId,
         });
         const activeTokens = undefined;
@@ -829,7 +829,6 @@ async function runInkTUI(opts: {
                     model,
                     apiKey: creds.accessToken,
                     accountId: creds.accountId,
-                    projectId: creds.projectId,
                     baseUrl: cached.baseUrl,
                     contextWindow,
                     targetTokens: policy.targetTokens,
@@ -956,6 +955,25 @@ async function runInkTUI(opts: {
       .catch(() => {});
     // Sweep recoverable full tool outputs (~/.gg/tool-output/) older than 48h.
     void cleanupToolOutputs().catch(() => {});
+    // ~/.gg/checkpoints/<session> folders untouched for 30 days (best-effort, non-blocking).
+    void pruneCheckpointSessions()
+      .then(({ removed }) => {
+        if (removed > 0) {
+          log("INFO", "checkpoints", "Pruned old checkpoint folders", { removed: String(removed) });
+        }
+      })
+      .catch(() => {});
+    // ~/.gg/diagnostics/sessions records older than 30 days (best-effort, non-blocking).
+    void pruneDiagnosticsRecords()
+      .then(({ removed, freedBytes }) => {
+        if (removed > 0) {
+          log("INFO", "diagnostics", "Pruned old diagnostics records", {
+            removed: String(removed),
+            freedBytes: String(freedBytes),
+          });
+        }
+      })
+      .catch(() => {});
   }
 
   await renderApp({
@@ -969,7 +987,6 @@ async function runInkTUI(opts: {
     thinking: opts.thinkingLevel,
     apiKey: creds.accessToken,
     accountId: creds.accountId,
-    projectId: creds.projectId,
     cwd,
     theme: opts.theme,
     loggedInProviders,
@@ -1030,7 +1047,7 @@ async function runSessions(): Promise<void> {
     if (p === "gemini") return "gemini-3.1-flash-lite";
     if (p === "glm") return "glm-5.3";
     if (p === "moonshot") return "kimi-k3";
-    if (p === "minimax") return "MiniMax-M3";
+    if (p === "minimax") return "MiniMax-M3.1-Flash";
     if (p === "deepseek") return "deepseek-v4-pro";
     if (p === "huggingface") return "moonshotai/Kimi-K2.7-Code";
     if (p === "sakana") return "fugu";
@@ -1504,6 +1521,12 @@ async function resolveActiveProvider(
     "sakana",
     "xai",
   ];
+  // Retired sign-ins (old Claude, Codex, Kimi, Grok or Google tokens) are never
+  // used. Tell the user once, then remove them.
+  for (const retired of await authStorage.legacySignIns()) {
+    if (!(await authStorage.takeLegacySignIn(retired.provider))) continue;
+    console.warn(chalk.yellow(`⚠ ${retired.message}\n  Run "ggcoder login" to connect again.`));
+  }
   const loggedInProviders: Provider[] = [];
   for (const p of allProviders) {
     if (await authStorage.hasProviderAuth(p)) loggedInProviders.push(p);

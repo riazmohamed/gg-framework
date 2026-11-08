@@ -31,7 +31,7 @@ import {
   type SubAgentManager,
   type SubAgentSnapshot,
 } from "../core/subagent-manager.js";
-import { buildProcessCompletionFollowUp } from "../core/process-gate.js";
+import { buildHostCompletionGateFollowUp } from "../core/process-gate.js";
 import { useAgentLoop, type StreamSnapshot, type UserContent } from "./hooks/useAgentLoop.js";
 import { useTranscriptHistory } from "./hooks/useTranscriptHistory.js";
 import type { PasteInfo } from "./components/InputArea.js";
@@ -50,7 +50,7 @@ import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { getGitBranch } from "../utils/git.js";
 import { getAuthStorageKeys, getModel, getVideoByteLimit } from "../core/model-registry.js";
 import { SessionManager, type TurnMetricPayload } from "../core/session-manager.js";
-import { log } from "../core/logger.js";
+import { describeUserInput, log } from "../core/logger.js";
 import {
   getPendingUpdate,
   startPeriodicUpdateCheck,
@@ -58,9 +58,9 @@ import {
 } from "../core/auto-update.js";
 import { SettingsManager, type Settings } from "../core/settings-manager.js";
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
-import { getAnnouncedLanguages, markLanguagesAnnounced } from "../core/setup-history.js";
 import { loadCustomCommands, type CustomCommand } from "../core/custom-commands.js";
 import { detectLanguages, type LanguageId } from "../core/language-detector.js";
+import { planLanguagePackUpdate } from "./language-pack-update.js";
 import { detectVerifyCommands } from "../core/verify-commands.js";
 import type { Skill } from "../core/skills.js";
 import type { CheckpointInfo, CheckpointStore, RestoreMode } from "../core/checkpoint-store.js";
@@ -77,6 +77,7 @@ import {
 import type { MCPClientManager } from "../core/mcp/index.js";
 import { getAllMcpServers } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
+import { resolveClaudeCodeProcess } from "../core/claude-code/complete.js";
 import {
   trimFlushedItems,
   flushOnTurnText,
@@ -198,7 +199,6 @@ export interface AppProps {
   apiKey?: string;
   baseUrl?: string;
   accountId?: string;
-  projectId?: string;
   cwd: string;
   version: string;
   showTokenUsage?: boolean;
@@ -207,7 +207,7 @@ export interface AppProps {
   loggedInProviders?: Provider[];
   credentialsByProvider?: Record<
     string,
-    { accessToken: string; accountId?: string; projectId?: string; baseUrl?: string }
+    { accessToken: string; accountId?: string; baseUrl?: string }
   >;
   initialHistory?: CompletedItem[];
   sessionsDir?: string;
@@ -532,7 +532,7 @@ export function App(props: AppProps) {
   );
   const idealReviewEnabledRef = useRef(idealReviewEnabled);
   /**
-   * Languages whose style packs are currently injected into the system prompt.
+   * Languages whose verify commands are currently in the system prompt.
    * Grown by `maybeInjectLanguagePacks` after `write`/`bash` tool results when
    * the language detector sees new marker files.
    * Only grows within a session; we never strip packs once injected (cheaper
@@ -679,7 +679,6 @@ export function App(props: AppProps) {
     .find((c) => c !== undefined);
   const activeApiKey = currentCreds?.accessToken ?? props.apiKey;
   const activeAccountId = currentCreds ? currentCreds.accountId : props.accountId;
-  const activeProjectId = currentCreds ? currentCreds.projectId : props.projectId;
   const activeBaseUrl =
     currentProvider === "gemini" ? undefined : currentCreds ? currentCreds.baseUrl : props.baseUrl;
   const contextWindowOptions = useMemo(
@@ -761,43 +760,43 @@ export function App(props: AppProps) {
       if (!injectedLanguagesRef.current.has(id)) added.push(id);
     }
     if (added.length === 0) {
-      // No new packs to inject. The with-packs path below is gated via
-      // getAnnouncedLanguages / markLanguagesAnnounced: badge fires once per
-      // (cwd, language) and stays silent on subsequent sessions / /clear.
       if (source === "initial" && injectedLanguagesRef.current.size === 0) {
-        log("INFO", "language", `No style packs detected for ${cwd}`, { source });
+        log("INFO", "language", `No languages detected for ${cwd}`, { source });
       }
       return;
     }
+    // Rewriting the system prompt after the first reply discards the whole
+    // prompt cache; append the update as a message between turns instead.
+    const plan = planLanguagePackUpdate({
+      added: new Set(added),
+      cwd,
+      hasReply: messagesRef.current.some((m) => m.role === "assistant"),
+      betweenTurns: source === "input" && !agentLoopRef.current?.isRunning,
+    });
+    if (plan.kind === "defer" || plan.kind === "none") return;
     injectedLanguagesRef.current = detected;
     try {
-      await replaceSystemPrompt({ cwd, activeLanguages: detected });
+      if (plan.kind === "append") {
+        messagesRef.current.push(plan.message);
+      } else {
+        await replaceSystemPrompt({ cwd, activeLanguages: detected });
+      }
       const verifyCmds = detectVerifyCommands(cwd, detected);
-      const tag = source === "initial" ? "Initial style packs" : "Style pack(s) loaded";
+      const tag = source === "initial" ? "Initial languages" : "Language(s) detected";
       log("INFO", "language", `${tag}: ${added.join(", ")}`, {
         source,
         active: [...detected].join(","),
         verify_count: String(verifyCmds.length),
         verify: verifyCmds.map((c) => `${c.language}:${c.label}=${c.command}`).join(" | "),
       });
-      // The badge is purely user-facing notification ("hey, this pack just
-      // turned on"). The system prompt is already updated above — that's the
-      // load-bearing part. We persist the announced set per-cwd so /clear,
-      // restart, and new sessions stay quiet for packs the user has seen.
-      const alreadyAnnounced = new Set(getAnnouncedLanguages(cwd));
-      const toAnnounce = added.filter((id) => !alreadyAnnounced.has(id));
-      if (toAnnounce.length > 0) {
-        markLanguagesAnnounced(cwd, toAnnounce);
-        setLiveItems((prev) => [...prev, { kind: "style_pack", added: toAnnounce, id: getId() }]);
-      }
     } catch (err) {
       log("WARN", "language", `Detection apply failed (${source}): ${(err as Error).message}`);
     }
   };
 
   // Initial language detection — runs once on mount so existing projects with
-  // marker files (package.json, Cargo.toml, etc.) get their style packs from
-  // turn 1, with a visible badge.
+  // marker files (package.json, Cargo.toml, etc.) get their verify commands
+  // from turn 1.
   useEffect(() => {
     void applyLanguageDetectionRef.current("initial");
   }, []);
@@ -865,7 +864,6 @@ export function App(props: AppProps) {
       contextWindowOptions,
       activeApiKey,
       activeAccountId,
-      activeProjectId,
       activeBaseUrl,
       setLiveItems,
       getId,
@@ -909,7 +907,6 @@ export function App(props: AppProps) {
       return {
         apiKey: creds.accessToken,
         accountId: creds.accountId,
-        projectId: creds.projectId,
       };
     },
     [authStorage, currentProvider, currentModel],
@@ -932,8 +929,10 @@ export function App(props: AppProps) {
       apiKey: activeApiKey,
       baseUrl: activeBaseUrl,
       accountId: activeAccountId,
-      projectId: activeProjectId,
       resolveCredentials: authStorage ? resolveCredentials : undefined,
+      resolveClaudeCode: authStorage
+        ? () => resolveClaudeCodeProcess(authStorage, currentProvider, props.cwd)
+        : undefined,
       transformContext,
       getLoopBreakMessage: (stats, stage) => {
         if (!idealReviewEnabledRef.current) return null;
@@ -1712,26 +1711,18 @@ export function App(props: AppProps) {
       // nudges per step so a genuinely blocked agent surfaces.
       getFollowUpMessages: useCallback(() => {
         const childCompletionFollowUp = buildSubAgentCompletionFollowUp(props.subAgentManager);
-        if (childCompletionFollowUp) return childCompletionFollowUp;
 
         // Background processes started this run and never read block
         // completion: their progress/exit checkpoints only reach the agent on
-        // the steering path, which a run about to stop never reaches.
-        const runStartedAt = agentLoopRef.current?.runStartRef.current ?? 0;
-        const gate = processGateRef.current;
-        if (gate.runStartedAt !== runStartedAt) {
-          gate.runStartedAt = runStartedAt;
-          gate.injected = 0;
-        }
-        const processFollowUp = buildProcessCompletionFollowUp(
+        // the steering path, which a run about to stop never reaches. Sent in
+        // one follow-up with the child-agent gate: one forced turn, not two.
+        const gateFollowUp = buildHostCompletionGateFollowUp(
+          childCompletionFollowUp,
           props.processManager?.list() ?? [],
-          runStartedAt,
-          gate.injected,
+          agentLoopRef.current?.runStartRef.current ?? 0,
+          processGateRef.current,
         );
-        if (processFollowUp) {
-          gate.injected += 1;
-          return processFollowUp;
-        }
+        if (gateFollowUp) return gateFollowUp;
 
         const steps = planStepsRef.current;
         if (steps.length === 0 || !approvedPlanPathRef.current) return null;
@@ -1895,11 +1886,10 @@ export function App(props: AppProps) {
       if (trimmed.startsWith("/")) {
         log("INFO", "command", `Slash command: ${trimmed}`);
       } else {
-        const truncated = trimmed.length > 100 ? trimmed.slice(0, 100) + "..." : trimmed;
         log(
           "INFO",
           "input",
-          `User input: ${truncated}${inputImages.length > 0 ? ` (+${inputImages.length} image${inputImages.length > 1 ? "s" : ""})` : ""}`,
+          `User input: ${describeUserInput(trimmed)}${inputImages.length > 0 ? ` (+${inputImages.length} image${inputImages.length > 1 ? "s" : ""})` : ""}`,
         );
         // Re-detect on every user submit — cheap (fs stats only). Catches
         // external changes between turns and ensures non-writing prompts still
