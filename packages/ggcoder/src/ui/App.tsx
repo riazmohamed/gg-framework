@@ -140,6 +140,7 @@ import { createGitCommand } from "./tui-git.js";
 import { paidSwitchHint, unconfirmedPaidSwitch } from "./paid-model-switch.js";
 import { createImportCommand } from "./tui-import.js";
 import { createEnhanceCommand, type EnhanceRoute } from "./tui-enhance.js";
+import { createTuiShell, parseBangCommand, type TuiShell } from "./tui-shell.js";
 import { createUsageService } from "../app-sidecar/usage.js";
 import { useRepoStatus } from "./hooks/useRepoStatus.js";
 import type { RepoStatusTone } from "./repo-status.js";
@@ -1082,6 +1083,20 @@ export function App(props: AppProps) {
   // (which run long after mount) can read loop-owned refs such as runStartRef.
   const agentLoopRef = useRef<ReturnType<typeof useAgentLoop> | null>(null);
   const safetyWatchRef = useRef(props.safetyWatch);
+  // `!cmd`: the user's own shell commands (see tui-shell.ts). The output is
+  // shown, and its hidden note joins the history between runs, so it reaches
+  // the agent with the next message.
+  const tuiShellRef = useRef<TuiShell | null>(null);
+  tuiShellRef.current ??= createTuiShell({
+    cwd: () => cwdRef.current,
+    onEnd: (_run, text) => {
+      setLiveItems((prev) => [...prev, { kind: "info", text, id: getId() }]);
+      if (!agentLoopRef.current?.isRunning) {
+        const note = tuiShellRef.current?.takeContext();
+        if (note) messagesRef.current.push(note);
+      }
+    },
+  });
   const agentLoop = useAgentLoop(
     messagesRef,
     {
@@ -2153,6 +2168,25 @@ export function App(props: AppProps) {
     async (input: string, inputImages: ImageAttachment[] = [], pasteInfo?: PasteInfo) => {
       const trimmed = input.trim();
 
+      // `!cmd` runs the user's own command in the project (tui-shell.ts).
+      const bang = parseBangCommand(trimmed);
+      if (bang !== null) {
+        const started = tuiShellRef.current?.run(bang) ?? {
+          ok: false as const,
+          error: "Commands are unavailable.",
+        };
+        log("INFO", "shell", "User shell command", { started: String(started.ok) });
+        setLiveItems((prev) => [
+          ...prev,
+          {
+            kind: "info",
+            text: started.ok ? `$ ${bang}  (running… Esc stops it)` : started.error,
+            id: getId(),
+          },
+        ]);
+        return;
+      }
+
       if (trimmed.startsWith("/")) {
         log("INFO", "command", `Slash command: ${trimmed}`);
       } else {
@@ -2628,6 +2662,13 @@ export function App(props: AppProps) {
     });
   }, [agentLoop.isRunning, safetyWatch]);
 
+  useEffect(() => {
+    if (agentLoop.isRunning) return;
+    const note = tuiShellRef.current?.takeContext();
+    if (note) messagesRef.current.push(note);
+  }, [agentLoop.isRunning]);
+  useEffect(() => () => tuiShellRef.current?.stopAll(), []);
+
   const handleAbort = useCallback(() => {
     props.askUserHost?.cancelAll();
     props.elicitHost?.cancelAll();
@@ -2647,6 +2688,8 @@ export function App(props: AppProps) {
         .some((agent) => agent.state === "starting" || agent.state === "running")
     ) {
       void props.subAgentManager.interruptAll();
+    } else if (tuiShellRef.current?.isRunning()) {
+      tuiShellRef.current.stop();
     } else if (compactionAbortRef.current) {
       compactionAbortRef.current.abort();
     } else {
