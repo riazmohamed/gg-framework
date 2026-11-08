@@ -15,6 +15,7 @@ function handlers(calls: string[]): Record<CliSubcommandName, () => void> {
     "agent-home": () => calls.push("agent-home"),
     local: () => calls.push("local"),
     steroids: () => calls.push("steroids"),
+    openrouter: () => calls.push("openrouter"),
     hf: () => calls.push("hf"),
   };
 }
@@ -76,8 +77,8 @@ describe("routeCliCommandInput", () => {
     expect(calls).toEqual([]);
   });
 
-  it("keeps the action word for local, steroids and hf", () => {
-    for (const name of ["local", "steroids", "hf"]) {
+  it("keeps the action word for local, steroids, openrouter and hf", () => {
+    for (const name of ["local", "steroids", "openrouter", "hf"]) {
       const argv = ["node", "ogcoder", name, "pull", "org/model"];
       const calls: string[] = [];
       expect(
