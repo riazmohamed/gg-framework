@@ -11,6 +11,7 @@ export type CliSubcommandName =
   | "agent-home"
   | "local"
   | "steroids"
+  | "openrouter"
   | "hf";
 
 export type CliCommandRouteResult =
@@ -36,6 +37,7 @@ const SUBCOMMANDS_THAT_KEEP_ARGV: ReadonlySet<CliSubcommandName> = new Set([
   "agent-home-login",
   "local",
   "steroids",
+  "openrouter",
   "hf",
 ]);
 
@@ -53,6 +55,7 @@ function isCliSubcommandName(value: string | undefined): value is CliSubcommandN
     value === "agent-home" ||
     value === "local" ||
     value === "steroids" ||
+    value === "openrouter" ||
     value === "hf"
   );
 }

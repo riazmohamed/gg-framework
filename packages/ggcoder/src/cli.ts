@@ -111,6 +111,8 @@ import { runLogin, runLogout, runDoctor } from "./cli/auth.js";
 import { runMcp } from "./cli/mcp.js";
 import { runLocal } from "./cli/local.js";
 import { runSteroids } from "./cli/steroids.js";
+import { runOpenRouter } from "./cli/openrouter.js";
+import { loadOpenRouterCatalog } from "./core/openrouter-catalog-store.js";
 import { runHf } from "./cli/hf.js";
 import { scanLocalModels } from "./core/local-scan.js";
 import {
@@ -173,6 +175,7 @@ function printHelp(): void {
     ["local", "Local model servers (Ollama, LM Studio, …)"],
     ["hf", "Search and pull Hugging Face models into Ollama"],
     ["steroids", "Install Agent Steroids (local code corpus)"],
+    ["openrouter", "Sync the OpenRouter model list from your endpoint"],
   ];
   for (const [name, desc] of cmds) {
     console.log(`  ${accent(name.padEnd(20))} ${dim(desc)}`);
@@ -268,6 +271,7 @@ function createCliSubcommandHandlers(): Record<CliSubcommandName, () => void> {
     "agent-home": () => runWithStandardErrorHandling(runAgentHome),
     local: () => runWithStandardErrorHandling(runLocal),
     steroids: () => runWithStandardErrorHandling(runSteroids),
+    openrouter: () => runWithStandardErrorHandling(runOpenRouter),
     hf: () => runWithStandardErrorHandling(runHf),
   };
 }
@@ -508,6 +512,15 @@ async function runInkTUI(opts: {
 
   const authStorage = new AuthStorage(paths.authFile);
   await authStorage.load();
+
+  // A synced OpenRouter list (`ogcoder openrouter sync`) replaces the built-in
+  // one, as in the desktop app. A local file read, so it is awaited: the saved
+  // model may be one of its entries. Never fatal.
+  await loadOpenRouterCatalog(authStorage).catch((err: unknown) => {
+    log("WARN", "openrouter", "openrouter catalog load failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
 
   // Local models (Ollama, LM Studio, …) only exist after a scan. Starting on
   // one waits for it, since the model and its server's address must be known
