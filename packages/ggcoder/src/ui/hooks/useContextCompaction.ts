@@ -36,7 +36,6 @@ interface UseContextCompactionOptions {
   contextWindowOptions: ContextWindowOptions;
   activeApiKey: string | undefined;
   activeAccountId: string | undefined;
-  activeProjectId: string | undefined;
   activeBaseUrl: string | undefined;
   setLiveItems: Dispatch<SetStateAction<CompletedItem[]>>;
   getId: () => string;
@@ -71,7 +70,6 @@ export function useContextCompaction({
   contextWindowOptions,
   activeApiKey,
   activeAccountId,
-  activeProjectId,
   activeBaseUrl,
   setLiveItems,
   getId,
@@ -136,7 +134,6 @@ export function useContextCompaction({
         // Resolve fresh credentials for compaction too
         let compactApiKey = activeApiKey;
         let compactAccountId = activeAccountId;
-        let compactProjectId = activeProjectId;
         let compactBaseUrl = activeBaseUrl;
         if (authStorage) {
           const creds = await authStorage.resolveCredentials(currentProvider, {
@@ -144,7 +141,6 @@ export function useContextCompaction({
           });
           compactApiKey = creds.accessToken;
           compactAccountId = creds.accountId;
-          compactProjectId = creds.projectId;
           compactBaseUrl = creds.baseUrl ?? compactBaseUrl;
         }
 
@@ -153,7 +149,6 @@ export function useContextCompaction({
           model: currentModel,
           apiKey: compactApiKey,
           accountId: compactAccountId,
-          projectId: compactProjectId,
           baseUrl: compactBaseUrl,
           contextWindow,
           signal: compactionSignal,
@@ -214,7 +209,6 @@ export function useContextCompaction({
       currentProvider,
       activeApiKey,
       activeAccountId,
-      activeProjectId,
       activeBaseUrl,
       contextWindowOptions,
       authStorage,
@@ -253,6 +247,7 @@ export function useContextCompaction({
         model: currentModel,
         contextWindow,
         threshold,
+        compactAtTokens: settings?.get("compactAtTokens"),
         accountId: contextWindowOptions.accountId,
         approvedPlanPath: approvedPlanPathRef.current,
       });

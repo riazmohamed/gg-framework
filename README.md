@@ -10,7 +10,7 @@
   <a href="https://github.com/riazmohamed/gg-framework/releases/latest"><img src="https://img.shields.io/github/v/release/riazmohamed/gg-framework?style=for-the-badge&label=Download&color=b0b6ff" alt="OG Coder desktop release"></a>
   <a href="https://github.com/riazmohamed/gg-framework/stargazers"><img src="https://img.shields.io/github/stars/riazmohamed/gg-framework?style=for-the-badge&label=Stars&color=yellow" alt="Star OG Coder on GitHub"></a>
   <a href="https://www.npmjs.com/package/@abukhaled/ogcoder"><img src="https://img.shields.io/npm/v/@abukhaled/ogcoder?style=for-the-badge&label=CLI&color=blue" alt="ogcoder npm version"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg?style=for-the-badge" alt="AGPL-3.0 License"></a>
   <a href="https://youtube.com/@abukhaled"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
   <a href="https://skool.com/abukhaled"><img src="https://img.shields.io/badge/Skool-Community-b0b6ff?style=for-the-badge" alt="Skool"></a>
 </p>
@@ -96,7 +96,7 @@ For your own agent, start here:
 npm install @abukhaled/gg-ai @abukhaled/gg-agent
 ```
 
-The package links above cover setup and usage. MIT licensed, so you can build on it.
+The package links above cover setup and usage. Licensed AGPL-3.0-only: you can build on it, and if you distribute your changes or run them as a network service, share their source under the same license.
 
 ## Learn with me
 

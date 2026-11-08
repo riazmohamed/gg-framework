@@ -1,5 +1,7 @@
 import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from "react";
 import { ArrowUpIcon, PaperclipIcon, SquareIcon } from "@phosphor-icons/react";
+import { ShellCommandMenu } from "./ShellCommandMenu";
+import type { ShellSuggestion } from "./agent";
 import {
   cancelKen,
   openImageDataUrl,
@@ -26,6 +28,7 @@ import { SlashMenu } from "./SlashMenu";
 import { theme } from "./theme";
 import { toast } from "./toast";
 import { WorkingBeam } from "./WorkingBeam";
+import { sendKeyAction } from "./send-key";
 
 export interface ComposerProps {
   workspaceMode: WorkspaceMode;
@@ -76,6 +79,10 @@ export interface ComposerProps {
   enhanceHintVisible: boolean;
   runEnhance: () => Promise<void>;
   kenActive: boolean;
+  /** The input starts with `!`: it runs a command instead of messaging GG. */
+  shellMode: boolean;
+  /** The `!` picker, when it has commands to offer. */
+  shellMenu: ShellMenu | null;
   kenInputParts: { lead: string; token: string; rest: string } | null;
   attachInput: (el: HTMLTextAreaElement | null) => void;
   displayPlaceholder: string;
@@ -85,6 +92,23 @@ export interface ComposerProps {
   navigateHistory: (dir: -1 | 1, el: HTMLTextAreaElement) => boolean;
   submit: () => void;
   requestCancel: () => void;
+}
+
+/** The `!` command picker's state; App owns it, the composer drives it. */
+export interface ShellMenu {
+  matches: readonly ShellSuggestion[];
+  activeIndex: number;
+  setActiveIndex: (index: number) => void;
+  /** ↑/↓: move the highlight. */
+  navigate: (delta: 1 | -1) => void;
+  /** Enter fills the highlighted command (bare `!`, or after ↑/↓) instead of running the typed one. */
+  enterPicks: boolean;
+  /** Put the command in the input (Enter/Tab/click). */
+  pick: (s: ShellSuggestion) => void;
+  /** Esc: close until the input changes. */
+  dismiss: () => void;
+  trusted: boolean;
+  revokeTrust: () => void;
 }
 
 /**
@@ -140,6 +164,8 @@ export function Composer({
   enhanceHintVisible,
   runEnhance,
   kenActive,
+  shellMode,
+  shellMenu,
   kenInputParts,
   attachInput,
   displayPlaceholder,
@@ -150,12 +176,14 @@ export function Composer({
   submit,
   requestCancel,
 }: ComposerProps): React.ReactElement {
+  const keyAction = sendKeyAction({ shellMode, running, kenRunning, autopilotReviewing });
+  const stopping = keyAction !== "send";
   return (
     <div
       ref={composerRef}
       className={`inputwrap${isFileDragOver ? " dragover" : ""}${
         scheduleInvalid ? " schedule-invalid" : ""
-      }`}
+      }${shellMode ? " shell-mode" : ""}`}
     >
       <WorkingBeam active={running || kenRunning || autopilotReviewing} />
       {scheduleDraft && (
@@ -168,6 +196,18 @@ export function Composer({
             activeIndex={clampedSlashIndex}
             onSelect={pickSlashCommand}
             onHover={setSlashIndex}
+          />
+        )}
+      </FloatingSurface>
+      <FloatingSurface>
+        {shellMenu && (
+          <ShellCommandMenu
+            suggestions={shellMenu.matches}
+            activeIndex={shellMenu.activeIndex}
+            trusted={shellMenu.trusted}
+            onRevokeTrust={shellMenu.revokeTrust}
+            onSelect={shellMenu.pick}
+            onHover={shellMenu.setActiveIndex}
           />
         )}
       </FloatingSurface>
@@ -205,7 +245,6 @@ export function Composer({
           ref={fileInputRef}
           type="file"
           multiple
-          accept="image/*,video/*"
           style={{ display: "none" }}
           onChange={(e) => {
             if (e.target.files) void addFiles(e.target.files);
@@ -243,7 +282,9 @@ export function Composer({
             ref={attachInput}
             // AskBand's number keys still pick an option while this is empty.
             data-composer-input=""
-            className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
+            className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}${
+              shellMode ? " input-shell" : ""
+            }`}
             rows={1}
             // Lock the input while the dissolve→decode animation plays: the caret
             // is invisible, so typing would be silently discarded and Enter would
@@ -299,7 +340,20 @@ export function Composer({
                 e.preventDefault();
                 return;
               }
-              if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+              if (shellMenu && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                e.preventDefault();
+                shellMenu.navigate(e.key === "ArrowDown" ? 1 : -1);
+              } else if (
+                shellMenu &&
+                (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && shellMenu.enterPicks))
+              ) {
+                e.preventDefault();
+                const picked = shellMenu.matches[shellMenu.activeIndex];
+                if (picked) shellMenu.pick(picked);
+              } else if (shellMenu && e.key === "Escape") {
+                e.preventDefault();
+                shellMenu.dismiss();
+              } else if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
                 e.preventDefault();
                 const delta = e.key === "ArrowDown" ? 1 : -1;
                 setFileIndex((i) => (i + delta + fileMatches.length) % fileMatches.length);
@@ -331,11 +385,10 @@ export function Composer({
                 e.preventDefault();
                 submit();
               } else if (e.key === "Escape") {
-                // Cancel the build if it's running; otherwise cancel Ken so the
-                // Escape stops him too, like the Stop key on his bar.
+                // Escape stops whatever the send key would stop.
                 if (slashOpen) setInput("");
-                else if (running && !cancelling) requestCancel();
-                else if (kenRunning) void cancelKen();
+                else if (keyAction === "stop-run" && !cancelling) requestCancel();
+                else if (keyAction === "stop-ken") void cancelKen();
               }
             }}
             autoFocus
@@ -361,17 +414,29 @@ export function Composer({
               {enhancing ? "Enhancing\u2026" : "Enhance"}
             </button>
           )}
-          <WorkingBeam active={running} size="sm" />
+          {/* A command runs alongside the agent, so mid-run this is Run, not Stop. */}
           <button
-            className="icon-circle icon-circle-primary"
-            title={running ? "Stop the run" : attachmentsLoading ? "Loading attachments…" : "Send"}
-            disabled={cancelling || (!running && sendDisabled)}
+            className={`icon-circle icon-circle-primary${stopping ? " icon-circle-stop" : ""}`}
+            title={
+              shellMode
+                ? "Run command"
+                : keyAction === "stop-run"
+                  ? "Stop the run"
+                  : keyAction === "stop-ken"
+                    ? "Stop Ken"
+                    : attachmentsLoading
+                      ? "Loading attachments…"
+                      : "Send"
+            }
+            aria-label={shellMode ? "Run command" : undefined}
+            disabled={shellMode ? sendDisabled : cancelling || (!stopping && sendDisabled)}
             onClick={() => {
-              if (running) requestCancel();
+              if (keyAction === "stop-run") requestCancel();
+              else if (keyAction === "stop-ken") void cancelKen();
               else submit();
             }}
           >
-            {running ? <SquareIcon size={12} weight="fill" /> : <ArrowUpIcon size={16} />}
+            {stopping ? <SquareIcon size={12} weight="fill" /> : <ArrowUpIcon size={16} />}
           </button>
         </div>
       </div>

@@ -76,6 +76,10 @@
   --warning: #f0c75e;
   --on-warning: #1c1405;
   --error: #ff7d70;
+  /* The composer's Stop key: a deeper red than --error so its white square
+     clears 3:1 (--error is tuned for red text, not a fill under white). */
+  --stop-fill: #d93a3a;
+  --stop-fill-hi: #e44c4c;
   /* Between warning and error: "improving, not there yet" (Project Health). */
   --caution: #ff9f5c;
   --on-error: #240704;
@@ -93,6 +97,9 @@
 
   /* Ken Kai (mentor agent) — must match theme.ken in theme.ts. */
   --ken: #62e8d8;
+  /* A solid @Ken bubble: Ken's teal with dark ink (11.3:1). */
+  --ken-fill: #62e8d8;
+  --on-ken-fill: #04211e;
   /* Critters — pink; must match theme.critter in theme.ts. */
   --critter: #ff8fd0;
 
@@ -143,6 +150,8 @@
   --warning: #855400;
   --on-warning: #ffffff;
   --error: #b8241a;
+  --stop-fill: #b8241a;
+  --stop-fill-hi: #cc2f22;
   --caution: #9c4700;
   --on-error: #ffffff;
   --secondary: #2848d8;
@@ -151,6 +160,8 @@
   --glow: #8ea2e6;
 
   --ken: #0b6b74;
+  --ken-fill: #0b6b74;
+  --on-ken-fill: #ffffff;
   --critter: #a8256f;
 
   --code-bg: #e6e9ed;
@@ -336,6 +347,9 @@
      1100px wide, 17px at 1550, 18px from 1850). Bigger windows get bigger
      text rather than longer lines, so a line holds the same ~72 characters. */
   --fs-read: clamp(15.5px, 11.8px + 0.335vw, 18px);
+  /* m5x7 in chat rows: 1.5x its 16px grid (3 device px per art px on Retina),
+     where its letters match --fs-read's size. */
+  --fs-pixel: 24px;
   /* A reply step's number well. */
   --step-well: 28px;
   --step-well-h: 22px;
@@ -455,10 +469,10 @@
 }
 
 /* ── Button system (shared) ───────────────────────────────────────────────
-   .btn is the base; pair with .btn-primary (cobalt key), .btn-ghost (alloy
-   key) or .btn-success (ship-green key). Alloy keys: a lit top edge and a dark
-   lip below, so a control reads as raised off the surface it sits on. Hover
-   changes the fill only — no movement. */
+   .btn is the base; pair with .btn-primary (cobalt key) or .btn-ghost (alloy
+   key). Alloy keys: a lit top edge and a dark lip below, so a control reads
+   as raised off the surface it sits on. Hover changes the fill only — no
+   movement. */
 .btn {
   position: relative;
   display: inline-flex;
@@ -516,7 +530,6 @@
     .btn,
     .modal-btn,
     .nav-toggle,
-    .thinking-toggle,
     .modal-close,
     .toast-close,
     .attach-remove,
@@ -540,7 +553,6 @@
     .btn,
     .modal-btn,
     .nav-toggle,
-    .thinking-toggle,
     .modal-close,
     .toast-close,
     .attach-remove,
@@ -571,17 +583,6 @@
 .btn-primary:hover:not(:disabled) {
   background: var(--primary-fill-hi);
   filter: none;
-}
-
-/* Success — same construction in the ship colour (an active /commit or live
-   serve). Luminous fill, near-black label. */
-.btn-success {
-  background: var(--success);
-  color: var(--on-success);
-  border-color: transparent;
-}
-.btn-success:hover:not(:disabled) {
-  filter: brightness(1.06);
 }
 
 /* Ghost — neutral surface, no border, no sheen. Separation is lightness. */
@@ -766,15 +767,7 @@
    Keyed by presence, so a changing number doesn't replay it. Inline, so a
    fade: a blur would need inline-block and break the strip's truncation. */
 .chat-head-title
-  > :is(
-    .chat-head-accent-dot,
-    .chat-head-cwd,
-    .chat-head-health,
-    .chat-head-branch,
-    .chat-head-dirty,
-    .chat-head-github,
-    .chat-head-ci
-  ),
+  > :is(.chat-head-accent-dot, .chat-head-cwd, .chat-head-health, .chat-head-github, .chat-head-ci),
 .chat-head-strip > .title-usage-meter {
   animation: fade-in var(--dur-dissolve) var(--ease-out) backwards;
 }
@@ -1207,7 +1200,8 @@ select {
 .home > .home-title,
 .home > .home-version-row,
 .home > .home-tagline,
-.home > .home-actions {
+.home > .home-actions,
+.home > .home-poll {
   position: relative;
   z-index: 1;
 }
@@ -1217,6 +1211,7 @@ select {
 .home > .home-version-row,
 .home > .home-tagline,
 .home > .home-actions,
+.home > .home-poll,
 .home > .home-settings,
 .home > .home-version-corner {
   animation: reveal-up 460ms var(--ease-out) both;
@@ -1241,6 +1236,7 @@ select {
   .home > .home-version-row,
   .home > .home-tagline,
   .home > .home-actions,
+  .home > .home-poll,
   .home > .home-settings,
   .home > .home-version-corner {
     animation: none;
@@ -1700,73 +1696,208 @@ select {
 .home-actions .plate-button {
   --plate-scale: var(--plate-step);
 }
-/* A plate with a tag pinned to the middle of its top edge (Royale's "New").
-   The tag is out of flow, so the plates stay level and the home column keeps
-   its centring; clicks fall through it to the button. */
-.home-action-slot {
+/* ── Weekly poll (HomePoll.tsx) ──
+   The What's new board on Home's art-pixel grid (--home-px): the dark board
+   with its ink outline, ring and drop, the title in Alagard, the question and
+   answers in m5x7. Answers are the board's rows; once voted each fills to its
+   share in the plates' felt green, and your pick gets the gold tag and ring.
+   m5x7 sits on a tight 11/16 line with the slack in split padding (3 above,
+   5 below), as the What's new rows do. Hidden in short windows, where it
+   would run into the critters. */
+.home-poll {
+  /* Type follows What's new (2px art pixels, 1px was too small to read), not
+     --home-step; the board's width still follows the plates row. */
+  --poll-px: 2px;
+  --poll-ink: #1e0c1f;
+  --poll-gold: #f5bd63;
+  box-sizing: border-box;
+  /* At least the plates row (four 100-art-px plates, three 8px gaps), and
+     wide enough for two columns of answers at the board's own type size. */
+  width: min(max(calc(424 * var(--home-px)), calc(320 * var(--poll-px))), 100%);
+  padding: calc(6 * var(--poll-px)) calc(9 * var(--poll-px)) calc(7 * var(--poll-px));
+  background: #251c22;
+  color: #e6dcd0;
+  border-radius: calc(3 * var(--poll-px));
+  box-shadow:
+    0 0 0 var(--poll-px) var(--poll-ink),
+    inset 0 0 0 var(--poll-px) #4e343f,
+    0 calc(3 * var(--poll-px)) 0 var(--poll-px) var(--poll-ink);
+  font-family: "m5x7", monospace;
+  font-size: calc(16 * var(--poll-px));
+  line-height: calc(11 * var(--poll-px));
+  -webkit-font-smoothing: none;
+  text-align: left;
+}
+.home-poll-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: calc(6 * var(--poll-px));
+}
+.home-poll-title {
+  margin: 0;
+  font-family: "Alagard", serif;
+  font-size: calc(16 * var(--poll-px));
+  font-weight: 400;
+  line-height: calc(16 * var(--poll-px));
+  color: #f6d0a8;
+  text-shadow: 0 var(--poll-px) 0 var(--poll-ink);
+}
+.home-poll-closes {
+  flex: none;
+  color: #c9a08c;
+}
+.home-poll-question {
+  margin: calc(3 * var(--poll-px)) 0 calc(5 * var(--poll-px));
+  color: #e6dcd0;
+}
+.home-poll-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: calc(3 * var(--poll-px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* Three answers: the last one takes the full row. */
+.home-poll.is-3 .home-poll-options > li:last-child {
+  grid-column: 1 / -1;
+}
+.home-poll-option {
   position: relative;
   display: flex;
+  align-items: baseline;
+  gap: calc(4 * var(--poll-px));
+  width: 100%;
+  min-height: calc(19 * var(--poll-px));
+  padding: calc(3 * var(--poll-px)) calc(5 * var(--poll-px)) calc(5 * var(--poll-px));
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: #2e2029;
+  color: #e6dcd0;
+  box-shadow: inset 0 calc(-1 * var(--poll-px)) 0 #221820;
+  font: inherit;
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast),
+    color var(--t-fast),
+    translate var(--dur-press) var(--ease-out),
+    box-shadow var(--dur-press) var(--ease-out);
 }
-/* The tag: a little GG Royale label, m5x7 on the game's red with an ink
-   outline and a shaded foot, drawn in --tag-px art pixels (Home's step). */
-.home-actions {
-  --tag-px: var(--home-px);
+.home-poll-option:hover:not(:disabled) {
+  background: #3a2934;
+  color: #f2ead2;
 }
-.home-loading-dots {
-  display: inline-flex;
-  gap: calc(2 * var(--tag-px));
-  align-items: center;
-  height: calc(5 * var(--tag-px));
+.home-poll-option:active:not(:disabled) {
+  translate: 0 var(--poll-px);
+  box-shadow: none;
 }
-.home-loading-dots i {
-  width: calc(2 * var(--tag-px));
-  height: calc(2 * var(--tag-px));
-  background: currentColor;
-  animation: home-loading-dot 900ms steps(2, end) infinite;
-  animation-play-state: var(--loop-play-state, running);
+.home-poll-option:focus-visible {
+  outline: var(--poll-px) solid var(--poll-gold);
+  outline-offset: var(--poll-px);
 }
-.home-loading-dots i:nth-child(2) {
-  animation-delay: 150ms;
+/* While a vote is saving, the other answers are inert (disabled), not dimmed. */
+.home-poll-option:disabled {
+  cursor: default;
 }
-.home-loading-dots i:nth-child(3) {
-  animation-delay: 300ms;
+.home-poll-option[aria-busy="true"] {
+  cursor: progress;
+  background: #3a2934;
 }
-@keyframes home-loading-dot {
-  0%,
-  100% {
-    opacity: 0.35;
+.home-poll-option.is-mine .home-poll-pct {
+  color: var(--poll-gold);
+}
+.home-poll-option.is-mine {
+  box-shadow:
+    inset 0 0 0 var(--poll-px) var(--poll-gold),
+    inset 0 calc(-1 * var(--poll-px)) 0 #221820;
+}
+.home-poll-bar {
+  position: absolute;
+  inset: 0;
+  background: #395653;
+  transform-origin: left center;
+  pointer-events: none;
+  transition: transform 420ms var(--ease-out);
+}
+.home-poll-label,
+.home-poll-pick,
+.home-poll-pct {
+  position: relative;
+}
+/* One line per answer, so rows stay even; the full text is the row's title. */
+.home-poll-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* Your pick: a gold pixel check beside its share (the row also gets the ring). */
+.home-poll-pick {
+  flex: none;
+  align-self: center;
+  width: calc(7 * var(--poll-px));
+  height: calc(6 * var(--poll-px));
+  fill: var(--poll-gold);
+}
+.home-poll-pct {
+  flex: none;
+  min-width: calc(17 * var(--poll-px));
+  color: #f6d0a8;
+  text-align: right;
+}
+.home-poll-foot {
+  margin: calc(5 * var(--poll-px)) 0 0;
+  color: #c9a08c;
+}
+/* Big windows, where Home's plates go 2x: a step up, matching their row. */
+@media (min-width: 1600px) and (min-height: 1000px) {
+  .home-poll {
+    --poll-px: 2.5px;
   }
-  50% {
-    opacity: 1;
+}
+/* Narrow or short windows: a step smaller type, and in narrow ones the
+   answers stack so each keeps its line. */
+@media (max-width: 699px), (max-height: 699px) {
+  .home-poll {
+    --poll-px: 1.5px;
+  }
+}
+@media (max-width: 599px) {
+  .home-poll-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+/* With the board, Home centres its stack over the space above the critters'
+   lane (sprites and their speech bubbles), not over the whole window. */
+.home:has(> .home-poll) {
+  padding-bottom: max(var(--space-12), var(--home-above-critters));
+}
+/* Short windows: Home's blocks pull closer together to make room for it. */
+@media (max-height: 699px) {
+  .home:has(> .home-poll) {
+    gap: var(--space-7);
+  }
+}
+/* Too short to clear the critters (the stacked list needs more height). */
+@media (max-height: 519px), (max-width: 599px) and (max-height: 579px) {
+  .home-poll {
+    display: none;
+  }
+  .home:has(> .home-poll) {
+    padding-bottom: var(--space-12);
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .home-loading-dots i {
-    animation: none;
-    opacity: 0.8;
+  .home-poll-bar,
+  .home-poll-option {
+    transition: none;
   }
 }
-.home-action-beta {
-  position: absolute;
-  top: calc(-2 * var(--tag-px));
-  left: 50%;
-  z-index: 1;
-  transform: translate(-50%, -50%);
-  padding: 0 calc(3 * var(--tag-px)) calc(2 * var(--tag-px));
-  border-radius: calc(2 * var(--tag-px));
-  background: #c2444d;
-  color: #fff0e0;
-  box-shadow:
-    0 0 0 var(--tag-px) #1e0c1f,
-    inset 0 calc(-1 * var(--tag-px)) 0 #921f25;
-  font-family: "m5x7", monospace;
-  font-size: calc(16 * var(--tag-px));
-  font-weight: 400;
-  line-height: calc(11 * var(--tag-px));
-  -webkit-font-smoothing: none;
-  white-space: nowrap;
-  pointer-events: none;
-}
+
 /* The padding is hit area: the gear itself sits 16px down, 20px in. */
 .home-settings {
   position: absolute;
@@ -1834,10 +1965,6 @@ select {
 .settings-card .modal-input {
   width: 100%;
 }
-/* The providers grid brings its own padding for its standalone screen. */
-.settings-card .login-grid {
-  padding: 0;
-}
 /* Shared Settings/Checklist page arrival. A light defocus, no movement, and
    a partially visible first frame avoid the full-page blank/reload flash. */
 @keyframes settings-page-dissolve {
@@ -1849,6 +1976,16 @@ select {
     opacity: 1;
     filter: none;
   }
+}
+/* A page that fills the window instead of scrolling (AI Providers): its own
+   regions scroll, and it keeps clear of the tab capsule itself. */
+.settings-page.is-fill {
+  height: 100%;
+  padding-bottom: 0;
+}
+.settings-panel.providers-page {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .settings-page.is-entering {
   animation: reveal-up var(--dur-row) var(--ease-out) both;
@@ -2048,113 +2185,39 @@ select {
   opacity: 0.55;
 }
 
-/* ── Login screen (provider logo grid + connection dots) ──
-   Tiles reuse the .btn-ghost recipe (glossy neutral gradient + inner top
-   highlight + drop shadow, brightness-on-hover) stretched onto a square card.
-   Responsive: 2 columns below 640px (window min width is 480), 4 above. */
+/* ── Login screen ──
+   The provider brain bay lives in ProvidersBay.css. On its own screen it
+   fills the space under the header; the logos keep this class so the light
+   theme's mono-mark rule (Deck.css) still applies. */
 .login-scroll {
   flex: 1 1 auto;
-  overflow-y: auto;
-}
-.login-grid {
-  /* Full-width with the same 12px padding as .picker-list (session list) so
-     page content edges align across screens. */
-  padding: var(--space-6);
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--space-5);
-}
-@media (min-width: 640px) {
-  .login-grid {
-    grid-template-columns: repeat(4, 1fr);
-  }
-}
-.login-tile {
-  position: relative;
-  aspect-ratio: 1 / 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-5);
-  background: var(--gloss-neutral);
-  border: 1px solid rgb(var(--ink-rgb) / 0.12);
-  border-radius: var(--radius-card);
-  box-shadow: var(--gloss-shadow-neutral);
-  font-family: var(--sans);
-  cursor: pointer;
-  transition:
-    filter var(--t-fast),
-    box-shadow var(--t-fast);
-}
-.login-tile:hover {
-  filter: brightness(1.18);
-}
-.login-tile:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
-}
-.login-tile-logo {
-  width: 48px;
-  height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  min-height: 0;
+  padding: 0 var(--page-pad);
 }
 .login-logo {
-  max-width: 48px;
-  max-height: 48px;
-  width: auto;
-  height: auto;
   object-fit: contain;
 }
-.login-logo-fallback {
-  font-size: 30px;
-  font-weight: 600;
-  color: var(--text);
-}
-.login-tile-name {
-  font-size: var(--fs-base);
-  font-weight: 600;
-  color: var(--text);
-  letter-spacing: -0.01em;
-}
-.login-tile-methods {
+/* Retired Claude sign-in still on disk: one row above the brain bay. */
+.login-reauth {
   display: flex;
-  gap: var(--space-2);
   flex-wrap: wrap;
-  justify-content: center;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4) var(--space-6);
+  padding: var(--space-6) 0;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text-muted);
 }
-.login-conn-dot {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--success);
-  box-shadow: 0 0 0 3px rgba(54, 196, 137, 0.18);
+.login-reauth-text {
+  flex: 1 1 280px;
+  min-width: 0;
 }
-/* Narrow windows (480-640px): tighter padding, slightly smaller logo. */
-@media (max-width: 639px) {
-  .login-grid {
-    padding: var(--space-5);
-    gap: var(--space-4);
-  }
-  .login-tile {
-    gap: var(--space-4);
-  }
-  .login-tile-logo {
-    width: 40px;
-    height: 40px;
-  }
-  .login-logo {
-    max-width: 40px;
-    max-height: 40px;
-  }
-  .login-tile-name {
-    font-size: var(--fs-sm);
-  }
+.login-reauth-actions {
+  display: flex;
+  gap: var(--space-4);
 }
 
 /* ── Provider login modal ── */
@@ -2234,403 +2297,6 @@ select {
   display: flex;
   flex-direction: column;
   height: 100%;
-}
-/* World: the game fills the WHOLE window, under the title bar too. The
-   header floats over it (no fill, no border): Back on the left beside the
-   traffic lights, the title centred in the window. The bar stays a drag
-   region; the game below it takes every pointer event it isn't covering. */
-.world-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: var(--z-overlay);
-}
-.world-screen {
-  position: relative;
-  min-height: 0;
-  height: 100%;
-}
-.world-stage {
-  position: absolute;
-  inset: 0;
-  background: #000;
-}
-.world-frame {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  display: block;
-  /* Hidden until the game's curtain is painted shut, then faded in on it
-     (WorldScreen.tsx). Opacity only: no filter over a live page. */
-  opacity: 0;
-  transition: opacity 260ms var(--ease-out);
-}
-.world-frame.is-shown {
-  opacity: 1;
-}
-/* The in-game computer (WorldScreen.tsx): this window's own GG Coder over
-   World, no frame. The app lays itself out at the FULL window size (so every
-   header, row and breakpoint is exactly the normal app's) and is then scaled
-   down into the space between World's top bar and Stand up (--mon-tf, set by
-   App.tsx). Popovers and modals are portaled to <body>, so they still land on
-   their anchors. The window's traffic lights aren't over the app here, so the
-   macOS gutters beside them are dropped. */
-.app.app-in-monitor {
-  position: fixed;
-  inset: 0;
-  height: auto;
-  z-index: calc(var(--z-overlay) + 2);
-  transform-origin: 50% 50%;
-  transform: var(--mon-tf, scale(0.88));
-  border-radius: var(--radius-card);
-  overflow: hidden;
-  box-shadow: 0 24px 80px rgb(0 0 0 / 0.55);
-  animation: world-monitor-in 520ms var(--ease-expo);
-}
-.platform-macos .app-in-monitor .picker-head {
-  padding-left: var(--page-pad);
-}
-.platform-macos .app-in-monitor .chat-head-lead {
-  padding-left: 0;
-}
-.platform-macos .app-in-monitor .plan-review-head {
-  padding-left: var(--rail);
-}
-.platform-macos .app-in-monitor .titlebar {
-  padding-top: var(--space-5);
-}
-.world-monitor {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-/* Stand up. World's own leave buttons (every game, TV and screen in it) copy
-   this look exactly (packages/gg-world act/overlay.js .act .x), so its colours
-   are set here rather than left to the browser's button default. */
-.world-monitor-leave {
-  position: absolute;
-  left: 50%;
-  bottom: 18px;
-  translate: -50% 0;
-  pointer-events: auto;
-  background: rgb(255 255 255 / 0.25);
-  color: rgb(255 255 255 / 0.85);
-}
-.world-monitor-leave:hover:not(:disabled) {
-  background: rgb(255 255 255 / 0.33);
-  color: #fff;
-}
-/* the camera has leaned onto the in-game monitor: GG Coder grows out of its screen */
-@keyframes world-monitor-in {
-  from {
-    opacity: 0;
-    transform: var(--mon-tf, scale(0.88)) scale(0.22);
-  }
-  35% {
-    opacity: 1;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .app.app-in-monitor {
-    animation: none;
-  }
-}
-/* World's TV video (WorldTv.tsx), laid over the TV's glass in the game. Hidden
-   until the player is up, so the game's "tuning in" screen shows meanwhile. */
-.world-tv {
-  position: absolute;
-  border: 0;
-  display: block;
-  background: #000;
-  opacity: 0;
-  transition: opacity 400ms var(--ease-out);
-}
-.world-tv.is-ready {
-  opacity: 1;
-}
-/* The way in: World's loading screen shows from the click (.is-open), and the
-   game fades in over it once it has drawn (.is-visible on the screen,
-   .is-shown on the frame). The way out is a plain screen change. */
-.world-screen {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur-dissolve) var(--ease-out);
-}
-/* On screen from the click: the loading screen shows straight away (WorldLoading.tsx). */
-.world-screen.is-open {
-  opacity: 1;
-  pointer-events: auto;
-  animation: world-open var(--dur-enter) var(--ease-out);
-}
-@keyframes world-open {
-  from {
-    opacity: 0;
-  }
-}
-/* World's loading screen (WorldLoading.tsx). Everything that moves animates transform or opacity only, so WebKit runs
-   it on the compositor and it keeps moving while World is busy building on the main thread. */
-.world-loading {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-8);
-  background: radial-gradient(ellipse 60% 55% at 50% 42%, #2a2140 0%, #15121f 55%, #0b0a12 100%);
-  color: var(--text-secondary);
-  transition: opacity var(--dur-dissolve) var(--ease-out);
-}
-.world-loading.is-gone {
-  opacity: 0;
-  pointer-events: none;
-}
-.world-loading-scene {
-  position: relative;
-  width: 220px;
-  height: 190px;
-  display: grid;
-  place-items: center;
-}
-.world-loading-float {
-  animation: world-loading-float 2.8s var(--ease-in-out) infinite;
-  animation-play-state: var(--loop-play-state, running);
-}
-.world-loading-house {
-  display: block;
-  overflow: visible;
-}
-@keyframes world-loading-float {
-  50% {
-    transform: translateY(-8px);
-  }
-}
-.world-loading-shadow {
-  position: absolute;
-  left: 50%;
-  bottom: var(--space-4);
-  width: 110px;
-  height: 18px;
-  margin-left: -55px;
-  border-radius: var(--radius-pill);
-  background: radial-gradient(closest-side, rgb(0 0 0 / 0.55), rgb(0 0 0 / 0));
-  animation: world-loading-shadow 2.8s var(--ease-in-out) infinite;
-  animation-play-state: var(--loop-play-state, running);
-}
-@keyframes world-loading-shadow {
-  50% {
-    transform: scale(0.82);
-    opacity: 0.7;
-  }
-}
-.world-loading-glass {
-  fill: #1c1830;
-  transition: fill var(--dur-dissolve) var(--ease-out);
-}
-.world-loading-pane.is-lit .world-loading-glass {
-  fill: #ffcf8a;
-}
-.world-loading-halo {
-  opacity: 0;
-  transition: opacity var(--dur-dissolve) var(--ease-out);
-}
-.world-loading-pane.is-lit .world-loading-halo {
-  opacity: 1;
-  animation: world-loading-glow 2.4s var(--ease-in-out) infinite;
-  animation-play-state: var(--loop-play-state, running);
-}
-@keyframes world-loading-glow {
-  50% {
-    opacity: 0.55;
-  }
-}
-.world-loading-star {
-  position: absolute;
-  width: 3px;
-  height: 3px;
-  border-radius: var(--radius-pill);
-  background: #ffe7c2;
-  opacity: 0.2;
-  animation: world-loading-twinkle 3.2s var(--ease-in-out) infinite;
-  animation-play-state: var(--loop-play-state, running);
-}
-.world-loading-star.s1 {
-  left: 18%;
-  top: 14%;
-}
-.world-loading-star.s2 {
-  right: 16%;
-  top: 22%;
-  animation-delay: 0.8s;
-}
-.world-loading-star.s3 {
-  left: 8%;
-  top: 52%;
-  animation-delay: 1.6s;
-}
-.world-loading-star.s4 {
-  right: 6%;
-  top: 60%;
-  animation-delay: 2.4s;
-}
-@keyframes world-loading-twinkle {
-  50% {
-    opacity: 0.9;
-    transform: scale(1.6);
-  }
-}
-.world-loading-text {
-  font-family: var(--sans);
-  font-size: var(--fs-base);
-  line-height: 1.3;
-  font-weight: 500;
-  color: var(--text-secondary);
-  min-height: 1.3em;
-}
-.world-loading-bar {
-  position: relative;
-  width: 220px;
-  height: 6px;
-  border-radius: var(--radius-pill);
-  overflow: hidden;
-  background: rgb(255 255 255 / 0.08);
-}
-.world-loading-fill {
-  position: absolute;
-  inset: 0;
-  transform-origin: 0 50%;
-  border-radius: var(--radius-pill);
-  background: linear-gradient(90deg, #f2a35a, #ffd29a);
-  transition: transform 0.45s var(--ease-out);
-}
-/* a soft highlight sweeping along the bar: always moving, so it never reads as stuck */
-.world-loading-sheen {
-  position: absolute;
-  inset: 0;
-  width: 40%;
-  background: linear-gradient(
-    90deg,
-    rgb(255 255 255 / 0),
-    rgb(255 255 255 / 0.35),
-    rgb(255 255 255 / 0)
-  );
-  transform: translateX(-120%);
-  animation: world-loading-sheen 1.6s var(--ease-in-out) infinite;
-  animation-play-state: var(--loop-play-state, running);
-}
-@keyframes world-loading-sheen {
-  to {
-    transform: translateX(300%);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .world-loading-float,
-  .world-loading-shadow,
-  .world-loading-star,
-  .world-loading-sheen,
-  .world-loading-pane.is-lit .world-loading-halo {
-    animation: none;
-  }
-  .world-screen.is-open {
-    animation: none;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .world-frame,
-  .world-screen {
-    transition: none;
-  }
-}
-.picker-head.world-head {
-  position: absolute;
-  inset: 0 0 auto 0;
-  z-index: 1;
-  justify-content: center;
-  background: linear-gradient(rgb(0 0 0 / 0.45), rgb(0 0 0 / 0));
-  border-bottom: 0;
-}
-.picker-head.world-head > .btn-icon {
-  position: absolute;
-  left: var(--page-pad);
-  top: 50%;
-  translate: 0 -50%;
-}
-.platform-macos .picker-head.world-head > .btn-icon {
-  left: 84px;
-}
-/* Centred on the WINDOW, not on what's left beside the traffic lights and
-   Back: pinned to the bar's middle, so nothing else can nudge it. */
-.picker-head.world-head > .picker-title {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  translate: -50% -50%;
-  max-width: calc(100% - 2 * 140px);
-  text-transform: none;
-  letter-spacing: -0.01em;
-  color: var(--text);
-  text-shadow: 0 1px 2px rgb(0 0 0 / 0.6);
-  pointer-events: none;
-}
-/* Online save: the cloud key beside Back, and its small panel. */
-/* The online-save menu: opened from the cloud button in the game's bottom-right icon bar, placed just above it
-   (right and bottom are set inline from the button's position). */
-.world-cloud-panel {
-  position: fixed;
-  z-index: calc(var(--z-overlay) + 3);
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: var(--space-2);
-  min-width: 220px;
-  padding: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-button);
-  background: var(--surface-2);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
-}
-.world-cloud-panel .btn {
-  justify-content: flex-start;
-}
-.world-cloud-status {
-  padding: var(--space-2) var(--space-3);
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
-}
-.world-cloud-danger {
-  color: var(--error);
-}
-.modal.world-consent {
-  width: min(440px, calc(100vw - 32px));
-}
-.world-consent-body {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-4);
-  font-size: var(--fs-sm);
-  line-height: 1.5;
-}
-.world-consent-body p {
-  margin: 0;
-}
-.world-consent-tick {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-3);
-}
-.world-status {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-6);
-  color: var(--text);
-  font-size: var(--fs-sm);
 }
 .picker-head {
   position: relative;
@@ -2755,79 +2421,19 @@ select {
   margin: 0 var(--space-4);
   color: var(--border);
 }
-.chat-head-branch {
-  color: var(--secondary);
-  /* Stable context, not a changing count — the FIRST segment to give way
-     (higher shrink factor than the folder), and fully hidden ≤600px below. */
-  flex: 0 3 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-/* Uncommitted-file count — teal (--info), deliberately NOT --warning amber:
-   the UI already leans on amber heavily (usage meter, plan mode, code tokens),
-   and an informational git status shouldn't compete with real warnings. */
-.chat-head-dirty {
-  flex: none;
-  color: var(--info);
-}
 /* Narrow-window cascade (media = window width; halves ≈ 750px, quads ≈ 375px).
    Segments drop WHOLE, highest-context-cost first, so every surviving count
    stays complete and readable instead of all ellipsizing into uselessness.
    The full string always remains in the strip's hover tooltip. */
-@media (max-width: 600px) {
-  /* Branch is the least glance-critical (it's stable context, not a changing
-     count) — drop it (+ its leading separator) so folder + counts stay whole. */
-  .chat-head-branch,
-  .chat-head-sep:has(+ .chat-head-branch) {
-    display: none;
-  }
-}
 @media (max-width: 440px) {
   /* Quad-tile widths: the folder had already shrunk to nothing, leaving the
      accent dot and a leading separator. Drop it and that separator explicitly
      so the whole counts get the room. (The separator to drop is the one not
-     preceded by a count chip; the uncommitted count before it goes too.) */
+     preceded by a count chip.) */
   /* Direct children only: the CI indicator keeps its own separator. */
   .chat-head-cwd,
   .chat-head-health,
-  .chat-head-uncommitted,
   .chat-head-title > .chat-head-sep:not(.chat-head-github + .chat-head-sep) {
-    display: none;
-  }
-}
-@media (max-width: 520px) {
-  /* Near the 480px minimum window the strip also carries the macOS traffic-light
-     gutter and the usage meter; folder + dirty + issues + PRs don't fit, and the
-     issues chip was hard-clipped mid-word. Keep identity (folder, elastic) +
-     the GitHub counts: the added-roots chip drops whole. */
-  .chat-head-dirty:not(.chat-head-uncommitted),
-  .chat-head-sep:has(+ .chat-head-dirty:not(.chat-head-uncommitted)) {
-    display: none;
-  }
-}
-/* The uncommitted count gives way in two steps, and only to make room for the
-   other counts (issues, PRs, CI); beside the folder alone it stays whole.
-   First it condenses to its number ("12 uncommitted" → "12", ~80px back),
-   then it drops. The widths are tuned on typical counts ("4 issues │ 1 PR")
-   so the folder name keeps a few readable characters at each step. The word
-   stays readable to screen readers (the .sr-only pattern), and the tooltip
-   still spells it out. */
-@container chat-head-title (max-width: 290px) {
-  .chat-head-title:has(.chat-head-github) .chat-head-uncommitted-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-  }
-}
-@container chat-head-title (max-width: 190px) {
-  .chat-head-title:has(.chat-head-github) > .chat-head-uncommitted,
-  .chat-head-title:has(.chat-head-github) > .chat-head-sep:has(+ .chat-head-uncommitted) {
     display: none;
   }
 }
@@ -3449,35 +3055,6 @@ select {
   .chat-head-title:has(.chat-head-ci) > .chat-head-sep:has(+ .chat-head-github) {
     display: none;
   }
-}
-/* Position pill — "1/4" reading-order indicator for multi-window orientation.
-   Shown only when >1 window is open. Dimmed when this window is not focused. */
-.window-index {
-  flex: 0 0 auto;
-  font-family: var(--sans);
-  font-size: var(--fs-xs);
-  font-weight: 500;
-  color: var(--text-muted);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  padding: 0 7px;
-  line-height: 18px;
-  white-space: nowrap;
-  user-select: none;
-}
-.window-index.dim {
-  opacity: 0.45;
-}
-.chat-head-nav {
-  display: flex;
-  align-items: center;
-  gap: var(--space-7);
-  /* Wrap the action cluster below the back button on narrow windows instead of
-     letting the fixed-width buttons overflow / clip off the right edge. */
-  flex-wrap: wrap;
-  row-gap: var(--space-4);
-  padding: var(--space-1) var(--rail) var(--space-6);
 }
 .picker-head-actions {
   margin-left: auto;
@@ -4603,15 +4180,6 @@ select {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.mcp-scope {
-  flex: 0 0 auto;
-  font-family: var(--sans);
-  font-size: var(--fs-xs);
-  padding: 1px var(--space-3);
-  border-radius: var(--radius-button);
-  background: var(--surface-1);
-  border: 1px solid var(--border);
-}
 .mcp-meta {
   flex: 0 0 auto;
   font-family: var(--sans);
@@ -5165,26 +4733,13 @@ select {
 }
 .app.goal-world-open .chat-head-title,
 .app.goal-world-open .chat-head-cwd,
-.app.goal-world-open .chat-head-branch,
 .app.goal-world-open .chat-head-sep,
 .app.goal-world-open .title-usage-window,
 .app.goal-world-open .title-usage-reset,
 .app.goal-world-open .goal-tally,
-.app.goal-world-open .rank-level,
 .app.goal-world-open .nav-toggle {
   color: var(--text);
 }
-/* The level pill gets a darker glass so its coloured rank name (gradient
-   text, which a text shadow smears) reads on its own. */
-.app.goal-world-open .rank-badge,
-.app.goal-world-open .chat-head-nav .btn-ghost {
-  background: rgb(10 12 18 / 0.62);
-  color: var(--text);
-}
-.app.goal-world-open .rank-name {
-  text-shadow: none;
-}
-.app.goal-world-open .rank-badge,
 .app.goal-world-open .nav-toggle,
 .app.goal-world-open .title-usage-track {
   /* Icons and pills: a drop shadow follows their shape, unlike a box shadow. */
@@ -6437,10 +5992,10 @@ select {
 
 /* ── Plan review (plan_exit) ──
    A full-window takeover laid out like the chat itself: header strip, the plan
-   where the transcript sits, a critter crew on the activity bar, Accept /
-   Reject in the activity bar, and the chat composer for feedback. The shared
-   `.liveregion`, `.statusrow`, `.inputwrap` and `.footer` rules style the
-   bottom half, so it can never drift from the real composer. */
+   in the transcript's centred column, a critter crew, and the workspace deck
+   (Deck.css) holding the feedback box with Reject / Accept beside send. The
+   shared `.deck`, `.statusrow` and `.inputwrap` rules style the bottom half,
+   so it can never drift from the real composer. */
 .plan-review {
   position: fixed;
   inset: 0;
@@ -6499,10 +6054,11 @@ select {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  /* Mirrors `.transcript` so the plan's left edge, the critter gutter and the
-     composer below share one rail. */
+  /* Mirrors `.transcript`: the same centred column, so the plan sits over the
+     deck the way the conversation does. */
   scrollbar-gutter: stable;
-  padding: var(--space-8) calc(var(--rail) - var(--scrollbar)) var(--space-10) var(--rail);
+  padding: var(--space-8) calc(var(--gutter-chat) - var(--scrollbar)) var(--space-10)
+    var(--gutter-chat);
   font-size: var(--fs-lg);
   outline: none;
 }
@@ -6524,27 +6080,25 @@ select {
 /* The plan reads in the assistant text column, right of the critter gutter. */
 .plan-review-doc {
   padding-left: var(--space-11);
-  max-width: 860px;
 }
-.plan-review .inputrow .input-stack {
-  /* No paperclip here, so the field carries the gap the circle would leave. */
-  padding-left: var(--space-4);
+/* Below the plan, like the workspace dock: the crew walks the chat's column
+   and the deck takes the deck's (Deck.css `.deck` margins). */
+.plan-review-dock {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
 }
+.plan-review-dock > .critter-lane {
+  margin: 0 var(--gutter-chat);
+}
+/* Reject reads in the error colour, like the deck's Stop key. */
+.plan-review-reject,
+.plan-review-reject:hover:not(:disabled) {
+  color: var(--error);
+}
+.plan-review-reject,
 .plan-review-accept {
-  /* Same height as the Stop/Reject text so the row keeps --bar-pad rhythm. */
-  line-height: 1.25;
-  padding-top: 2.4px;
-  padding-bottom: 3.6px;
-}
-.plan-review-footer {
-  justify-content: flex-start;
-  min-width: 0;
-}
-.plan-review-footer > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  align-self: center;
 }
 /* The crew's lane is decorative: it never takes clicks meant for the plan. */
 .plan-review-critters {
@@ -6592,11 +6146,10 @@ select {
 .plan-review-body {
   animation: plan-band-in 420ms var(--ease-out) 120ms backwards;
 }
-.plan-review .liveregion {
+.plan-review-critters {
   animation: plan-band-in 360ms var(--ease-out) 220ms backwards;
 }
-.plan-review .inputwrap,
-.plan-review-footer {
+.plan-review-deck {
   --band-y: 12px;
   animation: plan-band-in 360ms var(--ease-out) 300ms backwards;
 }
@@ -6604,102 +6157,32 @@ select {
   .plan-review,
   .plan-review.leaving,
   .plan-review-body,
-  .plan-review .liveregion,
-  .plan-review .inputwrap,
-  .plan-review-footer {
+  .plan-review-critters,
+  .plan-review-deck {
     animation-name: fade-in;
     animation-duration: var(--dur-enter);
   }
 }
 
-/* Plan decision rows (accepted / feedback / rejected) dissolve into the
-   transcript rather than just rising, echoing the pane they replace. */
-.row-enter[data-kind="plan_decision"] {
-  animation: plan-band-in 460ms var(--ease-out) backwards;
-  --band-y: 4px;
-}
-/* Plan mode arriving: the banner rows resolve out of a blur top to bottom
-   (staggered by each line's --line index), then the reason line. The amber
-   shimmer keeps running underneath, so the art never flashes plain. */
-.row-enter[data-kind="plan"] .plan-logo-line {
-  --band-y: 0px;
-  animation:
-    plan-band-in 420ms var(--ease-out) calc(var(--line, 0) * 35ms) backwards,
-    ggshimmer 5s linear infinite;
-  animation-play-state: running, var(--loop-play-state, running);
-}
-.row-enter[data-kind="plan"] .plan-logo-reason {
-  --band-y: 4px;
-  animation: plan-band-in 420ms var(--ease-out) 360ms backwards;
-}
-@media (prefers-reduced-motion: reduce) {
-  .row-enter[data-kind="plan_decision"],
-  .row-enter[data-kind="plan"] .plan-logo-reason {
-    animation-name: fade-in;
-  }
-  .row-enter[data-kind="plan"] .plan-logo-line {
-    animation: fade-in var(--dur-enter) var(--ease-out) backwards;
-  }
-}
-
-/* ── Plan mode ASCII banner ──
-   "Delta Corps Priest 1", the same FIGlet font as the home GG CODER banner. */
+/* ── Plan mode title ──
+   Home's pixel type: the Alagard title art at one screen pixel per art pixel,
+   and the reason in m5x7 at the chat's text size (--fs-pixel). */
 .plan-logo {
   margin: var(--space-5) 0;
-  padding-left: var(--space-1);
 }
-.plan-logo-art {
-  font-family: var(--mono);
-  /* 101 mono columns ≈ 61em: 8px fits ~490px. Shrink with the window rather
-     than overflow the transcript (rails + scrollbar ≈ 64px). */
-  font-size: min(8px, (100vw - 64px) / 64);
-  /* Half blocks (▄ ▀) draw the curves, so rows must touch: any extra
-     leading cuts gaps through every letter. */
-  line-height: 1;
-  letter-spacing: 0;
-}
-/* The amber sweep is painted per line, on the element that owns the text
-   (WebKit clips a text background only to the element's own glyphs). Every
-   line is padded to one width, so the gradient lines up down the banner. */
-.plan-logo-line {
-  width: max-content;
-  white-space: pre;
-  background: linear-gradient(
-    100deg,
-    #c98828 0%,
-    var(--warning) 25%,
-    #f6c97a 50%,
-    var(--warning) 75%,
-    #c98828 100%
-  );
-  background-size: 220% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: var(--warning);
-  animation: ggshimmer 5s linear infinite;
-  animation-play-state: var(--loop-play-state, running);
-}
-@media (prefers-reduced-motion: reduce) {
-  .plan-logo-line {
-    animation: none;
-  }
-}
-/* Forced colours drop the gradient; show the art in plain system text. */
-@media (forced-colors: active) {
-  .plan-logo-line {
-    background: none;
-    -webkit-text-fill-color: currentColor;
-  }
+.plan-logo-title {
+  display: block;
+  image-rendering: pixelated;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 .plan-logo-reason {
-  /* Back onto the rail (the banner's 2px optical inset), so the critter sits
-     in the assistant-dot gutter like every other critter line. */
-  margin: var(--space-4) 0 0 -2px;
-}
-/* A reason can run long: wrap it rather than ellipsize the agent's words. */
-.plan-logo-reason .subagents-compact-text {
-  white-space: normal;
+  margin: var(--space-4) 0 0;
+  font-family: "m5x7", monospace;
+  font-size: var(--fs-pixel);
+  line-height: var(--fs-pixel);
+  -webkit-font-smoothing: none;
+  color: var(--warning);
 }
 
 /* ── User message chip (the TUI's UserMessage bubble; fill is --user-bg) ── */
@@ -6725,13 +6208,11 @@ select {
      the text and every bubble below it at the moment the message is sent. */
   border: 1px solid transparent;
 }
-/* `@Ken` prompt bubble: Ken's colour on the ink (matching his replies + the
-   input highlight) and on the bubble's reserved border, so the transcript
-   shows this message went to the mentor, not GG Coder. The fill stays the
-   normal user bubble: a Ken-tinted wash under Ken-coloured text muddied both. */
+/* `@Ken` prompt bubble: solid in Ken's teal, so the transcript shows at a
+   glance this message went to the mentor, not GG Coder. */
 .user-msg.user-ken {
-  color: var(--ken);
-  border-color: color-mix(in srgb, var(--ken) 45%, transparent);
+  background: var(--ken-fill);
+  color: var(--on-ken-fill);
 }
 /* "Sent to GG Coder" bubble (from a Ken prompt-block button): same Ken border
    as a @Ken bubble, with the shimmer label carrying Ken's color. */
@@ -6890,10 +6371,6 @@ select {
     background: none;
     -webkit-text-fill-color: currentColor;
   }
-}
-.footer-plan {
-  margin-left: var(--space-5);
-  font-family: var(--sans);
 }
 
 /* ── Assistant message: the text alone, no lead marker ── */
@@ -7118,14 +6595,26 @@ select {
   border-color: var(--border-strong);
   background: var(--surface-2);
 }
-/* Ken Kai (mentor agent). Whole paragraphs of cyan were tiring to read, so the
-   prose stays in normal ink and Ken is marked by what frames it instead: a
-   thin teal rule down the reply, and teal headings / bold / links
-   as accents. Still unmistakably Ken at a glance, without the colour wall.
-   The runnable-prompt block keeps its own styling below. */
-.ken-msg .assistant-text {
-  padding-left: var(--space-5);
-  border-left: 2px solid color-mix(in srgb, var(--ken) 55%, transparent);
+/* Ken Kai (mentor agent). The prose stays in normal ink; Ken is marked by his
+   pixel face on its own row above the reply, and teal headings / bold / links
+   as accents. The runnable-prompt block keeps its own styling below. */
+.ken-msg {
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-5);
+}
+.ken-byline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+/* m5x7 at the chat's pixel size, like the plan and critter lines. */
+.ken-byline-name {
+  font-family: "m5x7", monospace;
+  font-size: var(--fs-pixel);
+  line-height: var(--fs-pixel);
+  -webkit-font-smoothing: none;
+  color: var(--ken);
 }
 .ken-msg .assistant-text .markdown :is(h1, h2, h3, h4, strong) {
   color: var(--ken);
@@ -7161,40 +6650,6 @@ select {
   opacity: 0;
 }
 
-/* The footer's Critters mark (CritterIcon.tsx), sized like Ken's face. */
-.critter-icon {
-  display: inline-block;
-  flex: 0 0 auto;
-}
-.critter-icon > img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  image-rendering: pixelated;
-  user-select: none;
-}
-
-/* GG Coder's robot face (GgFace.tsx): same stacking as Ken's, with a blink
-   layer only on the Ready mood. */
-.gg-face {
-  position: relative;
-  display: inline-block;
-  flex: 0 0 auto;
-}
-.gg-face-layer {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  display: block;
-  image-rendering: pixelated;
-  user-select: none;
-}
-.gg-face-blink {
-  opacity: 0;
-  animation: ken-face-blink 5.2s steps(1, end) infinite;
-  animation-play-state: var(--loop-play-state, running);
-}
 /* In the reply gutter: one cell per CSS px, centred on the first text line
    (assistant text is 15px at line-height 1.55), where the dot used to sit. */
 .ken-face-slot {
@@ -7347,21 +6802,13 @@ select {
   .ken-face,
   .ken-face.ken-face-talking,
   .ken-face .ken-face-layer,
-  .ken-face .ken-face-z,
-  .gg-face-blink {
+  .ken-face .ken-face-z {
     animation: none;
   }
   .ken-face-on .ken-face-happy,
   .ken-face-off .ken-face-sleepy {
     opacity: 1;
   }
-}
-/* Ken's activity bar reuses the GG Coder ActivityBar's running statusrow as-is
-   (same top border, padding, spinner, layout, meta readout) so it's the same
-   control aligned to what we have, just tinted to Ken. Only the spinner glow is
-   re-tinted from brand-blue to Ken's color. */
-.ken-spinner {
-  text-shadow: 0 0 8px color-mix(in srgb, var(--ken) 55%, transparent);
 }
 
 /* Ken's runnable-prompt block: Ken-tinted, with a Send-to-GG-Coder button. */
@@ -7566,11 +7013,6 @@ select {
 }
 
 /* ── Tool rows (styled verb/detail/summary, no lead marker) ── */
-.tool-row {
-  display: flex;
-  padding: 1px 0;
-  align-items: baseline;
-}
 .tool-line {
   flex: 1 1 auto;
   min-width: 0;
@@ -7640,83 +7082,16 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--fs-lg);
-  font-weight: 600;
-  line-height: 1.55;
+  /* Home's pixel body face at the chat's text size. A pixel font has one
+     weight: faux bold would smear its strokes. */
+  font-family: "m5x7", monospace;
+  font-size: var(--fs-pixel);
+  font-weight: 400;
+  line-height: var(--fs-pixel);
+  -webkit-font-smoothing: none;
 }
-.subagents-head {
-  display: flex;
-  gap: var(--space-3);
-  align-items: baseline;
-  padding: 1px 0 var(--space-2);
-  font-family: var(--sans);
-}
-.subagents-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  /* Indent the agent list under the header dot. */
-  padding-left: var(--space-9);
-  border-left: 1px solid var(--border);
-  margin-left: 5px;
-}
-.subagent {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-.subagent-row {
-  display: flex;
-  gap: var(--space-3);
-  align-items: baseline;
-  font-family: var(--sans);
-  min-width: 0;
-}
-.subagent-icon {
-  flex: 0 0 auto;
-}
-.subagent-name {
-  font-weight: 600;
-  flex: 0 0 auto;
-}
-.subagent-tokens {
-  flex: 0 0 auto;
-  font-size: 0.92em;
-  white-space: nowrap;
-}
-.subagent-summary {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.subagent-feed {
-  display: flex;
-  flex-direction: column;
-  /* Align activity lines under the agent name (past the icon + gap). */
-  padding-left: var(--space-9);
-  min-width: 0;
-}
-.subagent-activity {
-  font-family: var(--sans);
-  font-size: 0.92em;
-  /* One line each, truncated with ellipsis so the panel reflows on resize. */
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-/* Status indicator gutter (idle caret / running spinner / done sparkle). Shares
-   the SAME fixed px width + left-align + gap as the assistant message dot, so
-   the icon left edge AND the label both line up with the transcript rows above
-   — a px gutter (not em) keeps that true across the bar's smaller font size. */
-.statusrow-icon {
-  display: inline-block;
-  width: 16px;
-  text-align: left;
-  flex: 0 0 auto;
+.subagents-compact-text .shimmer-text {
+  font-weight: 400;
 }
 .spinner {
   /* Brand-blue glow ties the working indicator to the wake-screen aesthetic. */
@@ -8355,26 +7730,6 @@ select {
   box-shadow: 0 0 8px var(--critter-color);
   pointer-events: none;
 }
-.critter-spark {
-  position: absolute;
-  left: 50%;
-  bottom: calc(var(--critter-px) * 5);
-  width: var(--critter-px);
-  height: var(--critter-px);
-  background: var(--critter-spark, white);
-  box-shadow: 0 0 4px var(--critter-spark, white);
-  pointer-events: none;
-}
-.critter-sweat {
-  position: absolute;
-  top: 2px;
-  width: 3px;
-  height: 4px;
-  border-radius: 50% 50% 50% 50% / 30% 30% 70% 70%;
-  background: #7fd8ff;
-  pointer-events: none;
-}
-
 /* Speech bubble (latest tool) and status badges (✓, ✗, !). */
 .critter-bubble,
 .critter-badge {
@@ -8942,10 +8297,8 @@ select {
   flex: 1 1 auto;
 }
 
-/* ── Plan step completion row (✓ from [DONE:n] markers): blue circle + tick,
-   mirroring the requested ggcoder treatment. The tick takes --on-primary, the
-   ink paired with every --primary fill: white on this periwinkle measured
-   1.91:1, dark ink measures 9.92:1. ── */
+/* ── Plan step completion row (from [DONE:n] markers): a pixel tick in the
+   critter style, sat in the critter gutter so it lines up with critter rows. ── */
 .plan-step-done {
   display: flex;
   align-items: center;
@@ -8954,21 +8307,17 @@ select {
 }
 .plan-step-check {
   flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   width: 18px;
   height: 18px;
-  border-radius: var(--radius-pill);
-  background: var(--primary-fill);
-  color: var(--on-primary-fill);
-  font-size: var(--fs-xs);
-  font-weight: 700;
-  line-height: 1;
+  image-rendering: pixelated;
+  user-select: none;
 }
 .plan-step-label {
-  font-size: var(--fs-md);
-  font-weight: 600;
+  font-family: "m5x7", monospace;
+  font-size: var(--fs-pixel);
+  line-height: var(--fs-pixel);
+  -webkit-font-smoothing: none;
   color: var(--text);
 }
 
@@ -8990,14 +8339,6 @@ select {
      rest of the row as digits change (1 vs 8, etc.). */
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
-}
-
-/* Idle "ready" line: icon + label aligned with a clean gap. The 6px gap matches
-   the assistant message row so the label column lines up. */
-.statusrow-ready {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-3);
 }
 
 /* Plan-step progress badge in the activity bar (amber "Plan Steps n/total"). */
@@ -9036,12 +8377,6 @@ select {
 .statusrow.running .statusrow-right .cancel {
   margin-left: 0;
   padding-left: 0;
-}
-/* The tool-panel chevron lives in the activity bar (idle + running). Inherits
-   the nav-toggle look; nudge it to align with the bar's text baseline. */
-.statusrow-tools-toggle {
-  display: inline-flex;
-  align-items: center;
 }
 .tools-toggle {
   flex: 0 0 auto;
@@ -9233,6 +8568,52 @@ select {
 .icon-circle:disabled {
   cursor: not-allowed;
   opacity: 0.4;
+}
+/* Mid-run the send key becomes Stop: red with a white square, and two rings
+   pulsing out of it so the one way to stop the agent reads as live. */
+.icon-circle-stop {
+  position: relative;
+  color: #ffffff;
+  background: var(--stop-fill);
+}
+.icon-circle-stop:hover:not(:disabled) {
+  color: #ffffff;
+  background: var(--stop-fill-hi);
+}
+.icon-circle-stop::before,
+.icon-circle-stop::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--stop-fill);
+  opacity: 0;
+  pointer-events: none;
+  animation: stop-ripple 1.8s var(--ease-out) infinite;
+  animation-play-state: var(--loop-play-state, running);
+}
+.icon-circle-stop::after {
+  animation-delay: 0.9s;
+}
+.icon-circle-stop:disabled::before,
+.icon-circle-stop:disabled::after {
+  animation: none;
+}
+@keyframes stop-ripple {
+  0% {
+    transform: scale(1);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .icon-circle-stop::before,
+  .icon-circle-stop::after {
+    animation: none;
+  }
 }
 /* Chat-input stack: the textarea plus (transiently) the enhance animation layer.
    Highlights for enhanced terms are NOT drawn over the input — an overlay can't
@@ -9722,6 +9103,9 @@ select {
   padding: var(--space-3) 0;
 }
 .img-card {
+  /* The caption row's height, shared with the save button that ends it. */
+  --img-cap-h: 28px;
+  position: relative;
   margin: 0;
   max-width: 320px;
   border: 1px solid var(--border);
@@ -9730,12 +9114,88 @@ select {
   background: var(--surface-1);
 }
 .img-card-clickable {
-  cursor: pointer;
   transition: border-color var(--t-fast);
 }
-.img-card-clickable:hover,
-.img-card-clickable:focus-visible {
+.img-card-clickable:hover {
   border-color: var(--border-strong);
+}
+/* The whole image and its caption open the file. */
+.img-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.img-open:focus {
+  outline: none;
+}
+.img-open:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+  border-radius: var(--radius-card);
+}
+/* Save: the end of the caption row, or a frosted chip on the image's corner
+   when there is no caption. */
+.img-save {
+  position: absolute;
+  inset-inline-end: 0;
+  bottom: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: var(--img-cap-h);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    color var(--t-out),
+    background-color var(--t-out);
+}
+.img-save:hover {
+  color: var(--text);
+  background: rgb(var(--ink-rgb) / 0.06);
+  transition:
+    color var(--t-in),
+    background-color var(--t-in);
+}
+.img-save:active {
+  background: rgb(var(--ink-rgb) / 0.1);
+}
+.img-save:focus {
+  outline: none;
+}
+.img-save:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -3px;
+  border-radius: var(--radius-button);
+}
+.img-save:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+.img-card:not(.has-cap) .img-save {
+  inset-inline-end: var(--space-3);
+  bottom: var(--space-3);
+  width: 28px;
+  height: 28px;
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius-button);
+  background: color-mix(in srgb, var(--surface-3) 82%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  color: var(--text-secondary);
+}
+.img-card:not(.has-cap) .img-save:hover {
+  background: var(--surface-3);
+  color: var(--text);
 }
 .img-thumb {
   display: block;
@@ -9744,7 +9204,13 @@ select {
   object-fit: contain;
 }
 .img-cap {
-  padding: 5px 9px;
+  display: block;
+  box-sizing: border-box;
+  height: var(--img-cap-h);
+  /* One line, centred in the row by its line box (less the top border). */
+  line-height: calc(var(--img-cap-h) - 1px);
+  /* Room for the save button at the end of the row. */
+  padding: 0 34px 0 9px;
   font-family: var(--sans);
   font-size: var(--fs-xs);
   color: var(--text-muted);
@@ -9754,19 +9220,143 @@ select {
   text-overflow: ellipsis;
 }
 
+/* Images inside a reply reuse the tool image card; wider, since a reply
+   image is usually the point of the message rather than a side preview. */
+.markdown .md-img {
+  display: inline-block;
+  vertical-align: top;
+  max-width: min(100%, 720px);
+  margin: var(--space-3) 0;
+}
+.markdown .md-img .img-thumb {
+  max-height: 480px;
+}
+.markdown .md-img-loading,
+.markdown .md-img-missing,
+.markdown .md-img-alt {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
 /* ── Image generation placeholder (shimmering square while tool runs) ── */
-.img-gen-placeholder {
+/* generate_image in flight (image-gen/ImageGenCard.tsx): the same card as the
+   finished image, holding a square stage with a dot board that fills in as the
+   estimate grows, the status phrase above it and the estimate in a pill. */
+.img-gen-card {
+  width: min(100%, 320px);
+}
+.img-gen-stage {
+  position: relative;
+  aspect-ratio: 1 / 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: var(--space-5);
-  max-width: 240px;
+  padding: 44px var(--space-6) var(--space-6);
+  color: var(--text-secondary);
+  background: var(--surface-1);
 }
-.img-gen-label {
+.img-gen-board {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  border-radius: var(--radius-button);
+  background: var(--surface-2);
+}
+.img-gen-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.img-gen-play {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+.img-gen-play:focus {
+  outline: none;
+}
+.img-gen-play:active {
+  background: rgb(var(--ink-rgb) / 0.03);
+}
+.img-gen-play:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.img-gen-phrase {
+  position: absolute;
+  inset-inline: var(--space-8);
+  top: var(--space-8);
   font-family: var(--sans);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-md);
+  line-height: 1.3;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity var(--dur-dissolve) var(--ease-in-out);
+}
+.img-gen-phrase[data-changing] {
+  opacity: 0;
+}
+.img-gen-score {
+  position: absolute;
+  inset-inline-end: var(--space-8);
+  top: var(--space-8);
+  font-family: var(--sans);
+  font-size: var(--fs-md);
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
+}
+/* The estimate: a frosted pill over the board's corner. */
+.img-gen-progress {
+  position: absolute;
+  inset-inline-end: var(--space-9);
+  bottom: var(--space-9);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  height: 24px;
+  padding: 0 var(--space-4);
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--surface-3) 82%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--shadow-md);
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  color: var(--secondary);
+  pointer-events: none;
+}
+.img-gen-over {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-8);
+  font-family: var(--sans);
+  font-size: var(--fs-base);
+  line-height: 1.3;
   text-align: center;
+  color: var(--text);
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .img-gen-phrase {
+    transition: none;
+  }
 }
 
 /* ── Slash command palette (opens upward from the input) ── */
@@ -10185,8 +9775,17 @@ select {
   line-height: calc(11 * var(--home-px));
   -webkit-font-smoothing: none;
   cursor: pointer;
+  /* Eased like the plates: a springy lift in, a slower settle out, a short dip. */
+  transition:
+    translate var(--t-out),
+    background-color var(--t-out),
+    box-shadow var(--t-out);
 }
 .home-whatsnew:hover {
+  transition:
+    translate 220ms var(--ease-pop),
+    background-color var(--t-in),
+    box-shadow 220ms var(--ease-pop);
   translate: 0 calc(-1 * var(--home-px));
   background: #e4ecff;
   box-shadow:
@@ -10195,6 +9794,8 @@ select {
     0 calc(2 * var(--home-px)) 0 var(--home-px) #1e0c1f;
 }
 .home-whatsnew:active {
+  transition-duration: var(--dur-press);
+  transition-timing-function: var(--ease-out);
   translate: 0 var(--home-px);
   box-shadow:
     0 0 0 var(--home-px) #1e0c1f,
@@ -10225,13 +9826,21 @@ select {
   width: 100%;
   height: 100%;
   image-rendering: pixelated;
+  transition:
+    translate var(--t-out),
+    filter var(--t-out);
 }
 .pixel-icon-button:hover > canvas {
+  transition:
+    translate 220ms var(--ease-pop),
+    filter var(--t-in);
   translate: 0 calc(-1 * var(--icon-px));
   filter: drop-shadow(var(--icon-px) 0 0 #d0cbb1) drop-shadow(calc(-1 * var(--icon-px)) 0 0 #d0cbb1)
     drop-shadow(0 var(--icon-px) 0 #d0cbb1) drop-shadow(0 calc(-1 * var(--icon-px)) 0 #d0cbb1);
 }
 .pixel-icon-button:active > canvas {
+  transition-duration: var(--dur-press);
+  transition-timing-function: var(--ease-out);
   translate: 0 var(--icon-px);
 }
 .pixel-icon-button:focus-visible {
@@ -10241,6 +9850,15 @@ select {
 @media (max-width: 679px), (max-height: 560px) {
   .pixel-icon-button {
     --icon-px: 1px;
+  }
+}
+/* Less motion: the tag and icons still change colour, they just don't travel. */
+@media (prefers-reduced-motion: reduce) {
+  .home-whatsnew,
+  .home-whatsnew:hover,
+  .pixel-icon-button > canvas,
+  .pixel-icon-button:hover > canvas {
+    transition: none;
   }
 }
 
@@ -10266,19 +9884,12 @@ select {
   position: relative;
   z-index: 2;
 }
-.footer-chat {
-  justify-content: flex-end;
-}
-.footer-chat .footer-right {
-  margin-left: auto;
-}
 
 /* Footer clusters reveal as one faded unit once the session has hydrated,
    instead of cwd/git/thinking/model popping in piecemeal and reflowing. The
    skeleton occupies the same box first, so this is a true crossfade in place.
    The transcript's own hydration reveal is the same motion, so both share one
    rule — they were identical declarations sitting either side of the keyframe. */
-.footer-reveal,
 .transcript-reveal {
   animation: dissolve-in var(--dur-dissolve) var(--ease-out) backwards;
 }
@@ -10692,7 +10303,6 @@ select {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .footer-reveal,
   .transcript-reveal,
   .skeleton-msg,
   .skeleton-item,
@@ -10717,60 +10327,6 @@ select {
   overflow: hidden;
   white-space: nowrap;
 }
-/* Dividers sit flush (no flex gap) so ` │ ` reads as one separator unit. */
-.footer-sep {
-  flex: 0 0 auto;
-}
-
-/* Right cluster holds the controls (context, thinking, model, provider) at
-   their natural size so they stay legible and clickable. */
-.footer-right {
-  flex: 0 1 auto;
-  display: flex;
-  align-items: center;
-  gap: var(--space-8);
-  min-width: 0;
-  /* Narrow windows: controls wrap to a second line as whole units instead of
-     breaking inside "Thinking medium" or a model name. */
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  row-gap: var(--space-3);
-  white-space: nowrap;
-}
-
-/* Thinking level: borderless colored text (mirrors TUI footer), color graded
-   by tier. No badge, no icon — just the label changing hue. */
-.thinking-toggle {
-  background: transparent;
-  border: none;
-  font-family: var(--sans);
-  font-size: var(--fs-base);
-  padding: 0;
-  cursor: pointer;
-  line-height: 1.55;
-  transition:
-    color var(--t-fast),
-    filter var(--t-fast);
-}
-/* Hover lifts the text brightness rather than underlining it — these footer
-   controls carry their own inline color (thinking level is hue-graded, Ken's
-   picker is purple), so a fixed hover color would flatten the grading while
-   `filter` brightens whatever hue the control already has. */
-.thinking-toggle:hover:not(:disabled) {
-  filter: brightness(1.25);
-}
-/* Locked mid-run: drop the hover affordance and the pointer, so the control
-   reads as unavailable before the click. Mirrors `.model-select:disabled`. */
-.thinking-toggle:disabled {
-  cursor: default;
-}
-
-/* ── Footer: context percentage ── */
-.ctx-meter-pct {
-  font-size: var(--fs-sm);
-  font-variant-numeric: tabular-nums;
-}
-
 /* ── Footer: background tasks indicator + popover ── */
 /* No outer margin: the first pill's edge sits on the footer rail, lined up
    with the composer and transcript above; `.footer-left`'s gap spaces the rest. */
@@ -10799,35 +10355,12 @@ select {
 .bgtasks-button:hover {
   background: var(--surface-1);
 }
-.bgtasks-icon {
-  flex: 0 0 auto;
-}
 /* The popover itself is a .pop-panel (see "Popovers"). */
 .bgtasks-button[data-open] {
   background: var(--surface-1);
 }
 
 /* ── Model picker (footer, native <select>) ── */
-.model-anchor {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-/* Static "GG" / "Ken" prefix — plain text, never clickable. Only the model
-   select next to it opens the dropdown. `line-height: 1` matches `.model-select`
-   below so both sit on the same baseline — without it the control's default UA
-   line-height differs from the inherited body line-height and the label
-   visibly floats above the model name. */
-.model-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-family: var(--sans);
-  font-size: var(--fs-base);
-  line-height: 1;
-}
-
 /* Text-look picker with a native dropdown: the visible label is plain mono
    text (like the old footer button); a transparent <select> stretched over it
    takes the click and opens the OS-native dropdown. */
@@ -10956,209 +10489,7 @@ select {
   background: var(--surface-1);
 }
 
-/* ── Autopilot toggle (Material switch, Uiverse by lenin55) ──
-   Sits left of the "+ New" button in the nav row. The switch markup mirrors the
-   source snippet; colors are re-themed for the dark canvas: the off-track uses a
-   visible neutral (the original rgba(0,0,0,.38) vanished on dark), and the
-   checked track/thumb use the app accent instead of the source teal. */
-.autopilot-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-4);
-  flex: 0 0 auto;
-  /* Match the sibling .btn-sm height (25px) and reset the inherited 1.55
-     line-height so the label's tall line box can't push the nav row taller than
-     the buttons — the switch is 24px, the label collapses to its glyph height,
-     so the cluster stays ≤ the buttons and the row height is unchanged. */
-  height: 25px;
-  line-height: 1;
-}
-.autopilot-label {
-  font-size: var(--fs-base);
-  line-height: 1;
-  color: var(--text-muted);
-  user-select: none;
-}
-
-.cl-toggle-switch {
-  position: relative;
-  /* Center the inline-block switch as a flex child at its exact height. As a
-     plain inline box the wrapper baseline-aligned the switch, inflating its own
-     line box to 26px (taller than the 25px row) and lifting the switch ~1px above
-     the row center. Flex + fixed height removes the baseline/line-box effect so
-     the switch sits dead center with the label and buttons. */
-  display: inline-flex;
-  align-items: center;
-  height: 24px;
-}
-.cl-switch {
-  position: relative;
-  display: inline-block;
-  /* The track (span::before) floats and the thumb (::after) is absolute, so
-     neither adds height — an auto-height box collapses and the switch sits off
-     center in the flex row. Pin the switch to the track's real footprint
-     (36px + 10px left margin wide, 14px + 5px×2 margin tall) so the parent's
-     align-items:center lines it up with the label and buttons. */
-  width: 46px;
-  height: 24px;
-}
-/* Input */
-.cl-switch > input {
-  appearance: none;
-  -moz-appearance: none;
-  -webkit-appearance: none;
-  z-index: -1;
-  position: absolute;
-  right: 6px;
-  top: -8px;
-  display: block;
-  margin: 0;
-  border-radius: 50%;
-  width: 40px;
-  height: 40px;
-  background-color: var(--secondary);
-  outline: none;
-  opacity: 0;
-  transform: scale(1);
-  pointer-events: none;
-  transition:
-    opacity 0.3s var(--ease-out) 0.1s,
-    transform 0.2s var(--ease-out) 0.1s;
-}
-/* Track */
-.cl-switch > span::before {
-  content: "";
-  float: right;
-  display: inline-block;
-  margin: 5px 0 5px var(--space-5);
-  border-radius: 7px;
-  width: 36px;
-  height: 14px;
-  background-color: var(--border-strong);
-  vertical-align: top;
-  transition:
-    background-color var(--t-fast),
-    opacity var(--t-fast);
-}
-/* Thumb */
-.cl-switch > span::after {
-  content: "";
-  position: absolute;
-  top: 2px;
-  right: 16px;
-  border-radius: 50%;
-  width: 20px;
-  height: 20px;
-  background-color: #cdd2db;
-  box-shadow:
-    0 3px 1px -2px rgba(0, 0, 0, 0.2),
-    0 2px 2px 0 rgba(0, 0, 0, 0.14),
-    0 1px 5px 0 rgba(0, 0, 0, 0.12);
-  transition:
-    background-color var(--t-fast),
-    transform var(--t-fast);
-}
-/* Checked */
-.cl-switch > input:checked {
-  right: -10px;
-  background-color: var(--secondary);
-}
-.cl-switch > input:checked + span::before {
-  background-color: rgba(155, 140, 247, 0.5);
-}
-.cl-switch > input:checked + span::after {
-  background-color: var(--secondary);
-  transform: translateX(16px);
-}
-/* Hover, Focus */
-.cl-switch:hover > input {
-  opacity: 0.04;
-}
-.cl-switch > input:focus {
-  opacity: 0.12;
-}
-/* The input is a 12%-opacity ripple, so an outline on it would be near
-   invisible. Keyboard focus rings the visible track instead. */
-.cl-switch > input:focus-visible {
-  outline: none;
-}
-.cl-switch > input:focus-visible + span::before {
-  outline: 2px solid var(--primary);
-  outline-offset: 3px;
-}
-.cl-switch:hover > input:focus {
-  opacity: 0.16;
-}
-/* Active */
-.cl-switch > input:active {
-  opacity: 1;
-  transform: scale(0);
-  transition:
-    transform 0s,
-    opacity 0s;
-}
-.cl-switch > input:active + span::before {
-  background-color: var(--border-strong);
-}
-.cl-switch > input:checked:active + span::before {
-  background-color: rgba(155, 140, 247, 0.5);
-}
-/* Disabled */
-.cl-switch > input:disabled {
-  opacity: 0;
-}
-.cl-switch > input:disabled + span::before {
-  background-color: var(--border);
-}
-.cl-switch > input:checked:disabled + span::before {
-  background-color: rgba(155, 140, 247, 0.3);
-}
-.cl-switch > input:checked:disabled + span::after {
-  background-color: rgba(155, 140, 247, 0.6);
-}
-
 /* ── Rank / Progress (Ranks system) ───────────────────────────────────── */
-.rank-badge-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-}
-.rank-badge {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-3);
-  min-width: 0;
-  max-width: 160px;
-  height: 26px;
-  padding: var(--space-2) 11px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: var(--radius-pill);
-  background: var(--gloss-neutral);
-  color: var(--text-secondary);
-  box-shadow: var(--gloss-shadow-neutral);
-  font-family: var(--sans);
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  letter-spacing: -0.005em;
-  /* Fixed height + flex centring set the box; 1.25 just gives the label its
-     descender room so it sits optically centred instead of high. */
-  line-height: 1.25;
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-  overflow: visible;
-  transition:
-    filter var(--t-fast),
-    background-color var(--t-fast),
-    box-shadow var(--t-fast),
-    color var(--t-fast);
-}
-.rank-badge:hover {
-  filter: brightness(1.18);
-  color: var(--text);
-}
 .rank-xp-chip-layer {
   position: absolute;
   left: 50%;
@@ -11191,66 +10522,6 @@ select {
   line-height: 1.25;
   white-space: nowrap;
   animation: rankXpChip 1.7s ease-out both;
-}
-.rank-glyph {
-  position: relative;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  border-radius: var(--radius-pill);
-  background: linear-gradient(180deg, rgba(77, 157, 255, 0.28), rgba(155, 140, 247, 0.18));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
-}
-.rank-glyph::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 7px;
-  height: 7px;
-  border-radius: 1.5px;
-  background: var(--primary-fill);
-  transform: translate(-50%, -50%) rotate(45deg);
-}
-.rank-level {
-  color: var(--text-muted);
-  font-weight: 700;
-}
-.rank-badge-celebrate::before {
-  content: "";
-  position: absolute;
-  inset: -5px;
-  border-radius: var(--radius-pill);
-  border: 1px solid rgba(77, 157, 255, 0.42);
-  opacity: 0;
-  pointer-events: none;
-}
-.rank-sparks {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 4px;
-  height: 4px;
-  border-radius: var(--radius-pill);
-  pointer-events: none;
-  opacity: 0;
-  box-shadow:
-    0 -18px 0 var(--primary),
-    14px -12px 0 var(--secondary),
-    18px 2px 0 var(--info),
-    9px 16px 0 var(--primary),
-    -11px 15px 0 var(--secondary),
-    -18px -2px 0 var(--info),
-    -13px -13px 0 var(--primary);
-}
-.rank-name {
-  display: inline-block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 700;
-  line-height: 1.1;
 }
 .rank-fx-dim {
   color: var(--text-dim);
@@ -11351,21 +10622,6 @@ select {
   text-shadow: 0 0 16px rgba(125, 249, 255, 0.3);
 }
 @media (prefers-reduced-motion: no-preference) {
-  .rank-badge-celebrate::before {
-    animation: rankBadgePulse 2.2s ease-out both;
-  }
-  .rank-badge-celebrate .rank-glyph {
-    animation: rankBadgeGlyph 2.2s ease-out both;
-  }
-  .rank-badge-celebrate .rank-level {
-    animation: rankBadgeLevel 0.42s var(--ease-out) both;
-  }
-  .rank-badge-celebrate .rank-name {
-    animation: rankBadgeName 0.7s var(--ease-out) both;
-  }
-  .rank-badge-celebrate .rank-sparks {
-    animation: rankBadgeSparks 1.2s ease-out both;
-  }
   .rank-fx-animated {
     animation: rankArcaneShift 8s ease-in-out infinite;
     animation-play-state: var(--loop-play-state, running);
@@ -11418,65 +10674,6 @@ select {
   100% {
     opacity: 0;
     transform: translateY(-10px) scale(0.98);
-  }
-}
-@keyframes rankBadgePulse {
-  0% {
-    opacity: 0;
-    transform: scale(0.96);
-  }
-  18% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-    transform: scale(1.18);
-  }
-}
-@keyframes rankBadgeGlyph {
-  0% {
-    filter: brightness(1);
-  }
-  24% {
-    filter: brightness(1.5);
-  }
-  100% {
-    filter: brightness(1);
-  }
-}
-@keyframes rankBadgeLevel {
-  0% {
-    opacity: 0;
-    transform: translateY(5px);
-  }
-  100% {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-@keyframes rankBadgeName {
-  0% {
-    opacity: 0;
-    transform: translateX(5px);
-    filter: brightness(1.35);
-  }
-  100% {
-    opacity: 1;
-    transform: translateX(0);
-    filter: brightness(1);
-  }
-}
-@keyframes rankBadgeSparks {
-  0% {
-    opacity: 0;
-    transform: translate(-50%, -50%) scale(0.35);
-  }
-  18% {
-    opacity: 0.9;
-  }
-  100% {
-    opacity: 0;
-    transform: translate(-50%, -50%) scale(1.15);
   }
 }
 @keyframes rankArcaneShift {
@@ -11959,19 +11156,12 @@ select {
 }
 
 /* ── Footer responsiveness ──
-   The right cluster is `flex: 0 0 auto` at full width so its controls stay at
-   natural size. Below 900px that cluster plus a schedules/tasks pill overflows,
-   so the controls are allowed to shrink and the left cluster yields first. */
+   Below 900px a schedules/tasks pill can overflow, so the left cluster yields. */
 @media (max-width: 900px) {
   .footer {
     gap: var(--space-4);
     /* Tighten the gap between clusters, never the rail — the footer has to keep
        lining up with the composer and transcript above it at every width. */
-  }
-  .footer-right {
-    flex: 0 1 auto;
-    gap: var(--space-5);
-    overflow: hidden;
   }
   .footer-left {
     flex: 1 1 0;
@@ -11997,14 +11187,6 @@ select {
   }
   .footer:has(.footer-left > *) .footer-left::-webkit-scrollbar {
     display: none;
-  }
-  .footer:has(.footer-left > *) .footer-right {
-    flex: 1 1 100%;
-    justify-content: flex-end;
-  }
-  .footer-right {
-    gap: var(--space-4);
-    font-size: var(--fs-sm);
   }
   .schedules-menu {
     min-width: 0;
@@ -12620,4 +11802,207 @@ select {
   .pixel-tip {
     --tip-px: 1px;
   }
+}
+
+/* ── The user's own commands (`!cmd`) ──
+   A command and its output, run with no agent turn. Built from the code-block
+   vocabulary (code background, mono, neutral keyline): it is terminal output,
+   not a reply, so it carries no assistant dot and no bubble. */
+.shell-run {
+  margin: var(--space-4) 0 var(--space-3);
+  background: var(--code-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
+.shell-run-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-6);
+  padding: var(--space-4) var(--space-6);
+  background: var(--user-bg);
+  color: var(--text);
+}
+.shell-run-cmd {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: var(--fs-md);
+  line-height: 1.35;
+  font-weight: 600;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.shell-run-prompt {
+  margin-inline-end: var(--space-3);
+  color: var(--primary);
+}
+.shell-run-cwd {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  line-height: 1.3;
+  color: var(--text-muted);
+}
+.shell-run-out {
+  margin: 0;
+  padding: var(--space-5) var(--space-6);
+  max-height: 60vh;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: var(--fs-base);
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--code-bg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Folded: the newest lines show; fade the first so it reads as "there is more above". */
+.shell-run-out.folded {
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.35) 0, #000 3em);
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.35) 0, #000 3em);
+}
+.shell-run-more {
+  display: block;
+  margin: 0 var(--space-6) var(--space-4);
+  padding: 0;
+  font: inherit;
+  font-size: var(--fs-sm);
+  line-height: 1.3;
+  color: var(--primary);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.shell-run-more:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.shell-run-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3) var(--space-6);
+  padding: var(--space-3) var(--space-6);
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-sm);
+  line-height: 1.3;
+  color: var(--text-muted);
+}
+.shell-run-status {
+  font-weight: 600;
+}
+.shell-run-status.is-ok {
+  color: var(--success);
+}
+.shell-run-status.is-bad {
+  color: var(--warning);
+}
+.shell-run-share {
+  margin-inline-start: auto;
+}
+.shell-run-copy {
+  display: inline-flex;
+  align-items: center;
+}
+.shell-declined {
+  margin: var(--space-3) 0;
+  font-size: var(--fs-base);
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+.shell-declined code,
+.shell-confirm-where code {
+  font-family: var(--mono);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.shell-confirm-cmd {
+  margin: 0;
+  padding: var(--space-4) var(--space-6);
+  font-family: var(--mono);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.shell-confirm-where {
+  margin: var(--space-4) 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+.shell-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-6);
+}
+.shell-confirm-keys {
+  margin-inline-start: auto;
+  font-size: var(--fs-sm);
+  line-height: 1.3;
+  color: var(--text-muted);
+}
+
+/* Composer in command mode: mono text, a quiet primary keyline and one line
+   saying where the command runs and whether it asks first. */
+.inputwrap.shell-mode,
+.inputwrap.shell-mode:focus-within {
+  border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
+}
+.input.input-shell {
+  font-family: var(--mono);
+}
+/* The `!` picker reuses the @ picker's chrome; commands read as code. */
+.shell-menu-command {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.shell-menu-note {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  font-size: var(--fs-sm);
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.shell-menu-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-4);
+  margin-top: var(--space-2);
+  padding: var(--space-3) var(--space-4) var(--space-1);
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-sm);
+  line-height: 1.3;
+}
+.shell-menu-revoke {
+  padding: 0;
+  font: inherit;
+  color: var(--primary);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+/* Error output (stderr): the warning ink plus italics, so it never relies on
+   colour alone; it stays inline, in the order it arrived. */
+.shell-run-err {
+  color: var(--warning);
+  font-style: italic;
 }

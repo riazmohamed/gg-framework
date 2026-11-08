@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@abukhaled/gg-agent"><img src="https://img.shields.io/npm/v/@abukhaled/gg-agent?style=for-the-badge" alt="npm version"></a>
-  <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+  <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg?style=for-the-badge" alt="AGPL-3.0 License"></a>
 </p>
 
 Give an LLM tools. It calls them. Results go back in. It loops until it's done. That's it.
@@ -93,4 +93,4 @@ Return a string, or a `{ content, details }` object for structured results. If `
 
 ## License
 
-MIT
+[AGPL-3.0-only](../../LICENSE). You can build on it; if you distribute your changes or run them as a network service, share their source under the same license.

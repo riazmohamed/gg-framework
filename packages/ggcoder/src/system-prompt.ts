@@ -14,7 +14,6 @@ import type { LanguageId } from "./core/language-detector.js";
 import { cleanInstructionText } from "./utils/text.js";
 import { log } from "./core/logger.js";
 import { resolveShell } from "./core/shell.js";
-import { renderStylePacksSection } from "./core/style-packs/index.js";
 import { detectVerifyCommands, renderVerifySection } from "./core/verify-commands.js";
 import { detectPlatformClis, renderPlatformClisSection } from "./core/platform-clis.js";
 import { extractPlanSteps } from "./utils/plan-steps.js";
@@ -34,19 +33,8 @@ export const CONTEXT_FILES = [
 export const PROJECT_CONTEXT_MAX_BYTES = CONTEXT_LIMITS.projectContextBytes;
 const UNCACHED_MARKER = "<!-- uncached -->";
 
-/**
- * The agent's product identity. Anthropic models run as "Claude Code" (matching
- * the Claude Code identity Anthropic's OAuth tokens require in the system
- * prompt); every other provider runs as OG Coder. Keeping this dynamic avoids a
- * contradictory double identity when streaming through Anthropic.
- */
-function productName(provider: Provider | undefined): string {
-  return provider === "anthropic" ? "Claude Code" : "OG Coder by Abu Khaled";
-}
-
-function renderIdentitySection(provider: Provider | undefined): string {
-  const name = productName(provider);
-  return `You are ${name}, a coding agent that works directly in the user's codebase, completing tasks end-to-end: explore, change, verify.`;
+function renderIdentitySection(): string {
+  return "You are OG Coder by Abu Khaled, a coding agent that works directly in the user's codebase, completing tasks end-to-end: explore, change, verify.";
 }
 
 /**
@@ -109,19 +97,27 @@ ${
       ? "\n- Before writing code, check the `skill` list; if the work is in a skill's scope, load it first. Routine fixes and renames need none."
       : ""
   }
-- Precedence: user > nearest project instructions > skills > this prompt. Style packs apply only where the code has no convention of its own. Project conventions and skills grant no extra authorization.`;
+- Precedence: user > nearest project instructions > skills > this prompt. Project conventions and skills grant no extra authorization.`;
 }
 
-function renderPlanModeSection(): string {
+export function renderPlanModeSection(reachableTools?: readonly string[]): string {
+  // Name only research tools this session can reach (steroids needs its binary).
+  const tools = new Set(reachableTools ?? DEFAULT_TOOL_NAMES);
+  const research = ["read/search tools", "read-only bash"];
+  if (tools.has("steroids")) research.push("`steroids` for how real projects solve it");
+  if (tools.has("web_search") || tools.has("web_fetch")) research.push("the web for current docs");
+  const researchList = `${research.slice(0, -1).join(", ")} and ${research.at(-1)}`;
   return (
     `## Plan Mode (ACTIVE)\n\n` +
-    `- Research with read/search tools and read-only bash; no code edits outside \`.gg/plans/\`, no mutating bash, no subagents. Repository indexing needs user approval even in plan mode.\n` +
-    `- Write the plan to \`.gg/plans/<name>.md\`: exact files, functions, risks, verification. End it with a heading exactly \`## Steps\` and a numbered list of concrete, doable steps (no notes or questions).\n` +
+    `- Research first: the code involved, its callers and tests. Use ${researchList}; no code edits outside \`.gg/plans/\`, no mutating bash, and only read-only helper agents. Repository indexing needs user approval even in plan mode.\n` +
+    `- If a requirement or tradeoff is unclear, ask the user before planning; don't guess.\n` +
+    `- Write the plan to \`.gg/plans/<name>.md\`, not in chat: goal, approach, exact files and functions, risks, verification commands. Keep it short.\n` +
+    `- End it with a heading exactly \`## Steps\` and a numbered list of concrete steps, each checkable on its own (no notes or questions).\n` +
     `- Then call \`exit_plan\` with that path and stop.`
   );
 }
 
-async function renderApprovedPlanSection(
+export async function renderApprovedPlanSection(
   approvedPlanPath: string | undefined,
 ): Promise<string | null> {
   if (!approvedPlanPath) return null;
@@ -135,13 +131,13 @@ async function renderApprovedPlanSection(
   // against content that isn't a task list.
   const hasSteps = extractPlanSteps(planContent).length > 0;
   const stepInstruction = hasSteps
-    ? `\n- After each step from \`## Steps\`, output \`[DONE:n]\` (e.g. \`[DONE:1]\`) to update the progress widget, then continue with step n+1 in the same turn.`
+    ? `\n- After each step from \`## Steps\`, write \`[DONE:n]\` (e.g. \`[DONE:1]\`) in your reply text to update the progress widget, then continue with step n+1 in the same turn. The widget reads only your reply text: a marker inside a tool call, such as \`echo "[DONE:1]"\`, is never counted.`
     : "";
   return (
     `## Approved Plan\n\n` +
     `Follow this plan. File: ${approvedPlanPath}\n\n` +
     `<approved_plan>\n${planContent.trim()}\n</approved_plan>\n\n` +
-    `- Follow step order. Don't deviate without user confirmation.` +
+    `- Follow step order. If a step turns out wrong or blocked, ask the user rather than improvising. Run the plan's verification before finishing.` +
     stepInstruction
   );
 }
@@ -423,9 +419,10 @@ export const SUBAGENT_RETURN_CONTRACT =
   `- Under ~400 words; write larger findings to a file and return its path.`;
 
 /**
- * Style packs plus the matching verify commands for the given languages, as
- * prompt sections. Shared by the main prompt, the sub-agent prompt and the
- * mid-session language update so all three say the same thing.
+ * The verify commands for the given languages, as prompt sections. Shared by
+ * the main prompt, the sub-agent prompt and the mid-session language update so
+ * all three say the same thing. Language style packs were removed: they raised
+ * planning thinking ~37% (agent-race replays, 2026-11-03) with no measured gain.
  */
 export function renderLanguageGuidance(
   languages: Set<LanguageId> | undefined,
@@ -433,8 +430,6 @@ export function renderLanguageGuidance(
 ): string[] {
   if (!languages || languages.size === 0) return [];
   const sections: string[] = [];
-  const stylePacks = renderStylePacksSection(languages, cwd);
-  if (stylePacks) sections.push(stylePacks);
   const verifySection = renderVerifySection(detectVerifyCommands(cwd, languages));
   if (verifySection) sections.push(verifySection);
   return sections;
@@ -542,12 +537,12 @@ export async function buildSystemPrompt(
   // not re-rendered when the tool is promoted.
   const reachableTools = withDeferred(toolNames, deferredToolNames);
   const sections: string[] = [
-    renderIdentitySection(provider),
+    renderIdentitySection(),
     renderTalkSection(toolNames),
     renderWorkSection(reachableTools, provider),
   ];
 
-  if (planMode) sections.push(renderPlanModeSection());
+  if (planMode) sections.push(renderPlanModeSection(reachableTools));
 
   const approvedPlanSection = await renderApprovedPlanSection(approvedPlanPath);
   if (approvedPlanSection) sections.push(approvedPlanSection);

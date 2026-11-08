@@ -13,9 +13,9 @@ const claude: UsageResult = {
     { kind: "weekly", label: "Weekly", usedPercent: 90 },
   ],
 };
-const codexOff: UsageResult = {
-  provider: "openai",
-  displayName: "Codex",
+const kimiOff: UsageResult = {
+  provider: "moonshot",
+  displayName: "Kimi",
   connected: false,
   windows: [],
   fetchedAt: now,
@@ -31,19 +31,19 @@ describe("/usage", () => {
   });
 
   it("prints a bar per window and skips providers that are not logged in", () => {
-    const text = formatUsage([claude, codexOff], now);
+    const text = formatUsage([claude, kimiOff], now);
     expect(text).toContain("Anthropic");
     expect(text).toMatch(/5-hour\s+████░░░░░░\s+42%\s+resets in 2h 5m/);
     expect(text).toMatch(/Weekly\s+█████████░\s+90%\s+reset time unavailable/);
-    expect(text).not.toContain("Codex");
-    expect(formatUsage([codexOff], now, true)).toBe("Codex: not logged in with a subscription.");
-    expect(formatUsage([codexOff], now)).toContain("No subscription logins");
+    expect(text).not.toContain("Kimi");
+    expect(formatUsage([kimiOff], now, true)).toBe("Kimi: not logged in with a subscription.");
+    expect(formatUsage([kimiOff], now)).toContain("No subscription logins");
   });
 
   it("marks replayed snapshots and surfaces fetch errors", () => {
     expect(formatUsage([{ ...claude, stale: true }], now)).toContain("Anthropic (last known)");
     const failing: UsageResult = {
-      ...codexOff,
+      ...kimiOff,
       connected: true,
       error: "Usage is temporarily unavailable.",
     };
@@ -51,10 +51,10 @@ describe("/usage", () => {
   });
 
   it("queries every provider, or just the one named", async () => {
-    const fetch = vi.fn(async (provider: string) => (provider === "anthropic" ? claude : codexOff));
+    const fetch = vi.fn(async (provider: string) => (provider === "anthropic" ? claude : kimiOff));
     const command = createUsageCommand(() => fetch as never);
     await command.execute("", {} as never);
-    expect(fetch.mock.calls.map((c) => c[0])).toEqual(["anthropic", "openai", "moonshot"]);
+    expect(fetch.mock.calls.map((c) => c[0])).toEqual(["anthropic", "moonshot"]);
     expect(await command.execute("gemini", {} as never)).toContain("Usage: /usage");
     expect(await createUsageCommand(() => null).execute("", {} as never)).toContain(
       "needs a logged-in session",

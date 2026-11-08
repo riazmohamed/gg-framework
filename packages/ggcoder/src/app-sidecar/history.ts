@@ -6,6 +6,8 @@ export interface HistoryEntryForWire {
   role: "user" | "assistant";
   text: string;
   images?: string[];
+  /** Attached files and videos, by name (images ride `images`). */
+  attachments?: Array<{ kind: "file" | "video"; name: string }>;
   hook?: "ideal" | "loop_break" | "regrounding" | null;
   command?: boolean;
   compacted?: boolean;
@@ -43,6 +45,18 @@ export interface HistoryEntryForWire {
   infoKind?: "video_warning";
   /** Safety-block chat row (persisted `security` app marker). */
   security?: { rule: string; target: string };
+  /** A command the user ran themselves (persisted `shell` app marker). */
+  shell?: {
+    runId: string;
+    command: string;
+    cwd: string;
+    exitCode: number | null;
+    durationMs: number;
+    cancelled: boolean;
+    output: string;
+    truncated: boolean;
+    error?: string;
+  };
   toolImages?: Array<{ src: string; path?: string }>;
   subagentGroup?: Array<{
     agentName?: string;

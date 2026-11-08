@@ -1,14 +1,13 @@
-import { randomUUID } from "node:crypto";
-import os from "node:os";
 import path from "node:path";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { z } from "zod";
-import { CODEX_CLIENT_VERSION } from "@abukhaled/gg-ai";
+import { GG_CODER_USER_AGENT } from "@abukhaled/gg-ai";
 import type { AgentTool, StructuredToolResult, ToolContext } from "@abukhaled/gg-agent";
 import { resolvePath } from "./path-utils.js";
 import {
   IMAGE_MEDIA_TYPES,
   convertImageFormat,
+  animatedPreview,
   downscaleForPreview,
   imageDimensions,
   shrinkToFit,
@@ -21,43 +20,36 @@ import {
  * AuthStorage instance.
  */
 export type GenerateImageAuth = {
-  resolveCredentials(provider: string): Promise<{
-    accessToken: string;
-    accountId?: string;
-  }>;
+  /** The OpenAI API key; image generation isn't available on the ChatGPT plan. */
+  resolveApiKey(provider: string): Promise<{ accessToken: string }>;
 };
 
 /**
- * Codex's own image endpoints, called the way the Codex CLI's image extension
- * calls them (openai/codex `ext/image-generation/src/tool.rs` +
- * `codex-api/src/endpoint/images.rs`, checked 2026-10-17 at 592964c0): a plain
- * JSON POST to `images/generations` or `images/edits` under the ChatGPT Codex
- * backend with `{ prompt, background, model, quality, size }` (edits add
- * `images: [{ image_url }]`), answered with `data[].b64_json` PNG. ChatGPT OAuth tokens (auth.openai.com PKCE)
- * are rejected by api.openai.com/v1/images/* (missing the
- * `api.model.images.request` scope), but they work here.
- *
- * This used to go through `codex/responses` with a chat model driving the
- * hosted `image_generation` tool. That broke twice over: the driving model
- * (`gpt-5.5`) was retired, and the current Codex models are code-mode only,
- * so they ignore the hosted tool and answer in text.
+ * OpenAI's public Image API (developers.openai.com/api/docs/guides/image-generation):
+ * a JSON POST to `images/generations` or `images/edits` with `{ prompt,
+ * background, model, quality, size }` (edits add `images: [{ image_url }]`,
+ * GIFs add `output_format: "gif"` + frame controls), answered with
+ * `data[].b64_json`. It needs an OpenAI API key: the ChatGPT plan route
+ * doesn't serve image generation.
  */
-const CODEX_IMAGES_BASE = "https://chatgpt.com/backend-api/codex/images";
-/** The endpoint always answers in PNG; other formats are re-encoded locally. */
+const IMAGES_BASE = "https://api.openai.com/v1/images";
+/** The endpoint answers in PNG by default; other formats are re-encoded locally. */
 const RESPONSE_FORMAT = "png";
-/**
- * Codex's `IMAGE_MODEL`. Codex sends this fixed id on every request; the
- * backend picks the generator, so there is no model choice to offer.
- */
-const IMAGE_MODEL = "gpt-image-2";
-/** Codex's `MAX_EDIT_IMAGES`: an edit takes one to five reference images. */
+/** GPT Image 2.6: Flare for fast everyday generation, Sunburst where edit precision matters. */
+const GENERATION_MODEL = "gpt-image-2.6-flare";
+const EDIT_MODEL = "gpt-image-2.6-sunburst";
+/** GIF output bounds (`frame_count` 2–16, default 9; 200ms frames). */
+const GIF_MIN_FRAMES = 2;
+const GIF_MAX_FRAMES = 16;
+const GIF_DEFAULT_FRAMES = 9;
+const GIF_DEFAULT_FRAME_MS = 200;
+/** An edit takes one to five reference images. */
 const MAX_EDIT_IMAGES = 5;
 /**
- * Codex's retry policy for image requests (codex-client `retry.rs`
- * `run_with_retry`, with the provider's `DEFAULT_REQUEST_MAX_RETRIES` = 4 and a
- * 200ms base delay): up to 4 retries (5 attempts) on a 5xx or a failed
- * connection, never on a 4xx such as 429. The wait honours `Retry-After`;
- * otherwise it doubles from 200ms with ±10% jitter (200, 400, 800, 1600ms).
+ * Retry policy for image requests: up to 4 retries (5 attempts) on a 5xx or a
+ * failed connection, never on a 4xx such as 429. The wait honours
+ * `Retry-After`; otherwise it doubles from 200ms with ±10% jitter (200, 400,
+ * 800, 1600ms).
  */
 const MAX_RETRIES = 4;
 const RETRY_BASE_DELAY_MS = 200;
@@ -97,8 +89,7 @@ const DEFAULT_RETRY_DEPS: ImageRetryDeps = {
 };
 
 /**
- * Wait before retry number `retry` (1-based), as Codex computes it: the
- * server's `Retry-After` (whole seconds or an HTTP date) when present,
+ * Wait before retry number `retry` (1-based): the server's `Retry-After` (whole seconds or an HTTP date) when present,
  * otherwise exponential backoff from 200ms with ±10% jitter.
  */
 export function retryDelayMs(
@@ -141,9 +132,8 @@ const GenerateImageParams = z.object({
     .describe(
       "Output resolution: `auto` (default) or WIDTHxHEIGHT with both edges multiples of " +
         "16px, max edge 3840px, long:short ratio at most 3:1, and 655,360 to 8,294,400 " +
-        "total pixels. Common: 1024x1024, 1536x1024, 1024x1536. The ChatGPT image backend " +
-        "does not guarantee the requested size and may return a smaller image; the result " +
-        "always reports the size actually delivered.",
+        "total pixels. Common: 1024x1024, 1536x1024, 1024x1536. The result always reports " +
+        "the size actually delivered.",
     ),
   quality: z
     .enum(["low", "medium", "high", "auto"])
@@ -168,7 +158,32 @@ const GenerateImageParams = z.object({
   output_format: z
     .enum(["png", "jpeg", "webp"])
     .optional()
-    .describe("Output file format (default png)"),
+    .describe("Output file format for a still image (default png). Leave unset with `gif`."),
+  gif: z
+    .object({
+      frame_count: z
+        .number()
+        .int()
+        .min(GIF_MIN_FRAMES)
+        .max(GIF_MAX_FRAMES)
+        .optional()
+        .describe(`Number of frames (${GIF_MIN_FRAMES}–${GIF_MAX_FRAMES}). Default 9.`),
+      frame_duration_ms: z
+        .number()
+        .int()
+        .min(20)
+        .max(2000)
+        .optional()
+        .describe("Milliseconds per frame (20–2000). Default 200."),
+    })
+    .optional()
+    .describe(
+      "Set to make a simple looping animated GIF instead of a still image; use {} for the " +
+        `defaults (9 frames, 200ms each). Only for simple animations of ${GIF_MIN_FRAMES}–` +
+        `${GIF_MAX_FRAMES} frames. Describe the motion and the loop in the prompt. To change ` +
+        "an existing GIF, pass a spritesheet of its frames (equal cells in a regular grid) " +
+        "as `image`, never the GIF itself.",
+    ),
   background: z
     .enum(["opaque", "transparent"])
     .optional()
@@ -181,9 +196,11 @@ const GenerateImageParams = z.object({
 
 type GenerateImageArgs = z.infer<typeof GenerateImageParams>;
 
-function defaultOutPath(cwd: string, format: string): string {
+type SavedFormat = "png" | "jpeg" | "webp" | "gif";
+
+function defaultOutPath(cwd: string, format: SavedFormat): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const ext = format === "png" ? "png" : format === "jpeg" ? "jpg" : "webp";
+  const ext = format === "jpeg" ? "jpg" : format;
   return path.join(cwd, ".gg", "generated", `${stamp}.${ext}`);
 }
 
@@ -191,7 +208,18 @@ function defaultOutPath(cwd: string, format: string): string {
 function mediaTypeFor(format: string): string {
   if (format === "jpeg") return "image/jpeg";
   if (format === "webp") return "image/webp";
+  if (format === "gif") return "image/gif";
   return "image/png";
+}
+
+/** GIF87a / GIF89a magic: the backend's reply, not the request, decides the format. */
+function isGif(buffer: Buffer): boolean {
+  return buffer.subarray(0, 4).toString("latin1") === "GIF8";
+}
+
+/** Same path with another extension, for a still image returned to a GIF request. */
+function withExtension(filePath: string, ext: string): string {
+  return filePath.slice(0, filePath.length - path.extname(filePath).length) + ext;
 }
 
 export function createGenerateImageTool(
@@ -203,12 +231,12 @@ export function createGenerateImageTool(
   return {
     name: "generate_image",
     description:
-      "Generate or edit images with OpenAI's image generation, the same service Codex uses " +
-      "with a ChatGPT login. Works even when a different chat provider is active; only " +
-      "requires OpenAI to be connected. Only use this tool when the user explicitly asks to " +
+      "Generate or edit images with OpenAI's Image API. Works even when a different chat " +
+      "provider is active; needs an OpenAI API key. Only use this tool when the user explicitly asks to " +
       "create, generate, or edit an image. Pass `image` (or up to five `images`) to edit " +
       "existing files, such as a previous result or a user attachment. Set `background` to " +
-      "'transparent' for cutouts and transparent artwork. Generation can take a minute or " +
+      "'transparent' for cutouts and transparent artwork. Set `gif` for a short looping " +
+      "animation. Generation can take a minute or " +
       "more. Use `out_path` to save to a specific location (defaults to .gg/generated/).",
     parameters: GenerateImageParams,
     async execute(
@@ -227,43 +255,51 @@ export function createGenerateImageTool(
       if (args.image && args.images) {
         return "Pass either `image` or `images`, not both. No request was sent.";
       }
+      if (args.gif && args.output_format) {
+        return "A GIF is always saved as .gif; leave `output_format` unset with `gif`. No request was sent.";
+      }
 
-      // Resolve OpenAI credentials at execution time (lazy — token refresh
-      // happens on use, not at registration).
+      // The API key only: the ChatGPT plan route doesn't serve image generation.
       let token: string;
-      let accountId: string | undefined;
       try {
-        const creds = await auth.resolveCredentials("openai");
-        token = creds.accessToken;
-        accountId = creds.accountId;
+        token = (await auth.resolveApiKey("openai")).accessToken;
       } catch {
         return (
-          "OpenAI is not connected. The user needs to connect their OpenAI account " +
-          "to use image generation."
+          "Image generation needs an OpenAI API key; it isn't available on the ChatGPT plan. " +
+          "No request was sent. Tell the user to add a key from platform.openai.com/api-keys " +
+          "under OpenAI in Providers (or `ggcoder login`)."
         );
       }
 
-      const outputFormat = args.output_format ?? "png";
+      const outputFormat: SavedFormat = args.gif ? "gif" : (args.output_format ?? "png");
       const mediaType = mediaTypeFor(outputFormat);
       const outPath = args.out_path
         ? resolvePath(cwd, args.out_path)
         : defaultOutPath(cwd, outputFormat);
 
       try {
-        // Every field Codex sends, always: it pins quality and size to "auto"
-        // and background to opaque unless transparency is asked for.
+        // Quality and size default to "auto", background to opaque unless
+        // transparency is asked for.
+        const referencePaths = args.images ?? (args.image ? [args.image] : []);
         const request: Record<string, unknown> = {
           prompt: args.prompt,
           background: args.background ?? "opaque",
-          model: IMAGE_MODEL,
+          model: referencePaths.length > 0 ? EDIT_MODEL : GENERATION_MODEL,
           quality: args.quality ?? "auto",
           size: args.size ?? "auto",
         };
+        if (args.gif) {
+          // Frame controls sit beside `output_format`; unset ones are omitted.
+          request.output_format = "gif";
+          if (args.gif.frame_count !== undefined) request.frame_count = args.gif.frame_count;
+          if (args.gif.frame_duration_ms !== undefined) {
+            request.frame_duration_ms = args.gif.frame_duration_ms;
+          }
+        }
 
-        const referencePaths = args.images ?? (args.image ? [args.image] : []);
         if (referencePaths.length > 0) {
           // Edit mode: each reference travels inline as a data URL of the
-          // original bytes, as Codex sends them (PromptImageMode::Original).
+          // original bytes.
           const references: Array<{ image_url: string }> = [];
           for (const reference of referencePaths) {
             const imagePath = resolvePath(cwd, reference);
@@ -283,15 +319,15 @@ export function createGenerateImageTool(
           }
           request.images = references;
         }
-        const endpoint = `${CODEX_IMAGES_BASE}/${request.images ? "edits" : "generations"}`;
-        // One id for the whole tool call, like Codex's per-turn
-        // `x-codex-image-turn-id`, so every image of an `n` batch is grouped.
-        const turnId = randomUUID();
+        const endpoint = `${IMAGES_BASE}/${request.images ? "edits" : "generations"}`;
 
-        // One request per image, like the Codex CLI: each output is its own
-        // generation, and a later failure keeps the earlier ones.
+        // One request per image: each output is its own generation, and a
+        // later failure keeps the earlier ones.
         const requestedCount = args.n ?? 1;
         const imageBuffers: Buffer[] = [];
+        // Set once OpenAI refuses native GIF output: every GIF is then drawn as one
+        // sprite sheet and its frames stitched into a GIF locally.
+        let sheetGrid: SpriteGrid | undefined;
         // The size OpenAI's response says it produced, per image (when given).
         const reportedSizes: Array<string | undefined> = [];
         for (
@@ -299,18 +335,30 @@ export function createGenerateImageTool(
           index < requestedCount && imageBuffers.length < requestedCount;
           index++
         ) {
-          const generated = await callImageEndpoint(
-            endpoint,
-            request,
-            { token, accountId, turnId },
-            context.signal,
-            retry,
-          );
+          const call = (body: Record<string, unknown>) =>
+            callImageEndpoint(endpoint, body, token, context.signal, retry);
+          let generated: Awaited<ReturnType<typeof callImageEndpoint>>;
+          try {
+            generated = await call(sheetGrid ? spriteSheetRequest(request, sheetGrid) : request);
+          } catch (err) {
+            if (!args.gif || sheetGrid || !(err instanceof GifRefusedError)) throw err;
+            sheetGrid = spriteGrid(args.gif.frame_count ?? GIF_DEFAULT_FRAMES, args.size);
+            generated = await call(spriteSheetRequest(request, sheetGrid));
+          }
           for (const png of generated.images.slice(0, requestedCount - imageBuffers.length)) {
-            // PNG output is saved byte for byte as OpenAI sent it (alpha and
-            // all); only another format is re-encoded. Never resized.
+            // PNG and GIF output are saved byte for byte as OpenAI sent them
+            // (alpha and frames and all); only another format is re-encoded. Never resized.
             imageBuffers.push(
-              outputFormat === RESPONSE_FORMAT ? png : await convertImageFormat(png, outputFormat),
+              sheetGrid
+                ? // Not a usable grid: keep the still, saved and reported as a PNG.
+                  ((await gifFromSpriteSheet(
+                    png,
+                    sheetGrid,
+                    args.gif?.frame_duration_ms ?? GIF_DEFAULT_FRAME_MS,
+                  )) ?? png)
+                : outputFormat === RESPONSE_FORMAT || outputFormat === "gif"
+                  ? png
+                  : await convertImageFormat(png, outputFormat),
             );
             reportedSizes.push(generated.reportedSize);
           }
@@ -323,10 +371,16 @@ export function createGenerateImageTool(
 
         // Save each image and build preview content.
         const savedPaths: string[] = [];
+        let stillInsteadOfGif = false;
 
         for (let i = 0; i < imageBuffers.length; i++) {
           const buf = imageBuffers[i]!;
-          const savePath = imageBuffers.length === 1 ? outPath : insertIndex(outPath, i);
+          let savePath = imageBuffers.length === 1 ? outPath : insertIndex(outPath, i);
+          if (outputFormat === "gif" && !isGif(buf)) {
+            // A still came back for a GIF request: keep it, under its true extension.
+            stillInsteadOfGif = true;
+            savePath = withExtension(savePath, ".png");
+          }
           await mkdir(path.dirname(savePath), { recursive: true });
           await writeFile(savePath, buf);
           savedPaths.push(savePath);
@@ -338,14 +392,20 @@ export function createGenerateImageTool(
         const primaryPath = savedPaths[0]!;
 
         // Shrink for the model (provider image limits) and a smaller copy for
-        // the inline terminal/webview preview.
-        const { buffer: shrunk, mediaType: detectedType } = await shrinkToFit(primary, mediaType);
-        const previewBuffer = await downscaleForPreview(shrunk);
+        // the inline terminal/webview preview. The model sees a GIF as its
+        // first frame, while the preview keeps the animation.
+        const { buffer: shrunk, mediaType: detectedType } = await shrinkToFit(
+          isGif(primary) ? await convertImageFormat(primary, "png") : primary,
+          mediaType,
+        );
+        const primaryPreview = isGif(primary)
+          ? await animatedPreview(primary)
+          : { buffer: await downscaleForPreview(shrunk), mediaType: detectedType };
 
         const imagePreviews = [
           {
-            base64: previewBuffer.toString("base64"),
-            mediaType: detectedType,
+            base64: primaryPreview.buffer.toString("base64"),
+            mediaType: primaryPreview.mediaType,
             path: primaryPath,
           },
         ];
@@ -354,6 +414,15 @@ export function createGenerateImageTool(
         for (let i = 1; i < imageBuffers.length; i++) {
           const extraBuf = imageBuffers[i]!;
           const extraPath = savedPaths[i]!;
+          if (isGif(extraBuf)) {
+            const extraPreview = await animatedPreview(extraBuf);
+            imagePreviews.push({
+              base64: extraPreview.buffer.toString("base64"),
+              mediaType: extraPreview.mediaType,
+              path: extraPath,
+            });
+            continue;
+          }
           const extraShrunk = await shrinkToFit(extraBuf, mediaType);
           const extraPreview = await downscaleForPreview(extraShrunk.buffer);
           imagePreviews.push({
@@ -369,13 +438,31 @@ export function createGenerateImageTool(
             : `Generated ${savedPaths.length} images → ${savedPaths.join(", ")}`;
 
         const dimensions = await Promise.all(imageBuffers.map((buf) => imageDimensions(buf)));
-        const sizeText = sizeReport(args.size, savedPaths, dimensions, reportedSizes);
+        const sizeText =
+          sheetGrid && !stillInsteadOfGif
+            ? `Frame size: ${dimensions[0] ? formatDimensions(dimensions[0]) : "unknown"}. ` +
+              `Assembled locally from a ${sheetGrid.cols}x${sheetGrid.rows} sprite sheet of ` +
+              `${sheetGrid.frames} frames, because OpenAI's native GIF output isn't enabled ` +
+              "for this API key yet."
+            : sizeReport(args.size, savedPaths, dimensions, reportedSizes);
 
         // The summary stays the FIRST text block, on its own: restored history
         // reads the image paths from exactly that line (extractToolImagePaths).
         const allContent: StructuredToolResult["content"] = [
           { type: "text", text: summary },
           { type: "text", text: sizeText },
+          ...(stillInsteadOfGif
+            ? [
+                {
+                  type: "text" as const,
+                  text: sheetGrid
+                    ? "The frames OpenAI drew did not line up into an animation, so the " +
+                      "picture was saved as a still PNG. Tell the user, and offer to try again."
+                    : "OpenAI returned a still PNG instead of an animated GIF, saved with a " +
+                      ".png extension. Tell the user.",
+                },
+              ]
+            : []),
           {
             type: "image",
             mediaType: detectedType,
@@ -389,8 +476,8 @@ export function createGenerateImageTool(
         };
       } catch (err) {
         if (context.signal.aborted) return "Image generation aborted.";
-        if (err instanceof ImageAccessError) return imageAccessMessage(token);
-        if (err instanceof ImageLimitError) return imageLimitMessage(err.resetsAt);
+        if (err instanceof ImageAccessError) return imageAccessMessage(err.message);
+        if (err instanceof ImageLimitError) return imageLimitMessage();
         const reason = err instanceof Error ? err.message : String(err);
         return `Image generation failed: ${reason}`;
       }
@@ -403,8 +490,8 @@ type Dimensions = { width: number; height: number } | null;
 const formatDimensions = (d: { width: number; height: number }): string => `${d.width}x${d.height}`;
 
 /**
- * Requested versus delivered size, for the agent to relay. The ChatGPT image
- * backend can return a different size than asked (a user asked for 2048x2048
+ * Requested versus delivered size, for the agent to relay. OpenAI can return
+ * a different size than asked (a user asked for 2048x2048
  * and got 1254x1254), so a mismatch is reported plainly instead of the call
  * reading as a clean success. Nothing is resized and nothing is re-requested:
  * each request spends the user's image quota.
@@ -444,9 +531,9 @@ export function sizeReport(
   }
   return (
     `Size mismatch: requested ${explicit}, but OpenAI returned ${delivered}.${claimNote} ` +
-    "The file was saved at its native size with no resizing. Tell the user. The ChatGPT " +
-    "image backend does not always honour the requested size, so asking again is unlikely " +
-    "to change it and would spend more of their image quota."
+    "The file was saved at its native size with no resizing. Tell the user. OpenAI does not " +
+    "always honour the requested size, so asking again is unlikely to change it and would " +
+    "spend more of their credit."
   );
 }
 
@@ -461,77 +548,138 @@ function insertIndex(filePath: string, index: number): string {
 class ImageAccessError extends Error {}
 
 /** The account's image quota is used up (HTTP 429 `usage_limit_reached`). */
-class ImageLimitError extends Error {
-  constructor(
-    message: string,
-    /** Unix seconds when the limit resets, when OpenAI says. */
-    readonly resetsAt: number | undefined,
-  ) {
-    super(message);
+class ImageLimitError extends Error {}
+
+/** The backend turned down GIF output (HTTP 400 naming GIF), before generating anything. */
+class GifRefusedError extends Error {
+  constructor(readonly detail: string) {
+    super(`OpenAI Image API (400): ${detail}`);
   }
 }
 
-/** What to tell the agent when the image quota is used up. */
-function imageLimitMessage(resetsAt: number | undefined): string {
-  const when =
-    resetsAt !== undefined && Number.isFinite(resetsAt)
-      ? ` It resets at ${new Date(resetsAt * 1000).toISOString()}.`
+/** Frames of a sprite sheet, laid out left to right, top to bottom. */
+export type SpriteGrid = {
+  frames: number;
+  cols: number;
+  rows: number;
+  /** Sheet size to ask for, so each cell keeps the requested frame shape. */
+  size: string;
+};
+
+const SHEET_LONG_EDGE = 1536;
+
+/** The most square grid that holds `frames` cells, sized for the requested frame shape. */
+export function spriteGrid(frames: number, frameSize: string | undefined): SpriteGrid {
+  const cols = Math.ceil(Math.sqrt(frames));
+  const rows = Math.ceil(frames / cols);
+  const match = frameSize ? /^(\d+)x(\d+)$/.exec(frameSize) : null;
+  const frameAspect = match ? Number(match[1]) / Number(match[2]) : 1;
+  // The backend caps the long:short ratio at 3:1.
+  const aspect = Math.min(3, Math.max(1 / 3, (cols * frameAspect) / rows));
+  const snap = (edge: number): number => Math.max(16, Math.round(edge / 16) * 16);
+  const width = aspect >= 1 ? SHEET_LONG_EDGE : snap(SHEET_LONG_EDGE * aspect);
+  const height = aspect >= 1 ? snap(SHEET_LONG_EDGE / aspect) : SHEET_LONG_EDGE;
+  return { frames, cols, rows, size: `${width}x${height}` };
+}
+
+/** The still request that asks for every frame of the animation on one sheet. */
+export function spriteSheetRequest(
+  request: Record<string, unknown>,
+  grid: SpriteGrid,
+): Record<string, unknown> {
+  const { output_format: _format, frame_count: _count, frame_duration_ms: _ms, ...still } = request;
+  const spare =
+    grid.cols * grid.rows > grid.frames
+      ? ` Fill only the first ${grid.frames} cells; leave the rest plain background.`
       : "";
-  return (
-    `This ChatGPT account has reached its image generation limit.${when} ` +
-    "Tell the user; retrying before then will not help."
-  );
+  return {
+    ...still,
+    size: grid.size,
+    prompt:
+      `A sprite sheet for a looping animation: ${grid.frames} frames in a ${grid.cols}x` +
+      `${grid.rows} grid of equal cells, read left to right, top to bottom.${spare} No gaps, ` +
+      "borders, gutters, labels or numbers. Every cell shares the exact same background, " +
+      "framing and scale so the frames line up when played in order, and the last frame " +
+      `leads smoothly back into the first.\n\nAnimation: ${String(request.prompt)}`,
+  };
 }
 
-/**
- * The ChatGPT plan from the access token's auth claim (`chatgpt_plan_type`), or
- * undefined when the token is not a readable JWT. Only the plan name is read;
- * nothing from the token is logged or returned.
- */
-function chatgptPlan(token: string): string | undefined {
-  const payload = token.split(".")[1];
-  if (!payload) return undefined;
-  try {
-    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<
-      string,
-      unknown
-    >;
-    const auth = claims["https://api.openai.com/auth"];
-    if (auth && typeof auth === "object" && "chatgpt_plan_type" in auth) {
-      const plan = (auth as { chatgpt_plan_type?: unknown }).chatgpt_plan_type;
-      return typeof plan === "string" ? plan : undefined;
-    }
-  } catch {
-    // Not a JWT we can read; fall through to the generic message.
+/** Cut a sprite sheet into its cells and play them as a looping GIF. */
+export async function gifFromSpriteSheet(
+  sheet: Buffer,
+  grid: SpriteGrid,
+  frameMs: number,
+): Promise<Buffer | null> {
+  const sharp = (await import("sharp")).default;
+  const { width = 0, height = 0 } = await sharp(sheet).metadata();
+  const asked = /^(\d+)x(\d+)$/.exec(grid.size);
+  // A sheet whose shape is far from the one asked for was not drawn on the grid.
+  if (asked) {
+    const askedAspect = Number(asked[1]) / Number(asked[2]);
+    const gotAspect = height > 0 ? width / height : 0;
+    if (Math.abs(Math.log(gotAspect / askedAspect)) > Math.log(1.25)) return null;
   }
-  return undefined;
+  const cellW = Math.floor(width / grid.cols);
+  const cellH = Math.floor(height / grid.rows);
+  // Crop a hair off every edge: the model often draws faint lines between cells.
+  const inset = Math.max(2, Math.round(Math.min(cellW, cellH) * 0.012));
+  if (cellW <= inset * 2 || cellH <= inset * 2) {
+    throw new Error(`The sprite sheet (${width}x${height}) is too small to cut into frames.`);
+  }
+  const frames: Buffer[] = [];
+  for (let i = 0; i < grid.frames; i++) {
+    frames.push(
+      await sharp(sheet)
+        .extract({
+          left: (i % grid.cols) * cellW + inset,
+          top: Math.floor(i / grid.cols) * cellH + inset,
+          width: cellW - inset * 2,
+          height: cellH - inset * 2,
+        })
+        .png()
+        .toBuffer(),
+    );
+  }
+  // Identical cells mean one picture rather than frames of a motion: no animation.
+  const [first, ...rest] = await Promise.all(
+    frames.map((frame) =>
+      sharp(frame).resize(16, 16, { fit: "fill" }).greyscale().raw().toBuffer(),
+    ),
+  );
+  const moves = rest.some((cell) => cell.some((v, j) => Math.abs(v - (first![j] ?? 0)) > 24));
+  if (!moves) return null;
+  return sharp(frames, { join: { animated: true } })
+    .gif({ delay: Array<number>(grid.frames).fill(frameMs), loop: 0 })
+    .toBuffer();
 }
 
-/**
- * What to tell the agent when OpenAI refuses image generation for the account.
- * A free ChatGPT plan gets a bare 403 "Forbidden" for every image request, so
- * say that plainly instead of passing the opaque status through.
- */
-function imageAccessMessage(token: string): string {
-  const lead =
-    chatgptPlan(token) === "free"
-      ? "Image generation is not included with a free ChatGPT plan, so OpenAI refused the request (403 Forbidden)."
-      : "OpenAI refused the image request (403 Forbidden). This ChatGPT account does not appear to include image generation in Codex.";
+/** What to tell the agent when the API key has no credit left for images. */
+function imageLimitMessage(): string {
   return (
-    `${lead} It needs a ChatGPT login on a paid plan that includes Codex image generation. ` +
-    "Tell the user; retrying, or changing size, quality or format, will not help."
+    "The OpenAI API key has no credit left for image generation (or its billing limit is reached). " +
+    "Tell the user to check billing at platform.openai.com; retrying will not help."
   );
 }
 
 /**
- * POST one request to a Codex image endpoint and return the decoded images.
- * Headers carry the same Codex client identity as chat (originator, user agent
- * and `version`), since the ChatGPT backend gates features on that version.
+ * What to tell the agent when OpenAI refuses image generation for the key. GPT
+ * Image models can require a verified organization; say that plainly instead
+ * of passing the opaque status through.
  */
+function imageAccessMessage(detail: string): string {
+  const reason = detail ? ` OpenAI said: ${detail.slice(0, 300)}` : "";
+  return (
+    "OpenAI refused the image request (403 Forbidden). The API key's organization may need " +
+    "verification for GPT Image models (platform.openai.com/settings/organization/general)." +
+    `${reason} Tell the user; retrying, or changing size, quality or format, will not help.`
+  );
+}
+
+/** POST one request to the Image API and return the decoded images. */
 async function callImageEndpoint(
   url: string,
   request: Record<string, unknown>,
-  auth: { token: string; accountId: string | undefined; turnId: string },
+  token: string,
   signal: AbortSignal,
   retry: ImageRetryDeps,
 ): Promise<{ images: Buffer[]; reportedSize?: string }> {
@@ -545,12 +693,8 @@ async function callImageEndpoint(
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
-          Authorization: `Bearer ${auth.token}`,
-          ...(auth.accountId ? { "chatgpt-account-id": auth.accountId } : {}),
-          originator: "codex_cli_rs",
-          "User-Agent": `codex_cli_rs/${CODEX_CLIENT_VERSION} (${os.type()} ${os.release()}; ${os.arch()})`,
-          version: CODEX_CLIENT_VERSION,
-          "x-codex-image-turn-id": auth.turnId,
+          Authorization: `Bearer ${token}`,
+          "User-Agent": GG_CODER_USER_AGENT,
         },
         body,
         signal,
@@ -579,25 +723,34 @@ function parseImageResponse(
   attempts: number,
 ): { images: Buffer[]; reportedSize?: string } {
   const response = { status, ok: status >= 200 && status < 300 };
-  if (response.status === 403) throw new ImageAccessError(text);
   if (!response.ok) {
     let detail = text;
-    let errorType: string | undefined;
-    let resetsAt: number | undefined;
+    let errorCode: string | undefined;
     try {
       const parsed = JSON.parse(text) as {
         detail?: string;
-        error?: { message?: string; type?: string; resets_at?: number };
+        error?: { message?: string; type?: string; code?: string };
       };
-      errorType = parsed.error?.type;
-      resetsAt = typeof parsed.error?.resets_at === "number" ? parsed.error.resets_at : undefined;
+      errorCode = parsed.error?.code ?? parsed.error?.type;
       if (parsed.detail) detail = parsed.detail;
       else if (parsed.error?.message) detail = parsed.error.message;
     } catch {
       // Keep raw text
     }
-    if (response.status === 429 && errorType === "usage_limit_reached") {
-      throw new ImageLimitError(detail, resetsAt);
+    if (response.status === 403) throw new ImageAccessError(detail);
+    if (
+      response.status === 429 &&
+      (errorCode === "insufficient_quota" || errorCode === "billing_hard_limit_reached")
+    ) {
+      throw new ImageLimitError(detail);
+    }
+    // Only "GIF is not available here"; other 400s (bad input, policy) surface as they are.
+    if (
+      response.status === 400 &&
+      /\bgif\b/i.test(detail) &&
+      /\b(not|unsupported|unavailable|disabled)\b/i.test(detail)
+    ) {
+      throw new GifRefusedError(detail);
     }
     const tries = attempts > 1 ? ` after ${attempts} attempts` : "";
     throw new Error(`OpenAI Image API (${response.status})${tries}: ${detail}`);
@@ -613,7 +766,7 @@ function parseImageResponse(
     .map((item) => item.b64_json)
     .filter((b64): b64 is string => typeof b64 === "string" && b64.length > 0)
     .map((b64) => Buffer.from(b64, "base64"));
-  // Codex's ImageResponse carries the size the backend says it produced.
+  // The response carries the size OpenAI says it produced.
   const reportedSize = typeof parsed.size === "string" ? parsed.size : undefined;
   return { images, ...(reportedSize ? { reportedSize } : {}) };
 }

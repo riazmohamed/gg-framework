@@ -220,4 +220,94 @@ describe("async subagent control tools", () => {
     ).resolves.toContain("plan mode");
     expect(manager.spawn).toHaveBeenCalledTimes(1);
   });
+
+  it("lets read-only agents research in plan mode but blocks ones that can edit", async () => {
+    const roster = [
+      ...ROSTER,
+      {
+        name: "bee",
+        description: "Edits",
+        tools: ["read", "edit"],
+        systemPrompt: "Edit.",
+        source: "bundled" as const,
+      },
+    ];
+    const manager = fakeManager(roster);
+    const tools = createSubAgentControlTools(manager, { current: true });
+    const spawn = tools.find((tool) => tool.name === "spawn_agent")!;
+
+    await expect(
+      spawn.execute({ tasks: [{ task_name: "scan", task: "inspect", agent: "owl" }] }, context),
+    ).resolves.toMatchObject({ content: expect.stringContaining("12345678") });
+    const refused = await spawn.execute(
+      { tasks: [{ task_name: "fix", task: "edit", agent: "bee" }] },
+      context,
+    );
+    expect(refused).toContain("restricted in plan mode");
+    expect(refused).toContain("Only read-only agents can run in plan mode: owl.");
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("subagent control results stay lean for the parent model", () => {
+  const full = {
+    agent_id: "12345678",
+    task_name: "review",
+    state: "completed",
+    started_at: 1,
+    updated_at: 2,
+    elapsed_ms: 1,
+    turn_count: 1,
+    tool_use_count: 2,
+    token_usage: { input: 3, output: 4, cacheRead: 5, cacheWrite: 6 },
+    output: "CLEAR",
+    receipt: "Receipt (0 calls): no tool calls",
+    acceptance: "1/1 passed",
+    agent_name: "owl",
+    provider: "anthropic",
+    model: "m",
+    child_session_id: "sid",
+    child_session_path: "/t.jsonl",
+    collected: true,
+  };
+
+  it("wait_agent keeps output, receipt, acceptance and the transcript path once", async () => {
+    const manager = fakeManager();
+    (manager.wait as ReturnType<typeof vi.fn>).mockResolvedValue({
+      timed_out: false,
+      agents: [full],
+    });
+    const wait = createSubAgentControlTools(manager).find((t) => t.name === "wait_agent")!;
+    const result = (await wait.execute({}, context)) as { content: string };
+    const agent = JSON.parse(result.content).agents[0];
+    expect(agent).toMatchObject({
+      output: "CLEAR",
+      receipt: full.receipt,
+      acceptance: "1/1 passed",
+      transcript: "/t.jsonl",
+      state: "completed",
+    });
+    for (const key of ["started_at", "child_session_id", "child_session_path", "collected"]) {
+      expect(agent).not.toHaveProperty(key);
+    }
+  });
+
+  it("spawn_agent returns only identity and state", async () => {
+    const manager = fakeManager();
+    (manager.spawn as ReturnType<typeof vi.fn>).mockResolvedValue(full);
+    const spawn = createSubAgentControlTools(manager).find((t) => t.name === "spawn_agent")!;
+    const result = (await spawn.execute(
+      { tasks: [{ task_name: "review", task: "t", agent: "owl" }] },
+      context,
+    )) as { content: string };
+    expect(JSON.parse(result.content)).toEqual([
+      {
+        agent_id: "12345678",
+        task_name: "review",
+        state: "completed",
+        agent_name: "owl",
+        model: "m",
+      },
+    ]);
+  });
 });

@@ -2,11 +2,7 @@ import type { SubscriptionUsageProvider } from "@abukhaled/gg-core";
 import type { UsageResult } from "../app-sidecar/usage.js";
 import type { SlashCommand } from "../core/slash-commands.js";
 
-export const USAGE_PROVIDERS: readonly SubscriptionUsageProvider[] = [
-  "anthropic",
-  "openai",
-  "moonshot",
-];
+export const USAGE_PROVIDERS: readonly SubscriptionUsageProvider[] = ["anthropic", "moonshot"];
 
 /** `2h 5m`, as the desktop meter's compact reset label. */
 export function resetLabel(resetsAt: number | undefined, now: number): string {
@@ -55,18 +51,18 @@ export function formatUsage(
   }
   return lines.length > 0
     ? lines.join("\n")
-    : "No subscription logins (Claude, ChatGPT or Kimi). Plan usage shows for OAuth logins only.";
+    : "No subscription logins (Claude or Kimi Code). Plan usage shows for subscription logins only.";
 }
 
-/** `/usage [anthropic|openai|moonshot]` */
+/** `/usage [anthropic|moonshot]` */
 export function createUsageCommand(
   subscriptionUsage: () => ((provider: SubscriptionUsageProvider) => Promise<UsageResult>) | null,
 ): SlashCommand {
   return {
     name: "usage",
     aliases: [],
-    description: "Subscription plan usage (Claude, ChatGPT, Kimi)",
-    usage: "/usage [anthropic|openai|moonshot]",
+    description: "Subscription plan usage (Claude, Kimi Code)",
+    usage: "/usage [anthropic|moonshot]",
     async execute(args) {
       const fetch = subscriptionUsage();
       if (!fetch) return "Plan usage needs a logged-in session.";

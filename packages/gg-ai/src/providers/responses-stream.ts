@@ -18,7 +18,7 @@ import { toolResultText } from "./transform.js";
  * Consumer for the OpenAI Responses stream protocol (`response.output_text.*`,
  * `response.function_call_arguments.*`, `response.output_item.*`, reasoning
  * summaries, `response.completed`/`incomplete`), shared by every transport that
- * speaks it: the ChatGPT Codex backend and xAI's Responses API.
+ * speaks it: OpenAI's Responses API and xAI's.
  */
 export interface ResponsesStreamContext {
   /** Provider name stamped on errors. */
@@ -109,7 +109,7 @@ export async function* consumeResponsesEvents(
     }
 
     if (type === "error") {
-      // Codex Responses streams two error shapes:
+      // Responses streams two error shapes:
       //   { type:"error", error:{ type, code, message, param }, sequence_number }
       //   { type:"error", code, message, param, sequence_number }
       // Pick the first message field we find; fall back to the chunk code/type
@@ -129,8 +129,8 @@ export async function* consumeResponsesEvents(
       // FormattedError can surface it on its own line.
       const requestId =
         extractRequestIdFromMessage(message) ?? (event.request_id as string | undefined);
-      // ChatGPT-subscription usage-window exhaustion can arrive mid-stream as an
-      // error chunk. Surface it as a hard usage-limit stop, not a retriable error.
+      // ChatGPT plan usage exhaustion can arrive mid-stream as an error chunk.
+      // Surface it as a hard usage-limit stop, not a retriable error.
       const usageLimit = ctx.errorChunk?.(nested ?? (event as Record<string, unknown>), requestId);
       if (usageLimit) throw usageLimit;
       throw new ProviderError(ctx.provider, message, {
@@ -140,10 +140,16 @@ export async function* consumeResponsesEvents(
     }
 
     if (type === "response.failed") {
-      const nested = event.error as Record<string, unknown> | undefined;
+      // OpenAI puts the failure on `response.error`; older shapes on `error`.
+      const nested =
+        (event.error as Record<string, unknown> | undefined) ??
+        ((event.response as Record<string, unknown> | undefined)?.error as
+          Record<string, unknown> | undefined);
       const message = (nested?.message as string | undefined) ?? `${ctx.label} response failed.`;
       const requestId =
         extractRequestIdFromMessage(message) ?? (event.request_id as string | undefined);
+      const usageLimit = nested ? ctx.errorChunk?.(nested, requestId) : null;
+      if (usageLimit) throw usageLimit;
       throw new ProviderError(ctx.provider, message, {
         ...(requestId != null ? { requestId } : {}),
       });
@@ -449,6 +455,23 @@ export async function* consumeResponsesEvents(
   // first tool call leads the message so it precedes the function_call it
   // reasoned about when round-tripped into input; visible answer text sits
   // between leading reasoning and the tool calls.
+  // Parallel calls can finish out of order; replay them in the order the
+  // server emitted them (output_item.added). Completion order rewrote the
+  // input after the reasoning item, so the next request missed the cache from
+  // there on (the measured misses after parallel read,read turns).
+  const addedOrder = [...toolCalls.keys()];
+  const toolSlots = orderedItems.flatMap((e, i) => (e.kind === "tool" ? [i] : []));
+  const sortedTools = toolSlots
+    .map((i) => orderedItems[i])
+    .sort((a, b) =>
+      a?.kind === "tool" && b?.kind === "tool"
+        ? addedOrder.indexOf(a.id) - addedOrder.indexOf(b.id)
+        : 0,
+    );
+  toolSlots.forEach((slot, k) => {
+    const entry = sortedTools[k];
+    if (entry) orderedItems[slot] = entry;
+  });
   const seenTool = new Set<string>();
   let textInserted = false;
   for (const entry of orderedItems) {
@@ -556,6 +579,15 @@ export function toResponsesInput(
      * output-item shape, or of foreign ids like `toolu_*`, isn't guaranteed.
      */
     minimalAssistantItems?: boolean;
+    /**
+     * Wire definitions (with `defer_loading: true`) of deferred tools loaded
+     * through the transcript. A tool result naming one in `loadedTools` is
+     * followed by a client `tool_search_call`/`tool_search_output` pair, so the
+     * tool becomes callable without changing the top-level `tools` array.
+     */
+    toolSearchLoads?: ReadonlyMap<string, unknown>;
+    /** Namespace the request's tools are grouped under; replayed calls name it too. */
+    toolNamespace?: string;
   },
 ): { system: string | undefined; input: unknown[] } {
   const mapId = options.mapId ?? ((id: string) => id);
@@ -571,6 +603,8 @@ export function toResponsesInput(
   let system: string | undefined;
   const input: unknown[] = [];
   const idMap = new Map<string, string>();
+  const loadedTools = new Set<string>();
+  let toolLoads = 0;
 
   for (const msg of messages) {
     if (msg.role === "system") {
@@ -622,6 +656,7 @@ export function toResponsesInput(
             ...(sendItemId ? { id: mapId(itemId ?? callId, idMap) } : {}),
             call_id: mapId(callId, idMap),
             name: part.name,
+            ...(options.toolNamespace ? { namespace: options.toolNamespace } : {}),
             arguments: JSON.stringify(part.args),
           });
         }
@@ -642,6 +677,31 @@ export function toResponsesInput(
           call_id: mapId(callId, idMap),
           output: text.length > 0 ? text : "(see attached image)",
         });
+        const loads = options.toolSearchLoads;
+        const names = loads
+          ? (result.loadedTools ?? []).filter((name) => loads.has(name) && !loadedTools.has(name))
+          : [];
+        if (loads && names.length > 0) {
+          for (const name of names) loadedTools.add(name);
+          // Ordinal ids: history only appends, so every request rebuilds them.
+          const loadId = `gg_tool_load_${++toolLoads}`;
+          input.push(
+            {
+              type: "tool_search_call",
+              call_id: loadId,
+              execution: "client",
+              status: "completed",
+              arguments: { query: names.join(" "), limit: names.length },
+            },
+            {
+              type: "tool_search_output",
+              call_id: loadId,
+              execution: "client",
+              status: "completed",
+              tools: names.map((name) => loads.get(name)),
+            },
+          );
+        }
         if (options.supportsImages !== false && Array.isArray(result.content)) {
           for (const block of result.content) {
             if (block.type === "image") toolImages.push(block);

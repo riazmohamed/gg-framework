@@ -1088,13 +1088,18 @@ export async function* agentLoop(
         // let the provider report the real auth error.
         let liveApiKey = turnApiKey;
         let liveAccountId = options.accountId;
-        let liveProjectId = options.projectId;
         if (options.resolveCredentials) {
           try {
             const fresh = await options.resolveCredentials();
-            if (!turnApiKeyIsRouterOverride) liveApiKey = fresh.apiKey;
-            if (fresh.accountId !== undefined) liveAccountId = fresh.accountId;
-            if (fresh.projectId !== undefined) liveProjectId = fresh.projectId;
+            // @abukhaled-preserved: a router override pointing at a different
+            // provider keeps its own key; only the default provider's
+            // credential is refreshed here.
+            if (!turnApiKeyIsRouterOverride) {
+              liveApiKey = fresh.apiKey;
+              // The account belongs to the credential: a ChatGPT plan that fell
+              // back to an OpenAI API key must drop it, or the key rides the plan route.
+              liveAccountId = fresh.accountId;
+            }
           } catch (credErr) {
             diag("credential_refresh_failed", {
               error: (credErr instanceof Error ? credErr.message : String(credErr)).slice(0, 200),
@@ -1150,6 +1155,7 @@ export async function* agentLoop(
               model: turnModel,
               messages: requestMessages,
               tools: options.tools,
+              deferredTools: options.deferredTools,
               serverTools: options.serverTools,
               toolChoice: options.toolChoice,
               webSearch:
@@ -1159,24 +1165,22 @@ export async function* agentLoop(
               maxTokens: clampOutputTokens(ceilingKey, options.maxTokens),
               temperature: options.temperature,
               thinking: options.thinking,
+              thinkingLevels: options.thinkingLevels,
               apiKey: liveApiKey,
               baseUrl: turnBaseUrl,
               signal,
               accountId: liveAccountId,
               transportSessionId: options.transportSessionId,
-              projectId: liveProjectId,
               cacheRetention: options.cacheRetention,
               // A hedge duplicates an already-observed request; observe it once.
               onContextPrepared: arm === "primary" ? options.onContextPrepared : undefined,
               promptCacheKey: options.promptCacheKey,
               serviceTier: options.serviceTier,
-              responsesLite: options.responsesLite,
               strictTools: options.strictTools,
               supportsImages: options.supportsImages,
               supportsVideo: options.supportsVideo,
               compaction: options.compaction,
               clearToolUses: options.clearToolUses,
-              userAgent: options.userAgent,
               defaultHeaders: options.defaultHeaders,
               providerOptions: options.providerOptions,
               fetch: options.fetch,
@@ -2313,6 +2317,7 @@ interface ToolExecutionRecord {
   content: ToolResultContent;
   isError: boolean;
   endRun?: boolean;
+  loadedTools?: string[];
 }
 
 interface ToolBatchExecutionOptions {
@@ -2385,11 +2390,16 @@ async function executeSingleToolCall(
   let isError = false;
   let endRun = false;
   let invalidArgAttempt: number | undefined;
+  const loadedTools = new Set<string>();
 
   let tool = options.toolMap.get(toolCall.name);
   if (!tool && options.resolveTool) {
     tool = options.resolveTool(toolCall.name);
-    if (tool) options.toolMap.set(tool.name, tool);
+    if (tool) {
+      options.toolMap.set(tool.name, tool);
+      // Called by name before any load: this result is where it loads.
+      loadedTools.add(tool.name);
+    }
   }
   if (tool) {
     // Only deduplicate within this assistant response. Sort object keys so
@@ -2462,6 +2472,7 @@ async function executeSingleToolCall(
       const raw = await tool.execute(parsed, ctx);
       const normalized = normalizeToolResult(raw);
       endRun = normalized.endRun === true;
+      for (const name of normalized.loadedTools ?? []) loadedTools.add(name);
       resultContent = redactValue(normalized.content, toolRedactionOptions());
       details = redactValue(normalized.details, toolRedactionOptions());
       if (options.transformToolResult) {
@@ -2566,7 +2577,13 @@ async function executeSingleToolCall(
     ...(invalidArgAttempt === undefined ? {} : { invalidArgAttempt }),
   });
 
-  return { toolCallId: toolCall.id, content: resultContent, isError, endRun: endRun && !isError };
+  return {
+    toolCallId: toolCall.id,
+    content: resultContent,
+    isError,
+    endRun: endRun && !isError,
+    ...(loadedTools.size > 0 ? { loadedTools: [...loadedTools].sort() } : {}),
+  };
 }
 
 /**
@@ -2853,6 +2870,7 @@ function buildToolResults(
         toolCallId: toolCall.id,
         content: result.content,
         isError: result.isError || undefined,
+        ...(result.loadedTools?.length ? { loadedTools: result.loadedTools } : {}),
       });
     } else {
       // No record: either the abort landed before this call was dispatched

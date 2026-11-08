@@ -28,6 +28,7 @@ import { createSubAgentTool } from "./subagent.js";
 import { createSubAgentControlTools } from "./subagent-control.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import { createWebSearchTool } from "./web-search.js";
+import type { SideWebSearch } from "./side-web-search.js";
 import { createSourcePathTool } from "./source-path.js";
 import { createTaskOutputTool } from "./task-output.js";
 import { createTaskStopTool } from "./task-stop.js";
@@ -143,6 +144,8 @@ export interface CreateToolsOptions {
   getSandboxPolicy?: () => SandboxPolicy;
   /** Package release-age cooldown in days (settings `packageCooldownDays`). */
   getPackageCooldownDays?: () => number;
+  /** Settings `bashPath` (see ResolveShellOpts); read once when tools are built. */
+  getBashPath?: () => string | undefined;
   /**
    * Lazily read whether `grep` may use the external `rg` scanner when present
    * (grepUseRipgrep). Defaults to enabled when omitted.
@@ -154,6 +157,8 @@ export interface CreateToolsOptions {
    * detection happens once.
    */
   steroidsBin?: string | null;
+  /** Runs web_search as a separate provider request (Anthropic); see side-web-search.ts. */
+  sideWebSearch?: SideWebSearch;
   /**
    * Push queue for out-of-band notifications (child completions, background
    * process progress). When provided, producers enqueue here and the session
@@ -222,7 +227,7 @@ export async function createTools(
     ? async (filePath: string, content: string, source?: EditSource): Promise<string> =>
         opts?.deferLspDiagnostics
           ? lspManager.queueDiagnosticsAfterWrite(filePath, content, source)
-          : lspManager.diagnosticsAfterWrite(filePath, content, source)
+          : lspManager.diagnosticsWithinBudget(filePath, content, source)
     : undefined;
   // Same local-only reasoning as LSP: the index reads the workspace from disk.
   const testImpact =
@@ -280,7 +285,7 @@ export async function createTools(
       processManager,
       ops,
       planModeRef,
-      undefined,
+      opts?.getBashPath ? { bashPath: opts.getBashPath() } : undefined,
       opts?.getNetworkPolicy,
       ops === localOperations ? opts?.getSandboxPolicy : undefined,
       undefined,
@@ -309,12 +314,10 @@ export async function createTools(
   const steroidsBin = opts?.steroidsBin === undefined ? findSteroidsBinary() : opts.steroidsBin;
   if (steroidsBin) tools.push(createSteroidsTool(steroidsBin));
 
-  // Client web search. On Anthropic it is only the deferred catalog entry for
-  // the native server tool: once promoted, the transport swaps in
-  // `web_search_20250305` (same name) instead of this schema, and a call made
-  // before promotion runs this client search. See AgentSession.nativeWebSearchOn.
+  // Client web search. On Anthropic it runs the native search in a side
+  // request (sideWebSearch), so result pages stay out of the main context.
   if (opts?.provider) {
-    tools.push(createWebSearchTool(opts?.getNetworkPolicy));
+    tools.push(createWebSearchTool(opts?.getNetworkPolicy, opts?.sideWebSearch));
   }
 
   let subAgentManager: SubAgentManager | undefined;

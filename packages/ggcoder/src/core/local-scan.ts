@@ -1,6 +1,7 @@
 import {
   discoverLocalModels,
   formatLocalModelId,
+  toModelInfo,
   type LocalEndpoint,
   type LocalEndpointProbe,
 } from "@abukhaled/gg-core";
@@ -11,10 +12,20 @@ import { clearRuntimeModels, registerRuntimeModels } from "./model-registry.js";
  * Probe every local endpoint (built-in + user-added), give each one that
  * answered a credential, and replace the `local` runtime models with what the
  * servers serve now. Shared by the desktop sidecar and the `ogcoder` CLI.
+ *
+ * `adjust` rewrites each probe before its models are registered; the sidecar
+ * uses it to pin the context Ollama actually served a model with.
  */
-export async function scanLocalModels(force: boolean): Promise<LocalEndpointProbe[]> {
+export async function scanLocalModels(
+  force: boolean,
+  adjust: (probe: LocalEndpointProbe) => LocalEndpointProbe = (probe) => probe,
+): Promise<LocalEndpointProbe[]> {
   const endpoints = await listAllEndpoints();
-  const { probes, models } = await discoverLocalModels(endpoints, { force });
+  const discovered = await discoverLocalModels(endpoints, { force });
+  const probes = discovered.probes.map(adjust);
+  const models = probes.flatMap((probe) =>
+    probe.models.map((model) => toModelInfo(model, probe.endpoint)),
+  );
   // Only endpoints that answered get a credential: writing one for a server
   // that isn't running would make `hasProviderAuth("local")` true forever.
   await syncEndpointCredentials(
@@ -32,6 +43,7 @@ export interface LocalStatePayload {
     baseUrl: string;
     kind: LocalEndpoint["kind"];
     custom: boolean;
+    contextLength?: number;
     reachable: boolean;
     reason?: string;
     models: {
@@ -56,6 +68,7 @@ export function localStatePayload(probes: readonly LocalEndpointProbe[]): LocalS
       baseUrl: probe.endpoint.baseUrl,
       kind: probe.endpoint.kind,
       custom: probe.endpoint.custom === true,
+      ...(probe.endpoint.contextLength ? { contextLength: probe.endpoint.contextLength } : {}),
       reachable: probe.reachable,
       ...(probe.reason ? { reason: probe.reason } : {}),
       models: probe.models.map((m) => ({

@@ -1,6 +1,6 @@
-import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
+import type { Message, Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import type { AuthStorage } from "../core/auth-storage.js";
-import { getClaudeCliUserAgent } from "../core/claude-code-version.js";
+import { claudeCodeComplete, resolveClaudeCodeProcess } from "../core/claude-code/complete.js";
 import { detectProjectStack } from "../core/language-detector.js";
 import { getAuthStorageKeys } from "../core/model-registry.js";
 import type { SlashCommand } from "../core/slash-commands.js";
@@ -60,21 +60,39 @@ export function createEnhanceCommand(deps: EnhanceDeps): SlashCommand {
         // Best-effort: no stack hint.
       }
       try {
-        const creds = await route.authStorage.resolveCredentials(route.provider, {
-          storageKeys: getAuthStorageKeys(route.provider, route.model),
-        });
+        // A Claude subscription runs through the official Claude Code, same as
+        // AgentSession.enhancePrompt; every other route uses stored credentials.
+        const claudeCode = await resolveClaudeCodeProcess(
+          route.authStorage,
+          route.provider,
+          route.cwd,
+        );
+        const creds: { accessToken: string; accountId?: string; baseUrl?: string } = claudeCode
+          ? { accessToken: "" }
+          : await route.authStorage.resolveCredentials(route.provider, {
+              storageKeys: getAuthStorageKeys(route.provider, route.model),
+            });
         const result = await (deps.enhance ?? enhancePrompt)({
           provider: route.provider,
           model: route.model,
           thinking: route.thinking,
           maxTokens: route.maxTokens,
-          userAgent: route.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined,
-          projectId: creds.projectId,
           prompt: draft,
           stack,
           apiKey: creds.accessToken,
           baseUrl: route.baseUrl ?? creds.baseUrl,
           accountId: creds.accountId,
+          ...(claudeCode
+            ? {
+                complete: (messages: Message[]) =>
+                  claudeCodeComplete({
+                    ...claudeCode,
+                    model: route.model,
+                    messages,
+                    thinking: route.thinking,
+                  }),
+              }
+            : {}),
         });
         deps.putInComposer(result.enhanced);
         return describeEnhancement(result);
