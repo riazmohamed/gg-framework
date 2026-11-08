@@ -103,6 +103,7 @@ import { buildUserContentWithAttachments } from "./prompt-routing.js";
 import { submitPromptCommand } from "./submit-prompt-command.js";
 import { handleUiSlashCommand } from "./submit-slash-commands.js";
 import type { TuiSafetyWatch } from "./safety-watch.js";
+import { createTuiShell, parseBangCommand, type TuiShell } from "./tui-shell.js";
 import { buildLoopBreakMessage, evaluateLoopBreak } from "../core/loop-breaker.js";
 import { buildRegroundingMessage } from "../core/regrounding.js";
 import { getNextThinkingLevel, isThinkingLevelSupported } from "./thinking-level.js";
@@ -958,6 +959,20 @@ export function App(props: AppProps) {
   }, [currentProvider, currentModel, props.loggedInProviders, props.credentialsByProvider]);
 
   const safetyWatchRef = useRef(props.safetyWatch);
+  // `!cmd`: the user's own shell commands (see tui-shell.ts). The output is
+  // shown, and its hidden note joins the history between runs, so it reaches
+  // the agent with the next message.
+  const tuiShellRef = useRef<TuiShell | null>(null);
+  tuiShellRef.current ??= createTuiShell({
+    cwd: () => cwdRef.current,
+    onEnd: (_run, text) => {
+      setLiveItems((prev) => [...prev, { kind: "info", text, id: getId() }]);
+      if (!agentLoopRef.current?.isRunning) {
+        const note = tuiShellRef.current?.takeContext();
+        if (note) messagesRef.current.push(note);
+      }
+    },
+  });
   const agentLoop = useAgentLoop(
     messagesRef,
     {
@@ -1949,6 +1964,25 @@ export function App(props: AppProps) {
     async (input: string, inputImages: ImageAttachment[] = [], pasteInfo?: PasteInfo) => {
       const trimmed = input.trim();
 
+      // `!cmd` runs the user's own command in the project (tui-shell.ts).
+      const bang = parseBangCommand(trimmed);
+      if (bang !== null) {
+        const started = tuiShellRef.current?.run(bang) ?? {
+          ok: false as const,
+          error: "Commands are unavailable.",
+        };
+        log("INFO", "shell", "User shell command", { started: String(started.ok) });
+        setLiveItems((prev) => [
+          ...prev,
+          {
+            kind: "info",
+            text: started.ok ? `$ ${bang}  (running… Esc stops it)` : started.error,
+            id: getId(),
+          },
+        ]);
+        return;
+      }
+
       if (trimmed.startsWith("/")) {
         log("INFO", "command", `Slash command: ${trimmed}`);
       } else {
@@ -2287,6 +2321,13 @@ export function App(props: AppProps) {
     });
   }, [agentLoop.isRunning, safetyWatch]);
 
+  useEffect(() => {
+    if (agentLoop.isRunning) return;
+    const note = tuiShellRef.current?.takeContext();
+    if (note) messagesRef.current.push(note);
+  }, [agentLoop.isRunning]);
+  useEffect(() => () => tuiShellRef.current?.stopAll(), []);
+
   const handleAbort = useCallback(() => {
     if (agentLoop.isRunning) {
       // Restore any unsent queued messages to the composer instead of dropping
@@ -2304,6 +2345,8 @@ export function App(props: AppProps) {
         .some((agent) => agent.state === "starting" || agent.state === "running")
     ) {
       void props.subAgentManager.interruptAll();
+    } else if (tuiShellRef.current?.isRunning()) {
+      tuiShellRef.current.stop();
     } else if (compactionAbortRef.current) {
       compactionAbortRef.current.abort();
     } else {
