@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message, Provider, Usage } from "@abukhaled/gg-ai";
 import type * as CompactorModule from "../../core/compaction/compactor.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
+import type { ClaudeCodeProcess } from "../../core/claude-code/complete.js";
 import type { CompletedItem } from "../app-items.js";
 import { useContextCompaction } from "./useContextCompaction.js";
 import { getCalibratedRatio, setEstimatorModel } from "../../core/compaction/token-estimator.js";
@@ -37,10 +38,12 @@ const pendingMessage: Message = {
 function Harness({
   provider,
   reuseRecordedUsage = false,
+  claudeCode,
   onTransformed,
 }: {
   provider: Provider;
   reuseRecordedUsage?: boolean;
+  claudeCode?: ClaudeCodeProcess;
   onTransformed: (messages: Message[]) => void;
 }) {
   const messagesRef = useRef<Message[]>([
@@ -75,6 +78,7 @@ function Harness({
     settingsRef,
     messagesRef,
     persistCompactedSession: async () => {},
+    resolveClaudeCode: claudeCode ? async () => claudeCode : undefined,
   });
 
   useEffect(() => {
@@ -172,5 +176,41 @@ describe("useContextCompaction", () => {
       { role: "system", content: "sys" },
       { role: "user", content: "[compacted]" },
     ]);
+  });
+
+  it("summarizes through Claude Code on the Claude subscription route", async () => {
+    let transformed: Message[] | undefined;
+    const claudeCode: ClaudeCodeProcess = { executable: "claude", cwd: "/tmp", env: {} };
+    const mounted = render(
+      <Harness
+        provider="anthropic"
+        claudeCode={claudeCode}
+        onTransformed={(messages) => (transformed = messages)}
+      />,
+      { patchConsole: false },
+    );
+
+    await vi.waitFor(() => expect(transformed).toBeDefined());
+    mounted.unmount();
+
+    expect(compactMock).toHaveBeenCalledTimes(1);
+    const options = compactMock.mock.calls[0]![1] as { apiKey: string; complete?: unknown };
+    expect(options.apiKey).toBe("");
+    expect(typeof options.complete).toBe("function");
+  });
+
+  it("uses the API key and no Claude Code completer otherwise", async () => {
+    let transformed: Message[] | undefined;
+    const mounted = render(
+      <Harness provider="anthropic" onTransformed={(messages) => (transformed = messages)} />,
+      { patchConsole: false },
+    );
+
+    await vi.waitFor(() => expect(transformed).toBeDefined());
+    mounted.unmount();
+
+    const options = compactMock.mock.calls[0]![1] as { apiKey: string; complete?: unknown };
+    expect(options.apiKey).toBe("test-key");
+    expect(options.complete).toBeUndefined();
   });
 });

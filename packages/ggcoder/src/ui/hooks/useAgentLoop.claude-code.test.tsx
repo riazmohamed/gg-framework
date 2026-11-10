@@ -19,7 +19,13 @@ const usage = { inputTokens: 10, outputTokens: 5 };
 const timing = { startedAt: 0, completedAt: 1, providerDurationMs: 1 };
 const process = { executable: "/fake/claude", cwd: "/tmp/project", env: {} };
 
-function Harness({ onReady }: { onReady: (loop: UseAgentLoopReturn) => void }) {
+function Harness({
+  onReady,
+  transformContext,
+}: {
+  onReady: (loop: UseAgentLoopReturn) => void;
+  transformContext?: (messages: Message[]) => Promise<Message[]>;
+}) {
   const messages = useRef<Message[]>([{ role: "system", content: "sys" }]);
   const loop = useAgentLoop(messages, {
     provider: "anthropic",
@@ -28,6 +34,7 @@ function Harness({ onReady }: { onReady: (loop: UseAgentLoopReturn) => void }) {
     maxTokens: 1000,
     resolveCredentials: () => Promise.reject(new Error("no token on this route")),
     resolveClaudeCode: async () => process,
+    ...(transformContext ? { transformContext } : {}),
   });
   useEffect(() => onReady(loop));
   return <Text>harness</Text>;
@@ -71,5 +78,36 @@ describe("useAgentLoop on a Claude subscription", () => {
 
     loop!.queueMessage("steer");
     expect(woken).toBeGreaterThan(0);
+  });
+
+  it("runs GG compaction before the Claude Code turn and hands it the compacted history", async () => {
+    claudeCodeLoopMock.mockReset();
+    claudeCodeLoopMock.mockImplementation(async function* () {
+      yield { type: "agent_done", totalTurns: 0, totalUsage: usage };
+    });
+    const compacted: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "[summary]" },
+    ];
+    const transformContext = vi.fn(async () => compacted);
+
+    let loop: UseAgentLoopReturn | undefined;
+    const recorder = new ScreenRecorder({ columns: 80, rows: 24 });
+    const app = render(
+      <Harness onReady={(l) => (loop = l)} transformContext={transformContext} />,
+      { stdout: makeRecordingStdout(recorder), patchConsole: false },
+    );
+    try {
+      await vi.waitFor(() => expect(loop).toBeDefined());
+      await loop!.run("go");
+    } finally {
+      app.unmount();
+    }
+
+    expect(transformContext).toHaveBeenCalledTimes(1);
+    const calls = claudeCodeLoopMock.mock.calls as [Message[], ClaudeCodeLoopOptions][];
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe(compacted);
+    expect(calls[0][1].transformContext).toBeUndefined();
   });
 });
