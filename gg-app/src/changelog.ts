@@ -22,6 +22,46 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.109.0",
+    date: "2026-11-10",
+    items: [
+      "`Claude Fable 5.2` is here, and it is cheaper and faster to pick up. I added it with a full `1M` context window, and there is a `Fable 5.2 Fast` option when you want answers up to `2.5x` quicker. It replaces Fable 5.1 in the picker, and `xhigh` thinking now works on it.",
+      "Updates can no longer fail in silence. If an install does not go through, I now show an `Update failed` bar with `Retry` and a one-click manual download, so you are never left staring at nothing.",
+    ],
+  },
+  {
+    version: "0.108.2",
+    date: "2026-11-09",
+    items: [
+      "Marathon chats on your `Claude subscription` now stay lean. I taught GG Coder to tidy up long conversations at `400k` tokens, just like every other model, so your sessions stay fast and focused instead of ballooning until they are nearly full.",
+    ],
+  },
+  {
+    version: "0.108.1",
+    date: "2026-11-09",
+    items: [
+      "Skip a question card and just reply with a `screenshot`, and Claude reads it all in one go. No more stray `Awaiting the user's next message` lines sneaking into your chat before the real answer.",
+    ],
+  },
+  {
+    version: "0.108.0",
+    date: "2026-11-09",
+    items: [
+      "Every mode now has its own skills. Drop one into `GG Chat` and all three chat agents can use it, drop one into `GG Motion` for your videos, and your coding skills stay in code. Just ask for a new skill: the agent knows exactly where it goes, and in code mode it asks whether it's for `this project` or every project.",
+      "Your chats now live in their own tidy `GG Chat` folder, and every chat window is named after what you asked, so you can tell your conversations apart at a glance. Your older chats are all still right there.",
+      "Replies never run into each other anymore. When Claude answers twice in a row, each answer gets its own clean bubble instead of mashing together mid-sentence.",
+    ],
+  },
+  {
+    version: "0.107.1",
+    date: "2026-11-09",
+    items: [
+      "When Claude asks you a question with a choice card, you can now just type your answer instead. It reads your reply on the spot and gets right back to work, no more `I'll wait for your message` stalls.",
+      "Your messages cut straight through again on your `Claude` subscription. Send one while Claude is sitting on a long wait and it stops within a blink to answer you, and a message you fire off mid-answer always gets its own reply instead of vanishing.",
+      "Connecting `Anthropic` now speaks plain app. If a sign-in hiccups you get a clear try-again message, never a terminal command you can't run.",
+    ],
+  },
+  {
     version: "0.107.0",
     date: "2026-11-08",
     items: [
