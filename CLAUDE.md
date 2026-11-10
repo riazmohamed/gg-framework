@@ -170,6 +170,8 @@ that window's entry; closes during quit leave the file intact.
 
 pew2 (`~/Desktop/projects/unfazed/unstablemind/pew2`, branch `riaz_pew2`) is a phone remote for desktop agents. It reaches OG Coder three ways, and a sync must not break any of them:
 
+Every `/app-update` checks all three in **step 5c** of `~/.claude/commands/app-update.md` (kept in the `riaz-skills` repo), and step 2 first catches `main` up with `upstream/main`.
+
 1. **ACP**: pew2 spawns `ogcoder acp` (`pew2/providers/ggcoder.json`) and speaks ACP over stdio. Smoke test after a rebuild: `initialize`, then `session/new` with a `cwd`, keeping stdin open; both must answer.
 2. **iTerm mirror** ("Open in OG Coder"): pew2 runs `ogcoder --resume <id>` in iTerm, types into it key by key, reads the screen back every 800 ms (`parseOgCoderScreen`: `>` under a `▄`/`─` edge, `│`-separated status cells with model, `Thinking x`, `Plan on|off`) and tails the session `.jsonl` (`turn_metric` ends turns; a compacted session starts a new unlinked `.jsonl` that pew2 follows). Changes to `ui/components/Footer.tsx`, the input box or `useSessionPersistence` can break it.
 3. **GG Coder app Phone control** (contract v1.2: `~/.gg/goals/pew2-livestream/phone-control-contract.md`): while Settings › Phone control is on, the sidecar writes `~/.gg/gg-app-phone.json` (0600: port, token, pid) and serves `/phone/{ping,windows,open,draft,send,abort,close,plan,ask,events}` behind `x-gg-phone-token`. Code: `app-sidecar/phone-control.ts`, `src-tauri/src/phone.rs`, `usePhoneControl.ts`, `PhoneControlButton.tsx`. The **app inbox** (`core/app-inbox.ts`, `app-sidecar` inbox routes, `InboxBar.tsx`) lets local tools offer work to the open window. Ported from `og-mac` on 2026-11-10.
