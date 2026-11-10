@@ -1,5 +1,36 @@
 # @kenkaiiii/gg-agent
 
+## 5.97.0
+
+### Patch Changes
+
+- Updated dependencies [4900c19]
+  - @kenkaiiii/gg-ai@5.97.0
+
+## 5.96.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.96.2
+
+## 5.96.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.96.1
+
+## 5.96.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.96.0
+
+## 5.95.4
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.95.4
+
 ## 5.95.3
 
 ### Patch Changes

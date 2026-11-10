@@ -33,7 +33,9 @@ import {
   PLAN_SUBMITTED_FOR_REVIEW,
   shouldOfferPendingPlan,
 } from "./core/plan-handoff.js";
+import { discoverSkillsWithBlocked } from "./core/skills.js";
 import {
+  chatWorkspaceDir,
   createChatAgent,
   parseChatAgentId,
   switchChatAgent,
@@ -98,6 +100,7 @@ import type { ProjectHealthScan } from "./core/project-health-scan.js";
 import { scoreProjectHealth, type ProjectHealth } from "./core/project-health-score.js";
 import { type RepoPolls, createRepoPolls } from "./app-sidecar/repo-polls.js";
 import { extractPlanSteps, stepsDoneThrough } from "./utils/plan-steps.js";
+import { desktopGuidance } from "./app-sidecar/desktop-guidance.js";
 import { getSupportedThinkingLevels, isThinkingLevelSupported } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { pruneDoneTasksSync } from "./core/tasks-store.js";
@@ -722,10 +725,12 @@ async function createSession(
   const paths = deps.paths;
   const mode = opts.mode;
   let chatAgent = opts.chatAgent;
-  const cwd = opts.cwd;
+  const cwd = mode === "chat" ? chatWorkspaceDir(opts.cwd) : opts.cwd;
   // Motion's workspace is a dedicated folder the app names inside the projects
   // root; create it on first use so a fresh install can start a video at once.
-  if (mode === "motion") await fs.mkdir(cwd, { recursive: true });
+  // GG Chat's folder likewise; both get a ready skills folder.
+  if (mode === "motion" || mode === "chat")
+    await fs.mkdir(path.join(cwd, ".gg", "skills"), { recursive: true });
   // A coding session whose cwd is a Goal folder is that goal's coordinator.
   let goal =
     mode === "code" && isGoalDir(goalsRoot(paths.agentDir), cwd)
@@ -782,41 +787,6 @@ async function createSession(
     const safePayload = redactValue({ type, data }, { secrets: environmentSecrets(process.env) });
     const frame = `data: ${JSON.stringify(safePayload)}\n\n`;
     for (const c of clients) c.res.write(frame);
-  }
-
-  // Replace CLI-specific guidance (slash commands, CLI tool names) with
-  // desktop-app equivalents so the webview never shows "run ggcoder login".
-  // Applied to BOTH the message and guidance fields — the auth "Not logged in…
-  // Run "ggcoder login"" string lives in `message`, not `guidance`.
-  function desktopGuidance(guidance: string): string {
-    return (
-      guidance
-        // Auth: `Run "ggcoder login"` / `Run 'ggcoder login'` / `Run `ggcoder login``
-        // (any quote style, or none) → button. Do this first so the whole phrase
-        // is rewritten cleanly instead of leaving a dangling `Run "…"`.
-        .replaceAll(/Run ["'`]?ggcoder login["'`]?/gi, "Use the Login to AI Providers button")
-        // Any remaining bare mention.
-        .replaceAll(/ggcoder login/gi, "the Login to AI Providers button")
-        // /compact: the app has NO manual compact command or button — it only
-        // auto-compacts (and now auto-recovers on overflow). If this guidance is
-        // reached, auto-compaction already couldn't reduce enough, so the only
-        // real affordance is a fresh session. Don't tell the user to run a
-        // command that doesn't exist in the app.
-        .replaceAll(
-          /Run \/compact to shrink history, or start a new session\./gi,
-          "Start a new session to reset the context.",
-        )
-        // /model: handle each phrasing pattern
-        .replaceAll(/switch to (\S+) with \/model/gi, "switch to $1 using the model selector")
-        .replaceAll(/Switch with \/model\./gi, "Switch using the model selector.")
-        .replaceAll(
-          /try a different model with \/model\./gi,
-          "try a different model using the model selector.",
-        )
-        .replaceAll(/Use \/model to switch/gi, "Use the model selector to switch")
-        // /help
-        .replaceAll(/see \/help/gi, "check the help menu")
-    );
   }
 
   /**
@@ -1010,9 +980,17 @@ async function createSession(
   };
   let session!: AgentSession;
   if (mode === "chat") {
+    // Only GG Chat's own skills: GG Coder's global and built-in ones stay in code mode.
+    const chatSkills = await discoverSkillsWithBlocked({
+      globalSkillsDir: paths.skillsDir,
+      projectDir: cwd,
+      workspaceOnly: true,
+    });
     session = createChatAgent(chatAgent, {
       ...baseSessionOptions,
       sessionsDir: paths.sessionsDir,
+      skills: chatSkills.skills,
+      blockedSkills: chatSkills.blocked,
       additionalTools: [
         askUserTool,
         ...buildMemoryTools(memoryStore),
@@ -1031,9 +1009,17 @@ async function createSession(
       },
     });
   } else if (mode === "motion") {
+    // Only GG Motion's own skills, added to the built-in Motion ones.
+    const motionSkills = await discoverSkillsWithBlocked({
+      globalSkillsDir: paths.skillsDir,
+      projectDir: cwd,
+      workspaceOnly: true,
+    });
     session = await createMotionAgentSession({
       ...baseSessionOptions,
       sessionsDir: paths.sessionsDir,
+      workspaceSkills: motionSkills.skills,
+      blockedSkills: motionSkills.blocked,
       additionalTools: [askUserTool],
     });
   } else if (goal) {
