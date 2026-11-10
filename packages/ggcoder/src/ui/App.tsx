@@ -1023,6 +1023,7 @@ export function App(props: AppProps) {
     }
   }, [props.settingsFile]);
 
+  const compactionAuth = props.authStorage;
   const { compactionAbortRef, compactConversation, transformContext, recordProviderUsage } =
     useContextCompaction({
       currentModel,
@@ -1038,6 +1039,9 @@ export function App(props: AppProps) {
       settingsRef,
       messagesRef,
       persistCompactedSession,
+      resolveClaudeCode: compactionAuth
+        ? () => resolveClaudeCodeProcess(compactionAuth, currentProvider, props.cwd)
+        : undefined,
     });
 
   // ── Background task bar state (external store) ──────────

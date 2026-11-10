@@ -25,6 +25,7 @@ import {
 import { resolveCompactionPolicy } from "../../core/compaction/policy.js";
 import { log } from "../../core/logger.js";
 import type { AuthStorage } from "../../core/auth-storage.js";
+import { claudeCodeComplete, type ClaudeCodeProcess } from "../../core/claude-code/complete.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
 import type { CompletedItem, CompactedItem } from "../app-items.js";
 import { toErrorItem } from "../error-item.js";
@@ -43,6 +44,8 @@ interface UseContextCompactionOptions {
   settingsRef: MutableRefObject<SettingsManager | null>;
   messagesRef: MutableRefObject<Message[]>;
   persistCompactedSession: (compactedMessages: readonly Message[]) => Promise<void>;
+  /** Claude subscription route: when it resolves a process, summaries go through Claude Code. */
+  resolveClaudeCode?: () => Promise<ClaudeCodeProcess | null>;
 }
 
 export interface ContextCompaction {
@@ -77,6 +80,7 @@ export function useContextCompaction({
   settingsRef,
   messagesRef,
   persistCompactedSession,
+  resolveClaudeCode,
 }: UseContextCompactionOptions): ContextCompaction {
   const compactionAbortRef = useRef<AbortController | null>(null);
   const lastCompactionTimeRef = useRef(0);
@@ -135,7 +139,12 @@ export function useContextCompaction({
         let compactApiKey = activeApiKey;
         let compactAccountId = activeAccountId;
         let compactBaseUrl = activeBaseUrl;
-        if (authStorage) {
+        // A Claude subscription has no API key; summarize through Claude Code
+        // like AgentSession.compact() does.
+        const claudeCode = (await resolveClaudeCode?.()) ?? null;
+        if (claudeCode) {
+          compactApiKey = "";
+        } else if (authStorage) {
           const creds = await authStorage.resolveCredentials(currentProvider, {
             storageKeys: getAuthStorageKeys(currentProvider, currentModel),
           });
@@ -154,6 +163,12 @@ export function useContextCompaction({
           signal: compactionSignal,
           approvedPlanPath: approvedPlanPathRef.current,
           focus,
+          ...(claudeCode
+            ? {
+                complete: (req: { model: string; messages: Message[]; signal: AbortSignal }) =>
+                  claudeCodeComplete({ ...claudeCode, ...req }),
+              }
+            : {}),
         });
 
         if (result.result.compacted) {

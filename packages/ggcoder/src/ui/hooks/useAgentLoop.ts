@@ -438,8 +438,22 @@ export function useAgentLoop(
 
   const run = useCallback(
     async (userContent: UserContent) => {
-      /** Claude subscription route: Claude Code drives the loop (and its own compaction). */
+      /** Claude subscription route: Claude Code drives the loop; compaction stays ours. */
       const runClaudeCode = async function* (process: ClaudeCodeProcess, base: AgentOptions) {
+        // Claude Code never calls transformContext, so run the pre-turn
+        // compaction check here (upstream c6b1f904 did the same for AgentSession).
+        if (base.transformContext) {
+          try {
+            messages.current = await base.transformContext(messages.current, {
+              pendingMessages: [],
+            });
+          } catch (error) {
+            if (base.signal?.aborted) throw error;
+            log("WARN", "compaction", "Pre-run compaction before Claude Code failed", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
         const history = messages.current;
         const resume = claudeCodeResumeId(claudeCodeSessionRef.current, history);
         let sessionId = resume;
