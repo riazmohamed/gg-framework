@@ -35,6 +35,11 @@ export interface PhoneWindowInfo {
   planMode: boolean;
   /** The window's open `ask_user` questions, oldest first (v1.2). */
   asks: PhoneAsk[];
+  /** The window's model (v1.3). */
+  provider: string;
+  model: string;
+  /** The window's thinking level, `"off"` when thinking is off (v1.3). */
+  thinkingLevel: string;
 }
 
 /** One open `ask_user` card: the tool's own question payload. */
@@ -78,6 +83,18 @@ export interface PhoneControlDeps {
   answerAsk: (sessionId: string, id: string, result: AskUserResult) => boolean;
   /** Hand a window command to the Rust shell. */
   shell: (command: PhoneShellCommand) => void;
+  /**
+   * Run a request through a window's own route table (`POST /model`,
+   * `POST /thinking`), writing that route's answer to `res`. False when the
+   * window is gone.
+   */
+  forward: (
+    sessionId: string,
+    method: string,
+    url: string,
+    body: string | null,
+    res: http.ServerResponse,
+  ) => boolean;
   /** Find a conversation file by its id (in `cwd` first). */
   findSessionById: (agentSessionId: string, cwd: string) => Promise<string | null>;
   openTimeoutMs?: number;
@@ -144,7 +161,16 @@ function parseObject(raw: string): Record<string, unknown> | null {
 function windowsSignature(windows: PhoneWindowInfo[]): string {
   return JSON.stringify(
     windows
-      .map((w) => [w.sessionId, w.cwd, w.mode, w.sessionPath, w.agentSessionId])
+      .map((w) => [
+        w.sessionId,
+        w.cwd,
+        w.mode,
+        w.sessionPath,
+        w.agentSessionId,
+        w.provider,
+        w.model,
+        w.thinkingLevel,
+      ])
       .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
   );
 }
@@ -525,6 +551,32 @@ export function createPhoneControl(deps: PhoneControlDeps): PhoneControl {
             return;
           }
           send(res, 200, { ok: true });
+        });
+        return true;
+      case "POST /phone/model":
+        // v1.3: the window's model picker, through its own POST /model (busy
+        // and paid-model refusals come back unchanged as 409s).
+        withWindow(req, res, (win, body) => {
+          if (typeof body.model !== "string" || !body.model) {
+            send(res, 400, { error: "model must be a non-empty string" });
+            return;
+          }
+          const forwarded = JSON.stringify({ model: body.model });
+          if (!deps.forward(win.sessionId, "POST", "/model", forwarded, res))
+            send(res, 404, { error: "unknown session" });
+        });
+        return true;
+      case "POST /phone/thinking":
+        // v1.3: `level` is a thinking level, or "off" / null for none.
+        withWindow(req, res, (win, body) => {
+          const level = body.level === "off" ? null : body.level;
+          if (level !== null && typeof level !== "string") {
+            send(res, 400, { error: 'level must be a thinking level, "off" or null' });
+            return;
+          }
+          const forwarded = JSON.stringify({ level });
+          if (!deps.forward(win.sessionId, "POST", "/thinking", forwarded, res))
+            send(res, 404, { error: "unknown session" });
         });
         return true;
       case "POST /phone/close":

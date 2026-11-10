@@ -24,6 +24,8 @@ interface Harness {
   /** Open question ids per window; answerAsk settles (removes) them. */
   openAsks: Map<string, Set<string>>;
   settled: { sessionId: string; id: string; result: AskUserResult }[];
+  /** Requests forwarded to a window's own routes. */
+  forwarded: { sessionId: string; method: string; url: string; body: unknown }[];
   close: () => Promise<void>;
 }
 
@@ -41,6 +43,9 @@ function win(sessionId: string, extra: Partial<PhoneWindowInfo> = {}): PhoneWind
     plan: null,
     planMode: false,
     asks: [],
+    provider: "anthropic",
+    model: "claude-opus-5-5",
+    thinkingLevel: "high",
     ...extra,
   };
 }
@@ -53,6 +58,7 @@ async function harness(enabled = true): Promise<Harness> {
   const shell: PhoneShellCommand[] = [];
   const openAsks = new Map<string, Set<string>>();
   const settled: Harness["settled"] = [];
+  const forwarded: Harness["forwarded"] = [];
   const phone = createPhoneControl({
     discoveryFile: file,
     appVersion: "0.97.5",
@@ -65,6 +71,19 @@ async function harness(enabled = true): Promise<Harness> {
       return true;
     },
     shell: (c) => shell.push(c),
+    forward: (sessionId, method, url, body, res) => {
+      if (!windows.some((w) => w.sessionId === sessionId)) return false;
+      forwarded.push({ sessionId, method, url, body: body === null ? null : JSON.parse(body) });
+      res.writeHead(url === "/model" && sessionId === "busy" ? 409 : 200, {
+        "content-type": "application/json",
+      });
+      res.end(
+        JSON.stringify(
+          sessionId === "busy" ? { error: "cannot switch model while running" } : { ok: true },
+        ),
+      );
+      return true;
+    },
     findSessionById: async (id) => (id === "conv-9" ? "/s/conv-9.jsonl" : null),
     windowsPollMs: 20,
     planAcceptTimeoutMs: 300,
@@ -96,6 +115,7 @@ async function harness(enabled = true): Promise<Harness> {
     shell,
     openAsks,
     settled,
+    forwarded,
     close: async () => {
       phone.dispose();
       server.closeAllConnections();
@@ -496,5 +516,70 @@ describe("phone control questions (v1.2)", () => {
       { type: "ask", sessionId: "a", ask: two },
       { type: "ask_closed", sessionId: "a", ids: ["ask-2"] },
     ]);
+  });
+});
+
+describe("phone control model and thinking (v1.3)", () => {
+  it("lists each window's model and thinking level", async () => {
+    const h = await harness();
+    h.windows.push(win("w1"));
+    const body = (await (await call(h, "GET", "/phone/windows")).json()) as {
+      windows: PhoneWindowInfo[];
+    };
+    expect(body.windows[0]).toMatchObject({
+      provider: "anthropic",
+      model: "claude-opus-5-5",
+      thinkingLevel: "high",
+    });
+  });
+
+  it("switches the model and thinking level through the window's own routes", async () => {
+    const h = await harness();
+    h.windows.push(win("w1"));
+    expect(
+      (await call(h, "POST", "/phone/model", { sessionId: "w1", model: "gpt-6.1-sol" })).status,
+    ).toBe(200);
+    expect(
+      (await call(h, "POST", "/phone/thinking", { sessionId: "w1", level: "low" })).status,
+    ).toBe(200);
+    expect(
+      (await call(h, "POST", "/phone/thinking", { sessionId: "w1", level: "off" })).status,
+    ).toBe(200);
+    expect(h.forwarded).toEqual([
+      { sessionId: "w1", method: "POST", url: "/model", body: { model: "gpt-6.1-sol" } },
+      { sessionId: "w1", method: "POST", url: "/thinking", body: { level: "low" } },
+      { sessionId: "w1", method: "POST", url: "/thinking", body: { level: null } },
+    ]);
+  });
+
+  it("passes the window's refusal through and rejects bad bodies", async () => {
+    const h = await harness();
+    h.windows.push(win("busy"));
+    const busy = await call(h, "POST", "/phone/model", { sessionId: "busy", model: "x" });
+    expect(busy.status).toBe(409);
+    expect(await busy.json()).toEqual({ error: "cannot switch model while running" });
+    expect((await call(h, "POST", "/phone/model", { sessionId: "busy" })).status).toBe(400);
+    expect((await call(h, "POST", "/phone/thinking", { sessionId: "busy", level: 3 })).status).toBe(
+      400,
+    );
+    expect((await call(h, "POST", "/phone/model", { sessionId: "nope", model: "x" })).status).toBe(
+      404,
+    );
+  });
+
+  it("emits a windows event when a window's model changes", async () => {
+    const h = await harness();
+    h.windows.push(win("w1"));
+    const events = await fetch(`${h.base}/phone/events`, {
+      headers: { "x-gg-phone-token": h.phone.token },
+    });
+    const reader = events.body!.getReader();
+    const decoder = new TextDecoder();
+    await reader.read(); // ": connected"
+    h.windows[0] = win("w1", { model: "gpt-6.1-sol" });
+    let text = "";
+    while (!text.includes('"windows"')) text += decoder.decode((await reader.read()).value);
+    await reader.cancel();
+    expect(text).toContain('{"type":"windows"}');
   });
 });

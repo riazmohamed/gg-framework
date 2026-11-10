@@ -13,6 +13,7 @@
  */
 import { startThreatFeedSync } from "./core/threat-feed.js";
 import http from "node:http";
+import { Readable } from "node:stream";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -368,11 +369,25 @@ async function main(): Promise<void> {
             plan: ctx.offeredPlan(),
             planMode: ctx.planMode(),
             asks: ctx.openAsks(),
+            provider: st.provider,
+            model: st.model,
+            thinkingLevel: ctx.session.getThinkingLevel() ?? "off",
           };
         })
         .sort((a, b) => a.sessionId.localeCompare(b.sessionId)),
     relay: (sessionId, type, data) => sessions.get(sessionId)?.broadcast(type, data),
     answerAsk: (sessionId, id, result) => sessions.get(sessionId)?.answerAsk(id, result) ?? false,
+    forward: (sessionId, method, url, body, res) => {
+      const ctx = sessions.get(sessionId);
+      if (!ctx) return false;
+      const req = Object.assign(Readable.from(body === null ? [] : [Buffer.from(body)]), {
+        method,
+        url,
+        headers: { "content-type": "application/json" },
+      }) as unknown as http.IncomingMessage;
+      ctx.handle(req, res, url, method);
+      return true;
+    },
     // The Rust shell reads these lines on the daemon's stdout (daemon.rs).
     shell: (command) => {
       process.stdout.write(`GG_APP_PHONE ${JSON.stringify(command)}\n`);
