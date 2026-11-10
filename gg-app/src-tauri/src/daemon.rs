@@ -199,6 +199,7 @@ pub(crate) fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         // GG_APP_LISTENING handshake.
         .env("GG_APP_PORT", "0")
         .env("GG_APP_TOKEN", &app.state::<Daemon>().token)
+        .env("GG_APP_VERSION", app.package_info().version.to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
@@ -247,6 +248,8 @@ pub(crate) fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                             recreate_all_window_sessions(app2.clone());
                         }
                     }
+                } else if let Some(command) = parse_phone_command(&line) {
+                    dispatch_phone_command(app2.clone(), command);
                 } else {
                     log::debug!("[daemon] {line}");
                 }

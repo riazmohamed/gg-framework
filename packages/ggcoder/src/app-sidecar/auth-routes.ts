@@ -11,7 +11,7 @@ import { loginChatGPT, revokeChatGPTSignIn } from "../core/oauth/openai.js";
 import type { OAuthCredentials } from "../core/oauth/types.js";
 import { AUTH_PROVIDERS, type AuthMethod } from "../core/auth-providers.js";
 import type { ElicitResult } from "@modelcontextprotocol/client";
-import type { AskUserResult } from "../core/ask-user.js";
+import { parseAskAnswerBody } from "../core/ask-user.js";
 import { readBody, json } from "./http.js";
 import { desktopGuidance } from "./desktop-guidance.js";
 import { log } from "../core/logger.js";
@@ -268,34 +268,19 @@ export function handleAuthRoutes(
     const id = decodeURIComponent(url.slice("/ask/".length));
     void readBody(req, res).then((raw) => {
       if (raw === null) return;
-      let result: AskUserResult;
+      let body: unknown;
       try {
-        const parsed = JSON.parse(raw) as {
-          action?: string;
-          answers?: Record<string, unknown>;
-        };
-        if (parsed.action !== "answer" && parsed.action !== "cancel") {
-          json(res, 400, { error: "action must be answer or cancel" });
-          return;
-        }
-        if (parsed.action === "cancel") {
-          result = { action: "cancel" };
-        } else {
-          // Only strings and string arrays are answers; anything else is a
-          // malformed client, not a value to hand the model.
-          const answers: Record<string, string | string[]> = {};
-          for (const [key, value] of Object.entries(parsed.answers ?? {})) {
-            if (typeof value === "string") answers[key] = value;
-            else if (Array.isArray(value) && value.every((v) => typeof v === "string")) {
-              answers[key] = value as string[];
-            }
-          }
-          result = { action: "answer", answers };
-        }
+        body = JSON.parse(raw);
       } catch {
         json(res, 400, { error: "invalid JSON body" });
         return;
       }
+      const parsed = parseAskAnswerBody(body);
+      if (!parsed.ok) {
+        json(res, 400, { error: parsed.error });
+        return;
+      }
+      const result = parsed.result;
       if (!ctx.asks.settle(id, result)) {
         json(res, 409, { error: "no question is awaiting an answer" });
         return;

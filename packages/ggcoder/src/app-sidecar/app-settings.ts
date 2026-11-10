@@ -60,6 +60,8 @@ export interface AppSettings {
   hiddenProjects?: string[];
   /** Projects (normalized cwds) where the user's own `!` commands run without asking. */
   shellTrusted?: string[];
+  /** Phone control (pew2 phone app may open chats and type into them). Off by default. */
+  phoneControl?: boolean;
 }
 
 export function stringArray(value: unknown): string[] | undefined {
@@ -106,6 +108,7 @@ export async function loadAppSettings(): Promise<AppSettings> {
       projectRoots: stringArray(raw.projectRoots),
       hiddenProjects: stringArray(raw.hiddenProjects),
       shellTrusted: stringArray(raw.shellTrusted),
+      phoneControl: raw.phoneControl === true ? true : undefined,
     };
   } catch {
     return { projectsRoot: defaultProjectsRoot() };

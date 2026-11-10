@@ -1,7 +1,7 @@
 import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from "react";
 import { ArrowUpIcon, PaperclipIcon, SquareIcon } from "@phosphor-icons/react";
 import { ShellCommandMenu } from "./ShellCommandMenu";
-import type { ShellSuggestion } from "./agent";
+import type { InboxItem, ShellSuggestion } from "./agent";
 import {
   cancelKen,
   openImageDataUrl,
@@ -20,6 +20,7 @@ import { CacheExpiryNotice } from "./CacheExpiryNotice";
 import { EnhanceDissolve } from "./EnhanceDissolve";
 import { FileMentionMenu } from "./FileMentionMenu";
 import { FloatingSurface } from "./FloatingSurface";
+import { InboxBar } from "./InboxBar";
 import { QueuedBar } from "./QueuedBar";
 import { ReferencedFiles } from "./ReferencedFiles";
 import { ScheduleHint } from "./ScheduleHint";
@@ -71,6 +72,9 @@ export interface ComposerProps {
   /** Bumped by every send; the strips a send clears leave in that same commit. */
   sendCount: number;
   handleCancelQueued: (id: string) => void;
+  /** App inbox: send a waiting message as the user's own, or drop it. */
+  onSendInbox: (item: InboxItem) => Promise<void>;
+  onDismissInbox: (item: InboxItem) => Promise<void>;
   enhanceAnim: { oldText: string; newText: string | null } | null;
   onEnhanceAnimDone: () => void;
   enhancement: { plain: string; segments: PromptSegment[] } | null;
@@ -156,6 +160,8 @@ export function Composer({
   visibleQueuedMessages,
   sendCount,
   handleCancelQueued,
+  onSendInbox,
+  onDismissInbox,
   enhanceAnim,
   onEnhanceAnimDone,
   enhancement,
@@ -238,6 +244,12 @@ export function Composer({
             toast("Couldn't start compaction. Try again.", "error"),
           )
         }
+      />
+      <InboxBar
+        items={state?.inbox}
+        running={running}
+        onSend={onSendInbox}
+        onDismiss={onDismissInbox}
       />
       <QueuedBar messages={visibleQueuedMessages} onCancel={handleCancelQueued} />
       <div className="inputrow">

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  markAskAnswered,
   answerAskItem,
   askItemFor,
   closeAsksNotIn,
@@ -174,5 +175,24 @@ describe("withOpenAsks", () => {
       prompt: { id: "x", questions: [q("a")] },
       deferred: true,
     });
+  });
+});
+
+describe("markAskAnswered", () => {
+  it("shows an open card answered and leaves others alone", () => {
+    const items = [
+      { kind: "ask", id: 1, prompt: { id: "ask-1", questions: [] } },
+      { kind: "ask", id: 2, prompt: { id: "ask-2", questions: [] } },
+    ];
+    expect(markAskAnswered(items, "ask-1", { next: "Tests" })).toEqual([
+      {
+        kind: "ask",
+        id: 1,
+        prompt: { id: "ask-1", questions: [] },
+        answers: { next: "Tests" },
+        sent: true,
+      },
+      items[1],
+    ]);
   });
 });

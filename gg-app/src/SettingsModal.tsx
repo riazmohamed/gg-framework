@@ -16,6 +16,7 @@ import { SoundButton } from "./SoundButton";
 import { AppearancePicker } from "./AppearancePicker";
 import { HomeBackgroundButton } from "./HomeBackgroundButton";
 import { KeepAwakeButton } from "./KeepAwakeButton";
+import { PhoneControlButton } from "./PhoneControlButton";
 import { SettingsSection } from "./settings-section";
 import { useSettingsPageReady } from "./settings-ready";
 
@@ -161,6 +162,14 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
           >
             <div className="modal-row">
               <KeepAwakeButton />
+            </div>
+          </SettingsSection>
+          <SettingsSection
+            title="Phone control"
+            description="Lets the pew2 phone app open chats here and type into them."
+          >
+            <div className="modal-row">
+              <PhoneControlButton />
             </div>
           </SettingsSection>
         </div>

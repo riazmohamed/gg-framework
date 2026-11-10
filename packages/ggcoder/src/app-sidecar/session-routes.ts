@@ -4,7 +4,8 @@ import { goalNeedsKickoff, goalPhase, goalWasInterrupted } from "../core/goals-s
 import { goalRunningElsewhere } from "../core/goal-run-marker.js";
 import { goalCritterPick } from "../goals-agent/goals-agent.js";
 import { getSupportedThinkingLevels } from "../core/thinking-level.js";
-import { json } from "./http.js";
+import { inboxDir, isInboxId, listInbox, removeInboxItem } from "../core/app-inbox.js";
+import { json, readBody } from "./http.js";
 import type { SseClient } from "./session-types.js";
 import type { SessionRouteContext } from "./route-context.js";
 
@@ -71,8 +72,33 @@ export function handleSessionRoutes(
       supportsVideo: getModel(st.model)?.supportsVideo ?? false,
       autopilot: ctx.autopilot,
       cacheExpiry: ctx.session.getCacheExpiryStatus(),
+      inbox: listInbox(inboxDir(ctx.paths.agentDir), ctx.cwd),
       ...ctx.kenStatePayload(),
       ...ctx.footerExtras(),
+    });
+    return true;
+  }
+
+  // Sent or dismissed in the window: the message leaves the inbox for good.
+  if (method === "POST" && url === "/inbox/remove") {
+    void readBody(req, res).then((raw) => {
+      if (raw === null) return;
+      let id: unknown;
+      try {
+        id = (JSON.parse(raw) as { id?: unknown }).id;
+      } catch {
+        json(res, 400, { error: "invalid JSON body" });
+        return;
+      }
+      if (!isInboxId(id)) {
+        json(res, 400, { error: "invalid inbox id" });
+        return;
+      }
+      const dir = inboxDir(ctx.paths.agentDir);
+      const removed = removeInboxItem(dir, ctx.cwd, id);
+      const items = listInbox(dir, ctx.cwd);
+      ctx.broadcast("inbox", { items });
+      json(res, 200, { removed, items });
     });
     return true;
   }

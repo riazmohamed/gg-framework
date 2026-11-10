@@ -320,3 +320,34 @@ export function deliverLateAnswer(late: LateAskAnswer, sink: LateAnswerSink): vo
   sink.onQueued?.();
   if (!sink.isBusy()) sink.startIdleRun();
 }
+
+/**
+ * Parse an answer body (`{action, answers?}`) the way every answer route must:
+ * the window's `/ask/:id` and the phone's `/phone/ask`. Only strings and string
+ * arrays are answers; anything else is a malformed client, not a value to hand
+ * the model, and is dropped.
+ */
+export function parseAskAnswerBody(
+  body: unknown,
+): { ok: true; result: AskUserResult } | { ok: false; error: string } {
+  const parsed =
+    typeof body === "object" && body !== null && !Array.isArray(body)
+      ? (body as { action?: unknown; answers?: unknown })
+      : {};
+  if (parsed.action !== "answer" && parsed.action !== "cancel") {
+    return { ok: false, error: "action must be answer or cancel" };
+  }
+  if (parsed.action === "cancel") return { ok: true, result: { action: "cancel" } };
+  const answers: Record<string, string | string[]> = {};
+  const raw =
+    typeof parsed.answers === "object" && parsed.answers !== null && !Array.isArray(parsed.answers)
+      ? (parsed.answers as Record<string, unknown>)
+      : {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value === "string") answers[key] = value;
+    else if (Array.isArray(value) && value.every((v): v is string => typeof v === "string")) {
+      answers[key] = value;
+    }
+  }
+  return { ok: true, result: { action: "answer", answers } };
+}

@@ -9,6 +9,7 @@ import {
   type AgentState,
   type BackgroundTask,
   type CacheExpiryStatus,
+  type InboxItem,
   type ModelOption,
   type ProjectTask,
   type QueuedMessage,
@@ -20,6 +21,7 @@ import {
   closeAsksNotIn,
   isAskUserPrompt,
   markAskDeferred,
+  markAskAnswered,
   parseOpenAskPrompts,
   withOpenAsks,
 } from "./ask-user";
@@ -1136,6 +1138,20 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             setItems((prev) => markAskDeferred(prev, promptId));
           }
           break;
+        case "ask_user_answered":
+          // Answered from the phone (phone control): the card shows the answer.
+          if (typeof d.id === "string" && typeof d.answers === "object" && d.answers !== null) {
+            const promptId = d.id;
+            const answers = Object.fromEntries(
+              Object.entries(d.answers as Record<string, unknown>).filter(
+                (e): e is [string, string | string[]] =>
+                  typeof e[1] === "string" ||
+                  (Array.isArray(e[1]) && e[1].every((v) => typeof v === "string")),
+              ),
+            );
+            setItems((prev) => markAskAnswered(prev, promptId, answers));
+          }
+          break;
         case "ask_user_closed":
           // A newer question or a new session superseded deferred questions.
           if (Array.isArray(d.ids)) {
@@ -1428,6 +1444,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           endStreamingText();
           subagentGroupIdRef.current = null;
           subagentGroupByAgentRef.current.clear();
+          break;
+        case "inbox":
+          // The app inbox changed (core/app-inbox.ts): a message arrived or left.
+          setState((s) => (s ? { ...s, inbox: (d.items as InboxItem[] | undefined) ?? [] } : s));
           break;
         case "cache_expiry":
           // Live cold-cache status pushed after a run, compaction or model

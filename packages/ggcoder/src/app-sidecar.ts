@@ -52,7 +52,12 @@ import {
 } from "./core/autopilot-gate.js";
 import { describeRunVerification, describeTurnVerification } from "./core/run-status.js";
 import { validateKenModelPref, effectiveKenModel, type KenModelPref } from "./core/ken-model.js";
-import type { RunOutcome } from "./core/session-manager.js";
+import { SessionManager, type RunOutcome } from "./core/session-manager.js";
+import {
+  createPhoneControl,
+  phoneDiscoveryFile,
+  type PhoneWindowInfo,
+} from "./app-sidecar/phone-control.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
 import { pruneDiagnosticsRecords } from "./core/internal-diagnostics.js";
@@ -84,7 +89,7 @@ import {
   type AuthMethodMeta,
   type AuthProviderMeta,
 } from "./core/auth-providers.js";
-import { ensureAppDirs, loadSavedSettings } from "./config.js";
+import { ensureAppDirs, loadSavedSettings, VERSION } from "./config.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import {
   getModel,
@@ -133,6 +138,8 @@ import {
   loadProjectModelPrefs,
   loadKenModelPref,
   loadAutopilot,
+  loadAppSettings,
+  updateAppSettings,
 } from "./app-sidecar/app-settings.js";
 import { KEN_ALLOWED_TOOLS } from "./app-sidecar/ken-context.js";
 import { type ProgressManager, createProgressManager } from "./app-sidecar/progress-manager.js";
@@ -159,6 +166,7 @@ import { handleWorkspaceRoutes } from "./app-sidecar/workspace-routes.js";
 import { handleHistoryRoutes } from "./app-sidecar/history-routes.js";
 import { handlePromptRoutes } from "./app-sidecar/prompt-routes.js";
 import { handleTaskRoutes } from "./app-sidecar/task-routes.js";
+import { inboxDir, listInbox } from "./core/app-inbox.js";
 import { handleRunControlRoutes } from "./app-sidecar/run-control-routes.js";
 import { handleAuthRoutes } from "./app-sidecar/auth-routes.js";
 import { handleIntegrationRoutes } from "./app-sidecar/integration-routes.js";
@@ -338,6 +346,42 @@ async function main(): Promise<void> {
     return [...sessions.values()].some((ctx) => path.resolve(ctx.cwd) === target && ctx.isBusy());
   };
 
+  // Phone control (pew2): off until the saved setting says otherwise.
+  const phone = createPhoneControl({
+    discoveryFile: phoneDiscoveryFile(),
+    appVersion: process.env.GG_APP_VERSION ?? VERSION,
+    pid: process.pid,
+    listWindows: () =>
+      [...sessions.values()]
+        .map((ctx): PhoneWindowInfo => {
+          const st = ctx.session.getState();
+          const sessionPath = st.sessionPath ?? ctx.sessionPath ?? null;
+          const isGoal = ctx.mode === "code" && isGoalDir(goalsRoot(paths.agentDir), ctx.cwd);
+          return {
+            sessionId: ctx.id,
+            cwd: ctx.cwd,
+            mode: isGoal ? "goal" : ctx.mode,
+            sessionPath,
+            agentSessionId: sessionPath ? (st.sessionId ?? null) : null,
+            busy: ctx.isBusy(),
+            focused: phone.focusedOf(ctx.id),
+            plan: ctx.offeredPlan(),
+            planMode: ctx.planMode(),
+            asks: ctx.openAsks(),
+          };
+        })
+        .sort((a, b) => a.sessionId.localeCompare(b.sessionId)),
+    relay: (sessionId, type, data) => sessions.get(sessionId)?.broadcast(type, data),
+    answerAsk: (sessionId, id, result) => sessions.get(sessionId)?.answerAsk(id, result) ?? false,
+    // The Rust shell reads these lines on the daemon's stdout (daemon.rs).
+    shell: (command) => {
+      process.stdout.write(`GG_APP_PHONE ${JSON.stringify(command)}\n`);
+    },
+    findSessionById: (agentSessionId, cwd) =>
+      new SessionManager(paths.sessionsDir).findAnyById(agentSessionId, cwd),
+  });
+  phone.setEnabled((await loadAppSettings()).phoneControl === true);
+
   // Providers currently mid-OAuth in some window. Daemon-level so two windows
   // cannot race two browser flows for the same provider into one auth file.
   const oauthInFlightProviders = new Set<string>();
@@ -432,6 +476,9 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Phone routes carry their own token (x-gg-phone-token), never GG_APP_TOKEN.
+    if (phone.handle(req, res, url, method, req.headers["x-gg-token"] === authToken)) return;
+
     if (req.headers["x-gg-token"] !== authToken) {
       daemonJson(res, 401, { error: "unauthorized" });
       return;
@@ -472,10 +519,14 @@ async function main(): Promise<void> {
               repoPolls,
               sessionIdsAt,
               busyAt,
+              onOfferedPlan: (plan) => phone.planChanged(id, plan),
+              onConversationReset: () => phone.windowsChanged(),
+              onAsksChanged: (open) => phone.asksChanged(id, open),
             },
             { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
           );
           sessions.set(id, ctx);
+          phone.windowsChanged();
           log("INFO", "app-sidecar", "session created", {
             id,
             mode,
@@ -504,10 +555,65 @@ async function main(): Promise<void> {
       const ctx = sessions.get(id);
       if (ctx) {
         sessions.delete(id);
+        phone.sessionClosed(id);
         void ctx.dispose().catch(() => {});
         log("INFO", "app-sidecar", "session disposed", { id });
       }
       daemonJson(res, 200, { ok: true });
+      return;
+    }
+
+    // Phone control setting (app-wide, saved in gg-app.json).
+    if (method === "GET" && url === "/phone-control") {
+      daemonJson(res, 200, { enabled: phone.enabled });
+      return;
+    }
+    if (method === "POST" && url === "/phone-control") {
+      void daemonReadBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let enabled: unknown;
+        try {
+          enabled = (JSON.parse(raw) as { enabled?: unknown }).enabled;
+        } catch {
+          enabled = undefined;
+        }
+        if (typeof enabled !== "boolean") {
+          daemonJson(res, 400, { error: "enabled must be a boolean" });
+          return;
+        }
+        try {
+          await updateAppSettings((s) => {
+            s.phoneControl = enabled === true;
+          });
+        } catch (err) {
+          log("WARN", "app-sidecar", "failed to persist phoneControl", { err: String(err) });
+        }
+        phone.setEnabled(enabled);
+        daemonJson(res, 200, { enabled });
+      });
+      return;
+    }
+    // A window reports a hand edit of its composer and/or its focus.
+    if (method === "POST" && url === "/phone-client") {
+      const sid = sessionIdFromReq(req, url);
+      void daemonReadBody(req, res).then((raw) => {
+        if (raw === null) return;
+        if (!sid || !sessions.has(sid)) {
+          daemonJson(res, 404, { error: "unknown session" });
+          return;
+        }
+        let body: { draft?: unknown; focused?: unknown } = {};
+        try {
+          body = JSON.parse(raw) as typeof body;
+        } catch {
+          /* ignore */
+        }
+        phone.report(sid, {
+          ...(typeof body.draft === "string" ? { draft: body.draft } : {}),
+          ...(typeof body.focused === "boolean" ? { focused: body.focused } : {}),
+        });
+        daemonJson(res, 200, { ok: true });
+      });
       return;
     }
 
@@ -615,6 +721,7 @@ async function main(): Promise<void> {
     // The Rust shell reads this line to learn the daemon port (it already
     // knows the token — it set GG_APP_TOKEN; the field serves other spawners).
     process.stdout.write(`GG_APP_LISTENING ${addr.port} ${authToken}\n`);
+    phone.setPort(addr.port);
     log("INFO", "app-sidecar", "daemon listening", { port: String(addr.port), host });
   });
 
@@ -634,6 +741,7 @@ async function main(): Promise<void> {
       // group, and the app force-kills that group after 3 s. If a slow session
       // teardown is still pending then, these would never be stopped.
       for (const c of sessions.values()) c.stopBackgroundProcesses();
+      phone.dispose();
       clearInterval(parentWatch);
       // Radio playback is app-wide (one stream across all windows), so it stops
       // at the daemon level, not per session.
@@ -701,6 +809,12 @@ async function createSession(
     sessionIdsAt: (cwd: string) => string[];
     /** Whether any live window session in `cwd` is working right now. */
     busyAt: (cwd: string) => boolean;
+    /** The plan offered in this window's review box changed (phone control). */
+    onOfferedPlan: (plan: { planPath: string; content: string; generation: number } | null) => void;
+    /** This window's conversation was reset (new session, plan accept). */
+    onConversationReset: () => void;
+    /** This window's open questions changed (phone control v1.2). */
+    onAsksChanged: (asks: Array<{ id: string; questions: AskQuestion[] }>) => void;
   },
   opts: {
     id: string;
@@ -787,6 +901,16 @@ async function createSession(
     const safePayload = redactValue({ type, data }, { secrets: environmentSecrets(process.env) });
     const frame = `data: ${JSON.stringify(safePayload)}\n\n`;
     for (const c of clients) c.res.write(frame);
+    if (type === "session_reset") deps.onConversationReset();
+  }
+
+  // The plan in the window's review box right now, for phone control: set
+  // when plan_review offers it, cleared whenever the pending plan changes.
+  let offeredPlan: { planPath: string; content: string; generation: number } | null = null;
+  function setOfferedPlan(next: typeof offeredPlan): void {
+    if (offeredPlan === null && next === null) return;
+    offeredPlan = next;
+    deps.onOfferedPlan(next);
   }
 
   /**
@@ -876,15 +1000,21 @@ async function createSession(
   // when idle. The deadline is short when nobody is watching (autopilot, task
   // run-all, a scheduled prompt).
   let scheduledRunActive = false;
-  const asks = createAskUserBridge({
-    broadcast: (prompt) => broadcast("ask_user", prompt),
+  const askBridge = createAskUserBridge({
+    broadcast: (prompt) => {
+      broadcast("ask_user", prompt);
+      syncOpenAsks();
+    },
     timeoutMs: () =>
       askSoftDeadlineMs(autopilot || autopilotActive || taskRunAll || scheduledRunActive),
     onTimeout: (prompt) => {
       log("WARN", "app-sidecar", "ask_user deadline passed; agent proceeding", { id: prompt.id });
       broadcast("ask_user_deferred", { id: prompt.id });
     },
-    onClosed: (ids) => broadcast("ask_user_closed", { ids }),
+    onClosed: (ids) => {
+      broadcast("ask_user_closed", { ids });
+      syncOpenAsks();
+    },
     onLateAnswer: (late) => {
       log("INFO", "app-sidecar", "ask_user late answer queued", { id: late.prompt.id });
       // A late "Start the goal now" starts the goal before GG Goals hears it,
@@ -904,6 +1034,56 @@ async function createSession(
       );
     },
   });
+  // Phone control (v1.2) lists the window's open questions and hears when they
+  // open and close. A question stays open past its soft deadline until it is
+  // answered or closed, so the bridge's own open list is the source of truth;
+  // every call that can change it re-reports it.
+  function openAsks(): Array<{ id: string; questions: AskQuestion[] }> {
+    return askBridge
+      .openPrompts()
+      .map(({ prompt }) => ({ id: prompt.id, questions: prompt.questions }));
+  }
+  function syncOpenAsks(): void {
+    deps.onAsksChanged(openAsks());
+  }
+  const asks: typeof askBridge = {
+    park: (request) => askBridge.park(request),
+    settle: (id, result) => {
+      const ok = askBridge.settle(id, result);
+      if (ok) syncOpenAsks();
+      return ok;
+    },
+    cancelAll: (result) => {
+      askBridge.cancelAll(result);
+      syncOpenAsks();
+    },
+    closeDeferred: () => {
+      askBridge.closeDeferred();
+      syncOpenAsks();
+    },
+    get pendingCount() {
+      return askBridge.pendingCount;
+    },
+    get deferredCount() {
+      return askBridge.deferredCount;
+    },
+    openIds: () => askBridge.openIds(),
+    openPrompts: () => askBridge.openPrompts(),
+  };
+  /**
+   * Settle a question from the phone, exactly as the window's card does, then
+   * close the window's card: answered shows the picked answer, cancel closes it.
+   */
+  function answerAskFromPhone(id: string, result: AskUserResult): boolean {
+    if (!asks.settle(id, result)) return false;
+    if (result.action === "answer") {
+      broadcast("ask_user_answered", { id, answers: result.answers });
+      void trophies.count("questionsAnswered", opts.id);
+    } else {
+      broadcast("ask_user_closed", { ids: [id] });
+    }
+    return true;
+  }
   // A goal starts when the user picks "Start the goal now" from GG Goals'
   // question: answered while it waits, or late, after its deadline (see
   // onLateAnswer). Recorded once, and announced so the window can switch to
@@ -1619,9 +1799,11 @@ async function createSession(
     pendingPlanPath = planPath;
     pendingPlanContent = content;
     planGeneration++;
+    setOfferedPlan(null);
   }
 
   function clearPendingPlan(): void {
+    setOfferedPlan(null);
     if (pendingPlanPath === null) return;
     pendingPlanPath = null;
     pendingPlanContent = "";
@@ -1671,6 +1853,7 @@ async function createSession(
     offeredPlanGeneration = planGeneration;
     log("INFO", "app-sidecar", "plan handed to user for review", { planPath: plan.planPath });
     broadcast("plan_review", plan);
+    setOfferedPlan({ ...plan, generation: planGeneration });
   }
 
   // Workflow (prompt-template) commands: built-in + the custom
@@ -2390,6 +2573,22 @@ async function createSession(
   };
   scheduleTasksPoll(1500);
 
+  // The app inbox (core/app-inbox.ts): other local tools leave messages for the
+  // window open on this project. Files have no event source, so poll and push
+  // only changes; the webview reads the first snapshot from /state.
+  let lastInboxJson = "[]";
+  // Made here so tools can tell this app reads an inbox before they write to it.
+  await fs.mkdir(inboxDir(paths.agentDir), { recursive: true }).catch(() => {});
+  const inboxPoll = setInterval(() => {
+    const items = listInbox(inboxDir(paths.agentDir), cwd);
+    const next = JSON.stringify(items);
+    if (next !== lastInboxJson) {
+      lastInboxJson = next;
+      broadcast("inbox", { items });
+    }
+  }, 3000);
+  inboxPoll.unref?.();
+
   // Keep the dirty count, GitHub issue/PR counts and CI current while idle
   // (they change outside the agent: editor saves, commits, teammates). Branch/
   // repo state already refreshes after agent runs. The pollers are shared with
@@ -2753,6 +2952,7 @@ async function createSession(
     asks.cancelAll();
     tasksPollStopped = true;
     if (tasksPoll) clearTimeout(tasksPoll);
+    clearInterval(inboxPoll);
     repoWatchStopped = true;
     repoWatch.unsubscribe();
     // Stop the Telegram serve loop + dispose its per-chat sessions.
@@ -2786,6 +2986,10 @@ async function createSession(
     handle,
     dispose,
     stopBackgroundProcesses,
+    offeredPlan: () => offeredPlan,
+    planMode: () => session.getPlanMode(),
+    openAsks,
+    answerAsk: answerAskFromPhone,
     isBusy: () =>
       running ||
       runClaim.active ||

@@ -34,6 +34,8 @@ import {
   switchKenModel,
   listCommands,
   cancelQueued,
+  removeInboxItem,
+  type InboxItem,
   type PromptMeta,
   type QueuedMessage,
   listHistory,
@@ -200,6 +202,7 @@ import { usePromptHistory } from "./usePromptHistory";
 import { usePromptEnhance } from "./usePromptEnhance";
 import { shellCommandFromInput, shellItemFromHistory, useShellRuns } from "./useShellRuns";
 import { filterShellSuggestions, shellEnterPicks } from "./shell-menu";
+import { usePhoneControl } from "./usePhoneControl";
 import "./App.css";
 import "./Deck.css";
 import "./Trophies.css";
@@ -1608,6 +1611,25 @@ function App(): React.ReactElement {
     void cancelQueued(id);
   }
 
+  // App inbox. A message that could not be sent stays in the inbox for another try.
+  async function handleInbox(item: InboxItem, send: boolean): Promise<void> {
+    if (send && !submitText(item.text, undefined, { keepInput: true })) {
+      toast("GG isn't ready yet. The message is still in the inbox.", "error");
+      return;
+    }
+    const left = await removeInboxItem(item.id);
+    if (left === null) {
+      toast(
+        send
+          ? "Sent, but it stayed in the inbox. Dismiss it there."
+          : "Couldn't update the inbox. Try again.",
+        "error",
+      );
+      return;
+    }
+    setState((s) => (s ? { ...s, inbox: left } : s));
+  }
+
   function pickSlashCommand(cmd: SlashCommand): void {
     if (cmd.name === "add-dir" || cmd.name === "remove-dir") {
       setInput("");
@@ -1765,6 +1787,23 @@ function App(): React.ReactElement {
   // current one without re-creating the interval on every render.
   const submitTextRef = useRef(submitText);
   submitTextRef.current = submitText;
+
+  // Phone control (pew2): the phone's draft, send and stop act on this window
+  // exactly as the composer, Enter and the stop button do.
+  const submitRef = useRef(submit);
+  submitRef.current = submit;
+  usePhoneControl({
+    input,
+    setDraft: fillComposer,
+    submitRef,
+    cancel: requestCancel,
+    // The phone decides through the same buttons the plan box uses.
+    plan: {
+      accept: () => void acceptPlan(),
+      feedback: (feedback) => sendPlanFeedback(feedback),
+      reject: () => rejectPlan(),
+    },
+  });
 
   // Return to chat without consuming the draft. Agent setup runs the existing
   // /init workflow; audits require a recorded result, never an inferred pass.
@@ -3245,6 +3284,8 @@ function App(): React.ReactElement {
                   visibleQueuedMessages={visibleQueuedMessages}
                   sendCount={sendCount}
                   handleCancelQueued={handleCancelQueued}
+                  onSendInbox={(item) => handleInbox(item, true)}
+                  onDismissInbox={(item) => handleInbox(item, false)}
                   enhanceAnim={enhanceAnim}
                   onEnhanceAnimDone={onEnhanceAnimDone}
                   enhancement={enhancement}

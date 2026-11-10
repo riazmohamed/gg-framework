@@ -205,6 +205,58 @@ pub(crate) async fn agent_keep_awake_set(
     sidecar_json(res).await
 }
 
+/// Proxy: the app-wide "Phone control" setting (pew2). Daemon-level.
+#[tauri::command]
+pub(crate) async fn agent_phone_control_get(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let res = client
+        .get(format!("{}/phone-control", sidecar_base(port)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
+/// Proxy: turn phone control on/off (writes/removes ~/.gg/gg-app-phone.json).
+#[tauri::command]
+pub(crate) async fn agent_phone_control_set(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let res = client
+        .post(format!("{}/phone-control", sidecar_base(port)))
+        .json(&serde_json::json!({ "enabled": enabled }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
+/// Proxy: this window's composer was edited by hand and/or its focus changed.
+#[tauri::command]
+pub(crate) async fn agent_phone_report(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    draft: Option<String>,
+    focused: Option<bool>,
+) -> Result<(), String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    client
+        .post(format!("{}/phone-client", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "draft": draft, "focused": focused }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Proxy: the active provider's subscription quota snapshot. Account-wide, so
 /// no per-window session header is needed.
 #[tauri::command]
@@ -731,6 +783,25 @@ pub(crate) async fn agent_delete_task(
     let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/tasks/delete", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
+/// Proxy: drop one app inbox message (sent or dismissed). Returns `{ removed, items }`.
+#[tauri::command]
+pub(crate) async fn agent_inbox_remove(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/inbox/remove", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "id": id }))
         .send()

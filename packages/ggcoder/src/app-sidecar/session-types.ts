@@ -1,3 +1,4 @@
+import type { AskQuestion, AskUserResult } from "../core/ask-user.js";
 import type http from "node:http";
 import type { AgentSession } from "../core/agent-session.js";
 import type { ChatAgentId } from "../chat-agents/index.js";
@@ -37,6 +38,14 @@ export interface SessionContext {
   stopBackgroundProcesses: () => void;
   /** Working right now: a run in progress, or a worker still on a task. */
   isBusy: () => boolean;
+  /** The plan offered in the window's review box right now (phone control). */
+  offeredPlan: () => { planPath: string; content: string; generation: number } | null;
+  /** The window is in plan mode. */
+  planMode: () => boolean;
+  /** Open `ask_user` questions, oldest first (phone control v1.2). */
+  openAsks: () => Array<{ id: string; questions: AskQuestion[] }>;
+  /** Settle a question from the phone and close the window's card. */
+  answerAsk: (id: string, result: AskUserResult) => boolean;
 }
 
 export interface HfPullState {

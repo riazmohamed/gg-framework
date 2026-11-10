@@ -231,3 +231,16 @@ export function closeAsks<T extends AskItemLike>(items: readonly T[], ids: reado
   const closed = new Set(ids);
   return items.map((it) => (isOpenAsk(it, closed) ? { ...it, cancelled: true } : it));
 }
+
+/**
+ * A question was answered from elsewhere (the phone): show it answered with the
+ * picked values, the same as if it had been picked in this window.
+ */
+export function markAskAnswered<T extends AskItemLike>(
+  items: readonly T[],
+  promptId: string,
+  answers: AskAnswers,
+): T[] {
+  const ids = new Set([promptId]);
+  return items.map((it) => (isOpenAsk(it, ids) ? { ...it, answers, sent: true } : it));
+}

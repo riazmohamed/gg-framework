@@ -54,6 +54,7 @@ mod events;
 #[cfg(target_os = "macos")]
 mod macos_event_guard;
 mod paths;
+mod phone;
 mod process;
 mod settings;
 mod state;
@@ -64,6 +65,7 @@ use commands::agent_admin::*;
 use daemon::*;
 use events::*;
 use paths::*;
+use phone::*;
 use process::*;
 use settings::*;
 use state::*;
@@ -177,6 +179,9 @@ pub fn run() {
             commands::poll::agent_poll_vote,
             commands::agent::agent_keep_awake_get,
             commands::agent::agent_keep_awake_set,
+            commands::agent::agent_phone_control_get,
+            commands::agent::agent_phone_control_set,
+            commands::agent::agent_phone_report,
             commands::agent::agent_usage,
             commands::agent::agent_prompt,
             commands::agent::agent_cancel,
@@ -206,6 +211,7 @@ pub fn run() {
             commands::agent::agent_git_overview,
             commands::agent::agent_run_tasks,
             commands::agent::agent_delete_task,
+            commands::agent::agent_inbox_remove,
             commands::agent::agent_cycle_thinking,
             commands::agent::agent_set_thinking,
             commands::agent::agent_prewarm,
