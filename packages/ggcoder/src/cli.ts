@@ -113,6 +113,7 @@ import { runLocal } from "./cli/local.js";
 import { runSteroids } from "./cli/steroids.js";
 import { runOpenRouter } from "./cli/openrouter.js";
 import { loadOpenRouterCatalog } from "./core/openrouter-catalog-store.js";
+import { loadOpenCodeCatalogs } from "./core/opencode-startup.js";
 import { runHf } from "./cli/hf.js";
 import { scanLocalModels } from "./core/local-scan.js";
 import {
@@ -523,6 +524,11 @@ async function runInkTUI(opts: {
       error: err instanceof Error ? err.message : String(err),
     });
   });
+
+  // OpenCode's cached model lists, as in the desktop app: awaited (a local
+  // read; the saved model may be one of them), then a stale list for a
+  // connected plan is read again in the background for the next /model.
+  await loadOpenCodeCatalogs(authStorage);
 
   // Local models (Ollama, LM Studio, …) only exist after a scan. Starting on
   // one waits for it, since the model and its server's address must be known
