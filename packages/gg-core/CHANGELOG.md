@@ -1,5 +1,92 @@
 # @kenkaiiii/gg-core
 
+## 5.103.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.103.0
+
+## 5.102.0
+
+### Minor Changes
+
+- 188a0ca: Local endpoints can pin `supportsImages` (it wins over the server, like `contextLength`), llama.cpp's `/props` `modalities.vision` now marks its models as seeing images, and a new `pointScale(modelId)` says whether a model points in pixels or on Qwen3-VL/Qwen3.5's 0–1000 grid.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.102.0
+
+## 5.101.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.101.0
+
+## 5.100.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.100.3
+
+## 5.100.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.100.2
+
+## 5.100.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.100.1
+
+## 5.100.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.100.0
+
+## 5.99.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.99.0
+
+## 5.98.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.98.2
+
+## 5.98.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.98.1
+
+## 5.98.0
+
+### Minor Changes
+
+- ec684b8: Add OpenCode as two providers: **OpenCode Go** (the subscription) and **OpenCode** (pay-as-you-go), each connected with an OpenCode Console API key (#142). Every request carries GG Coder's own User-Agent and a stable `x-opencode-session` per conversation, which Go requires; calls made outside a conversation (summaries, the prompt enhancer) share one fallback id. Models are listed as `opencode-go/<id>` and `opencode/<id>` and run over the gateway's Chat Completions API, so only the models OpenCode serves on that API are offered (19 of Go's 30 today); models whose own API is Responses, Anthropic Messages or Gemini are left out for now. Requests cap output with `max_tokens` and return earlier thinking as `reasoning_content`, which the gateway's backends require. The desktop app reads each connected plan's public model list (context, output cap, image input, effort levels) and refreshes it every six hours; pay-as-you-go leaves out the free tier, which only runs inside OpenCode. Kimi K3, GLM-5.3 and GLM-5.3-Flash are built in for the CLI and offline starts.
+
+  - gg-ai: new `opencode` and `opencode-go` providers.
+  - gg-core: `parseOpenCodeCatalog`, `OPENCODE_CATALOG_URLS`, `OPENCODE_PROVIDERS`, `formatOpenCodeModelId`.
+
+### Patch Changes
+
+- Updated dependencies [ec684b8]
+  - @kenkaiiii/gg-ai@5.98.0
+
+## 5.97.1
+
+### Patch Changes
+
+- Fix the Claude subscription route failing a resume whose Claude Code transcript is gone: the session now seeds a fresh one from its own history, holds the transcript it would resume against the retention pass, and reloads the on-demand tools a restored conversation already used (the prompt now says to run `tool_search` first on that route). A Claude Code summary that keeps streaming is no longer dropped at the attempt timeout, a caller's access token is refreshed before reuse, and an unfinished run owned by another live process is left open instead of being treated as a crash.
+
+  Prune tool results less often on a warm cache (warm floor 0.2 → 0.35 of active tokens, flat floor near the compaction trigger), halve the `ask_user` interactive deadline to 5 min and the `task_output` wait cap to 300s, keep three rotated `debug.log` generations, and stop repeating unchanged log lines (local-model scan, autopilot disabled, unknown agent tools). The Claude Code route now logs `cache_health` and `retry` like the public-API route.
+  - @kenkaiiii/gg-ai@5.97.1
+
 ## 5.97.0
 
 ### Minor Changes

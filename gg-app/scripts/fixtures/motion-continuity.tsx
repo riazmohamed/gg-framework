@@ -7,8 +7,6 @@ import App from "../../src/App";
 import "../../src/App.css";
 import { Markdown } from "../../src/Markdown";
 import { ChatErrorNotice } from "../../src/ChatErrorNotice";
-import { QueuedBar } from "../../src/QueuedBar";
-import { BackgroundTasksButton } from "../../src/BackgroundTasksButton";
 import { SettingsTabBar } from "../../src/SettingsTabBar";
 import { ConfirmModal } from "../../src/ConfirmModal";
 import { Dropdown } from "../../src/Dropdown";
@@ -19,12 +17,6 @@ import { FileMentionMenu } from "../../src/FileMentionMenu";
 import { FloatingSurface } from "../../src/FloatingSurface";
 
 function Components(): React.ReactElement {
-  const [messages, setMessages] = useState(
-    Array.from({ length: 12 }, (_, i) => ({
-      id: `queue-${i}`,
-      text: `Fictional queued message ${i}`,
-    })),
-  );
   const [tab, setTab] = useState("general");
   const [lines, setLines] = useState(60);
   const [mounted, setMounted] = useState(true);
@@ -47,20 +39,6 @@ function Components(): React.ReactElement {
         />
       </section>
       <div id="fixture-panel">
-        <button
-          onClick={() =>
-            setMessages((current) => [
-              ...current,
-              { id: `extra-${current.length}`, text: "Fictional added queue message" },
-            ])
-          }
-        >
-          Grow fixture queue
-        </button>
-        <button onClick={() => setMessages((current) => current.slice(0, 1))}>
-          Drain fixture queue
-        </button>
-        <button onClick={() => setMessages([])}>Empty fixture queue</button>
         <button onClick={() => setLines((current) => current + 20)}>Grow fixture code</button>
         <button onClick={() => setMounted(false)}>Unmount fixture disclosures</button>
         {mounted && (
@@ -69,10 +47,6 @@ function Components(): React.ReactElement {
               error={{ text: "Fictional error detail. ".repeat(100) }}
               critterId="bee"
               active
-            />
-            <QueuedBar
-              messages={messages}
-              onCancel={(id) => setMessages((current) => current.filter((m) => m.id !== id))}
             />
             <Markdown>
               {[
@@ -83,17 +57,6 @@ function Components(): React.ReactElement {
             </Markdown>
           </>
         )}
-        <BackgroundTasksButton
-          tasks={[
-            {
-              id: "fictional-task",
-              pid: 0,
-              command: "Fictional task, not executed",
-              startedAt: 0,
-              exitCode: null,
-            },
-          ]}
-        />
         <RunningSchedulesButton
           schedules={
             scheduled

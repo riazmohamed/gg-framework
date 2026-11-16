@@ -1,6 +1,6 @@
 {
   "name": "@abukhaled/gg-agent",
-  "version": "5.97.0",
+  "version": "5.103.0",
   "type": "module",
   "description": "Agent loop for LLMs: runs your tools, feeds results back and loops until done, with retries, steering and cancellation. Works with every gg-ai provider.",
   "author": "Ken Kai",
@@ -47,7 +47,7 @@
   },
   "dependencies": {
     "@abukhaled/gg-ai": "workspace:*",
-    "zod": "^4.5.4"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "typescript": "^6.0.3",

@@ -33,43 +33,53 @@
 @property --glow-live {
   syntax: "<color>";
   inherits: true;
-  initial-value: #3a4fb8;
+  initial-value: #4b505c;
 }
 
 :root,
 :root[data-theme="dark"] {
-  /* Alloy. Brushed graphite surfaces separated by lightness, keys raised off
-     them, and one cobalt accent. Every colour has a light twin below; nothing
-     outside these two blocks names a raw colour for chrome. */
-  --bg: #15171a;
-  --surface-1: #1f2226;
-  --surface-2: #2a2e33;
-  --surface-3: #33383e;
-  --border: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.16);
+  /* Obsidian. Near-black surfaces separated by lightness, Ice Grey (#dfe5eb)
+     ink and hairlines, and one Racing Red accent. Every colour has a light
+     twin below; nothing outside these two blocks names a raw colour for
+     chrome. */
+  --bg: #111217;
+  /* The obsidian sheen behind the shell: a soft pool of light high in the
+     window, a low band near the floor, over a top-to-bottom falloff. Peaks
+     below --surface-2, so text keeps its measured contrast. */
+  --bg-wash:
+    radial-gradient(62% 40% at 50% 22%, rgb(223 229 235 / 0.055), transparent 72%),
+    radial-gradient(56% 10% at 50% 94%, rgb(223 229 235 / 0.05), transparent 76%),
+    linear-gradient(180deg, #15161c 0%, #111217 42%, #0c0d11 100%);
+  --surface-1: #181a21;
+  --surface-2: #20232b;
+  --surface-3: #2a2d37;
+  --border: rgba(223, 229, 235, 0.08);
+  --border-strong: rgba(223, 229, 235, 0.17);
   /* The ink overlays are drawn in (hover washes, hairlines): white on dark,
      deep navy on light. Used as `rgb(var(--ink-rgb) / <alpha>)`. */
-  --ink-rgb: 255 255 255;
+  --ink-rgb: 223 229 235;
 
-  /* Text — one ink at four levels. --text-dim is the floor: 4.87:1 on
+  /* Text — Ice Grey at four levels. --text-dim is the floor: 5.26:1 on
      --surface-2; on --surface-3 use --text-muted. */
-  --text: #e8ebef;
-  --text-secondary: #c2c7ce;
-  --text-muted: #a1a8b1;
-  --text-dim: #949ba5;
+  --text: #dfe5eb;
+  --text-secondary: #bcc3cc;
+  --text-muted: #9da5af;
+  --text-dim: #8e96a1;
 
-  /* Accent — cobalt, light enough to carry the dark --on-primary label on a
-     fill (8.1:1) and to read as text on every surface. */
-  --primary: #8fa3ff;
-  --primary-hi: #a9b8ff;
-  --on-primary: #050a2e;
-  /* Filled accent controls (send, Commit, the home buttons): the same
-     periwinkle and dark ink in both themes, so a primary button looks the
-     same in light and dark. --primary itself darkens in light mode, for
-     accent text and icons on light surfaces. */
-  --primary-fill: #8fa3ff;
-  --primary-fill-hi: #a9b8ff;
-  --on-primary-fill: #050a2e;
+  /* Accent text, icons and rings — Racing Red lifted a step, because the
+     exact red is only 3.7:1 as text on --surface-2 (this is 4.5:1+ on every
+     surface). */
+  --primary: #ff5d6e;
+  --primary-hi: #ff7c89;
+  --on-primary: #14060a;
+  /* Filled accent controls (send, Commit, the home buttons): Racing Red
+     itself with white ink, a requested look (4.08:1, under the 4.5:1 a small
+     label needs). The white is a hair warm because pure #fff is kept for
+     decorative literals. Hover deepens rather than lifts, so the ink gains
+     contrast there (4.94:1). */
+  --primary-fill: #ef233c;
+  --primary-fill-hi: #d61f36;
+  --on-primary-fill: #fffafa;
 
   --success: #7fdc95;
   --on-success: #04180b;
@@ -83,17 +93,17 @@
   /* Between warning and error: "improving, not there yet" (Project Health). */
   --caution: #ff9f5c;
   --on-error: #240704;
-  --secondary: #8fa3ff;
+  --secondary: #dfe5eb;
   --info: #62e8d8;
 
-  /* Ambient glow behind the window. Alloy keeps it faint: the material, not a
-     wash, carries the look. */
-  --glow: #3a4fb8;
+  /* Ambient glow behind the window at rest: neutral slate, so red only shows
+     while the agent works. */
+  --glow: #4b505c;
 
   --user-text: var(--text);
   --user-bg: var(--surface-2);
   /* Code blocks: a panel sunk below the message surface. */
-  --code-bg: #0e1013;
+  --code-bg: #0b0c10;
 
   /* Ken Kai (mentor agent) — must match theme.ken in theme.ts. */
   --ken: #62e8d8;
@@ -109,15 +119,15 @@
 
   /* Keys: the raised controls of the deck and title bar. A lit top edge, a
      dark lip below, and a recessed well for the value a key reads out. */
-  --key: #2c3035;
-  --key-hi: rgba(255, 255, 255, 0.09);
-  --key-edge: #0b0c0e;
+  --key: #262932;
+  --key-hi: rgba(223, 229, 235, 0.09);
+  --key-edge: #08090c;
   --key-shadow: rgba(0, 0, 0, 0.6);
-  --well: #23272c;
+  --well: #1b1d24;
   --well-shadow: rgba(0, 0, 0, 0.55);
-  --led-off: #3a3f46;
+  --led-off: #363a45;
   --deck-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 14px 30px -16px rgba(0, 0, 0, 0.9);
-  --mark: rgba(143, 163, 255, 0.28);
+  --mark: rgba(239, 35, 60, 0.3);
 
   /* Elevation: neutral black so depth never tints a surface. */
   --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.45);
@@ -127,6 +137,7 @@
 
 :root[data-theme="light"] {
   --bg: #dde1e6;
+  --bg-wash: none;
   --surface-1: #eaedf0;
   --surface-2: #f5f7f9;
   --surface-3: #ffffff;
@@ -142,6 +153,9 @@
   --primary: #2848d8;
   --primary-hi: #3a5af0;
   --on-primary: #ffffff;
+  --primary-fill: #8fa3ff;
+  --primary-fill-hi: #a9b8ff;
+  --on-primary-fill: #050a2e;
   /* A light theme's links and accent text: the dark cobalt. */
   --link: #2848d8;
 
@@ -274,9 +288,9 @@
   /* Things that resolve out of a blur (transcript rows, swapped labels, the
      tool panel): long enough that the blur reads as a dissolve, not a flicker. */
   --dur-dissolve: 340ms;
-  /* Composer strips and chip bars (attachments, mentions, queued message, cache
-     notice) growing open and folding shut. --dur-strip-out is mirrored by
-     EXIT_MS in AttachmentBar, ReferencedFiles, QueuedBar and CacheExpiryNotice,
+  /* Composer strips and chip bars (attachments, mentions, cache notice)
+     growing open and folding shut. --dur-strip-out is mirrored by
+     EXIT_MS in AttachmentBar, ReferencedFiles and CacheExpiryNotice,
      and also times an answered ask_user card dissolving out (AskBand's EXIT_MS),
      so everything in the chat column leaves at one speed. */
   --dur-strip-in: 260ms;
@@ -410,7 +424,7 @@
      drawn on it (text and the typing cursor). Fixed dark ink: --bg is light
      in the light theme, which left the words white on white. */
   --speech-bg: #ffffff;
-  --on-speech: #15171a;
+  --on-speech: #111217;
 
   /* Shimmer highlight — the default moving bright spot of ShimmerText, a step
      brighter than --text so the sweep reads. */
@@ -443,28 +457,28 @@
   /* The dark palette by name, for night scenes (Home's forest, a Goal's
      farm) that stay dark in the light theme: see the end of Deck.css. Same
      values as the dark theme above. */
-  --night-bg: #15171a;
-  --night-surface-1: #1f2226;
-  --night-surface-2: #2a2e33;
-  --night-surface-3: #33383e;
-  --night-border: rgba(255, 255, 255, 0.07);
-  --night-border-strong: rgba(255, 255, 255, 0.16);
-  --night-ink-rgb: 255 255 255;
-  --night-text: #e8ebef;
-  --night-text-secondary: #c2c7ce;
-  --night-text-muted: #a1a8b1;
-  --night-text-dim: #949ba5;
-  --night-primary: #8fa3ff;
-  --night-primary-hi: #a9b8ff;
-  --night-on-primary: #050a2e;
+  --night-bg: #111217;
+  --night-surface-1: #181a21;
+  --night-surface-2: #20232b;
+  --night-surface-3: #2a2d37;
+  --night-border: rgba(223, 229, 235, 0.08);
+  --night-border-strong: rgba(223, 229, 235, 0.17);
+  --night-ink-rgb: 223 229 235;
+  --night-text: #dfe5eb;
+  --night-text-secondary: #bcc3cc;
+  --night-text-muted: #9da5af;
+  --night-text-dim: #8e96a1;
+  --night-primary: #ff5d6e;
+  --night-primary-hi: #ff7c89;
+  --night-on-primary: #14060a;
   --night-success: #7fdc95;
   --night-warning: #f0c75e;
   --night-error: #ff7d70;
-  --night-key: #2c3035;
-  --night-key-hi: rgba(255, 255, 255, 0.09);
-  --night-key-edge: #0b0c0e;
+  --night-key: #262932;
+  --night-key-hi: rgba(223, 229, 235, 0.09);
+  --night-key-edge: #08090c;
   --night-key-shadow: rgba(0, 0, 0, 0.6);
-  --night-well: #23272c;
+  --night-well: #1b1d24;
   --night-well-shadow: rgba(0, 0, 0, 0.55);
 }
 
@@ -927,7 +941,7 @@ select {
   position: relative;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
+  background: var(--bg-wash), var(--bg);
   isolation: isolate;
   /* 100% (not 100vh): vh resolves against the unzoomed layout viewport, so under
      CSS `zoom` < 1 the shell came up short and the footer floated up. % chains
@@ -1050,9 +1064,6 @@ select {
 :root[data-motion="off"] {
   --loop-play-state: paused;
 }
-/* The logo's one-shot reveal is never paused: paused at 0% it held the banner
-   invisible whenever Home mounted while another window was focused. Its
-   shimmer and glitch loops (on .ascii-logo-glitch) pause instead. */
 /* Everything else in the shell paints above the glow. Modals are portalled to
    <body> (see Modal.tsx), so they sit outside this stacking context entirely
    rather than being trapped by it. */
@@ -1273,10 +1284,6 @@ select {
   right: 0;
   bottom: 0;
 }
-/* Ambient hover card: just the name, so no stats-sized minimum. */
-.home-critters .critter-tooltip {
-  min-width: 0;
-}
 /* Top centre, level with the Settings button (top 16px, 44px tall): the
    update button, only while an update is out. Spans the width and centres its
    content, rather than translate(-50%), since reveal-up owns transform; only
@@ -1296,155 +1303,6 @@ select {
 }
 .home > .home-version-corner > * {
   pointer-events: auto;
-}
-
-.ascii-logo {
-  font-family: var(--mono);
-  /* 89 mono columns ≈ 54em wide, so 9px needs ~480px (about the old banner's
-     footprint). Scale down below that instead of overflowing both edges on
-     very narrow viewports. */
-  font-size: min(9px, 100vw / 57);
-  /* The font draws curves with half blocks (▄ ▀), so rows must touch: any
-     extra leading shows as horizontal gaps through every letter. */
-  line-height: 1;
-  white-space: pre;
-}
-.ascii-logo-line {
-  white-space: pre;
-}
-/* ── Banner glitch loop ──
-   Movement only, no colour. A 5s cycle, still most of the time, with two
-   short bursts near its end (~140ms, then ~80ms): the banner jolts a pixel,
-   and one or two thin bands of rows tear sideways by a few pixels, then it all
-   snaps back. The tearing bands are white copies painted from data-text,
-   clipped to a sliver of rows, so they add no text to the page. */
-/* The white shimmer is painted here, on the element whose text it is: WebKit
-   (the macOS app) clips a text background only to the element's own text, so
-   painted on .ascii-logo it left these letters transparent. */
-.ascii-logo-glitch {
-  position: relative;
-  /* White, with a faint brighter band wider than the text, so the animated
-     position shift still reads as a gentle shimmer across the letters. */
-  background: linear-gradient(
-    100deg,
-    #e4e6ee 0%,
-    var(--text) 25%,
-    #ffffff 50%,
-    var(--text) 75%,
-    #e4e6ee 100%
-  );
-  background-size: 220% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation:
-    ggshimmer 4s linear infinite,
-    gg-glitch-shake 5s steps(1, end) infinite;
-  animation-play-state: var(--loop-play-state, running), var(--loop-play-state, running);
-}
-.ascii-logo-glitch::before,
-.ascii-logo-glitch::after {
-  content: attr(data-text);
-  position: absolute;
-  inset: 0;
-  white-space: pre;
-  pointer-events: none;
-  opacity: 0;
-  /* The banner paints its white through background-clip: text; the copies
-     opt out and fill with the same white, so a tear shows as shape, not
-     colour. */
-  background: none;
-  color: var(--text);
-  -webkit-text-fill-color: currentColor;
-}
-.ascii-logo-glitch::before {
-  animation: gg-glitch-tear-a 5s steps(1, end) infinite;
-  animation-play-state: var(--loop-play-state, running);
-}
-.ascii-logo-glitch::after {
-  animation: gg-glitch-tear-b 5s steps(1, end) infinite;
-  animation-play-state: var(--loop-play-state, running);
-}
-/* Burst windows: 82–85% (≈150ms) and 93–94.6% (≈80ms) of the cycle. */
-@keyframes gg-glitch-shake {
-  0%,
-  82%,
-  85%,
-  93%,
-  94.6%,
-  100% {
-    transform: none;
-  }
-  82.1% {
-    transform: translateX(-1px);
-  }
-  83.4% {
-    transform: translateX(1px);
-  }
-  93.1% {
-    transform: translateX(1px);
-  }
-}
-@keyframes gg-glitch-tear-a {
-  0%,
-  82%,
-  85%,
-  93%,
-  94.6%,
-  100% {
-    opacity: 0;
-    transform: none;
-    clip-path: inset(0 0 0 0);
-  }
-  82.1% {
-    opacity: 1;
-    transform: translateX(-4px);
-    clip-path: inset(22% 0 66% 0);
-  }
-  83.4% {
-    opacity: 1;
-    transform: translateX(3px);
-    clip-path: inset(56% 0 33% 0);
-  }
-  93.1% {
-    opacity: 1;
-    transform: translateX(-3px);
-    clip-path: inset(68% 0 21% 0);
-  }
-}
-@keyframes gg-glitch-tear-b {
-  0%,
-  82%,
-  85%,
-  93%,
-  94.6%,
-  100% {
-    opacity: 0;
-    transform: none;
-    clip-path: inset(0 0 0 0);
-  }
-  82.1% {
-    opacity: 1;
-    transform: translateX(3px);
-    clip-path: inset(44% 0 44% 0);
-  }
-  83.4% {
-    opacity: 1;
-    transform: translateX(-2px);
-    clip-path: inset(11% 0 78% 0);
-  }
-}
-/* Reduced motion: no glitch. */
-@media (prefers-reduced-motion: reduce) {
-  /* Keep the slow shimmer (as before); drop the glitch. */
-  .ascii-logo-glitch {
-    animation: ggshimmer 4s linear infinite;
-    animation-play-state: var(--loop-play-state, running);
-  }
-  .ascii-logo-glitch::before,
-  .ascii-logo-glitch::after {
-    animation: none;
-  }
 }
 
 /* ── Ken power banner (Autopilot on/off) ──────────────────────────────────
@@ -5937,6 +5795,11 @@ select {
       visibility 0s;
   }
 }
+/* Rows gliding to a new place are displaced by a transform. Scroll anchoring
+   takes that for a layout shift and scrolls to undo it (chat-layout-motion.ts). */
+.transcript[data-gliding] {
+  overflow-anchor: none;
+}
 .transcript {
   flex: 1 1 auto;
   /* Required so this scrollable flex child actually shrinks (default min-height
@@ -6230,7 +6093,6 @@ select {
    the promote a continuous start, and composites a 14px label instead of the
    whole bubble on every frame for as long as the message sits in the queue. ── */
 .user-msg.queued {
-  position: relative;
   opacity: 0.5;
   border-style: dashed;
   border-color: var(--border);
@@ -6260,45 +6122,48 @@ select {
     border-color: transparent;
   }
 }
+/* The label and its cancel sit in the turn gap just above the bubble, out of
+   flow, so the queued look adds no height. In flow it did: the agent taking the
+   message collapsed it, shrank the bubble and dragged the pinned chat back down
+   right after the send had pushed it up. Now promotion only fades it. */
+.user-msg.queued,
+.user-msg.promoted {
+  position: relative;
+}
+.queued-tag {
+  position: absolute;
+  bottom: calc(100% + var(--space-2));
+  /* Right-anchored: the bubble hugs the column's right edge and can be
+     narrower than the tag ("hi"), which must grow into the free space. */
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+/* Buttons don't inherit ink; take the bubble's, so the dimmed queued bubble
+   dims its cancel with it. Hover turns it the error red (.queued-cancel:hover). */
+.queued-tag .queued-cancel {
+  color: inherit;
+}
 .queued-pill {
-  display: block;
   font-family: var(--sans);
   font-size: var(--fs-xs);
-  /* Explicit line-height so the collapse below starts at the pill's REAL height.
-     `max-height: 2em` overshot the rendered 13.9px by 22%, and that slack is
-     dead time: the label sits still through the first fifth of the beat, then
-     drops. Pinning both to the same number makes the collapse start moving on
-     frame one. Unitless (1.28 x 11px = 14px) so the label still fits when the
-     user enlarges text; the max-heights below use the same 1.28em. */
   line-height: 1.28;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  margin-bottom: var(--space-3);
   /* Resting value under the pulse, so the label still reads as secondary when
      the animation is suppressed for reduced motion. */
   opacity: 0.52;
-  /* Collapsed by height (not unmounted) on promotion, so the bubble shrinks
-     over the beat instead of losing a whole line in one frame. */
-  overflow: hidden;
-  max-height: 1.28em;
   animation: ggqueuedpulse 2s ease-in-out infinite;
   animation-play-state: var(--loop-play-state, running);
 }
-.user-msg.promoted .queued-pill {
-  animation: ggqueuedpillout 300ms var(--ease-out) forwards;
+.user-msg.promoted .queued-tag {
+  animation: ggqueuedtagout 300ms var(--ease-out) forwards;
 }
-@keyframes ggqueuedpillout {
-  from {
-    /* Midpoint of the pulse it takes over from, so the handoff is at worst half
-       an amplitude rather than a jump to full brightness. */
-    opacity: 0.52;
-    max-height: 1.28em;
-    margin-bottom: var(--space-3);
-  }
+@keyframes ggqueuedtagout {
   to {
     opacity: 0;
-    max-height: 0;
-    margin-bottom: 0;
   }
 }
 @keyframes ggqueuedpulse {
@@ -7228,7 +7093,7 @@ select {
 }
 
 /* With a terrain the lane opens taller by the ground's depth, and the
-   critters (and their hover card) stand on top of it. */
+   critters stand on top of it. */
 .critter-lane.with-terrain {
   --critter-ground: calc(var(--critter-px) * 8);
 }
@@ -7238,8 +7103,33 @@ select {
 .critter-lane.with-terrain > .critter-floor {
   bottom: var(--critter-ground);
 }
-.critter-lane.with-terrain > .critter-tooltip {
-  bottom: calc(var(--critter-size) + 14px + var(--critter-ground));
+
+/* A horizon behind the chat lane's ground (CritterBackdrop.tsx): it comes up
+   after the ground has risen and goes before the ground sinks. */
+.critter-backdrop {
+  position: absolute;
+  left: 0;
+  bottom: var(--critter-ground, 0px);
+  height: calc(var(--critter-px) * 42);
+  image-rendering: pixelated;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(10px);
+  transition:
+    opacity 260ms var(--ease-in),
+    transform 260ms var(--ease-in);
+}
+.critter-lane.open:not(.closing) > .critter-backdrop {
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity 420ms var(--ease-out) 240ms,
+    transform 420ms var(--ease-out) 240ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  .critter-backdrop {
+    transform: none;
+  }
 }
 
 /* Packed away (shut or .closing), with the exit timings; then out (.open)
@@ -7681,9 +7571,8 @@ select {
   background: rgba(0, 0, 0, 0.55);
   filter: blur(1px);
 }
+/* The tip-over itself is keyframed (critter-looks.ts: fall): one clean drop. */
 .critter.fallen .critter-body {
-  transform: rotate(-90deg) translateX(30%);
-  transition: transform 260ms var(--ease-pop);
   filter: saturate(0.4) brightness(0.8);
 }
 .critter.fading {
@@ -7904,7 +7793,6 @@ select {
   width: var(--critter-px);
   height: var(--critter-px);
   background: var(--critter-pc, #fff);
-  box-shadow: 0 0 3px var(--critter-pc, #fff);
 }
 .critter-pt-txt {
   font-family: var(--mono);
@@ -7921,8 +7809,7 @@ select {
 .critter-pt-puff {
   width: calc(var(--critter-px) * 2);
   height: calc(var(--critter-px) * 2);
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.35);
+  background: #f3efe6;
 }
 .critter-pt-steam {
   background: rgba(225, 232, 245, 0.5);
@@ -8191,54 +8078,403 @@ select {
   scale: -1 1;
 }
 
-/* Hover card with the stats the old in-chat feed showed. */
-.critter-tooltip {
+/* ── The critter stage (critter-stage.ts): looks, emotes, the name tag and
+   the things that come and go. Everything sits on the critters' pixel grid
+   (--critter-px per art pixel) in GG Royale's paper, ink and gold: fixed art
+   colours, the same in both themes. ── */
+
+/* A pixel shadow that stays on the ground: critter-looks.ts slides it down
+   and narrows it as the critter rises. */
+.critter > .critter-shadow {
+  left: calc(var(--critter-px) * 2.5);
+  right: calc(var(--critter-px) * 2.5);
+  bottom: calc(var(--critter-px) * -1.5);
+  height: calc(var(--critter-px) * 3);
+  border-radius: 0;
+  filter: none;
+  opacity: 0.42;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 13 3' shape-rendering='crispEdges'%3E%3Cpath fill='%231e0c1f' d='M2 0h9v1H2zM0 1h13v1H0zM2 2h9v1H2z'/%3E%3C/svg%3E")
+    center / 100% 100% no-repeat;
+  image-rendering: pixelated;
+  transform-origin: 50% 50%;
+}
+/* Breathing: one art pixel taller, in a step, each critter on its own beat. */
+.critter .critter-flip {
+  transform-origin: 50% 100%;
+  animation: critter-breathe 2.8s steps(1) infinite;
+  animation-delay: var(--critter-breath, 0s);
+  animation-play-state: var(--loop-play-state, running);
+}
+.critter.frame1 .critter-flip,
+.critter.leaving .critter-flip,
+.critter.summoning .critter-flip {
+  animation: none;
+}
+@keyframes critter-breathe {
+  0%,
+  58% {
+    scale: 1 1;
+  }
+  59%,
+  100% {
+    scale: 1 1.03;
+  }
+}
+/* The eyes-shut frames sit over the sprite and show for a blink. */
+.critter-flip img.critter-blink {
+  visibility: hidden;
+}
+.critter.blinking:not(.frame1) .critter-b0,
+.critter.blinking.frame1 .critter-b1 {
+  visibility: visible;
+}
+.critter-flip img.critter-hat {
+  inset: auto;
+  z-index: 1;
+}
+.critter-chute,
+.critter-balloon {
   position: absolute;
-  left: 0;
-  /* Just above the critters' heads (hovering bee included). */
-  bottom: calc(var(--critter-size) + 14px);
-  z-index: 3;
-  min-width: 190px;
-  max-width: 320px;
-  padding: var(--space-4) var(--space-5);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  border: 1px solid var(--border-strong);
-  box-shadow: var(--shadow-md);
-  font-family: var(--sans);
-  font-size: var(--fs-sm);
-  line-height: 1.5;
-  color: var(--text-muted);
+  image-rendering: pixelated;
   pointer-events: none;
 }
-.critter-tooltip[hidden] {
-  display: none;
+.critter-balloon {
+  transform-origin: 50% 100%;
 }
-.critter-tooltip-name {
+.critter.shiver .critter-react {
+  animation: critter-shiver 90ms steps(2) infinite;
+  animation-play-state: var(--loop-play-state, running);
+}
+@keyframes critter-shiver {
+  50% {
+    translate: 1px 0;
+  }
+}
+
+/* Emotes: a pixel icon on a slip of bubble paper, where text badges were. */
+.critter-badge.critter-emote {
+  --bp: var(--critter-px);
+  bottom: calc(100% + 4 * var(--bp));
+  padding: calc(2 * var(--bp)) calc(3 * var(--bp)) calc(3 * var(--bp));
+  background: #cedbf9;
+  border-radius: calc(2 * var(--bp));
+  box-shadow:
+    0 0 0 var(--bp) #1e0c1f,
+    inset 0 calc(-1 * var(--bp)) 0 #a9b8e4,
+    0 var(--bp) 0 var(--bp) #1e0c1f;
+}
+.critter-emote img,
+.critter-thing-emote {
+  display: block;
+  image-rendering: pixelated;
+}
+.critter-emote::after {
+  content: "";
+  position: absolute;
+  top: calc(100% + 2 * var(--bp));
+  left: 50%;
+  width: calc(3 * var(--bp));
+  height: calc(2 * var(--bp));
+  margin-left: calc(-1.5 * var(--bp));
+  background: #1e0c1f;
+  clip-path: polygon(0 0, 100% 0, 100% 50%, 66% 50%, 66% 100%, 33% 100%, 33% 50%, 0 50%);
+}
+
+/* The name tag (critter-tag.ts): a gold name tab on a slip of bubble paper
+   saying what the critter is doing. In the bubble's type and on its grid. */
+.critter-tag {
+  --bp: var(--critter-px);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 7 * var(--bp));
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  transform: translateX(calc(-50% + var(--critter-tag-shift, 0px)));
+  pointer-events: none;
+  font-family: "m5x7", monospace;
+  font-size: calc(16 * var(--bp));
+  font-weight: 400;
+  line-height: calc(11 * var(--bp));
+  -webkit-font-smoothing: none;
+  white-space: nowrap;
+  animation: critter-tag-in 140ms var(--ease-pop) both;
+}
+@keyframes critter-tag-in {
+  from {
+    opacity: 0;
+    scale: 0.6;
+  }
+}
+.critter-tag-name {
+  position: relative;
+  z-index: 1;
+  margin: 0 0 0 calc(4 * var(--bp));
+  padding: 0 calc(4 * var(--bp)) calc(2 * var(--bp));
+  text-transform: uppercase;
+  background: #e9af54;
+  color: #1e0c1f;
+  box-shadow:
+    0 0 0 var(--bp) #1e0c1f,
+    inset 0 var(--bp) 0 #f8d488,
+    inset 0 calc(-1 * var(--bp)) 0 #c47a3a;
+}
+.critter-tag-do {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  font-weight: 600;
-  color: var(--text);
+  gap: calc(4 * var(--bp));
+  max-width: calc(160 * var(--bp));
+  margin-top: var(--bp);
+  padding: var(--bp) calc(5 * var(--bp)) calc(4 * var(--bp));
+  background: #cedbf9;
+  color: #1e0c1f;
+  border-radius: calc(3 * var(--bp));
+  box-shadow:
+    0 0 0 var(--bp) #1e0c1f,
+    inset 0 calc(-2 * var(--bp)) 0 #a9b8e4,
+    0 calc(2 * var(--bp)) 0 var(--bp) #1e0c1f;
 }
-.critter-tooltip-swatch {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
+.critter-tag-icon {
+  flex: none;
+  image-rendering: pixelated;
 }
-.critter-tooltip-dim {
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-}
-.critter-tooltip-activity {
-  margin-top: var(--space-1);
+.critter-tag-text {
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--fs-xs);
-  color: var(--text-secondary);
 }
+/* Its tail stays over the critter where the tag is pushed in from the lane's edge. */
+.critter-tag::after {
+  content: "";
+  position: absolute;
+  top: calc(100% + 3 * var(--bp));
+  left: calc(50% - var(--critter-tag-shift, 0px));
+  width: calc(5 * var(--bp));
+  height: calc(3 * var(--bp));
+  margin-left: calc(-2.5 * var(--bp));
+  background: #1e0c1f;
+  clip-path: polygon(
+    0 0,
+    100% 0,
+    100% 33%,
+    80% 33%,
+    80% 66%,
+    60% 66%,
+    60% 100%,
+    40% 100%,
+    40% 66%,
+    20% 66%,
+    20% 33%,
+    0 33%
+  );
+}
+/* One thing over a critter's head at a time: the tag stands in for its bubble. */
+.critter.tagged {
+  z-index: 5;
+}
+.critter.tagged > .critter-bubble,
+.critter.tagged > .critter-badge {
+  display: none;
+}
+
+/* Things on the floor (critter-stage-kit.ts): the lane is a window, so they
+   leave through its sides (clipped there) or shrink away upward. */
+.critter-things {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  clip-path: inset(-900px 0 -60px 0);
+}
+.critter-things-front {
+  z-index: 3;
+}
+.critter-thing {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  z-index: 2;
+  pointer-events: none;
+  will-change: transform;
+}
+.critter-thing-art {
+  position: absolute;
+  inset: 0;
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+}
+.critter-thing.critter-clip {
+  overflow: hidden;
+}
+.critter-ufo,
+.critter-ken {
+  z-index: 4;
+}
+.critter-ufo .critter-thing-art {
+  animation: critter-ufo-hover 700ms steps(2) infinite alternate;
+  animation-play-state: var(--loop-play-state, running);
+}
+@keyframes critter-ufo-hover {
+  to {
+    translate: 0 -2px;
+  }
+}
+.critter-ufo-beam {
+  position: absolute;
+  left: 50%;
+  top: calc(100% - 6px);
+  z-index: -1;
+  width: 56px;
+  margin-left: -28px;
+  clip-path: polygon(36% 0, 64% 0, 100% 100%, 0 100%);
+  background: repeating-linear-gradient(
+    to bottom,
+    rgb(125 249 255 / 0.6) 0 4px,
+    rgb(125 249 255 / 0.34) 4px 8px
+  );
+  opacity: 0;
+  transition: opacity 140ms steps(2);
+}
+.critter-ufo-beam.on {
+  opacity: 1;
+}
+.critter-ufo-beam.scan {
+  animation: critter-ufo-scan 200ms steps(2) infinite;
+  animation-play-state: var(--loop-play-state, running);
+}
+@keyframes critter-ufo-scan {
+  50% {
+    opacity: 0.35;
+  }
+}
+.critter-monster,
+.critter-ball {
+  z-index: 3;
+}
+.critter-ken.charging .critter-thing-art {
+  animation: critter-shiver 70ms steps(2) infinite;
+  animation-play-state: var(--loop-play-state, running);
+}
+.critter-carried {
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  margin: -8px 0 0 -11px;
+  image-rendering: pixelated;
+}
+.critter-thing-emote {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 4px);
+  translate: -50% 0;
+  animation: critter-pop-plain 180ms var(--ease-pop) both;
+}
+.critter-soul {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  z-index: 4;
+  width: var(--critter-size);
+  height: var(--critter-size);
+  transform-origin: 50% 100%;
+  pointer-events: none;
+}
+.critter-soul img {
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+.critter-halo {
+  position: absolute;
+  left: 8px;
+  top: -8px;
+  box-sizing: border-box;
+  width: 20px;
+  height: 6px;
+  border: 2px solid #ffe14d;
+}
+.critter-rain {
+  position: absolute;
+  z-index: 3;
+  width: 2px;
+  height: 6px;
+  background: #7ec8ff;
+  pointer-events: none;
+}
+.critter-bolt {
+  position: absolute;
+  z-index: 4;
+  width: 8px;
+  margin-left: -4px;
+  background: #fff7a8;
+  clip-path: polygon(50% 0, 100% 0, 50% 45%, 100% 45%, 25% 100%, 50% 55%, 0 55%);
+  pointer-events: none;
+}
+.critter-star {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  z-index: 1;
+  width: 52px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, white);
+  pointer-events: none;
+}
+.critter-star::after {
+  content: "";
+  position: absolute;
+  right: -2px;
+  top: -2px;
+  width: 6px;
+  height: 6px;
+  background: #fff7a8;
+}
+.critter-twinkle {
+  position: absolute;
+  z-index: 4;
+  width: 14px;
+  height: 14px;
+  margin: 0 0 -7px -7px;
+  background: white;
+  clip-path: polygon(50% 0, 60% 40%, 100% 50%, 60% 60%, 50% 100%, 40% 60%, 0 50%, 40% 40%);
+  pointer-events: none;
+}
+.critter-pow {
+  position: absolute;
+  z-index: 5;
+  background: radial-gradient(white 0 34%, #ffe14d 34%);
+  clip-path: polygon(
+    50% 0%,
+    59% 28%,
+    85% 15%,
+    72% 41%,
+    100% 50%,
+    72% 59%,
+    85% 85%,
+    59% 72%,
+    50% 100%,
+    41% 72%,
+    15% 85%,
+    28% 59%,
+    0% 50%,
+    28% 41%,
+    15% 15%,
+    41% 28%
+  );
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .critter .critter-flip,
+  .critter.shiver .critter-react,
+  .critter-tag,
+  .critter-ufo .critter-thing-art,
+  .critter-ufo-beam.scan,
+  .critter-ken.charging .critter-thing-art,
+  .critter-thing-emote {
+    animation: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .critter-lane {
     transition: none;
@@ -8246,10 +8482,6 @@ select {
   .critter-bubble,
   .critter-badge {
     animation: none;
-  }
-  .critter.fallen .critter-body {
-    transform: none;
-    transition: none;
   }
   .critter-react {
     transition: none;
@@ -11212,18 +11444,8 @@ select {
      jumping the moment a message queues. */
   animation: ggqueuedin var(--dur-strip-in) var(--ease-out);
 }
-/* Chat queue insertion joins App's layout transaction. Its final space lands
-   once; an independent max-height entrance would fight transcript following.
-   Other strips sharing the generic queued styles keep their existing motion. */
-/* A fixed composer corner keeps expanded-list controls inside the pointer clip. */
-.chat-queue {
-  border-radius: var(--radius-input);
-}
-.chat-queue:not(.leaving) {
-  animation: fade-in var(--dur-row) var(--ease-out);
-}
 /* Exit: reverse, and collapse the box so the composer glides back down instead
-   of snapping. Held on screen for EXIT_MS by QueuedBar before it unmounts. */
+   of snapping. Held on screen for EXIT_MS by the strip before it unmounts. */
 .queued-bar.leaving {
   animation: ggqueuedout var(--dur-strip-out) var(--ease-in) forwards;
   pointer-events: none;
@@ -11283,11 +11505,6 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.queued-bar-when {
-  flex: 0 0 auto;
-  font-size: var(--fs-xs);
-  opacity: 0.7;
-}
 .queued-toggle,
 .queued-cancel {
   flex: 0 0 auto;
@@ -11315,51 +11532,18 @@ select {
 .queued-cancel:hover {
   color: var(--error);
 }
-.queued-list-shell {
-  display: flow-root;
-  overflow: hidden;
-}
-.queued-list {
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  animation: fade-in var(--dur-row) var(--ease-out) both;
-}
-.queued-list.leaving {
-  animation: queued-list-out var(--dur-row) var(--ease-in) both;
-}
-@keyframes queued-list-out {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
-  }
-}
-/* The measured shell owns disclosure motion; rows do not compete with it. */
-.queued-list-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  min-width: 0;
-}
 /* Respect reduced-motion: keep the state changes, drop the movement. */
 @media (prefers-reduced-motion: reduce) {
   .queued-bar,
   .queued-bar.leaving,
-  .queued-list,
-  .queued-list.leaving,
-  .queued-list-item,
   .user-msg.promoted,
-  .queued-pill {
+  .queued-pill,
+  .queued-tag {
     animation: none;
   }
-  /* No animation means no `forwards` fill, so collapse the pill outright —
+  /* No animation means no `forwards` fill, so hide the tag outright —
      otherwise a promoted bubble keeps its "queued" label forever. */
-  .user-msg.promoted .queued-pill {
+  .user-msg.promoted .queued-tag {
     animation: none;
     display: none;
   }
@@ -11368,21 +11552,6 @@ select {
     display: none;
   }
 }
-.queued-index {
-  flex: 0 0 auto;
-  font-family: var(--sans);
-  font-size: var(--fs-xs);
-  width: 12px;
-}
-.queued-list-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-family: var(--sans);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 /* ── ask_user question band ──
    The agent's question, inside the reply it belongs to. Deliberately built from
    the app's existing vocabulary rather than a look of its own: every option is a
@@ -11463,8 +11632,10 @@ select {
 /* "Agent continued with its best guess": a note about the run, not part of the
    question, so it is smaller and ruled off from it. `width: 0; min-width: 100%`
    keeps it out of the band's fit-content sizing — it wraps to the width the
-   question and options set instead of stretching the card. */
-.ask-deferred-note {
+   question and options set instead of stretching the card. "Ken left this one
+   for you" is the same kind of note. */
+.ask-deferred-note,
+.ask-ken-note {
   width: 0;
   min-width: 100%;
   margin: 0 0 var(--space-5);

@@ -171,10 +171,14 @@ export function DeckMenu({
   onOpenTasks,
   showChecklist,
   onOpenChecklist,
+  onOpenLivePreview,
+  livePreviewRunning = false,
   hasHealth = false,
   onOpenHealth,
   onOpenRadio,
   onOpenGoalSettings,
+  onAddFolder,
+  onRemoveFolder,
   canExport = false,
   exporting = false,
   onExport,
@@ -195,11 +199,18 @@ export function DeckMenu({
   onOpenTasks: () => void;
   showChecklist: boolean;
   onOpenChecklist: () => void;
+  /** Code windows: open the project's running app in the browser, with the chat on it. */
+  onOpenLivePreview?: () => void;
+  livePreviewRunning?: boolean;
   /** A Project Health score exists for this project. */
   hasHealth?: boolean;
   onOpenHealth?: () => void;
   onOpenRadio: () => void;
   onOpenGoalSettings?: () => void;
+  /** Code and Chat windows: add another folder GG can work in. */
+  onAddFolder?: () => void;
+  /** Set only once a folder has been added: pick one to drop. */
+  onRemoveFolder?: () => void;
   /** The chat has something to save. */
   canExport?: boolean;
   exporting?: boolean;
@@ -254,6 +265,22 @@ export function DeckMenu({
           Checklist
         </button>
       )}
+      {code && onOpenLivePreview && (
+        <button
+          type="button"
+          className="key"
+          title="Open your running app in the browser, with GG Coder's chat on it"
+          aria-label={livePreviewRunning ? "Live preview, running" : "Live preview"}
+          onClick={onOpenLivePreview}
+        >
+          Live preview
+          <span
+            className="led"
+            data-state={livePreviewRunning ? "on" : undefined}
+            aria-hidden="true"
+          />
+        </button>
+      )}
       {code && hasHealth && onOpenHealth && (
         <button
           type="button"
@@ -262,6 +289,26 @@ export function DeckMenu({
           onClick={onOpenHealth}
         >
           Project Health
+        </button>
+      )}
+      {onAddFolder && !isGoal && (workspaceMode === "code" || workspaceMode === "chat") && (
+        <button
+          type="button"
+          className="key"
+          title="Add another folder GG can work in"
+          onClick={onAddFolder}
+        >
+          Add folder
+        </button>
+      )}
+      {onRemoveFolder && !isGoal && (workspaceMode === "code" || workspaceMode === "chat") && (
+        <button
+          type="button"
+          className="key"
+          title="Remove a folder you added"
+          onClick={onRemoveFolder}
+        >
+          Remove folder
         </button>
       )}
       {!isGoal && (

@@ -228,7 +228,7 @@ describe("buildSystemPrompt", () => {
 
   it.each([
     [[], "6d6afd179a5aa52c7b06f957c2eb580eed552e35ad7205f97a965a67543c4ab3"],
-    [["ask_user"], "e073f364f6534f17ffa443772b6a6cd0471ccd78ff8efb69f0ea3dc625d36a3c"],
+    [["ask_user"], "abec6221b1c924545c0bd219008c9f68fc46f718b6a240359120911f61f3612a"],
   ] as const)(
     "preserves the message-aware takeaway policy with tools %j",
     async (toolNames, hash) => {
@@ -294,6 +294,11 @@ describe("buildSystemPrompt", () => {
     );
     // Optional follow-up offers are questions too, so they also go on the card.
     expect(prompt).toContain('a blocker or an optional "want me to also…?"');
+    // A bare card left the user choosing without the answer or context; a short
+    // lead-in fixes that without turning every question into a full report.
+    expect(prompt).toContain(
+      "Before the card, write just enough to choose: the direct answer or what you found, in one to three plain sentences, not a full report.",
+    );
     expect(prompt).toContain("No question? Just end.");
     expect(prompt).not.toContain("is the last line");
     expect(prompt.match(/`> \*\*/g) ?? []).toHaveLength(0);
@@ -417,6 +422,8 @@ describe("buildSystemPrompt", () => {
       "Leave changes you didn't make alone",
       "Find facts yourself",
       "Ask only about unclear requirements, real tradeoffs, secrets/access, cost, or anything destructive",
+      // #152: agents paused mid-task to ask "fix it or ignore it?".
+      "Fix broken things the task touches without asking; mention unrelated ones in the final reply",
       "Fix the root cause minimally",
       "Precedence: user > nearest project instructions > skills > this prompt",
       "Research only what's unresolved: local/installed source first",
@@ -628,7 +635,8 @@ describe("buildSystemPrompt", () => {
     // Plan mode +300 for the 2026-11 refresh: research callers/tests, ask when
     // a requirement is unclear, keep the plan out of chat, verification commands.
     // +~200 for the new-skills line, as for normal above.
-    expect(measurements.planMode.characters).toBeLessThan(4_100);
+    // +~100 for "fix broken things without asking" (#152: needless fix-or-ignore asks).
+    expect(measurements.planMode.characters).toBeLessThan(4_200);
     // +~120 for the parallel-calls fact shown with bash (agent-race, 2026-11-03).
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(4_400);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);

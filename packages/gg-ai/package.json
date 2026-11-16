@@ -1,6 +1,6 @@
 {
   "name": "@abukhaled/gg-ai",
-  "version": "5.97.0",
+  "version": "5.103.0",
   "type": "module",
   "description": "One streaming API for 12 LLM providers and local models: Anthropic, OpenAI, Gemini, xAI, Moonshot, GLM, DeepSeek, OpenRouter and more. Tool calls, reasoning, embeddings and reranking.",
   "author": "Ken Kai",
@@ -49,14 +49,13 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^1.4.0",
-    "@bokuweb/zstd-wasm": "^0.0.27",
-    "openai": "^7.50.0",
+    "@anthropic-ai/sdk": "^1.7.0",
+    "openai": "^7.54.0",
     "undici": "7.25.0",
-    "zod": "^4.4.3"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/node": "^25.6.0",
+    "@types/node": "^26.6.6",
     "typescript": "^6.0.3",
     "vitest": "^4.1.4"
   },

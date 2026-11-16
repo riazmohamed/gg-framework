@@ -75,6 +75,8 @@ const VALID_PROVIDERS = new Set<Provider>([
   "deepseek",
   "openrouter",
   "huggingface",
+  "opencode",
+  "opencode-go",
   "sakana",
   "xai",
 ]);

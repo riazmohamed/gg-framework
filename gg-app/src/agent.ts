@@ -848,6 +848,25 @@ export async function runShellCommand(
   }
 }
 
+/**
+ * Add another folder GG can work in ("Add folder" in the More panel). Throws
+ * with a user-facing message when the folder can't be added.
+ */
+export async function addWorkspaceFolder(
+  path: string,
+): Promise<{ root: string; additionalRoots: string[] }> {
+  await waitForReady();
+  return invoke<{ root: string; additionalRoots: string[] }>("agent_add_dir", { path });
+}
+
+/** Drop a folder added with "Add folder". Throws with a user-facing message. */
+export async function removeWorkspaceFolder(
+  path: string,
+): Promise<{ root: string; additionalRoots: string[] }> {
+  await waitForReady();
+  return invoke<{ root: string; additionalRoots: string[] }>("agent_remove_dir", { path });
+}
+
 /** Stop a running `!cmd` and everything it started. */
 export async function cancelShellCommand(id: string): Promise<void> {
   try {
@@ -1049,6 +1068,11 @@ export interface PromptMeta {
   /** Plan feedback from the review box: the sidecar revises the plan back in
    *  read-only plan mode instead of with full write access. */
   planRevision?: boolean;
+  /** Sent from the live preview chat: the page and the element picked on it. */
+  livePreview?: {
+    url: string;
+    element: { selector: string; html: string; tag: string; text: string } | null;
+  };
 }
 
 export async function sendPrompt(
@@ -1660,16 +1684,6 @@ export async function prewarmCache(): Promise<void> {
   }
 }
 
-/** Cycle the reasoning/thinking level to the next supported value (or off). */
-export async function cycleThinking(): Promise<ThinkingState | null> {
-  try {
-    return await invoke<ThinkingState>("agent_cycle_thinking");
-  } catch (e) {
-    await logError(`agent_cycle_thinking failed: ${String(e)}`);
-    return null;
-  }
-}
-
 /**
  * Set the reasoning level directly (null turns thinking off). Throws with the
  * sidecar's message when the run is busy or the model doesn't support it.
@@ -1817,37 +1831,6 @@ export async function getSettings(): Promise<AppSettings | null> {
  */
 export async function saveSettings(projectsRoot: string): Promise<void> {
   await invoke("app_settings_save", { projectsRoot });
-}
-
-export interface InstalledPlugin {
-  schemaVersion: 1;
-  id: string;
-  name: string;
-  version: string;
-  entry: string;
-  description?: string;
-  commands?: string[];
-  installPath: string;
-}
-
-export async function listPlugins(): Promise<InstalledPlugin[]> {
-  await waitForReady();
-  const result = await invoke<{ plugins: InstalledPlugin[] }>("agent_plugins");
-  return result.plugins;
-}
-
-export async function installPluginBundle(
-  bundlePath: string,
-): Promise<{ plugin: InstalledPlugin; restartRequired: boolean }> {
-  await waitForReady();
-  return invoke("agent_install_plugin", { bundlePath });
-}
-
-export async function removePluginBundle(
-  pluginId: string,
-): Promise<{ removed: string; restartRequired: boolean }> {
-  await waitForReady();
-  return invoke("agent_remove_plugin", { pluginId });
 }
 
 export interface PermissionsStatus {
@@ -2484,6 +2467,35 @@ export async function startServe(): Promise<void> {
 export async function stopServe(): Promise<void> {
   await waitForReady();
   await invoke("agent_serve_stop");
+}
+
+/** This window's live preview: the running web app in the browser, with the chat on it. */
+export interface LivePreviewStatus {
+  running: boolean;
+  /** The link to open in the browser. */
+  url: string | null;
+  /** The dev server it shows. */
+  target: string | null;
+  /** No dev server was found: ask the user for its address. */
+  needsUrl?: boolean;
+  error?: string;
+}
+
+/** Start (or reuse) the live preview. `url` is a dev server address the user typed. */
+export async function startLivePreview(url?: string): Promise<LivePreviewStatus> {
+  await waitForReady();
+  return invoke<LivePreviewStatus>("live_preview_start", { url: url ?? null });
+}
+
+/** Stop the live preview and close its session. */
+export async function stopLivePreview(): Promise<LivePreviewStatus> {
+  await waitForReady();
+  return invoke<LivePreviewStatus>("live_preview_stop");
+}
+
+export async function getLivePreviewStatus(): Promise<LivePreviewStatus> {
+  await waitForReady();
+  return invoke<LivePreviewStatus>("live_preview_status");
 }
 
 // ── Agent Steroids (local code corpus) ────────────────────────

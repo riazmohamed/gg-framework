@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseMcpAddCommand, parseMcpAddTokens } from "./parse-add-command.js";
+import { parseMcpAddCommand } from "./parse-add-command.js";
 
 describe("parseMcpAddCommand", () => {
   it("parses an http server (Notion docs example)", () => {
@@ -99,45 +99,104 @@ describe("parseMcpAddCommand", () => {
   });
 });
 
-describe("parseMcpAddTokens", () => {
-  it("keeps a shell-quoted bearer header intact (Refero docs example)", () => {
-    // The shell delivers `--header "Authorization: Bearer tok"` as ONE argv
-    // token; joining argv back into a string used to split it and save "".
-    const r = parseMcpAddTokens([
-      "--transport",
-      "http",
-      "refero",
-      "https://api.refero.design/mcp",
-      "--header",
-      "Authorization: Bearer mcp-tok",
-    ]);
-    expect(r).toEqual({
-      ok: true,
-      value: {
-        config: {
-          name: "refero",
-          url: "https://api.refero.design/mcp",
-          transport: "http",
-          headers: { Authorization: "Bearer mcp-tok" },
-        },
+describe("pasted Claude Code lines", () => {
+  it("treats `add <name> <command> [args…]` without `--` as stdio (Playwright README)", () => {
+    const r = parseMcpAddCommand("claude mcp add playwright npx @playwright/mcp@latest");
+    expect(r.ok && r.value.config).toEqual({
+      name: "playwright",
+      command: "npx",
+      args: ["@playwright/mcp@latest"],
+    });
+    // The server's own flags pass through untouched.
+    const flags = parseMcpAddCommand("claude mcp add -s user ctx npx -y @upstash/context7-mcp");
+    expect(flags.ok && flags.value).toEqual({
+      config: { name: "ctx", command: "npx", args: ["-y", "@upstash/context7-mcp"] },
+      scope: "global",
+    });
+    // A URL without --transport is still a remote server.
+    const url = parseMcpAddCommand("claude mcp add notion https://mcp.notion.com/mcp");
+    expect(url.ok && url.value.config.url).toBe("https://mcp.notion.com/mcp");
+  });
+
+  it("drops a pasted $ prompt and joins \\-continued lines", () => {
+    const r = parseMcpAddCommand(
+      "$ claude mcp add ctx \\\n  -- npx -y \\\r\n  @upstash/context7-mcp",
+    );
+    expect(r.ok && r.value.config).toEqual({
+      name: "ctx",
+      command: "npx",
+      args: ["-y", "@upstash/context7-mcp"],
+    });
+  });
+
+  it("parses add-json for http and stdio servers", () => {
+    const http = parseMcpAddCommand(
+      `claude mcp add-json weather '{"type":"http","url":"https://w.dev/mcp","headers":{"Authorization":"Bearer t"}}' -s user`,
+    );
+    expect(http.ok && http.value).toEqual({
+      config: {
+        name: "weather",
+        url: "https://w.dev/mcp",
+        transport: "http",
+        headers: { Authorization: "Bearer t" },
       },
+      scope: "global",
+    });
+    const stdio = parseMcpAddCommand(
+      `claude mcp add-json gh '{"command":"npx","args":["-y","@modelcontextprotocol/server-github"],"env":{"TOKEN":"x"}}'`,
+    );
+    expect(stdio.ok && stdio.value.config).toEqual({
+      name: "gh",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-github"],
+      env: { TOKEN: "x" },
     });
   });
 
-  it("preserves spaces in --env values from argv", () => {
-    const r = parseMcpAddTokens(["api", "--env", "GREETING=hello world", "--", "node", "x.js"]);
-    expect(r.ok && r.value.config.env).toEqual({ GREETING: "hello world" });
-  });
-
-  it("strips a pasted claude mcp add prefix arriving as argv tokens", () => {
-    const r = parseMcpAddTokens(["claude", "mcp", "add", "--transport", "http", "n", "https://x"]);
-    expect(r).toEqual({
-      ok: true,
-      value: { config: { name: "n", url: "https://x", transport: "http" } },
+  it("rejects bad add-json input with a clear reason", () => {
+    expect(parseMcpAddCommand(`claude mcp add-json w '{nope'`)).toMatchObject({ ok: false });
+    expect(parseMcpAddCommand(`claude mcp add-json w '{"args":[]}'`)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('"command"'),
+    });
+    expect(parseMcpAddCommand(`claude mcp add-json w {"a": 1}`)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("single quotes"),
     });
   });
 
-  it("errors on empty token list", () => {
-    expect(parseMcpAddTokens([]).ok).toBe(false);
+  it("keeps OAuth client options, taking the secret from MCP_CLIENT_SECRET", () => {
+    const r = parseMcpAddCommand(
+      "MCP_CLIENT_SECRET=shh claude mcp add --client-id cid --client-secret --callback-port 8080 --transport http s https://s.dev/mcp",
+    );
+    expect(r.ok && r.value).toEqual({
+      config: {
+        name: "s",
+        url: "https://s.dev/mcp",
+        transport: "http",
+        oauth: { clientId: "cid", callbackPort: 8080 },
+      },
+      clientSecret: "shh",
+    });
+    expect(
+      parseMcpAddCommand("claude mcp add --client-id c --client-secret -t http s https://s.dev"),
+    ).toMatchObject({ ok: false, error: expect.stringContaining("MCP_CLIENT_SECRET=") });
+    expect(
+      parseMcpAddCommand("claude mcp add --callback-port 99999 -t http s https://s.dev"),
+    ).toMatchObject({ ok: false });
+  });
+});
+
+describe("ogcoder branch", () => {
+  it("keeps a quoted bearer header intact (Refero docs example)", () => {
+    const r = parseMcpAddCommand(
+      'ogcoder mcp add --transport http refero https://api.refero.design/mcp --header "Authorization: Bearer mcp-tok"',
+    );
+    expect(r.ok && r.value.config).toEqual({
+      name: "refero",
+      url: "https://api.refero.design/mcp",
+      transport: "http",
+      headers: { Authorization: "Bearer mcp-tok" },
+    });
   });
 });

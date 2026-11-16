@@ -54,7 +54,12 @@ import { loadWorkspaceCustomCommands, type CustomCommand } from "./custom-comman
 import { expandPromptCommand } from "./prompt-command-expansion.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage } from "./auth-storage.js";
-import { dualAuthProvider } from "@abukhaled/gg-core";
+import { claudeCodeConfigDir, dualAuthProvider } from "@abukhaled/gg-core";
+import {
+  claudeCodeTranscriptExists,
+  holdClaudeCodeTranscript,
+  pruneClaudeCodeTranscriptsOnce,
+} from "./claude-code/transcripts.js";
 import {
   runSideWebSearch,
   runSideWebSearchViaClaudeCode,
@@ -64,6 +69,7 @@ import {
 } from "../tools/side-web-search.js";
 import {
   SessionManager,
+  processIsAlive,
   type MessageEntry,
   type BranchInfo,
   type CustomEntry,
@@ -295,6 +301,16 @@ export class PaidModelConfirmationError extends Error {
 /** A chat attachment (image / video / other file) prepared for the model. The
  *  raw base64 `data` rides native blocks; `path` (when persisted to disk) lets
  *  the agent's tools open the file directly. */
+/** What applying one MCP config change did in a session. */
+export interface McpServerChange {
+  name: string;
+  removed: boolean;
+  connected: boolean;
+  toolCount: number;
+  error?: string;
+  requiresAuth?: boolean;
+}
+
 export interface SessionAttachment {
   kind: "image" | "video" | "file";
   mediaType: string;
@@ -909,6 +925,8 @@ export class AgentSession {
    */
   /** Commands the user ran themselves, held until their next message. */
   private pendingUserShell: Array<{ runId: string; text: string }> = [];
+  /** MCP servers the user added or removed mid-session, not yet told to the model. */
+  private pendingMcpNotices: string[] = [];
 
   private persistedTranscriptCount(): number {
     return this.messages.slice(0, this.lastPersistedIndex).filter((m) => m.role !== "system")
@@ -1243,6 +1261,7 @@ export class AgentSession {
             message: error instanceof Error ? error.message : String(error),
           });
         });
+      void pruneClaudeCodeTranscriptsOnce(claudeCodeConfigDir());
     }
     // GG Coder owns its command registry. Other agents start with an isolated
     // empty registry and can register their own commands in their own file.
@@ -1375,7 +1394,9 @@ export class AgentSession {
       // capabilities that genuinely exist — a wrong answer, not a slow one.
       await this.seedMcpCatalogFromCache(servers);
 
-      const connected = await mcpManager.connectAll(servers);
+      const results = await mcpManager.connectAllDetailed(servers);
+      this.mcp.recordServers(servers, results);
+      const connected = results.flatMap((r) => r.tools);
       // Defense-in-depth: even from a whitelisted server, only push tools that
       // pass the allow-list (no-op when there's no allow-list).
       const mcpTools = this.opts.allowedTools
@@ -1403,6 +1424,89 @@ export class AgentSession {
         `MCP initialization failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * The user added, changed or removed one MCP server mid-session: connect,
+   * reconnect or drop just that server, without a restart. `config` is its
+   * current effective config, or undefined when it is gone (or not allowed).
+   *
+   * Append-only for the prompt cache: new tools go into the tool_search
+   * catalog (or are appended when deferral is off), and the model learns about
+   * the change from a hidden note with the next message, never from a
+   * re-rendered system prompt. Returns null when nothing changed here.
+   */
+  async applyMcpServerChange(
+    name: string,
+    config: MCPServerConfig | undefined,
+  ): Promise<McpServerChange | null> {
+    const manager = this.mcp.manager;
+    if (!manager) return null;
+    const whitelist = this.opts.allowedMcpServers;
+    if (this.opts.allowedTools && !whitelist?.includes(name)) return null;
+    const wanted = config && config.enabled !== false ? config : undefined;
+    const previous = this.mcp.serverState(name);
+    // Same config still connected: nothing to do. Same config that failed
+    // (e.g. before an OAuth sign-in) is retried.
+    if (wanted && previous?.ok && previous.config === JSON.stringify(wanted)) return null;
+    if (!wanted && !previous) return null;
+
+    if (previous) {
+      await manager.disconnect(name);
+      this.mcp.removeServer(name);
+    }
+    if (!wanted) {
+      this.pendingMcpNotices.push(
+        `- MCP server "${name}" was removed by the user. Its mcp__${name}__* tools no longer work; don't call them.`,
+      );
+      log("INFO", "mcp", `Removed MCP server "${name}" mid-session`);
+      return { name, removed: true, connected: false, toolCount: 0 };
+    }
+
+    const [result] = await manager.connectAllDetailed([wanted]);
+    const ok = result?.ok ?? false;
+    this.mcp.recordServers([wanted], result ? [result] : []);
+    const tools = (result?.tools ?? []).filter(
+      (t) => !this.opts.allowedTools || this.isToolAllowed(t.name),
+    );
+    this.addMcpTools(tools);
+    if (ok) {
+      const deferred = !this.opts.allowedTools && this.settingsManager.get("deferredMcpTools");
+      const names = tools.map((t) => t.name);
+      const shown = names.slice(0, 20).join(", ") + (names.length > 20 ? ", …" : "");
+      this.pendingMcpNotices.push(
+        `- The user connected MCP server "${name}" with ${tools.length} tool${tools.length === 1 ? "" : "s"}` +
+          (names.length > 0 ? `: ${shown}.` : ".") +
+          (deferred
+            ? " Load them with tool_search (e.g. by capability or the server name) when they help."
+            : " They are in your tool list now."),
+      );
+    }
+    log("INFO", "mcp", `Applied MCP server "${name}" mid-session`, {
+      ok: String(ok),
+      tools: String(tools.length),
+    });
+    return {
+      name,
+      removed: false,
+      connected: ok,
+      toolCount: tools.length,
+      ...(result?.error ? { error: result.error } : {}),
+      ...(result?.requiresAuth ? { requiresAuth: true } : {}),
+    };
+  }
+
+  private takeMcpNotice(): Message | null {
+    if (this.pendingMcpNotices.length === 0) return null;
+    const lines = this.pendingMcpNotices.splice(0);
+    return {
+      role: "user",
+      provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+      content:
+        "MCP update. The user changed MCP servers during this session:\n" +
+        lines.join("\n") +
+        "\nTrust this over anything earlier that disagrees. Do not restate this note; just proceed.",
+    };
   }
 
   /** Persist `cwd` as a trusted project for project-scope MCP. Called by the
@@ -1591,7 +1695,19 @@ export class AgentSession {
     options: PromptRunOptions,
   ): Promise<void> {
     let loopMessages = await this.prepareDynamicContext();
-    const resume = claudeCodeResumeId(this.claudeCodeSession, loopMessages);
+    let resume = claudeCodeResumeId(this.claudeCodeSession, loopMessages);
+    // Claude Code fails a resume whose transcript is gone (retention pass, or
+    // removed by hand); our history can seed a fresh session instead.
+    if (
+      resume &&
+      !(await claudeCodeTranscriptExists(
+        process.env.CLAUDE_CONFIG_DIR ?? claudeCodeConfigDir(),
+        resume,
+      ))
+    ) {
+      log("INFO", "claude-code", "Transcript missing; seeding a fresh session from history");
+      resume = undefined;
+    }
     // A fresh Claude Code session gets our history as text; summarize it first
     // when it would not fit.
     if (
@@ -1657,6 +1773,34 @@ export class AgentSession {
             provider: this.provider,
             model: this.model,
             policy: CLAUDE_CODE_CACHE_TTL,
+          });
+        }
+        // Same line names as the public-API route, which logs them from the agent loop.
+        if (event.type === "turn_end") {
+          const cacheRead = event.usage.cacheRead ?? 0;
+          const cacheWrite = event.usage.cacheWrite ?? 0;
+          const promptTokens = event.usage.inputTokens + cacheRead + cacheWrite;
+          log("INFO", "stream", "cache_health", {
+            promptTokens,
+            cacheRead,
+            cacheWrite,
+            ...(promptTokens > 0
+              ? { ratio: Math.round((cacheRead / promptTokens) * 100) / 100 }
+              : {}),
+            ...(event.timing.ttftMs !== undefined ? { ttftMs: event.timing.ttftMs } : {}),
+            providerDurationMs: event.timing.providerDurationMs,
+            outputTokens: event.usage.outputTokens,
+            provider: this.provider,
+            model: this.model,
+            transport: "claude_code",
+          });
+        } else if (event.type === "retry") {
+          log("INFO", "stream", "retry", {
+            reason: event.reason,
+            attempt: event.attempt,
+            maxAttempts: event.maxAttempts,
+            delayMs: event.delayMs,
+            transport: "claude_code",
           });
         }
         this.eventBus.forwardAgentEvent(event);
@@ -1737,6 +1881,7 @@ export class AgentSession {
     const history = this.messages.filter((m) => m.role !== "system");
     const state = { sessionId, messageCount: history.length, anchor: history.at(-1) };
     this.claudeCodeSession = state;
+    this.holdClaudeCodeTranscript();
     if (!this.sessionPath) return;
     await this.sessionManager.appendEntry(this.sessionPath, {
       type: "custom",
@@ -1761,6 +1906,23 @@ export class AgentSession {
     const [tool] = this.mcp.promote([name]);
     if (tool) this.tools.push(tool);
     return tool;
+  }
+
+  // A restored conversation still calls the on-demand tools it used; Claude
+  // Code refuses any name missing from the list this process gives it.
+  private reloadUsedTools(messages: readonly Message[]): void {
+    if (this.deferredBuiltinToolNames.length === 0) return;
+    for (const message of messages) {
+      if (message.role === "assistant" && Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (part.type === "tool_call") this.promoteDeferredBuiltin(part.name);
+        }
+      } else if (message.role === "tool") {
+        for (const result of message.content) {
+          for (const name of result.loadedTools ?? []) this.promoteDeferredBuiltin(name);
+        }
+      }
+    }
   }
 
   private wrapToPromote(
@@ -2205,6 +2367,7 @@ export class AgentSession {
     if (planNotice) {
       log("INFO", "session", "Injecting plan state update instead of rebuilding the prompt");
     }
+    const mcpNotice = this.takeMcpNotice();
     if (environmentDelta) {
       // The model has now been told; only a further change re-triggers this.
       this.renderedEnvironment = this.promptEnvironment();
@@ -2280,15 +2443,17 @@ export class AgentSession {
       return [
         ...(environmentDelta ? [environmentDelta] : []),
         ...(planNotice ? [planNotice] : []),
+        ...(mcpNotice ? [mcpNotice] : []),
         ...(userShell ? [userShell] : []),
         ...steeringMessages,
         ...(notificationMessage ? [notificationMessage] : []),
       ];
     }
-    if (environmentDelta || planNotice || notificationMessage) {
+    if (environmentDelta || planNotice || mcpNotice || notificationMessage) {
       return [
         ...(environmentDelta ? [environmentDelta] : []),
         ...(planNotice ? [planNotice] : []),
+        ...(mcpNotice ? [mcpNotice] : []),
         ...(notificationMessage ? [notificationMessage] : []),
       ];
     }
@@ -2920,7 +3085,7 @@ export class AgentSession {
             if (shouldPruneToolResults(activeTokens, policy.targetTokens)) {
               const cacheCold = this.getCacheExpiryStatus()?.expired ?? false;
               const pruneResult = pruneStaleToolResults(messages, {
-                minimumTokens: pruneMinimumTokens(activeTokens, cacheCold),
+                minimumTokens: pruneMinimumTokens(activeTokens, cacheCold, policy.targetTokens),
               });
               if (pruneResult.pruned) {
                 this.cacheDiagnostics.noteEdit("tool_prune", pruneResult.freedTokens);
@@ -3284,11 +3449,13 @@ export class AgentSession {
           const servers = await getAllMcpServers(this.provider, apiKey, this.cwd, {
             allowProjectScope: this.settingsManager.isProjectTrusted(this.cwd),
           });
-          const mcpTools = await mcpManager.connectAll(servers);
+          const results = await mcpManager.connectAllDetailed(servers);
+          const mcpTools = results.flatMap((r) => r.tools);
           // Drop stale MCP tools from both the live set and deferred catalog before
           // re-adding. Some tools may already have been promoted out of the catalog.
           this.tools = this.tools.filter((t) => !t.name.startsWith("mcp__"));
           this.mcp.clearMcpTools();
+          this.mcp.recordServers(servers, results);
           this.addMcpTools(mcpTools);
         } catch (err) {
           log(
@@ -3604,6 +3771,18 @@ export class AgentSession {
     })();
   }
 
+  // A caller's token was captured at run start; the loop may have rotated it since.
+  private async withLiveAccessToken<T extends { accessToken: string }>(captured: T): Promise<T> {
+    try {
+      const live = await this.authStorage.resolveCredentials(this.provider, {
+        storageKeys: this.currentAuthStorageKeys(),
+      });
+      return { ...captured, accessToken: live.accessToken };
+    } catch {
+      return captured;
+    }
+  }
+
   async compact(
     existingCredentials?: {
       accessToken: string;
@@ -3622,13 +3801,13 @@ export class AgentSession {
         ? AbortSignal.any([this.opts.signal, abortSignal])
         : (abortSignal ?? this.opts.signal);
     const claudeCode = existingCredentials ? null : await this.claudeCodeProcess();
-    const creds =
-      existingCredentials ??
-      (claudeCode
+    const creds = existingCredentials
+      ? await this.withLiveAccessToken(existingCredentials)
+      : claudeCode
         ? { accessToken: "" }
         : await this.authStorage.resolveCredentials(this.provider, {
             storageKeys: this.currentAuthStorageKeys(),
-          }));
+          });
     const contextWindow = getContextWindow(this.model, {
       provider: this.provider,
       accountId: creds.accountId,
@@ -3661,8 +3840,12 @@ export class AgentSession {
         focus,
         ...(claudeCode
           ? {
-              complete: (req: { model: string; messages: Message[]; signal: AbortSignal }) =>
-                claudeCodeComplete({ ...claudeCode, ...req }),
+              complete: (req: {
+                model: string;
+                messages: Message[];
+                signal: AbortSignal;
+                onActivity: () => void;
+              }) => claudeCodeComplete({ ...claudeCode, ...req }),
             }
           : {}),
       });
@@ -4502,6 +4685,9 @@ export class AgentSession {
     }
     const toolNames = this.tools.map((tool) => tool.name);
     const deferredToolNames = this.deferredToolNamesForPrompt(toolNames);
+    // A missing Claude Code binary fails the run itself with a clear message, not the prompt build.
+    const deferredNeedSearch =
+      deferredToolNames.length > 0 && (await this.claudeCodeProcess().then(Boolean, () => false));
     // Whatever is rendered now is what the model has been told.
     this.announcedLanguages = new Set(this.activeLanguages);
     if (this.agentPrompt !== undefined) {
@@ -4509,6 +4695,7 @@ export class AgentSession {
         cwd: this.cwd,
         toolNames,
         deferredToolNames,
+        deferredNeedSearch,
         context: this.opts.agentContext,
         role: this.opts.agentRole,
         environment: this.recordRenderedEnvironment(),
@@ -4527,6 +4714,7 @@ export class AgentSession {
       this.recordRenderedEnvironment(),
       deferredToolNames,
       this.contextLimits,
+      deferredNeedSearch,
     );
   }
 
@@ -4559,6 +4747,12 @@ export class AgentSession {
    * update is saved in order with the rest of the conversation.
    */
   private async announceNewLanguages(): Promise<void> {
+    const mcpNotice = this.takeMcpNotice();
+    if (mcpNotice) {
+      this.messages.push(mcpNotice);
+      await this.persistMessage(mcpNotice);
+      this.lastPersistedIndex = this.messages.length;
+    }
     const planNotice = this.takePlanNotice();
     if (planNotice) {
       this.messages.push(planNotice);
@@ -4881,6 +5075,7 @@ export class AgentSession {
       generation,
       startedAt: new Date().toISOString(),
       afterMessageCount: this.persistedTranscriptCount(),
+      pid: process.pid,
     });
   }
 
@@ -5011,6 +5206,14 @@ export class AgentSession {
   private prewarmController: AbortController | null = null;
   /** Claude Code session that has seen this history (Claude subscription route). */
   private claudeCodeSession: ClaudeCodeSessionState | null = null;
+  private releaseClaudeCodeTranscript: (() => void) | undefined;
+
+  /** Keep the retention pass off the transcript this chat would resume. */
+  private holdClaudeCodeTranscript(): void {
+    this.releaseClaudeCodeTranscript?.();
+    const sessionId = this.claudeCodeSession?.sessionId;
+    this.releaseClaudeCodeTranscript = sessionId ? holdClaudeCodeTranscript(sessionId) : undefined;
+  }
   /** This chat's running Claude Code process, reused while `key` (its start settings) matches. */
   private claudeCodeLive: { session: ClaudeCodeLiveSession; key: Record<string, string> } | null =
     null;
@@ -5184,6 +5387,8 @@ export class AgentSession {
     // step leaves background commands running after the app has quit.
     this.stopBackgroundProcesses();
     this.installedWatchStop?.();
+    this.releaseClaudeCodeTranscript?.();
+    this.releaseClaudeCodeTranscript = undefined;
     // Quiesce any in-flight post-turn compaction BEFORE tearing down state:
     // the background compact() snapshots and replaces `this.messages`, so
     // letting it run past this point would checkpoint a near-empty history
@@ -5319,10 +5524,12 @@ export class AgentSession {
     // not fail when Anthropic's stricter many-image limit activates later.
     const systemMsg = this.messages[0]; // Already built
     this.messages = [systemMsg, ...loadedMessages];
+    this.reloadUsedTools(loadedMessages);
     this.claudeCodeSession = parseClaudeCodeSessionState(
       savedClaudeCode?.type === "custom" ? savedClaudeCode.data : null,
       loadedMessages,
     );
+    this.holdClaudeCodeTranscript();
     // Reads recorded for the previous conversation don't carry over.
     this.clearReadTracker?.();
     const normalizedImageCount = await normalizeMessageImages(this.messages);
@@ -5414,6 +5621,15 @@ export class AgentSession {
    */
   private async recordInterruptedRuns(runs: RunJournalEntry[]): Promise<void> {
     for (const run of runs) {
+      // Another app has this chat open and is still running it: not a crash.
+      if (run.pid !== undefined && run.pid !== process.pid && processIsAlive(run.pid)) {
+        log("WARN", "session", "Unfinished run belongs to another live process; left open", {
+          generation: String(run.generation),
+          startedAt: run.startedAt,
+          pid: String(run.pid),
+        });
+        continue;
+      }
       log("WARN", "session", "Restored a session with an unfinished run", {
         generation: String(run.generation),
         startedAt: run.startedAt,

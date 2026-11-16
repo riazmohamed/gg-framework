@@ -53,7 +53,7 @@ function renderTalkSection(toolNames: readonly string[] | undefined): string {
   // ending the reply while the card the user can click never got built. The
   // fallback only renders for hosts with no one to answer a question.
   const askRule = (toolNames ?? DEFAULT_TOOL_NAMES).includes("ask_user")
-    ? `Every question — a blocker or an optional "want me to also…?" — is an \`ask_user\` call with your pick marked \`recommended\`, never prose. No question? Just end.`
+    ? `Every question — a blocker or an optional "want me to also…?" — is an \`ask_user\` call with your pick marked \`recommended\`, never prose. Before the card, write just enough to choose: the direct answer or what you found, in one to three plain sentences, not a full report. No question? Just end.`
     : `Any question — a blocker or an optional "want me to also…?" — is the last line: \`> **<question>?** <your next step>\`. No question? Just end.`;
   return (
     `## Replies\n\n` +
@@ -80,7 +80,7 @@ function renderWorkSection(
   return `## Work
 
 - Do the requested task fully, nothing adjacent. Take safe, reversible steps without asking. A question about code is not permission to edit it.
-- Find facts yourself. Ask only about unclear requirements, real tradeoffs, secrets/access, cost, or anything destructive.
+- Find facts yourself. Ask only about unclear requirements, real tradeoffs, secrets/access, cost, or anything destructive. Fix broken things the task touches without asking; mention unrelated ones in the final reply.
 - Read before editing; follow existing conventions. Prefer existing helpers, then built-ins, then installed deps. Never install packages, delete data, commit/push, publish, or touch git config unless asked. Confirm a dependency actually exists before adding it, then pin it. Leave changes you didn't make alone.
 - Preserve input validation, error handling, security and accessibility.
 ${
@@ -188,6 +188,8 @@ function renderToolsSection(
   toolNames: readonly string[] | undefined,
   deferredToolNames?: readonly string[],
   discoveryOnly = false,
+  // Claude Code rejects a tool name it has not listed, so the search must come first.
+  deferredNeedSearch = false,
 ): string | null {
   const activeTools = toolNames ?? DEFAULT_TOOL_NAMES;
   const deferred = activeTools.includes("tool_search")
@@ -213,8 +215,11 @@ function renderToolsSection(
   if (steering) parts.push(steering);
   if (toolLines.length > 0) parts.push(toolLines.join("\n"));
   if (deferredLines.length > 0) {
+    const how = deferredNeedSearch
+      ? "not loaded yet: run `tool_search` with the name first, then call it"
+      : "call by name";
     parts.push(
-      `On demand (call by name; \`tool_search\` finds more, so check it before saying you can't):\n${deferredLines.join("\n")}`,
+      `On demand (${how}; \`tool_search\` finds more, so check it before saying you can't):\n${deferredLines.join("\n")}`,
     );
   } else if (discoveryOnly && activeTools.includes("tool_search")) {
     parts.push("Call `tool_search` before concluding a capability is missing.");
@@ -461,6 +466,8 @@ export async function buildSubAgentSystemPrompt(
     toolNames?: readonly string[];
     /** Tools available via `tool_search` but not carrying a schema this turn. */
     deferredToolNames?: readonly string[];
+    /** True on the Claude Code route, where a deferred tool cannot be called before `tool_search` loads it. */
+    deferredNeedSearch?: boolean;
     context?: "project" | "none";
     role?: "subagent" | "primary";
     environment?: SystemPromptEnvironment;
@@ -473,7 +480,12 @@ export async function buildSubAgentSystemPrompt(
   const limits = opts.contextLimits ?? CONTEXT_LIMITS;
   const sections: string[] = [agentBody.trim()];
 
-  const toolsSection = renderToolsSection(opts.toolNames, opts.deferredToolNames);
+  const toolsSection = renderToolsSection(
+    opts.toolNames,
+    opts.deferredToolNames,
+    false,
+    opts.deferredNeedSearch,
+  );
   if (toolsSection) sections.push(toolsSection);
 
   // A child may itself delegate (up to the nesting limit), so it needs the same
@@ -531,6 +543,8 @@ export async function buildSystemPrompt(
   deferredToolNames?: readonly string[],
   /** Byte budgets for skill catalog / project instructions / total ceiling. */
   contextLimits?: ContextLimits,
+  /** True on the Claude Code route, where a deferred tool cannot be called before `tool_search` loads it. */
+  deferredNeedSearch?: boolean,
 ): Promise<string> {
   const limits = contextLimits ?? CONTEXT_LIMITS;
   // Guidance for a capability (docs research, delegation) must not vanish just
@@ -549,7 +563,7 @@ export async function buildSystemPrompt(
   if (approvedPlanSection) sections.push(approvedPlanSection);
 
   // Active tools own their invocation details; deferred capabilities must remain discoverable.
-  const toolsSection = renderToolsSection(toolNames, deferredToolNames, true);
+  const toolsSection = renderToolsSection(toolNames, deferredToolNames, true, deferredNeedSearch);
   if (toolsSection) sections.push(toolsSection);
 
   const delegationSection = renderDelegationSection(reachableTools);

@@ -4,7 +4,14 @@ import type {
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { describe, expect, it } from "vitest";
+import type * as GgCore from "@abukhaled/gg-core";
+import { describe, expect, it, vi } from "vitest";
+
+// Keep the real ~/.gg install out of these tests: the binary always looks missing.
+vi.mock("@abukhaled/gg-core", async (importOriginal) => ({
+  ...(await importOriginal<typeof GgCore>()),
+  resolveClaudeCodeBinary: () => null,
+}));
 import { claudeCodeSearchHits } from "../../tools/side-web-search.js";
 import { claudeCodeComplete, resolveClaudeCodeProcess } from "./complete.js";
 
@@ -133,6 +140,26 @@ describe("claudeCodeComplete", () => {
     expect((await seen.options!.canUseTool!("Bash", {}, sig))?.behavior).toBe("deny");
   });
 
+  it("reports activity for every SDK message, partial deltas included", async () => {
+    const { query, seen } = fakeQuery([
+      { type: "stream_event", event: { type: "content_block_delta" } } as unknown as SDKMessage,
+      { type: "stream_event", event: { type: "content_block_delta" } } as unknown as SDKMessage,
+      assistant("m1", [{ type: "text", text: "Paris" }]),
+      result(),
+    ]);
+    let beats = 0;
+    const reply = await claudeCodeComplete({
+      ...proc,
+      query,
+      model: "claude-sonnet-5",
+      messages: [{ role: "user", content: "Capital of France?" }],
+      onActivity: () => beats++,
+    });
+    expect(beats).toBe(4);
+    expect(seen.options?.includePartialMessages).toBe(true);
+    expect(reply.message.content).toEqual([{ type: "text", text: "Paris" }]);
+  });
+
   it("throws Claude Code's error instead of returning an empty reply", async () => {
     const { query } = fakeQuery([
       assistant("x", [{ type: "text", text: "API Error: 401 invalid credentials" }], "<synthetic>"),
@@ -155,5 +182,28 @@ describe("resolveClaudeCodeProcess", () => {
     const signedOut = { hasClaudeCodeLogin: async () => false };
     expect(await resolveClaudeCodeProcess(signedIn, "openai", "/tmp")).toBeNull();
     expect(await resolveClaudeCodeProcess(signedOut, "anthropic", "/tmp")).toBeNull();
+  });
+
+  it("downloads a missing binary instead of asking to sign in again", async () => {
+    const signedIn = { hasClaudeCodeLogin: async () => true };
+    let installs = 0;
+    const install = async () => {
+      installs++;
+      return "/fresh/claude";
+    };
+    const proc = await resolveClaudeCodeProcess(signedIn, "anthropic", "/tmp", install);
+    expect(installs).toBe(1);
+    expect(proc?.executable).toBe("/fresh/claude");
+    expect(proc?.cwd).toBe("/tmp");
+  });
+
+  it("explains a failed download", async () => {
+    const signedIn = { hasClaudeCodeLogin: async () => true };
+    const install = async () => {
+      throw new Error("Claude Code download failed (HTTP 503).");
+    };
+    await expect(resolveClaudeCodeProcess(signedIn, "anthropic", "/tmp", install)).rejects.toThrow(
+      "Couldn't download Claude Code: Claude Code download failed (HTTP 503).",
+    );
   });
 });

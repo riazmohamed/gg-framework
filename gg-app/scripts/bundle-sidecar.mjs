@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pruneOnnxRuntimePayloads } from "./prune-native-payloads.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
@@ -36,6 +37,11 @@ const bundledSkillsOut = join(outDir, "skills");
 // `skills/` so its skills never enter coder or chat discovery.
 const motionBundleSource = join(repoRoot, "packages", "ggcoder", "assets", "motion");
 const motionBundleOut = join(outDir, "motion");
+// Live preview's overlay (page script + chat frame), served by the sidecar.
+// Built here, not taken from a previous app build, so it is never stale.
+const livePreviewConfig = join(here, "..", "vite.live-preview.config.ts");
+const livePreviewBuilt = join(here, "..", "dist-live-preview");
+const livePreviewOut = join(outDir, "live-preview");
 
 // Packages that must NOT be inlined: native addons, lazily-loaded optional
 // heavy deps, and child-process entry points that esbuild cannot discover.
@@ -48,9 +54,6 @@ const EXTERNAL = [
   "turndown",
   "turndown-plugin-gfm",
   "@mozilla/readability",
-  // The Codex transport loads this package's zstd.wasm by path at runtime.
-  // Keep the package external so the WASM asset survives the sidecar bundle.
-  "@bokuweb/zstd-wasm",
   // LSP servers run as child processes from their real package entry points.
   // The server resolver also needs a physical tsserver.js path. Neither package
   // is imported by the sidecar, so esbuild would otherwise omit both and every
@@ -214,32 +217,6 @@ function copyPackage(name, fromRequire, fromDir, copied) {
   }
 }
 
-/**
- * Native packages can publish binaries for every supported OS/architecture in
- * one npm tarball. Keep only this build runner's payload: shipping dormant Intel
- * Mach-O files makes an arm64 app look Intel-based to macOS inventory scanners
- * and adds roughly 180 MB of unused files before compression.
- */
-function pruneForeignNativePayloads() {
-  const runtimes = join(nodeModulesOut, "onnxruntime-node", "bin", "napi-v3");
-  if (!existsSync(runtimes)) return;
-
-  const selected = join(runtimes, process.platform, process.arch);
-  if (!existsSync(selected)) {
-    throw new Error(
-      `onnxruntime-node has no native payload for ${process.platform}/${process.arch}`,
-    );
-  }
-
-  const keep = join(outDir, `.gg-onnxruntime-${process.pid}`);
-  cpSync(selected, keep, { recursive: true });
-  rmSync(runtimes, { recursive: true, force: true });
-  mkdirSync(join(runtimes, process.platform), { recursive: true });
-  cpSync(keep, selected, { recursive: true });
-  rmSync(keep, { recursive: true, force: true });
-  console.log(`pruned onnxruntime-node payloads to ${process.platform}/${process.arch}`);
-}
-
 const mb = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
 
 /** Recursive non-symlink walk; visit(absPath, dirent) gets files and dirs. */
@@ -345,6 +322,15 @@ async function main() {
     },
   });
 
+  const { build: viteBuild } = await import("vite");
+  await viteBuild({ configFile: livePreviewConfig, logLevel: "warn" });
+  for (const file of ["page.js", "frame.html"]) {
+    if (!existsSync(join(livePreviewBuilt, file))) {
+      throw new Error(`live preview build missing ${file}: ${livePreviewBuilt}`);
+    }
+  }
+  cpSync(livePreviewBuilt, livePreviewOut, { recursive: true });
+
   await build({
     entryPoints: [sidecarEntry],
     outfile: outFile,
@@ -376,7 +362,9 @@ async function main() {
   for (const name of EXTERNAL) {
     copyPackage(name, ggcoderRequire, ggcoderRoot, copied);
   }
-  pruneForeignNativePayloads();
+  for (const abi of pruneOnnxRuntimePayloads(nodeModulesOut)) {
+    console.log(`pruned onnxruntime-node ${abi} payloads to ${process.platform}/${process.arch}`);
+  }
   pruneBrowserOnnxPayloads();
   stripSourceMaps();
   console.log(
