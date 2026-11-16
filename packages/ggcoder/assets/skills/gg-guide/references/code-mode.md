@@ -30,6 +30,11 @@ A Code-mode window is one session on one project folder. You type in the compose
 - A queued message goes to GG at the next turn boundary, not after the whole run ends. It shows in the chat dimmed, with a **queued** label above it.
 - To cancel a queued message, click the x next to its label (**Cancel this queued message**). Each queued message has its own x. A message that is already being delivered can't be cancelled.
 
+## Messages waiting for you (inbox)
+
+- Another tool on this computer (such as the autopilot) can leave a message for the project. It shows in a strip above the composer, oldest first, with a count of any others.
+- Nothing is sent until you click **Send**, and Send waits while a run is active, so a hand-off never steers work in progress. Click the x to drop the message.
+
 ## Stopping a run
 
 - During a run the round send button becomes **Stop the run**. Click it or press Esc to stop.

@@ -46,6 +46,10 @@ General opens first. It has no Save button: every change saves as soon as you ma
 - A badge next to it shows **On** or **Off**. It is on by default.
 - The change applies right away, including to a task already running, and is remembered.
 
+### Phone control
+
+Lets the pew2 phone app open chats in GG Coder windows, type into them, send, stop a run, answer questions, review plans, and change a window's model and thinking. It is off until you turn it on. While it is on, GG writes a private connection file only pew2 on this computer can read; turning it off removes the file.
+
 ### Project folder
 
 - The folder where new projects are created. The example text in the box is /Users/you/gg-projects.

@@ -162,6 +162,7 @@ const COVERAGE: Record<string, string> = {
   TasksModal: "code-mode.md",
   NotesModal: "code-mode.md",
   CIIndicator: "code-mode.md",
+  InboxBar: "code-mode.md",
   InitGitModal: "code-mode.md",
   HookNotice: "code-mode.md",
   ActivityBar: "code-mode.md",
@@ -220,6 +221,7 @@ const COVERAGE: Record<string, string> = {
   TelegramSettingsModal: "settings.md",
   SteroidsModal: "settings.md",
   KeepAwakeButton: "settings.md",
+  PhoneControlButton: "settings.md",
   SoundButton: "settings.md",
   AppearancePicker: "settings.md",
   // mcp-and-skills.md

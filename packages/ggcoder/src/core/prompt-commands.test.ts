@@ -277,12 +277,15 @@ describe("prompt commands", () => {
   });
 
   it("ships exactly the workflows the app and CLI list", () => {
-    // /compare was dropped; CI setup now goes through the Checklist's CI item.
+    // CI setup now goes through the Checklist's CI item. This branch keeps
+    // /compare (grep MCP fallback) and /nuclear-commit, which main dropped.
     expect(PROMPT_COMMANDS.map((command) => command.name)).toEqual([
       "expand",
       "init",
       "commit",
       "setup-commit",
+      "compare",
+      "nuclear-commit",
       "steroids",
     ]);
   });
