@@ -33,6 +33,8 @@ import {
   isSwitchModelError,
   switchKenModel,
   listCommands,
+  addWorkspaceFolder,
+  removeWorkspaceFolder,
   cancelQueued,
   type PromptMeta,
   type QueuedMessage,
@@ -123,6 +125,10 @@ import { TasksModal } from "./TasksModal";
 import { ChecklistScreen } from "./ChecklistScreen";
 import { parseProjectHealth } from "./project-health";
 import { NotesModal } from "./NotesModal";
+import { FoldersPanel } from "./FoldersPanel";
+import { LivePreviewPanel } from "./LivePreviewPanel";
+import { livePreviewAvailable, START_DEV_SERVER_PROMPT } from "./livePreviewAvailable";
+import { useLivePreview } from "./useLivePreview";
 import { MemoryModal } from "./MemoryModal";
 import { GoalSettingsModal } from "./GoalSettingsModal";
 import { isHiddenScroller } from "./transcript-pin";
@@ -136,6 +142,7 @@ import { KenPowerBanner } from "./KenPowerBanner";
 import { PlanReviewModal } from "./PlanReviewModal";
 import { McpElicitModal } from "./McpElicitModal";
 import { ProjectPicker } from "./ProjectPicker";
+import { type DraftEnhancement, followDraftEdit, rebaseSegments } from "./PromptEnhancement";
 import { ChatPicker } from "./ChatPicker";
 // The goal list and its New goal modal load on demand: they are only needed
 // once someone opens Goals.
@@ -146,11 +153,7 @@ import { BackButton } from "./BackButton";
 import { HomeScreen } from "./HomeScreen";
 import { SettingsModal } from "./SettingsModal";
 import { initialEntryView, type EntryView } from "./app-entry-view";
-import {
-  showsQueuedBubble,
-  submitDisposition,
-  withoutSupersedingMessage,
-} from "./submit-disposition";
+import { showsQueuedBubble, submitDisposition } from "./submit-disposition";
 import { Toaster } from "./Toaster";
 import { Confetti } from "./Confetti";
 import { ScorecardPanel } from "./Scorecard";
@@ -184,7 +187,7 @@ import { useTrayIntents } from "./useTrayIntents";
 import { useAttachments } from "./useAttachments";
 import { useDragOverlay, useWindowFileDrop } from "./useFileDrop";
 import { DeckMenu, TitleBarActions } from "./WorkspaceHeaderActions";
-import { nextDockHeight } from "./dock-height";
+import { dockStepped, nextDockHeight } from "./dock-height";
 import { finishEntrances } from "./finish-entrances";
 import { Deck, type DeckPanelId } from "./Deck";
 import { ProjectHealthPanel } from "./ProjectHealthBadge";
@@ -201,6 +204,7 @@ import { usePromptEnhance } from "./usePromptEnhance";
 import { shellCommandFromInput, shellItemFromHistory, useShellRuns } from "./useShellRuns";
 import { filterShellSuggestions, shellEnterPicks } from "./shell-menu";
 import "./App.css";
+import { queueIdsForBubbles } from "./queued-bubble";
 import "./Deck.css";
 import "./Trophies.css";
 
@@ -259,7 +263,28 @@ const SCHEDULE_COMMAND: SlashCommand = {
 export type { Item, TranscriptImage } from "./transcript-item";
 
 function App(): React.ReactElement {
-  const [items, setItems] = useState<Item[]>([]);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const liveRegionRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
+  const chatLayout = useMemo(
+    () =>
+      createChatLayoutMotion(() => ({
+        transcript: scrollRef.current,
+        surfaces: [liveRegionRef.current, composerRef.current],
+      })),
+    [],
+  );
+  const [items, updateItems] = useState<Item[]>([]);
+  // Every change to the rows is captured first, whoever makes it (the agent,
+  // Ken, autopilot, a shell run, an answered question), so the rows it moves
+  // glide to their new place instead of landing there in one frame.
+  const setItems = useCallback(
+    (update: Parameters<typeof updateItems>[0]) => {
+      chatLayout.capture();
+      updateItems(update);
+    },
+    [chatLayout],
+  );
   // Text of the reply streaming right now, grown outside `items` so each chunk
   // re-renders only that row (live-text.ts). One store for the window's life.
   const [liveText] = useState(createLiveTextStore);
@@ -319,20 +344,15 @@ function App(): React.ReactElement {
     removeAttachment,
   } = useAttachments();
   // The most recent prompt-enhancement result. `plain` is the text now in the
-  // textarea; `segments` drive the inline highlight overlay + the sent bubble.
-  // It's dropped the moment the textarea diverges from `plain` so highlights
-  // never misalign. `enhancing` shows the pulse on the Enhance pill mid-call.
-  const [enhancement, setEnhancement] = useState<{
-    plain: string;
-    segments: PromptSegment[];
-  } | null>(null);
+  // textarea; `segments` drive the highlighted terms in the sent bubble. Edits
+  // re-anchor the segments onto the new text (followDraftEdit), keeping every
+  // corrected term the edit didn't touch. `enhancing` shows the pulse on the
+  // Enhance pill mid-call.
+  const [enhancement, setEnhancement] = useState<DraftEnhancement | null>(null);
   const [enhancing, setEnhancing] = useState(false);
   // Composer sends so far: a change tells the composer strips (attachments,
   // @-files, cold-cache notice) to drop what the send cleared in that commit.
   const [sendCount, setSendCount] = useState(0);
-  // The floating "Enhance" pill is shown only after the user pauses typing for
-  // ~1s (and hidden again on the next keystroke / send / empty input).
-  const [enhanceHintVisible, setEnhanceHintVisible] = useState(false);
   // Drives the Matrix dissolve→decode animation over the input while enhancing.
   // `newText` is null until the enhancer returns (dissolve/scramble), then the
   // enhanced text (decode). Null when no animation is playing.
@@ -395,17 +415,6 @@ function App(): React.ReactElement {
     });
   }, [cancelling]);
   const [status, setStatus] = useState("connecting to agent\u2026");
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const liveRegionRef = useRef<HTMLDivElement>(null);
-  const composerRef = useRef<HTMLDivElement>(null);
-  const chatLayout = useMemo(
-    () =>
-      createChatLayoutMotion(() => ({
-        transcript: scrollRef.current,
-        surfaces: [liveRegionRef.current, composerRef.current],
-      })),
-    [],
-  );
   const [liveToolFeed, updateLiveToolFeed] = useState<LiveToolEntry[]>([]);
   const setLiveToolFeed = useCallback(
     (update: Parameters<typeof updateLiveToolFeed>[0]) => {
@@ -519,6 +528,8 @@ function App(): React.ReactElement {
   const { activity, handleActivityEvent } = useTaskActivity(hydrateNonce);
   // New-session confirmation modal + in-flight guard.
   const [confirmNewSession, setConfirmNewSession] = useState(false);
+  /** The added folder being removed right now (Remove folder panel). */
+  const [removingFolder, setRemovingFolder] = useState<string | null>(null);
   const { toolsHidden, setToolsHiddenPersisted, toggleTools } = useChromeToggles(chatLayout);
   const [newSessionBusy, setNewSessionBusy] = useState(false);
   const { exporting, exportTranscript } = useTranscriptExport();
@@ -591,11 +602,16 @@ function App(): React.ReactElement {
   const insertDroppedFolderPaths = useCallback((paths: string[]): void => {
     if (paths.length === 0) return;
     const text = paths.join(" ");
-    setInput((prev) => {
+    const append = (prev: string): string => {
       if (!prev.trim()) return text;
       return `${prev}${/\s$/.test(prev) ? "" : " "}${text}`;
-    });
-    setEnhancement(null);
+    };
+    setInput(append);
+    // A live enhancement's `plain` is the current draft, so the same append
+    // re-anchors its highlights; a stale one is discarded on the next edit/send.
+    setEnhancement((current) =>
+      current ? followDraftEdit(current, current.plain, append(current.plain)) : null,
+    );
     requestAnimationFrame(() => inputRef.current?.focus());
   }, []);
 
@@ -706,6 +722,15 @@ function App(): React.ReactElement {
   const transcriptFrameRef = useRef<HTMLDivElement>(null);
   const dockElRef = useRef<HTMLDivElement | null>(null);
   const dockRoRef = useRef<ResizeObserver | null>(null);
+  const syncDockHeight = useCallback((): boolean => {
+    const dock = dockElRef.current;
+    const frame = transcriptFrameRef.current;
+    if (!dock || !frame) return false;
+    const height = nextDockHeight(dock, frame.style.getPropertyValue("--dock-h"));
+    if (height === null) return false;
+    frame.style.setProperty("--dock-h", height);
+    return true;
+  }, []);
   const dockRef = useCallback(
     (dock: HTMLDivElement | null) => {
       dockRoRef.current?.disconnect();
@@ -715,10 +740,18 @@ function App(): React.ReactElement {
       const apply = (): void => {
         const frame = transcriptFrameRef.current;
         if (!frame) return;
-        const height = nextDockHeight(dock, frame.style.getPropertyValue("--dock-h"));
-        if (height === null) return;
-        frame.style.setProperty("--dock-h", height);
-        maybeScrollToBottom();
+        const current = frame.style.getPropertyValue("--dock-h");
+        const next = nextDockHeight(dock, current);
+        if (next === null) return;
+        // A step nobody captured (a panel opening, a draft wrapping or being
+        // deleted). The transcript has not heard yet, so its rows are still
+        // where they were: capture them here and glide, instead of following.
+        const glide = dockStepped(current, next) && !chatLayout.capturing();
+        if (glide) chatLayout.capture();
+        frame.style.setProperty("--dock-h", next);
+        if (!glide) maybeScrollToBottom();
+        else if (chatLayout.commit(stickToBottomRef.current, scrollToBottom) && scrollRef.current)
+          lastScrollTopRef.current = scrollRef.current.scrollTop;
       };
       apply();
       if (typeof ResizeObserver === "undefined") return;
@@ -726,7 +759,7 @@ function App(): React.ReactElement {
       observer.observe(dock);
       dockRoRef.current = observer;
     },
-    [maybeScrollToBottom],
+    [chatLayout, lastScrollTopRef, maybeScrollToBottom, scrollToBottom, stickToBottomRef],
   );
 
   // Settle the scroll position after a session hydrates. The single layout-effect
@@ -764,6 +797,8 @@ function App(): React.ReactElement {
   const sendDisabled =
     attachmentsLoading ||
     (!input.trim() && attachments.length === 0 && mentionedPaths.length === 0);
+  const canLivePreview = livePreviewAvailable(workspaceMode, needsProject, state);
+  const livePreview = useLivePreview(canLivePreview);
   // Cosmetic work only belongs to a focused, visible, empty code composer.
   const animatePlaceholder =
     windowFocused &&
@@ -856,8 +891,9 @@ function App(): React.ReactElement {
   // intact across the measurement (see composer-autosize.ts for why both
   // halves matter).
   const autosizeInput = useCallback(() => {
-    chatLayout.settle();
-    autosizeComposer(inputRef.current, scrollRef.current, stickToBottomRef.current);
+    chatLayout.still(() =>
+      autosizeComposer(inputRef.current, scrollRef.current, stickToBottomRef.current),
+    );
   }, [chatLayout, stickToBottomRef]);
 
   // useLayoutEffect (not useEffect) so the height is recomputed BEFORE the
@@ -882,6 +918,10 @@ function App(): React.ReactElement {
       chatLayout.cancel();
       return;
     }
+    // The dock's new height reaches the transcript here, not a frame later
+    // through its observer: the transaction has to measure where rows will
+    // really rest, or it finds nothing to move and the observer snaps them.
+    if (chatLayout.capturing()) syncDockHeight();
     if (chatLayout.commit(stickToBottomRef.current, scrollToBottom) && scrollRef.current) {
       lastScrollTopRef.current = scrollRef.current.scrollTop;
     }
@@ -1282,7 +1322,7 @@ function App(): React.ReactElement {
       setLiveFromId(lastIssuedId() + 1);
       setHydrated(true);
     }
-  }, [stickToBottomRef, refreshShellTrust]);
+  }, [stickToBottomRef, refreshShellTrust, setItems]);
 
   useEffect(() => {
     const unsub = subscribe(handleEvent);
@@ -1603,19 +1643,7 @@ function App(): React.ReactElement {
     });
   }
 
-  /** Ordered queue events own both pending rows and cancelled transcript bubbles. */
-  function handleCancelQueued(id: string): void {
-    void cancelQueued(id);
-  }
-
   function pickSlashCommand(cmd: SlashCommand): void {
-    if (cmd.name === "add-dir" || cmd.name === "remove-dir") {
-      setInput("");
-      setSlashIndex(0);
-      void pickWorkspaceDirectory(cmd.name);
-      return;
-    }
-
     // Fill the input with the command; the user can add args or press Enter.
     const next = `/${cmd.name} `;
     setInput(next);
@@ -1626,17 +1654,36 @@ function App(): React.ReactElement {
     requestAnimationFrame(() => inputRef.current?.focus());
   }
 
-  async function pickWorkspaceDirectory(command: "add-dir" | "remove-dir"): Promise<void> {
+  /** "Remove folder": drop one of the folders added with "Add folder". */
+  async function removeFolder(root: string): Promise<void> {
+    setRemovingFolder(root);
+    try {
+      const { additionalRoots } = await removeWorkspaceFolder(root);
+      const name = root.split(/[\\/]/).filter(Boolean).pop() ?? root;
+      toast(`Removed ${name}. GG no longer works in it.`, "success");
+      if (additionalRoots.length === 0) closeDeckPanel("folders");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    } finally {
+      setRemovingFolder(null);
+    }
+  }
+
+  /** "Add folder" in the More panel: one more folder GG can work in. */
+  async function addFolder(): Promise<void> {
     const selected = await open({
       directory: true,
       multiple: false,
-      title:
-        command === "add-dir"
-          ? "Add project folder to workspace"
-          : "Remove project folder from workspace",
+      title: "Add a folder GG can work in",
     });
     if (typeof selected !== "string") return;
-    submitText(`/${command} ${selected}`, command === "add-dir" ? "/add-dir" : "/remove-dir");
+    try {
+      const { root } = await addWorkspaceFolder(selected);
+      const name = root.split(/[\\/]/).filter(Boolean).pop() ?? root;
+      toast(`Added ${name}. GG can work in it now.`, "success");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
   }
 
   // Detect an active `@`-mention token at the caret: a `@` that starts at a word
@@ -1693,6 +1740,7 @@ function App(): React.ReactElement {
     const tail = input.slice(caret);
     const next = head + tail;
     setInput(next);
+    setEnhancement((current) => followDraftEdit(current, input, next));
     setMentionedPaths((prev) => (prev.includes(file.path) ? prev : [...prev, file.path]));
     setMention(null);
     setFileMatches([]);
@@ -1731,11 +1779,9 @@ function App(): React.ReactElement {
     markShellShared();
     // A send that supersedes an open question is consumed the moment it lands
     // (the sidecar releases the parked call), so it must not wear the queued
-    // look for the one frame before that, nor open the queued strip below the
-    // transcript — see showsQueuedBubble / withoutSupersedingMessage.
+    // look for the one frame before that — see showsQueuedBubble.
     const supersedesQuestion = hasOpenAsk();
     const queued = showsQueuedBubble(disposition, supersedesQuestion);
-    if (disposition === "queue" && supersedesQuestion) noteSupersedingSend(trimmed);
     dismissOpenAsks();
     // A user send always re-pins to the bottom — they want to see their message.
     stickToBottomRef.current = true;
@@ -1831,39 +1877,14 @@ function App(): React.ReactElement {
     typingAskRef.current = null;
   }, [setItems]);
 
-  // Text of the prompt that superseded a question and is now briefly sitting in
-  // the sidecar's steering queue. Kept out of the queued strip until the agent
-  // consumes it — see withoutSupersedingMessage.
-  const supersedingTextRef = useRef<string | null>(null);
-  const [supersedingText, setSupersedingText] = useState<string | null>(null);
-  const supersedeClearRef = useRef<number | null>(null);
-  const noteSupersedingSend = useCallback((text: string) => {
-    supersedingTextRef.current = text;
-    setSupersedingText(text);
-    // Safety net: if the message never shows up in a queue broadcast at all
-    // (the run ended between typing and sending, so it started a fresh turn),
-    // nothing would ever clear the filter and a later identical message would
-    // be missing from the strip.
-    if (supersedeClearRef.current !== null) window.clearTimeout(supersedeClearRef.current);
-    supersedeClearRef.current = window.setTimeout(() => {
-      supersedingTextRef.current = null;
-      setSupersedingText(null);
-    }, 5000);
-  }, []);
-  useEffect(() => {
-    const text = supersedingTextRef.current;
-    if (text === null) return;
-    // Gone from the queue: the agent took it, so stop filtering — otherwise a
-    // later identical message would be hidden from the strip forever.
-    if (!queuedMessages.some((m) => m.text === text)) {
-      supersedingTextRef.current = null;
-      setSupersedingText(null);
-    }
-  }, [queuedMessages]);
-  const visibleQueuedMessages = useMemo(
-    () => withoutSupersedingMessage(queuedMessages, supersedingText),
-    [queuedMessages, supersedingText],
+  // Which sidecar queue entry each queued bubble is, so the bubble can cancel it.
+  const queuedBubbleIds = useMemo(
+    () => queueIdsForBubbles(items, queuedMessages),
+    [items, queuedMessages],
   );
+  // Stable, so passing it doesn't defeat the transcript rows' memo. Queue events
+  // own the outcome: a confirmed cancel removes the bubble (useAgentEvents).
+  const cancelQueuedMessage = useCallback((id: string) => void cancelQueued(id), []);
   // Sub-agent groups for the critter floor. Recomputed with `items`, but the
   // floor compares group identities and ignores token-only re-renders.
   const critterGroups = useMemo(
@@ -1911,7 +1932,7 @@ function App(): React.ReactElement {
         return false;
       }
     },
-    [pushItem, endStreamingText, dismissOpenAsks, stickToBottomRef],
+    [pushItem, endStreamingText, dismissOpenAsks, stickToBottomRef, setItems],
   );
 
   // Record answers for an `ask_user` band, and settle the parked tool call once
@@ -2202,13 +2223,12 @@ function App(): React.ReactElement {
     inputRef,
   });
 
-  const { runEnhance, onEnhanceAnimDone } = usePromptEnhance({
+  const { runEnhance, onEnhanceAnimDone, enhanceHintVisible } = usePromptEnhance({
     input,
     setInput,
     inputRef,
     enhancing,
     setEnhancing,
-    setEnhanceHintVisible,
     setEnhanceAnim,
     pendingEnhanceRef,
     enhancement,
@@ -2370,9 +2390,8 @@ function App(): React.ReactElement {
     recordHistory(trimmed);
     markShellShared();
     // Read BEFORE the dismissal clears the band: a prompt that supersedes a
-    // question is consumed as soon as it lands, so it must neither flash the
-    // queued look on the way in nor open the queued strip below the transcript
-    // (see showsQueuedBubble / withoutSupersedingMessage).
+    // question is consumed as soon as it lands, so it must not flash the
+    // queued look on the way in (see showsQueuedBubble).
     const supersedesQuestion = hasOpenAsk();
     dismissOpenAsks();
     // A user send always re-pins to the bottom — they want to see their message.
@@ -2389,16 +2408,17 @@ function App(): React.ReactElement {
       mentionedPaths,
       scope: "error" as const,
     };
-    // Carry the enhancer's highlighted segments into the sent bubble ONLY when
-    // the message is the unedited enhanced text (the bubble shows `trimmed`).
+    // Carry the enhancer's highlighted segments (re-anchored through any edits)
+    // into the sent bubble, aligned to the trimmed text the bubble shows.
     const sentEnhancements =
-      enhancement && enhancement.plain === trimmed ? enhancement.segments : undefined;
+      enhancement && enhancement.plain === input
+        ? (rebaseSegments(enhancement.segments, input, trimmed) ?? undefined)
+        : undefined;
     // While a run is in flight, the message is QUEUED as steering (the sidecar
     // injects it mid-loop). Attachments queue too — they're persisted and ride
     // the same native-block path when the queue drains. Queued rows render
     // dimmed until run_end clears the flag.
     if (running) {
-      if (supersedesQuestion) noteSupersedingSend(prompt);
       const queuedWire = attachments.map(toWire);
       const queuedImgs = attachments.flatMap((a) => (a.previewUrl ? [a.previewUrl] : []));
       pushItem({
@@ -2943,6 +2963,8 @@ function App(): React.ReactElement {
                               ) : undefined
                             }
                             onContentGrow={maybeScrollToBottom}
+                            queueId={queuedBubbleIds.get(it.id)}
+                            onCancelQueued={cancelQueuedMessage}
                             onAskAnswer={answerAsk}
                             onAskType={typeAskInstead}
                             shellActions={shellActions}
@@ -3035,6 +3057,42 @@ function App(): React.ReactElement {
               projectHealth={projectHealth}
               onReviewHealth={reviewProjectHealth}
               tools={{
+                preview: canLivePreview
+                  ? {
+                      title: "Live preview",
+                      meta: livePreview.status?.running ? "Running" : undefined,
+                      fit: true,
+                      body: (
+                        <LivePreviewPanel
+                          preview={livePreview}
+                          onStartDevServer={() => {
+                            if (
+                              submitText(
+                                START_DEV_SERVER_PROMPT,
+                                "Start the dev server and open the live preview",
+                                { keepInput: true },
+                              )
+                            )
+                              setDeckPanel(null);
+                          }}
+                        />
+                      ),
+                    }
+                  : undefined,
+                folders:
+                  (state?.additionalRoots?.length ?? 0) > 0
+                    ? {
+                        title: "Added folders",
+                        meta: `${state?.additionalRoots?.length ?? 0} added`,
+                        body: (
+                          <FoldersPanel
+                            roots={state?.additionalRoots ?? []}
+                            busy={removingFolder}
+                            onRemove={(root) => void removeFolder(root)}
+                          />
+                        ),
+                      }
+                    : undefined,
                 notes: {
                   title: "Notes",
                   meta: "Saved on this Mac",
@@ -3162,10 +3220,25 @@ function App(): React.ReactElement {
                   onOpenTasks={openTasks}
                   showChecklist={showChecklist}
                   onOpenChecklist={openChecklist}
+                  onOpenLivePreview={
+                    canLivePreview
+                      ? () => {
+                          setDeckPanel("preview");
+                          void livePreview.start();
+                        }
+                      : undefined
+                  }
+                  livePreviewRunning={livePreview.status?.running ?? false}
                   hasHealth={projectHealth !== null}
                   onOpenHealth={() => setDeckPanel("health")}
                   onOpenRadio={() => setDeckPanel("radio")}
                   onOpenGoalSettings={state?.goal ? () => setDeckPanel("goal") : undefined}
+                  onAddFolder={closeDeckThen(() => void addFolder())}
+                  onRemoveFolder={
+                    (state?.additionalRoots?.length ?? 0) > 0
+                      ? () => setDeckPanel("folders")
+                      : undefined
+                  }
                   canExport={items.length > 0}
                   exporting={exporting}
                   onExport={closeDeckThen(() => void exportTranscript())}
@@ -3242,9 +3315,7 @@ function App(): React.ReactElement {
                   fileInputRef={fileInputRef}
                   mentionedPaths={mentionedPaths}
                   removeMentionChip={removeMentionChip}
-                  visibleQueuedMessages={visibleQueuedMessages}
                   sendCount={sendCount}
-                  handleCancelQueued={handleCancelQueued}
                   enhanceAnim={enhanceAnim}
                   onEnhanceAnimDone={onEnhanceAnimDone}
                   enhancement={enhancement}

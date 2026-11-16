@@ -33,7 +33,7 @@ import {
   PLAN_SUBMITTED_FOR_REVIEW,
   shouldOfferPendingPlan,
 } from "./core/plan-handoff.js";
-import { discoverSkillsWithBlocked } from "./core/skills.js";
+import { discoverSkillsWithBlocked, loadBundledSkill } from "./core/skills.js";
 import {
   chatWorkspaceDir,
   createChatAgent,
@@ -77,6 +77,7 @@ import {
   syncEndpointCredentials,
 } from "./core/local-endpoint-store.js";
 import { loadOpenRouterCatalog } from "./core/openrouter-catalog-store.js";
+import { openCodeCatalogs } from "./core/opencode-catalog-store.js";
 import type { OAuthLoginCallbacks } from "./core/oauth/types.js";
 import {
   AUTH_PROVIDERS,
@@ -119,6 +120,7 @@ import {
   createAskUserBridge,
   deliverLateAnswer,
   type AskQuestion,
+  type AskUserPrompt,
   type AskUserResult,
 } from "./core/ask-user.js";
 import { createAskUserTool } from "./tools/ask-user.js";
@@ -167,7 +169,15 @@ import { handleAuthRoutes } from "./app-sidecar/auth-routes.js";
 import { handleIntegrationRoutes } from "./app-sidecar/integration-routes.js";
 import { handleMcpRoutes } from "./app-sidecar/mcp-routes.js";
 import { finishShellRun, handleShellRoutes } from "./app-sidecar/shell-routes.js";
+import {
+  createLivePreviewManager,
+  findLivePreviewAssets,
+} from "./app-sidecar/live-preview/manager.js";
+import { handleLivePreviewRoutes } from "./app-sidecar/live-preview/routes.js";
+import { findProjectServers, probePort } from "./app-sidecar/live-preview/servers.js";
+import { createLivePreviewTool, type LivePreviewResult } from "./tools/live-preview.js";
 import { ShellRunner } from "./app-sidecar/shell-runs.js";
+import { syncMcpServerAcross } from "./app-sidecar/mcp-sync.js";
 import type { SessionRouteContext } from "./app-sidecar/route-context.js";
 import { createHfPullManager } from "./app-sidecar/hf-pull-manager.js";
 import { keepAwake } from "./app-sidecar/keep-awake.js";
@@ -328,6 +338,11 @@ async function main(): Promise<void> {
       });
     });
 
+  // OpenCode's cached model lists; `/models` reads them again when stale.
+  void openCodeCatalogs.load().then((installed) => {
+    if (installed) broadcastAll("models_change", {});
+  });
+
   const sessionIdsAt = (cwd: string): string[] => {
     const target = path.resolve(cwd);
     return [...sessions.values()]
@@ -335,6 +350,9 @@ async function main(): Promise<void> {
       .map((ctx) => ctx.id)
       .sort();
   };
+  /** Apply a saved MCP server change to every open window, no restart needed. */
+  const syncMcpServer = (name: string) =>
+    syncMcpServerAcross(sessions.values(), name, paths.settingsFile);
   /** Whether any live window session in `cwd` is working right now. */
   const busyAt = (cwd: string): boolean => {
     const target = path.resolve(cwd);
@@ -389,6 +407,74 @@ async function main(): Promise<void> {
   );
 
   const { subscriptionUsage } = createUsageService(auth);
+
+  /** Create a session and register it under a fresh id (a window's, or a live preview's). */
+  const openSession = async (
+    opts: {
+      mode: ReturnType<typeof parseWorkspaceMode>;
+      chatAgent: ReturnType<typeof parseChatAgentId>;
+      cwd: string;
+      sessionPath?: string;
+    },
+    { preview = false }: { preview?: boolean } = {},
+  ): Promise<SessionContext> => {
+    const id = randomUUID();
+    const ctx = await createSession(
+      {
+        auth,
+        paths,
+        progress,
+        trophies,
+        memoryStore,
+        jiwaStore,
+        broadcastAll,
+        oauthInFlightProviders,
+        repoPolls,
+        sessionIdsAt,
+        busyAt,
+        syncMcpServer,
+        // The preview's own session has no window to preview from.
+        ...(preview
+          ? {}
+          : {
+              livePreview: async (sessionId: string, url: string | undefined) => {
+                const window = sessions.get(sessionId);
+                if (!window) throw new Error("This window's session is gone.");
+                return livePreview.start(window, url ? { url } : {});
+              },
+            }),
+      },
+      { id, ...opts },
+    );
+    sessions.set(id, ctx);
+    log("INFO", "app-sidecar", "session created", {
+      id,
+      mode: opts.mode,
+      chatAgent: opts.chatAgent,
+      cwd: opts.cwd,
+    });
+    return ctx;
+  };
+  const closeSession = async (id: string): Promise<void> => {
+    const ctx = sessions.get(id);
+    if (!ctx) return;
+    sessions.delete(id);
+    log("INFO", "app-sidecar", "session disposed", { id });
+    await ctx.dispose().catch(() => {});
+  };
+
+  // Live preview: one per window, each with its own session in the window's project.
+  const livePreview = createLivePreviewManager({
+    assetsDir: findLivePreviewAssets(),
+    scan: (cwd) => findProjectServers(cwd),
+    probe: (port) => probePort(port),
+    createSession: (cwd) =>
+      openSession({ mode: "code", chatAgent: parseChatAgentId(undefined), cwd }, { preview: true }),
+    closeSession,
+    usage: subscriptionUsage,
+    log: (message, fields) => log("INFO", "live-preview", message, fields),
+    onChange: (windowId, status) => sessions.get(windowId)?.broadcast("live_preview", status),
+  });
 
   // git status / GitHub counts / CI pollers, one per repo however many windows
   // have it open (each window used to run its own).
@@ -460,36 +546,13 @@ async function main(): Promise<void> {
             : (process.env.GG_APP_CWD ?? process.cwd());
         const sessionPath =
           typeof body.sessionPath === "string" && body.sessionPath ? body.sessionPath : undefined;
-        const id = randomUUID();
         try {
-          const ctx = await createSession(
-            {
-              auth,
-              paths,
-              progress,
-              trophies,
-              memoryStore,
-              jiwaStore,
-              broadcastAll,
-              oauthInFlightProviders,
-              repoPolls,
-              sessionIdsAt,
-              busyAt,
-            },
-            { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
-          );
-          sessions.set(id, ctx);
-          log("INFO", "app-sidecar", "session created", {
-            id,
-            mode,
-            chatAgent,
-            cwd: sessionCwd,
-          });
+          const ctx = await openSession({ mode, chatAgent, cwd: sessionCwd, sessionPath });
           // The conversation file too, so the app can reopen this exact
           // session if the daemon restarts (a new session has no path yet
           // on the app's side).
           daemonJson(res, 200, {
-            sessionId: id,
+            sessionId: ctx.id,
             sessionPath: ctx.session.getState().sessionPath ?? null,
           });
         } catch (err) {
@@ -504,12 +567,9 @@ async function main(): Promise<void> {
     // Dispose a session: DELETE /session/:id.
     if (method === "DELETE" && url.startsWith("/session/")) {
       const id = decodeURIComponent(url.slice("/session/".length));
-      const ctx = sessions.get(id);
-      if (ctx) {
-        sessions.delete(id);
-        void ctx.dispose().catch(() => {});
-        log("INFO", "app-sidecar", "session disposed", { id });
-      }
+      // A closing window takes its live preview (and the preview's session) with it.
+      void livePreview.onSessionClosed(id);
+      void closeSession(id);
       daemonJson(res, 200, { ok: true });
       return;
     }
@@ -611,6 +671,7 @@ async function main(): Promise<void> {
       daemonJson(res, 404, { error: "unknown session" });
       return;
     }
+    if (handleLivePreviewRoutes(livePreview, ctx, req, res, url, method)) return;
     ctx.handle(req, res, url, method);
   }
   server.listen(port, host, () => {
@@ -645,6 +706,8 @@ async function main(): Promise<void> {
       keepAwake.dispose();
       // Close the ~/.gg progress fs.watch handle (baseline #8 leak fix).
       progress.dispose();
+      // Previews first: they close their own sessions, which then aren't disposed twice.
+      await livePreview.stopAll().catch(() => {});
       await Promise.all([...sessions.values()].map((c) => c.dispose().catch(() => {})));
       server.close();
     },
@@ -676,6 +739,9 @@ async function main(): Promise<void> {
   parentWatch.unref?.();
 }
 
+/** Daemon-wide: the last local-model scan result that was logged. */
+let lastLocalScanSummary: string | undefined;
+
 /**
  * Build one in-process agent session: its AgentSession, SSE client set, event
  * bridge, task runner, auth/login bridge, and the full HTTP route table exposed
@@ -704,6 +770,9 @@ async function createSession(
     sessionIdsAt: (cwd: string) => string[];
     /** Whether any live window session in `cwd` is working right now. */
     busyAt: (cwd: string) => boolean;
+    syncMcpServer: SessionRouteContext["syncMcpServer"];
+    /** Start this window's live preview (the `live_preview` tool); absent for the preview's own session. */
+    livePreview?: (sessionId: string, url: string | undefined) => Promise<LivePreviewResult>;
   },
   opts: {
     id: string;
@@ -724,6 +793,7 @@ async function createSession(
     repoPolls,
     sessionIdsAt,
     busyAt,
+    syncMcpServer,
   } = deps;
   const paths = deps.paths;
   const mode = opts.mode;
@@ -880,7 +950,11 @@ async function createSession(
   // run-all, a scheduled prompt).
   let scheduledRunActive = false;
   const asks = createAskUserBridge({
-    broadcast: (prompt) => broadcast("ask_user", prompt),
+    broadcast: (prompt) => {
+      broadcast("ask_user", prompt);
+      // Code windows only: GG Goals' start card and chat/motion stay with the user.
+      if (autopilot && mode !== "chat" && mode !== "motion" && !goal) kenAnswerAsk(prompt);
+    },
     timeoutMs: () =>
       askSoftDeadlineMs(autopilot || autopilotActive || taskRunAll || scheduledRunActive),
     onTimeout: (prompt) => {
@@ -942,6 +1016,35 @@ async function createSession(
     if (!goal || goal.record.startedAt || !isGoalStartMessage(text)) return;
     await startGoalFrom({ action: "answer", answers: { message: text } }, []);
   };
+  // Autopilot: Ken answers a card in the user's place or leaves it to them.
+  // The user can still answer first; the first answer wins. A failure only
+  // leaves the card with the user, who can still answer, so no error frame.
+  const isAskPending = (id: string): boolean =>
+    asks.openPrompts().some((open) => open.prompt.id === id && !open.deferred);
+  const kenAnswerAsk = (prompt: AskUserPrompt): void => {
+    answerAskWithKen(prompt, () => isAskPending(prompt.id)).then(
+      (reply) => {
+        if (!reply) return;
+        if (reply.kind === "human") {
+          if (asks.openIds().includes(prompt.id)) {
+            broadcast("ask_user_left", { id: prompt.id, reason: reply.reason });
+          }
+          return;
+        }
+        // Past the deadline the agent already moved on: drop Ken's answer.
+        if (!isAskPending(prompt.id)) return;
+        if (asks.settle(prompt.id, { action: "answer", answers: reply.answers, by: "ken" })) {
+          log("INFO", "app-sidecar", "ken answered ask_user", { id: prompt.id });
+          broadcast("ask_user_answered", { id: prompt.id, answers: reply.answers, by: "ken" });
+        }
+      },
+      (err: unknown) =>
+        log("WARN", "app-sidecar", "ken couldn't answer ask_user", {
+          id: prompt.id,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+    );
+  };
   const askUserTool = createAskUserTool(async (request) => {
     const result = await asks.park(request);
     await startGoalFrom(result, request.questions);
@@ -989,10 +1092,15 @@ async function createSession(
       projectDir: cwd,
       workspaceOnly: true,
     });
+    // GG's own guide is the one built-in skill Chat gets: people ask it how the app works.
+    // A workspace skill with the same name still wins.
+    const guide = chatSkills.skills.some((s) => s.name === "gg-guide")
+      ? undefined
+      : await loadBundledSkill("gg-guide");
     session = createChatAgent(chatAgent, {
       ...baseSessionOptions,
       sessionsDir: paths.sessionsDir,
-      skills: chatSkills.skills,
+      skills: guide ? [...chatSkills.skills, guide] : chatSkills.skills,
       blockedSkills: chatSkills.blocked,
       additionalTools: [
         askUserTool,
@@ -1038,9 +1146,12 @@ async function createSession(
       additionalTools: [askUserTool],
     });
   } else {
+    const startLivePreview = deps.livePreview;
     session = new AgentSession({
       ...baseSessionOptions,
-      additionalTools: [askUserTool],
+      additionalTools: startLivePreview
+        ? [askUserTool, createLivePreviewTool((url) => startLivePreview(opts.id, url))]
+        : [askUserTool],
       // A run must not end mid-plan with nothing submitted: nobody could review it.
       planSubmissionGate: true,
       // Plan mode belongs only to the coding agent.
@@ -1162,10 +1273,13 @@ async function createSession(
     );
     clearRuntimeModels((m) => m.provider === "local");
     registerRuntimeModels(models);
-    log("INFO", "app-sidecar", "local model scan", {
-      reachable: probes.filter((p) => p.reachable).length + "/" + probes.length,
-      models: String(models.length),
-    });
+    const reachable = probes.filter((p) => p.reachable).length + "/" + probes.length;
+    // Every window re-scans; only a changed result is news.
+    const summary = `${reachable} ${models.length}`;
+    if (summary !== lastLocalScanSummary) {
+      lastLocalScanSummary = summary;
+      log("INFO", "app-sidecar", "local model scan", { reachable, models: String(models.length) });
+    }
     return probes;
   }
 
@@ -2137,158 +2251,163 @@ async function createSession(
   let taskRunAll = false;
 
   // Moved to app-sidecar/autopilot-runner.ts
-  const { runAutopilotCycle, runStrandedQueue, runTasks } = createAutopilotRunner({
-    get autopilotReviewing() {
-      return autopilotReviewing;
+  const { answerAskWithKen, runAutopilotCycle, runStrandedQueue, runTasks } = createAutopilotRunner(
+    {
+      get autopilotReviewing() {
+        return autopilotReviewing;
+      },
+      set autopilotReviewing(v) {
+        autopilotReviewing = v;
+      },
+      get broadcast() {
+        return broadcast;
+      },
+      get ensureKenAutoSession() {
+        return ensureKenAutoSession;
+      },
+      get cwd() {
+        return cwd;
+      },
+      get gitBranch() {
+        return gitBranch;
+      },
+      set gitBranch(v) {
+        gitBranch = v;
+      },
+      get session() {
+        return session;
+      },
+      set session(v) {
+        session = v;
+      },
+      get injectedAutopilotPrompts() {
+        return injectedAutopilotPrompts;
+      },
+      set injectedAutopilotPrompts(v) {
+        injectedAutopilotPrompts = v;
+      },
+      get loadWorkflowCommandSpecs() {
+        return loadWorkflowCommandSpecs;
+      },
+      get autopilotCancelled() {
+        return autopilotCancelled;
+      },
+      set autopilotCancelled(v) {
+        autopilotCancelled = v;
+      },
+      get broadcastError() {
+        return broadcastError;
+      },
+      get pendingKenAutoModel() {
+        return pendingKenAutoModel;
+      },
+      set pendingKenAutoModel(v) {
+        pendingKenAutoModel = v;
+      },
+      get syncKenAutoModel() {
+        return syncKenAutoModel;
+      },
+      get pendingPlanPath() {
+        return pendingPlanPath;
+      },
+      set pendingPlanPath(v) {
+        pendingPlanPath = v;
+      },
+      get planGeneration() {
+        return planGeneration;
+      },
+      set planGeneration(v) {
+        planGeneration = v;
+      },
+      get pendingPlanContent() {
+        return pendingPlanContent;
+      },
+      set pendingPlanContent(v) {
+        pendingPlanContent = v;
+      },
+      get autopilot() {
+        return autopilot;
+      },
+      set autopilot(v) {
+        autopilot = v;
+      },
+      get runLifecycle() {
+        return runLifecycle;
+      },
+      get abortOwnedWork() {
+        return abortOwnedWork;
+      },
+      get pendingCancelDrain() {
+        return pendingCancelDrain;
+      },
+      set pendingCancelDrain(v) {
+        pendingCancelDrain = v;
+      },
+      get autopilotActive() {
+        return autopilotActive;
+      },
+      set autopilotActive(v) {
+        autopilotActive = v;
+      },
+      get MAX_AUTOPILOT_ROUNDS() {
+        return MAX_AUTOPILOT_ROUNDS;
+      },
+      get activateApprovedPlan() {
+        return activateApprovedPlan;
+      },
+      get clearPendingPlan() {
+        return clearPendingPlan;
+      },
+      get planProgressPayload() {
+        return planProgressPayload;
+      },
+      get IMPLEMENT_PLAN_PROMPT() {
+        return IMPLEMENT_PLAN_PROMPT;
+      },
+      get runAgent() {
+        return runAgent;
+      },
+      get kenAutoSession() {
+        return kenAutoSession;
+      },
+      set kenAutoSession(v) {
+        kenAutoSession = v;
+      },
+      get reenterPlanModeForRevision() {
+        return reenterPlanModeForRevision;
+      },
+      get finishOwnedGeneration() {
+        return finishOwnedGeneration;
+      },
+      get drainingStrandedQueue() {
+        return drainingStrandedQueue;
+      },
+      set drainingStrandedQueue(v) {
+        drainingStrandedQueue = v;
+      },
+      get running() {
+        return running;
+      },
+      set running(v) {
+        running = v;
+      },
+      get offerPendingPlan() {
+        return offerPendingPlan;
+      },
+      get deactivateApprovedPlan() {
+        return deactivateApprovedPlan;
+      },
+      get taskRunAll() {
+        return taskRunAll;
+      },
+      set taskRunAll(v) {
+        taskRunAll = v;
+      },
+      get runClaim() {
+        return runClaim;
+      },
     },
-    set autopilotReviewing(v) {
-      autopilotReviewing = v;
-    },
-    get broadcast() {
-      return broadcast;
-    },
-    get ensureKenAutoSession() {
-      return ensureKenAutoSession;
-    },
-    get cwd() {
-      return cwd;
-    },
-    get gitBranch() {
-      return gitBranch;
-    },
-    set gitBranch(v) {
-      gitBranch = v;
-    },
-    get session() {
-      return session;
-    },
-    set session(v) {
-      session = v;
-    },
-    get injectedAutopilotPrompts() {
-      return injectedAutopilotPrompts;
-    },
-    set injectedAutopilotPrompts(v) {
-      injectedAutopilotPrompts = v;
-    },
-    get loadWorkflowCommandSpecs() {
-      return loadWorkflowCommandSpecs;
-    },
-    get autopilotCancelled() {
-      return autopilotCancelled;
-    },
-    set autopilotCancelled(v) {
-      autopilotCancelled = v;
-    },
-    get broadcastError() {
-      return broadcastError;
-    },
-    get pendingKenAutoModel() {
-      return pendingKenAutoModel;
-    },
-    set pendingKenAutoModel(v) {
-      pendingKenAutoModel = v;
-    },
-    get syncKenAutoModel() {
-      return syncKenAutoModel;
-    },
-    get pendingPlanPath() {
-      return pendingPlanPath;
-    },
-    set pendingPlanPath(v) {
-      pendingPlanPath = v;
-    },
-    get planGeneration() {
-      return planGeneration;
-    },
-    set planGeneration(v) {
-      planGeneration = v;
-    },
-    get pendingPlanContent() {
-      return pendingPlanContent;
-    },
-    set pendingPlanContent(v) {
-      pendingPlanContent = v;
-    },
-    get autopilot() {
-      return autopilot;
-    },
-    set autopilot(v) {
-      autopilot = v;
-    },
-    get runLifecycle() {
-      return runLifecycle;
-    },
-    get abortOwnedWork() {
-      return abortOwnedWork;
-    },
-    get pendingCancelDrain() {
-      return pendingCancelDrain;
-    },
-    set pendingCancelDrain(v) {
-      pendingCancelDrain = v;
-    },
-    get autopilotActive() {
-      return autopilotActive;
-    },
-    set autopilotActive(v) {
-      autopilotActive = v;
-    },
-    get MAX_AUTOPILOT_ROUNDS() {
-      return MAX_AUTOPILOT_ROUNDS;
-    },
-    get activateApprovedPlan() {
-      return activateApprovedPlan;
-    },
-    get clearPendingPlan() {
-      return clearPendingPlan;
-    },
-    get planProgressPayload() {
-      return planProgressPayload;
-    },
-    get IMPLEMENT_PLAN_PROMPT() {
-      return IMPLEMENT_PLAN_PROMPT;
-    },
-    get runAgent() {
-      return runAgent;
-    },
-    get kenAutoSession() {
-      return kenAutoSession;
-    },
-    set kenAutoSession(v) {
-      kenAutoSession = v;
-    },
-    get reenterPlanModeForRevision() {
-      return reenterPlanModeForRevision;
-    },
-    get finishOwnedGeneration() {
-      return finishOwnedGeneration;
-    },
-    get drainingStrandedQueue() {
-      return drainingStrandedQueue;
-    },
-    set drainingStrandedQueue(v) {
-      drainingStrandedQueue = v;
-    },
-    get running() {
-      return running;
-    },
-    set running(v) {
-      running = v;
-    },
-    get offerPendingPlan() {
-      return offerPendingPlan;
-    },
-    get deactivateApprovedPlan() {
-      return deactivateApprovedPlan;
-    },
-    get taskRunAll() {
-      return taskRunAll;
-    },
-    set taskRunAll(v) {
-      taskRunAll = v;
-    },
-  });
+  );
 
   // ── Idle wake for background alerts ────────────────────────
   // A background task that fails, or a child agent that finishes, after the
@@ -2603,6 +2722,7 @@ async function createSession(
     sessionId: opts.id,
     sessionIdsAt,
     busyAt,
+    syncMcpServer,
     get goal() {
       return goal;
     },

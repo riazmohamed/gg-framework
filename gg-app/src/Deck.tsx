@@ -56,6 +56,8 @@ export type DeckPanelId =
   | "health"
   | "scorecard"
   | "goal"
+  | "folders"
+  | "preview"
   | "trophies";
 
 /** A tool that used to be a pop-up dialog, now shown in the deck. */
@@ -63,8 +65,19 @@ export interface DeckTool {
   title: string;
   meta?: ReactNode;
   body: ReactNode;
+  /** A short tool: the panel hugs its content instead of taking the full tool height. */
+  fit?: boolean;
 }
-export type DeckToolId = "notes" | "todo" | "brain" | "checklist" | "health" | "scorecard" | "goal";
+export type DeckToolId =
+  | "notes"
+  | "todo"
+  | "brain"
+  | "checklist"
+  | "health"
+  | "scorecard"
+  | "goal"
+  | "folders"
+  | "preview";
 
 export interface DeckProps {
   state: AgentState | null;
@@ -77,8 +90,8 @@ export interface DeckProps {
   status: ReactNode;
   /** The message box (Composer). Kept mounted, hidden, while a panel is open. */
   composer: ReactNode;
-  /** The ⋯ keypad's keys. */
-  menu: ReactNode;
+  /** The ⋯ keypad's keys; null leaves the ⋯ key off the rail. */
+  menu: ReactNode | null;
   running: boolean;
   contextPct: number;
   models: readonly ModelOption[];
@@ -212,6 +225,8 @@ const PANEL_NAMES: Readonly<Record<DeckPanelId, string>> = {
   health: "Project Health",
   scorecard: "Scorecard",
   goal: "Goal settings",
+  folders: "Added folders",
+  preview: "Live preview",
   trophies: "Trophies",
 };
 
@@ -228,6 +243,7 @@ function Rail({
   onStopSchedule,
   radio,
   toggle,
+  menu,
 }: DeckProps & {
   radio: Radio;
   toggle: (id: DeckPanelId, event: React.MouseEvent<HTMLElement>) => void;
@@ -315,15 +331,17 @@ function Rail({
           <span className="rail-label">On air</span>
         </button>
       )}
-      <button
-        type="button"
-        className="key rail-key more-key"
-        title="More: new session, notes, tasks, radio and more"
-        aria-label="More"
-        {...key("more")}
-      >
-        <Icon name="more-horiz" size={16} />
-      </button>
+      {menu !== null && (
+        <button
+          type="button"
+          className="key rail-key more-key"
+          title="More: new session, notes, tasks, radio and more"
+          aria-label="More"
+          {...key("more")}
+        >
+          <Icon name="more-horiz" size={16} />
+        </button>
+      )}
       <span className="deck-spacer" />
       <button
         type="button"
@@ -400,7 +418,9 @@ function PanelBody(
     case "checklist":
     case "health":
     case "scorecard":
-    case "goal": {
+    case "goal":
+    case "folders":
+    case "preview": {
       const tool = props.tools[props.panel];
       return tool ? <ToolPanel tool={tool} onClose={close} /> : null;
     }
@@ -415,7 +435,9 @@ function isTool(panel: DeckPanelId): panel is DeckToolId {
     panel === "checklist" ||
     panel === "health" ||
     panel === "scorecard" ||
-    panel === "goal"
+    panel === "goal" ||
+    panel === "folders" ||
+    panel === "preview"
   );
 }
 
@@ -438,7 +460,7 @@ function ToolPanel({ tool, onClose }: { tool: DeckTool; onClose: () => void }): 
   return (
     <div className="deck-panel tool-panel">
       <PanelHead title={tool.title} meta={tool.meta} onClose={onClose} />
-      <div ref={bodyRef} className="tool-body" tabIndex={-1}>
+      <div ref={bodyRef} className={tool.fit ? "tool-body fit" : "tool-body"} tabIndex={-1}>
         <EmbeddedModal>{tool.body}</EmbeddedModal>
       </div>
     </div>

@@ -10,7 +10,13 @@ import type {
   ThinkingLevel,
   UserMessage,
 } from "@kenkaiiii/gg-ai";
-import { claudeCodeEnv, resolveClaudeCodeBinary, type AuthStorage } from "@kenkaiiii/gg-core";
+import {
+  claudeCodeEnv,
+  ensureClaudeCodeBinary,
+  log,
+  resolveClaudeCodeBinary,
+  type AuthStorage,
+} from "@kenkaiiii/gg-core";
 import {
   effortForThinking,
   fromSdkContentBlock,
@@ -39,13 +45,24 @@ export async function resolveClaudeCodeProcess(
   authStorage: Pick<AuthStorage, "hasClaudeCodeLogin">,
   provider: string,
   cwd: string,
+  install: () => Promise<string> = ensureClaudeCodeBinary,
 ): Promise<ClaudeCodeProcess | null> {
   if (provider !== "anthropic" || !(await authStorage.hasClaudeCodeLogin())) return null;
-  const executable = resolveClaudeCodeBinary();
+  let executable = resolveClaudeCodeBinary();
   if (!executable) {
-    throw new Error(
-      "Claude Code isn't installed anymore. Sign in with Claude again to restore it.",
-    );
+    // An app update pins a new version (or the binary was removed); the login
+    // lives in the config dir, so re-downloading is enough — no new sign-in.
+    log("INFO", "claude-code", "binary missing; downloading");
+    try {
+      executable = await install();
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Couldn't download Claude Code: ${reason} Check your connection and try again.`,
+        { cause: err },
+      );
+    }
+    log("INFO", "claude-code", "binary downloaded", { executable });
   }
   return { executable, cwd, env: claudeCodeEnv() };
 }
@@ -60,6 +77,8 @@ export interface ClaudeCodeCompleteOptions extends ClaudeCodeProcess {
   builtinTools?: string[];
   /** Default 1; raise it when `builtinTools` must run before the answer. */
   maxTurns?: number;
+  /** Called on every SDK message (partial deltas included), as proof of life. */
+  onActivity?: () => void;
 }
 
 export interface ClaudeCodeCompletion extends StreamResponse {
@@ -115,6 +134,8 @@ export async function claudeCodeComplete(
     strictMcpConfig: true,
     mcpServers: {},
     persistSession: false,
+    // Deltas are only used as a heartbeat; the full assistant messages still arrive.
+    includePartialMessages: true,
     maxTurns: opts.maxTurns ?? 1,
     pathToClaudeCodeExecutable: opts.executable,
     env: opts.env,
@@ -130,6 +151,7 @@ export async function claudeCodeComplete(
   const q = (opts.query ?? sdkQuery)({ prompt: input, options: sdkOptions });
   try {
     for await (const message of q) {
+      opts.onActivity?.();
       if (message.type === "assistant" && !message.parent_tool_use_id) {
         const blocks = message.message.content as unknown as Record<string, unknown>[];
         if ((message.message as { model?: string }).model === "<synthetic>") {

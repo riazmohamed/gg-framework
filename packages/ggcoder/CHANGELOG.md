@@ -1,5 +1,136 @@
 # @kenkaiiii/ggcoder
 
+## 5.103.0
+
+### Minor Changes
+
+- Add Live Preview: open a project's running dev server in the browser with GG's chat on the page and point-and-ask element picking; `review` on a command that can't carry one now runs the command with a skip note instead of rejecting it.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.103.0
+- @kenkaiiii/gg-agent@5.103.0
+- @kenkaiiii/gg-core@5.103.0
+
+## 5.102.0
+
+### Patch Changes
+
+- Updated dependencies [188a0ca]
+  - @kenkaiiii/gg-core@5.102.0
+  - @kenkaiiii/gg-ai@5.102.0
+  - @kenkaiiii/gg-agent@5.102.0
+
+## 5.101.0
+
+### Minor Changes
+
+- Autopilot Ken now answers ask_user cards in your place (or leaves them to you with a reason), /init writes much leaner context files, and CI tracks the cached system-prompt prefix size.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.101.0
+- @kenkaiiii/gg-agent@5.101.0
+- @kenkaiiii/gg-core@5.101.0
+
+## 5.100.3
+
+### Patch Changes
+
+- Fix Claude Code going missing: a missing pinned binary is now re-downloaded instead of asking you to sign in again, and installing one version no longer deletes newer versions that other apps on gg-core pinned.
+  - @kenkaiiii/gg-ai@5.100.3
+  - @kenkaiiii/gg-agent@5.100.3
+  - @kenkaiiii/gg-core@5.100.3
+
+## 5.100.2
+
+### Patch Changes
+
+- Refresh dependencies and the Claude Code manifest (claude-agent-sdk 0.3.321), and update the GG Coder guide for the new critter name tags, Home crew and Goals farm visitors.
+  - @kenkaiiii/gg-ai@5.100.2
+  - @kenkaiiii/gg-agent@5.100.2
+  - @kenkaiiii/gg-core@5.100.2
+
+## 5.100.1
+
+### Patch Changes
+
+- Update the gg-guide skill: queued messages are cancelled from the x on each queued bubble, not a strip above the input
+  - @kenkaiiii/gg-ai@5.100.1
+  - @kenkaiiii/gg-agent@5.100.1
+  - @kenkaiiii/gg-core@5.100.1
+
+## 5.100.0
+
+### Minor Changes
+
+- 4175416: Add a light `@kenkaiiii/ggcoder/web` entry point (web_search, web_fetch and the side search, with no UI code) and an optional `guardUrl` hook on `createWebFetchTool` that checks the first URL and every redirect hop.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.100.0
+- @kenkaiiii/gg-agent@5.100.0
+- @kenkaiiii/gg-core@5.100.0
+
+## 5.99.0
+
+### Minor Changes
+
+- Add `!claude mcp …` / `!ggcoder mcp …` server management in the app with live MCP loading in open windows, any pasted Claude Code `mcp add` line, the bundled gg-guide skill, Add/Remove folder sidecar routes, and a short answer before every ask_user card.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.99.0
+- @kenkaiiii/gg-agent@5.99.0
+- @kenkaiiii/gg-core@5.99.0
+
+## 5.98.2
+
+### Patch Changes
+
+- Fix "Continue with ChatGPT" sign-in failing with `invalid_grant`: when OpenAI refuses the one-time code after a first registration, sign-in now retries once with the app ID it just issued, reports refusals as a typed `ChatGPTSignInError`, and frees the callback port immediately when cancelled. Also removes dead code and the unused `@bokuweb/zstd-wasm` dependency.
+  - @kenkaiiii/gg-ai@5.98.2
+  - @kenkaiiii/gg-agent@5.98.2
+  - @kenkaiiii/gg-core@5.98.2
+
+## 5.98.1
+
+### Patch Changes
+
+- Fix the run-all task sweep letting a prompt or new session start between two tasks: the sweep now holds the run claim from first task to last, and `/tasks/run` and `/new-session` refuse while a run is starting or Autopilot is active.
+  - @kenkaiiii/gg-ai@5.98.1
+  - @kenkaiiii/gg-agent@5.98.1
+  - @kenkaiiii/gg-core@5.98.1
+
+## 5.98.0
+
+### Minor Changes
+
+- ec684b8: Add OpenCode as two providers: **OpenCode Go** (the subscription) and **OpenCode** (pay-as-you-go), each connected with an OpenCode Console API key (#142). Every request carries GG Coder's own User-Agent and a stable `x-opencode-session` per conversation, which Go requires; calls made outside a conversation (summaries, the prompt enhancer) share one fallback id. Models are listed as `opencode-go/<id>` and `opencode/<id>` and run over the gateway's Chat Completions API, so only the models OpenCode serves on that API are offered (19 of Go's 30 today); models whose own API is Responses, Anthropic Messages or Gemini are left out for now. Requests cap output with `max_tokens` and return earlier thinking as `reasoning_content`, which the gateway's backends require. The desktop app reads each connected plan's public model list (context, output cap, image input, effort levels) and refreshes it every six hours; pay-as-you-go leaves out the free tier, which only runs inside OpenCode. Kimi K3, GLM-5.3 and GLM-5.3-Flash are built in for the CLI and offline starts.
+
+  - gg-ai: new `opencode` and `opencode-go` providers.
+  - gg-core: `parseOpenCodeCatalog`, `OPENCODE_CATALOG_URLS`, `OPENCODE_PROVIDERS`, `formatOpenCodeModelId`.
+
+### Patch Changes
+
+- Updated dependencies [ec684b8]
+  - @kenkaiiii/gg-ai@5.98.0
+  - @kenkaiiii/gg-core@5.98.0
+  - @kenkaiiii/gg-agent@5.98.0
+
+## 5.97.1
+
+### Patch Changes
+
+- Fix the Claude subscription route failing a resume whose Claude Code transcript is gone: the session now seeds a fresh one from its own history, holds the transcript it would resume against the retention pass, and reloads the on-demand tools a restored conversation already used (the prompt now says to run `tool_search` first on that route). A Claude Code summary that keeps streaming is no longer dropped at the attempt timeout, a caller's access token is refreshed before reuse, and an unfinished run owned by another live process is left open instead of being treated as a crash.
+
+  Prune tool results less often on a warm cache (warm floor 0.2 → 0.35 of active tokens, flat floor near the compaction trigger), halve the `ask_user` interactive deadline to 5 min and the `task_output` wait cap to 300s, keep three rotated `debug.log` generations, and stop repeating unchanged log lines (local-model scan, autopilot disabled, unknown agent tools). The Claude Code route now logs `cache_health` and `retry` like the public-API route.
+
+- Updated dependencies
+  - @kenkaiiii/gg-core@5.97.1
+  - @kenkaiiii/gg-ai@5.97.1
+  - @kenkaiiii/gg-agent@5.97.1
+
 ## 5.97.0
 
 ### Minor Changes

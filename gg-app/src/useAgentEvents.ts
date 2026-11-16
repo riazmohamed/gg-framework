@@ -18,8 +18,10 @@ import {
   askItemFor,
   closeAsks,
   closeAsksNotIn,
+  completeAskFromSidecar,
   isAskUserPrompt,
   markAskDeferred,
+  markAskLeftByKen,
   parseOpenAskPrompts,
   withOpenAsks,
 } from "./ask-user";
@@ -609,6 +611,22 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           if (readyState.goal?.needsResume) onGoalNeedsResume?.();
           break;
         }
+        case "live_preview_prompt": {
+          // Sent from the live preview chat on the running web app: show the
+          // typed words and the picked element, not the context block the agent
+          // receives (core/live-preview.ts in ggcoder).
+          const text = typeof d.text === "string" ? d.text : "";
+          const element = typeof d.element === "string" && d.element ? d.element : null;
+          if (!text.trim() && !element) break;
+          stickToBottomRef.current = true;
+          pushItem({
+            kind: "user",
+            id: nextId(),
+            text,
+            ...(element ? { attachments: [{ kind: "file" as const, name: element }] } : {}),
+          });
+          break;
+        }
         case "run_start":
           // Land any still-buffered sub-agent snapshots on their (previous
           // run's) group before the active-group pointer resets below.
@@ -1134,6 +1152,28 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           if (typeof d.id === "string") {
             const promptId = d.id;
             setItems((prev) => markAskDeferred(prev, promptId));
+          }
+          break;
+        case "ask_user_answered":
+          // Autopilot Ken answered the card in the user's place.
+          if (typeof d.id === "string" && typeof d.answers === "object" && d.answers !== null) {
+            const promptId = d.id;
+            const answers: Record<string, string | string[]> = {};
+            for (const [key, value] of Object.entries(d.answers as Record<string, unknown>)) {
+              if (typeof value === "string") answers[key] = value;
+              else if (Array.isArray(value) && value.every((v) => typeof v === "string")) {
+                answers[key] = value as string[];
+              }
+            }
+            setItems((prev) => completeAskFromSidecar(prev, promptId, answers, nextId));
+          }
+          break;
+        case "ask_user_left":
+          // Autopilot Ken left the card to the user; it stays open.
+          if (typeof d.id === "string") {
+            const promptId = d.id;
+            const reason = typeof d.reason === "string" ? d.reason : "";
+            setItems((prev) => markAskLeftByKen(prev, promptId, reason));
           }
           break;
         case "ask_user_closed":

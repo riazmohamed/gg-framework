@@ -1,4 +1,4 @@
-import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from "react";
+import type { Dispatch, MutableRefObject, ReactNode, RefObject, SetStateAction } from "react";
 import { ArrowUpIcon, PaperclipIcon, SquareIcon } from "@phosphor-icons/react";
 import { ShellCommandMenu } from "./ShellCommandMenu";
 import type { ShellSuggestion } from "./agent";
@@ -9,8 +9,6 @@ import {
   sendPrompt,
   type AgentState,
   type FileHit,
-  type PromptSegment,
-  type QueuedMessage,
   type SlashCommand,
   type WorkspaceMode,
 } from "./agent";
@@ -20,7 +18,7 @@ import { CacheExpiryNotice } from "./CacheExpiryNotice";
 import { EnhanceDissolve } from "./EnhanceDissolve";
 import { FileMentionMenu } from "./FileMentionMenu";
 import { FloatingSurface } from "./FloatingSurface";
-import { QueuedBar } from "./QueuedBar";
+import { type DraftEnhancement, followDraftEdit } from "./PromptEnhancement";
 import { ReferencedFiles } from "./ReferencedFiles";
 import { ScheduleHint } from "./ScheduleHint";
 import { ShimmerText } from "./ShimmerText";
@@ -67,14 +65,12 @@ export interface ComposerProps {
   fileInputRef: RefObject<HTMLInputElement | null>;
   mentionedPaths: string[];
   removeMentionChip: (p: string) => void;
-  visibleQueuedMessages: readonly QueuedMessage[];
   /** Bumped by every send; the strips a send clears leave in that same commit. */
   sendCount: number;
-  handleCancelQueued: (id: string) => void;
   enhanceAnim: { oldText: string; newText: string | null } | null;
   onEnhanceAnimDone: () => void;
-  enhancement: { plain: string; segments: PromptSegment[] } | null;
-  setEnhancement: Dispatch<SetStateAction<{ plain: string; segments: PromptSegment[] } | null>>;
+  enhancement: DraftEnhancement | null;
+  setEnhancement: Dispatch<SetStateAction<DraftEnhancement | null>>;
   enhancing: boolean;
   enhanceHintVisible: boolean;
   runEnhance: () => Promise<void>;
@@ -92,6 +88,8 @@ export interface ComposerProps {
   navigateHistory: (dir: -1 | 1, el: HTMLTextAreaElement) => boolean;
   submit: () => void;
   requestCancel: () => void;
+  // Replaces the attach button (the live preview puts its element picker here).
+  leadAction?: ReactNode;
 }
 
 /** The `!` command picker's state; App owns it, the composer drives it. */
@@ -153,9 +151,7 @@ export function Composer({
   fileInputRef,
   mentionedPaths,
   removeMentionChip,
-  visibleQueuedMessages,
   sendCount,
-  handleCancelQueued,
   enhanceAnim,
   onEnhanceAnimDone,
   enhancement,
@@ -175,6 +171,7 @@ export function Composer({
   navigateHistory,
   submit,
   requestCancel,
+  leadAction,
 }: ComposerProps): React.ReactElement {
   const keyAction = sendKeyAction({ shellMode, running, kenRunning, autopilotReviewing });
   const stopping = keyAction !== "send";
@@ -239,25 +236,28 @@ export function Composer({
           )
         }
       />
-      <QueuedBar messages={visibleQueuedMessages} onCancel={handleCancelQueued} />
       <div className="inputrow">
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          style={{ display: "none" }}
-          onChange={(e) => {
-            if (e.target.files) void addFiles(e.target.files);
-            e.target.value = "";
-          }}
-        />
-        <button
-          className="icon-circle"
-          title="Attach files"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <PaperclipIcon size={15} />
-        </button>
+        {leadAction ?? (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => {
+                if (e.target.files) void addFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            <button
+              className="icon-circle"
+              title="Attach files"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <PaperclipIcon size={15} />
+            </button>
+          </>
+        )}
         <div className="input-stack">
           {enhanceAnim && (
             <EnhanceDissolve
@@ -316,9 +316,10 @@ export function Composer({
               setCaret(e.target.selectionStart ?? e.target.value.length);
               // Typing exits history-recall mode so ↑/↓ start fresh next time.
               if (historyIndex !== null) setHistoryIndex(null);
-              // Drop the enhancement the instant the text diverges from it, so
-              // the highlighted preview/bubble never misalign with edited text.
-              if (enhancement && e.target.value !== enhancement.plain) setEnhancement(null);
+              // Re-anchor the corrected terms onto the edited text so their
+              // highlights survive edits; terms the edit touched are dropped.
+              if (enhancement && e.target.value !== enhancement.plain)
+                setEnhancement(followDraftEdit(enhancement, input, e.target.value));
               updateMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
             }}
             onClick={(e) => {
