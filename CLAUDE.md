@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | Branch | Machine / OS | What it ships | Merges from |
 | --- | --- | --- | --- |
-| `main` | — | Exact mirror of upstream KenKaiii/gg-framework. Never commit here. | `upstream/main` |
+| `main` | — | Upstream KenKaiii/gg-framework plus the Mac side's `fork-mac.yml` (scheduled workflows only run from the default branch). Never commit here from WSL/Windows. | `upstream/main` (merged on the Mac) |
 | `windows` (this file) | Windows PC: desktop app from `C:\Users\riaza\gg-framework`; WSL: `ogcoder` CLI from `/home/riaz24/gg-framework` | OG desktop app (`og-v*` releases, self-update feed, Job Object), WSL/Windows CLI fixes | `main` only |
 | `rebrand/abukhaled` | **Mac** | Mac `ogcoder` + its own CLI feature work | `main` only — **never merge `windows` into it, never push to it from here** |
 
@@ -71,8 +71,8 @@ from WSL `~/.gg/gg-app.json` → `/home/riaz24/projects`. Details in `gg-app/DIS
 
 **Dependency chain**: `gg-core` → `gg-ai` → `gg-agent` → `ogcoder` (uses `ggcoder-eyes` for perception)
 
-Current published version: **5.79.2** (last app-update sync: 2026-10-12; gg-app upstream v0.87.2,
-fork desktop release `og-v0.87.201`).
+Current published version: **5.106.1** (last app-update sync: 2026-11-20; gg-app upstream v0.117.1;
+last fork desktop release `og-v0.87.201` — the next `og-v*` tag will be `og-v0.117.101`).
 
 Sync history note: the previous `origin/windows` had independently synced upstream to 4.5.0
 (2026-06-04) with 42 fork-only commits on top. The 2026-09-07 sync merged upstream 5.58.0 first,
@@ -87,6 +87,38 @@ compaction-tuned `getSummaryModel`; pnpm `overrides`/`onlyBuiltDependencies` mov
 passes `ignoreDeprecations: "6.0"` to the dts step (as gg-ai/gg-agent do). New upstream
 `@kenkaiiii/gg-*` imports arrive in every sync. Rebrand them, then confirm
 `git grep -E "@kenkaiiii/(gg-core|gg-ai|gg-agent|ggcoder)"` returns nothing outside docs.
+
+The 2026-11-20 sync (5.79.2 → 5.106.1, ~330 upstream commits) is the biggest since the fork:
+- `origin/main` is **no longer a pure mirror**: the Mac side committed `.github/workflows/fork-mac.yml`
+  there and merges upstream by hand, so it can trail `upstream/main`. `/app-update` merges `main`
+  **and then `upstream/main`** into `windows`. `fork-mac.yml` rides along harmlessly (schedule-only).
+- **License is now AGPL-3.0-only** upstream (LICENSE + per-package LICENSE/NOTICE, `author: Ken Kai`
+  kept). Fork READMEs keep their own text but say AGPL; resolve README conflicts `--ours`, then
+  re-check the badge and `## License` sections.
+- **Auth rewrite accepted**: upstream deleted the CLI-impersonating OAuth look-alikes
+  (`core/oauth/{anthropic,gemini,kimi,xai}.ts`, `claude-code-version.ts`, `interactive.ts`,
+  `utils/format.ts`, `core/auth/index.ts`). Claude subscriptions now **sign in through the official
+  Claude Code** (`signInWithClaudeCode`, `core/claude-code/*`, binary downloaded on first use,
+  sha512-pinned); ChatGPT keeps its sign-in (`loginChatGPT`); everything else is an API key, with
+  `apiKeyVariants` for plan vs pay-per-token keys (Kimi, Xiaomi). User chose to stay on upstream's
+  Claude sign-in. Do not resurrect the deleted OAuth files.
+- Identity is now **"OG Coder by Abu Khaled" for every provider**, Anthropic included (the Claude Code
+  identity was only needed by the removed OAuth). `src/__golden__/system-prompt-prefix.md` differs
+  from upstream by the identity line and the "(all OG Coder projects …)" skills line; regenerate with
+  `UPDATE_GOLDEN=1 pnpm --filter @abukhaled/ogcoder exec vitest run src/system-prompt.golden.test.ts`.
+- Fork resolutions to re-check next sync: GLM keeps the **Coding Plan** endpoint
+  (`GLM_CODING_BASE_URL` in gg-ai `stream.ts`; upstream moved to pay-per-token because the plan is
+  limited to tools Z.AI lists); `cli/auth.ts` overrides the Xiaomi Token Plan variant's hardcoded
+  `sgp` URL with the region picked in phase 1.5; agent-loop's hedged stream sends `turnProvider` /
+  `turnModel` / `turnBaseUrl` and skips the credential refresh when the router overrode credentials;
+  `useAgentLoop` passes `modelRouter` alongside upstream's Claude Code route; gg-app "Add folder"
+  wraps the picked path in `toAgentPath` (WSL mode); `prompt-commands.test.ts` lists the fork's
+  `setup-eyes`, `eyes-improve`, `nuclear-commit`.
+- Accepted upstream removals: `/setup-skills`, `/setup-ci`, `/compare`, `experiments/`, the
+  `screenshot` tool (replaced by the script-driven `browser` tool). `utils/open-browser.ts` is back
+  (upstream's `rundll32` opener; `live-preview.ts` needs it).
+- `ogcoder` exports keep the fork subset plus upstream's new `./mcp` (tsup entry
+  `core/mcp/index`). Root tsup is now **9.x**.
 
 The 2026-10-12 sync (13 upstream commits, 5.78.0 → 5.79.2) added **GG Goals**
 (`goals-agent/`, `core/goals-store.ts`, app-sidecar `goal-routes.ts`; feature name kept, only
@@ -129,7 +161,7 @@ keeps it — a merge from main will silently drop its ~27 files unless they are 
 
 ### Brand
 
-User-visible name is **"OG Coder by abukhaled"** — rendered with the "OG" ASCII logo by the TUI banner in `terminal-history.ts` and by the duplicate help-screen banner in `cli.ts` (printed for `ogcoder --help`). The default agent identity in `system-prompt.ts` (used for non-Anthropic providers — Anthropic OAuth requires the "Claude Code" identity) is **"OG Coder by Abu Khaled"** (title-case attribution) — that form is reserved for prompts the agent reads about itself; everything the human sees uses lowercase "abukhaled".
+User-visible name is **"OG Coder by abukhaled"** — rendered with the "OG" ASCII logo by the TUI banner in `terminal-history.ts` and by the duplicate help-screen banner in `cli.ts` (printed for `ogcoder --help`). The agent identity in `system-prompt.ts` (every provider, Anthropic included, since 2026-11-20) is **"OG Coder by Abu Khaled"** (title-case attribution) — that form is reserved for prompts the agent reads about itself; everything the human sees uses lowercase "abukhaled".
 
 The literal string `"ggcoder"` is still load-bearing in several internal places and must NOT be rebranded:
 
@@ -228,7 +260,7 @@ Fix ALL errors before continuing. Quick fixes: `pnpm lint:fix` and `pnpm format`
 - **Model router** (`core/model-router.ts`): Per-turn model switching. Modes: `vision` (auto-switch on images/video/docs), `plan-execute` (heavy planner + light executor), `hybrid` (vision priority, then plan-execute).
 - **Compaction** (`core/compaction/compactor.ts`): Triggers at 80% context usage. Keeps system message + recent ~20K tokens intact. Middle section summarized via LLM (tool calls → text, thinking stripped, results truncated). Falls back to extractive summary on failure.
 - **Sessions** (`core/session-manager.ts`): Append-only JSONL with DAG structure (leafId for branching). Streams line-by-line for large files. `repairToolPairs()` fixes interrupted sessions on restore.
-- **Auth**: OAuth PKCE for Anthropic, OpenAI, Gemini, Kimi and xAI; static API keys for GLM, Moonshot, Xiaomi, MiniMax, DeepSeek, OpenRouter, HuggingFace and Sakana. Credentials live in `~/.gg/auth.json` (mode `0o600`, atomic write under a file lock — `gg-core`'s `auth-storage`). Xiaomi keys are **region-scoped**: a key issued for `ams` returns 401 on `sgp`. `runLogin()` in `cli/auth.ts` therefore runs the Ink region selector **before** `readline.createInterface()` — a raw-mode Ink selector (`ui/login.tsx`) cannot coexist with an active readline interface. Xiaomi's API-Credits endpoint (`XIAOMI_CREDITS_KEY`) is a single global URL and skips region selection.
+- **Auth**: Claude subscriptions sign in through the official Claude Code (`signInWithClaudeCode`; runs go through `core/claude-code/*`); ChatGPT plan sign-in via `loginChatGPT`; every other provider (and Anthropic's pay-per-token route) is a static API key, with `apiKeyVariants` in gg-core's `auth-providers.ts` for providers taking two key kinds. Credentials live in `~/.gg/auth.json` (mode `0o600`, atomic write under a file lock — `gg-core`'s `auth-storage`). Xiaomi keys are **region-scoped**: a key issued for `ams` returns 401 on `sgp`. `runLogin()` in `cli/auth.ts` therefore runs the Ink region selector **before** `readline.createInterface()` — a raw-mode Ink selector (`ui/login.tsx`) cannot coexist with an active readline interface. Xiaomi's API-Credits endpoint (`XIAOMI_CREDITS_KEY`) is a single global URL; the region only overrides the Token Plan variant's `baseUrl`.
   - Known gap: the desktop app's provider descriptor (`gg-core/src/auth-providers.ts` → `app-sidecar.ts`) still hardcodes the `sgp` Token Plan URL, so a desktop login with an `ams` key will 401. The CLI path is region-correct.
 - **Models**: The registry lives in `@abukhaled/gg-core` (`gg-core/src/model-registry.ts`); `ggcoder/src/core/model-registry.ts` is a re-export shim that additionally defines the fork's routing helpers — `getVisionModel`, `getVideoCapableModel`, `getDocumentCapableModel`, and `getExecutorModel` (first low-tier model for the provider, else the current model — implemented locally since gg-core dropped `getFastModel`). gg-core's `ModelInfo` has no `supportsDocuments` flag, so documents ride the image/multimodal path.
 - **Eyes (`packages/ggcoder-eyes`)**: Perception probes the agent invokes via the `ogcoder eyes ...` passthrough in `cli.ts`. Driven by the `/setup-eyes` and `/eyes-improve` prompt commands in `core/prompt-commands.ts`. Probes live in `probes/<name>/impl/*.sh`, with `detect.sh`, `install.sh`, and `test.sh` per probe. The agent reads `isEyesActive`/`journalCount`/`readJournal` from `@abukhaled/ggcoder-eyes`; `EyesOverlay.tsx` renders the live journal in the TUI.
