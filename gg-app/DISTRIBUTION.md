@@ -198,7 +198,16 @@ contents) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` set. The private key + passwo
 two repo secrets. **Losing the key strands installed apps** — they will only trust updates
 signed by it; recovery is a manual reinstall of a build with a new pubkey.
 
-Releasing: `.github/workflows/release-windows.yml` runs on an `og-v<version>` tag that points at
+**Local builds (2026-11-20, current way to ship):** `gg-app/scripts/build-fork-windows.ps1
+-Version <x.y.z> [-Install]`, run in `C:\Users\riaza\gg-framework`. Same steps as
+`release-windows.yml` (frozen install, `pnpm build`, stage node, bundle sidecar, installer art,
+sidecar smoke, `tauri build --bundles nsis` with the fork-release config and a version override
+written to `%TEMP%`). It refuses a dirty tree or a HEAD not on `origin/windows`, reads the key
+from `%USERPROFILE%\.gg-signing`, prints the installer path + SHA256, and with `-Install` runs
+it `/S` (fails if OG Coder is open). Output: `src-tauri\target\release\bundle\nsis\`.
+Nothing is published, so installed apps update only by running this again.
+
+Releasing via CI (dormant: Actions creates no runs here since 2026-10-12): `.github/workflows/release-windows.yml` runs on an `og-v<version>` tag that points at
 `windows` (upstream's `release.yml` only fires on `v*`, so it never runs here). Version scheme:
 upstream major.minor, patch = upstream_patch × 100 + fork build (upstream 0.86.0 → fork
 0.86.1, 0.86.2…; upstream 0.86.1 → 0.86.101), so a fork build always sorts above the upstream

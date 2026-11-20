@@ -61,9 +61,15 @@ stable-msvc, pnpm 10.33 pinned). Helper scripts from that build live in
 `steroids-cargo.ps1`, `gg-reinstall.cmd`) — disposable, not tracked.
 **Desktop updates (2026-10-11):** the installed fork app self-updates from this fork's GitHub
 releases, not upstream's (`tauri.fork-release.conf.json`, signed with the fork key in
-`~/.gg-signing`). Ship one with: `/app-update` → push → tag `og-v<x.y.(patch*100+n)>` on
-`windows` → `release-windows.yml` builds + publishes → apps update. Details in
-`gg-app/DISTRIBUTION.md` "Fork release feed". Upstream is fetched directly via the `upstream`
+`~/.gg-signing`). **Since 2026-11-20 desktop rebuilds are local** (user's choice; GitHub
+Actions stopped creating runs here after 2026-10-12): `/app-update` → push → on Windows run
+`powershell -ExecutionPolicy Bypass -File gg-app\scripts\build-fork-windows.ps1 -Version
+<x.y.(patch*100+n)> -Install` in `C:\Users\riaza\gg-framework` (clean tree, HEAD on
+`origin/windows`, OG Coder closed). It runs `release-windows.yml`'s steps, signs with
+`%USERPROFILE%\.gg-signing`, and installs per-user to `%LOCALAPPDATA%\GG Coder`. Nothing is
+uploaded, so the in-app updater (GitHub `releases/latest`, still `og-v0.87.202`) offers nothing
+newer; local builds are how the app gets updated now. Details in `gg-app/DISTRIBUTION.md`
+"Fork release feed". Upstream is fetched directly via the `upstream`
 remote (`git -c credential.helper= fetch upstream` while the gh token is expired).
 The app daemon's process tree is held in a kill-on-close Windows Job Object
 (`src-tauri/src/daemon_job.rs`, ported from creativeprofit22's fork), so agent-started dev
@@ -82,13 +88,15 @@ from WSL `~/.gg/gg-app.json` → `/home/riaz24/projects`. Details in `gg-app/DIS
 
 Current published version: **5.106.1** (last app-update sync: 2026-11-20; gg-app upstream v0.117.1;
 last published fork desktop release `og-v0.87.202`, 2026-10-12).
-**Release blocked (2026-11-20):** tag `og-v0.117.101` (→ `bdeed526`) is pushed, but GitHub Actions
-has created **no runs in this repo since 2026-10-12** — not this tag, not pushes to
-`windows`/`rebrand/abukhaled`, and the Mac's scheduled `fork-mac.yml` has never run. Repo is a
-public fork with Actions enabled, so check the Actions tab / account in the web UI. Once runs
-are created again, re-push the tag (`git push --delete <ssh-remote> og-v0.117.101`, then push
-it again) to trigger `release-windows.yml`. The Windows checkout was pulled to `bdeed526` the
-same day.
+**Installed desktop build (2026-11-20): 0.117.101**, built locally from `59334f76` with
+`build-fork-windows.ps1` (NSIS `GG Coder_0.117.101_x64-setup.exe`, sha256 `61ca67ea…f4db4d`,
+plus its updater `.sig`). The pushed tag `og-v0.117.101` points at `bdeed526`, one commit before
+the Rust fix that build needed (`commands/files.rs`: the fork's WSL branch of
+`resolve_chat_path` must return the path since upstream's refactor); moving it needs a
+force-push, left for the user. GitHub Actions has created **no runs since 2026-10-12** (the
+Mac's scheduled `fork-mac.yml` has never run either), so Mac auto-builds are not happening.
+`pnpm test` under WSL does not compile the Rust shell: run `cargo check --release` in
+`gg-app\src-tauri` on Windows after any sync that touches `src-tauri/src`.
 
 Sync history note: the previous `origin/windows` had independently synced upstream to 4.5.0
 (2026-06-04) with 42 fork-only commits on top. The 2026-09-07 sync merged upstream 5.58.0 first,
