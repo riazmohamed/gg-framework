@@ -1,5 +1,4 @@
 import chalk from "chalk";
-import { readFile } from "node:fs/promises";
 import { SessionManager, type SessionInfo } from "../core/session-manager.js";
 import { gradientLine, LOGO_GAP } from "../cli/shared.js";
 
@@ -36,43 +35,15 @@ function formatRelativeTime(isoTimestamp: string): string {
   return new Date(isoTimestamp).toLocaleDateString();
 }
 
-/** Extract first user prompt from a session JSONL file */
-async function extractFirstPrompt(sessionPath: string): Promise<string> {
-  try {
-    const content = await readFile(sessionPath, "utf-8");
-    const lines = content.split("\n");
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const entry = JSON.parse(line) as {
-          type: string;
-          message?: { role: string; content: string | { type: string; text?: string }[] };
-        };
-        if (entry.type === "message" && entry.message?.role === "user") {
-          const c = entry.message.content;
-          let text: string;
-          if (typeof c === "string") {
-            text = c;
-          } else if (Array.isArray(c)) {
-            text = c.flatMap((b) => (b.type === "text" && b.text ? [b.text] : [])).join(" ") || "";
-          } else {
-            continue;
-          }
-          // Collapse whitespace and truncate
-          text = text.replace(/\s+/g, " ").trim();
-          if (text.length > MAX_PROMPT_LEN) {
-            text = text.slice(0, MAX_PROMPT_LEN) + "...";
-          }
-          return text || "(empty)";
-        }
-      } catch {
-        // Skip unparseable lines
-      }
-    }
-  } catch {
-    // File read error
-  }
-  return "(no prompt)";
+/**
+ * Picker label for a session. Uses the preview `SessionManager.list()` already
+ * computed, which reads gzipped cold sessions and skips compaction summaries;
+ * re-reading the file as plain JSONL got both wrong.
+ */
+export function firstPromptLabel(info: SessionInfo): string {
+  const text = (info.preview ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "(no prompt)";
+  return text.length > MAX_PROMPT_LEN ? text.slice(0, MAX_PROMPT_LEN) + "..." : text;
 }
 
 function renderScreen(sessions: SessionDisplay[], selectedIndex: number): string {
@@ -130,13 +101,10 @@ export async function renderSessionSelector(
     return null;
   }
 
-  // Load first prompt for each session
-  const sessions: SessionDisplay[] = await Promise.all(
-    top5.map(async (info) => ({
-      info,
-      firstPrompt: await extractFirstPrompt(info.path),
-    })),
-  );
+  const sessions: SessionDisplay[] = top5.map((info) => ({
+    info,
+    firstPrompt: firstPromptLabel(info),
+  }));
 
   return new Promise((resolve) => {
     let selectedIndex = 0;
