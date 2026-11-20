@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Box, Text } from "ink";
 import type { Provider } from "@abukhaled/gg-ai";
-import { getAllModels, getModel } from "../../core/model-registry.js";
+import { getListedModels, getModel } from "../../core/model-registry.js";
 import { useTheme } from "../theme/theme.js";
 import { SlashStyledSelectList } from "./SlashStyledSelectList.js";
 
@@ -67,7 +67,7 @@ export function ModelSelector({
 
   const items = useMemo(
     () =>
-      getAllModels()
+      getListedModels()
         .filter((m) => loggedInProviders.includes(m.provider))
         .map((m) => {
           const value = `${m.provider}:${m.id}`;
