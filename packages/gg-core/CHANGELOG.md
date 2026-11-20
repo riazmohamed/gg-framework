@@ -1,5 +1,42 @@
 # @abukhaled/gg-core
 
+## 5.106.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.106.1
+
+## 5.106.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.106.0
+
+## 5.105.0
+
+### Minor Changes
+
+- cecf292: Add Gemini 4 Hydrogen (`gemini-4-hydrogen`), Argon (`gemini-4-argon`) and Carbon (`gemini-4-carbon`), each with a 1M window, 64K output and image and video input, and Gemini 3.6 Flash (`gemini-3.6-flash`), which replaced 3.5 Flash. Gemini 3.1 Flash Lite stays the Gemini default. Gemini 4 and later get a thinking level instead of a token budget, the way Gemini 3 does (a budget 400s there).
+
+### Patch Changes
+
+- Updated dependencies [cecf292]
+  - @kenkaiiii/gg-ai@5.105.0
+
+## 5.104.0
+
+### Minor Changes
+
+- 7c90836: Replace GPT-6 Astra with GPT-6.2 Astra (`gpt-6.2-astra`) and GPT-6.1 Sol with GPT-6.2 Sol (`gpt-6.2-sol`), plus their Fast variants. Both have 1.05M context on the public Responses API (922K max input), 128K output and text+image input. Astra costs $8/$40 per MTok (cached input $0.40) and Sol $2/$10 (cached input $0.10). The 272K ChatGPT-plan window, the `low` default effort and the full ladder up to `ultra` carry over from the models they replace.
+
+  GPT-6.2 Sol is the new OpenAI default (registry, CLI, benchmarks). The login hub, footer names, READMEs, Fast mode, Ultra delegation and subagent policy now use the 6.2 ids. `gpt-6-astra` and `gpt-6.1-sol` are retired, so a saved session still on one falls back to the provider default on next start.
+
+### Patch Changes
+
+- Updated dependencies [7c90836]
+- Updated dependencies [7c90836]
+  - @kenkaiiii/gg-ai@5.104.0
+
 ## 5.103.0
 
 ### Patch Changes

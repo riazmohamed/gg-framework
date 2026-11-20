@@ -1,6 +1,6 @@
 {
   "name": "@abukhaled/ogcoder",
-  "version": "5.103.0",
+  "version": "5.106.1",
   "type": "module",
   "description": "The engine and CLI behind the OG Coder desktop app: a lean coding agent for Claude, ChatGPT, Grok, Kimi, 12 providers and local models.",
   "author": "Ken Kai",
@@ -90,6 +90,10 @@
     "./ui/login": {
       "import": "./dist/ui/login.js",
       "types": "./dist/ui/login.d.ts"
+    },
+    "./mcp": {
+      "import": "./dist/core/mcp/index.js",
+      "types": "./dist/core/mcp/index.d.ts"
     },
     "./models": {
       "import": "./dist/core/model-registry.js",

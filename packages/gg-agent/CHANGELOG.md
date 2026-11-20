@@ -1,5 +1,32 @@
 # @abukhaled/gg-agent
 
+## 5.106.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.106.1
+
+## 5.106.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.106.0
+
+## 5.105.0
+
+### Patch Changes
+
+- Updated dependencies [cecf292]
+  - @kenkaiiii/gg-ai@5.105.0
+
+## 5.104.0
+
+### Patch Changes
+
+- Updated dependencies [7c90836]
+- Updated dependencies [7c90836]
+  - @kenkaiiii/gg-ai@5.104.0
+
 ## 5.103.0
 
 ### Patch Changes

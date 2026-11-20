@@ -377,7 +377,7 @@ describe("spawn_agent worker", () => {
     const { done } = await runWorkerTurn({
       provider: "openai",
       model: "gpt-6-luna",
-      fallbackModel: "gpt-6.1-sol",
+      fallbackModel: "gpt-6.2-sol",
       thinkingLevel: "max",
       parentThinkingLevel: "ultra",
     });
@@ -390,11 +390,11 @@ describe("spawn_agent worker", () => {
       }),
     ).toEqual([
       { model: "gpt-6-luna", thinking: "max" },
-      { model: "gpt-6.1-sol", thinking: "ultra" },
+      { model: "gpt-6.2-sol", thinking: "ultra" },
     ]);
   });
 
-  it("retries an unavailable pinned model on the parent model at the parent's lowest thinking level", async () => {
+  it("retries an unavailable pinned model on the parent model at the parent's thinking level", async () => {
     // A retired, unregistered model's ladder bottoms out at "high", Opus's at "low". The retry used
     // to keep the pinned model's rung, so it would run Opus at "high".
     const { getSupportedThinkingLevels } = await import("../core/thinking-level.js");
@@ -413,6 +413,7 @@ describe("spawn_agent worker", () => {
       model: "claude-retired-model",
       fallbackModel: "claude-opus-5-5",
       thinkingLevel: pinnedLowest,
+      parentThinkingLevel: "low",
     });
 
     expect(done).toMatchObject({ status: "completed", output: "Final report." });

@@ -22,6 +22,37 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.117.1",
+    date: "2026-11-20",
+    items: [
+      "The helpers GG Coder sends off now think as hard as you set it to. They used to drop to the `lowest` thinking level whatever you picked, so research, reviews and side tasks now get the same brainpower as your main chat.",
+      "`/commit` reviews are the real deal now. The reviewer reads every line of your changes and has to list each file it checked before it can call things clear. I put it through a change that used to sail through in `6 seconds`, and it caught a real bug.",
+      "Ask me a question and you get the full answer first. If I need to ask you something back, it comes after the answer, so you always have what you need to pick.",
+    ],
+  },
+  {
+    version: "0.117.0",
+    date: "2026-11-19",
+    items: [
+      "GG Coder now tests your app in a real `browser`. It opens your dev server, clicks through, fills in forms, checks the results and grabs screenshots in a single go, and any console errors or failed requests get flagged automatically. I tuned it so a whole flow takes about `half the turns` it used to, so you get a checked, working UI back faster.",
+    ],
+  },
+  {
+    version: "0.116.0",
+    date: "2026-11-18",
+    items: [
+      "Google's Gemini 4 family is here. `Gemini 4 Hydrogen` is the fast everyday one (free tier too), `Gemini 4 Argon` and `Gemini 4 Carbon` bring the heavy reasoning, and all three read a `1M` token window with images and video. `Gemini 3.6 Flash` joins them as the new Flash, so add your Gemini key and pick one.",
+    ],
+  },
+  {
+    version: "0.115.0",
+    date: "2026-11-18",
+    items: [
+      "OpenAI's newest brains just landed. `GPT-6.2 Astra` is their most capable model yet, now cheaper to run, and `GPT-6.2 Sol` is your new OpenAI default for everyday coding. Both come with Fast mode and the full reasoning dial up to `ultra`, so just pick them and go.",
+      "Hit a ChatGPT usage wall that made no sense? I fixed that. ChatGPT lets you cap how much GG Coder can use, and when that cap stops you I now say so plainly and give you a `Manage usage` button that takes you straight to the switch. One click and you're coding again.",
+    ],
+  },
+  {
     version: "0.114.0",
     date: "2026-11-17",
     items: [

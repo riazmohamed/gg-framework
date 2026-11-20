@@ -203,7 +203,7 @@ function printHelp(): void {
       "--provider <name>",
       "AI provider (anthropic, xiaomi, openai, gemini, glm, moonshot, minimax, deepseek, openrouter, sakana, xai)",
     ],
-    ["--model <name>", "Model to use (e.g. claude-sonnet-5, gpt-6-astra)"],
+    ["--model <name>", "Model to use (e.g. claude-sonnet-5, gpt-6.2-astra)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
     ["--system-prompt <text>", "Replace the system prompt entirely"],
     ["--agent-prompt <text>", "Sub-agent body composed with tools/context/environment"],
@@ -440,7 +440,7 @@ function main(): void {
   const provider: Provider = saved.provider ?? "anthropic";
 
   function getHardcodedDefault(p: string): string {
-    if (p === "openai") return "gpt-6.1-sol";
+    if (p === "openai") return "gpt-6.2-sol";
     if (p === "gemini") return "gemini-3.1-flash-lite";
     if (p === "glm") return "glm-5.3";
     if (p === "moonshot") return "kimi-k3";
@@ -690,6 +690,7 @@ async function runInkTUI(opts: {
     clearReadTracker,
     lspManager,
     debugManager,
+    browserManager,
     subAgentManager,
   } = await createTools(cwd, {
     agents,
@@ -756,6 +757,8 @@ async function runInkTUI(opts: {
     processManager.shutdownAll();
     lspManager?.shutdownAll();
     debugManager?.shutdown();
+    // Playwright also kills its browsers on exit; this covers a normal close.
+    void browserManager?.shutdown();
     mcpManager.dispose().catch(() => {});
   });
 
@@ -1107,7 +1110,7 @@ async function runSessions(): Promise<void> {
   const provider: Provider = saved2.provider ?? "anthropic";
 
   function getDefault(p: string): string {
-    if (p === "openai") return "gpt-6.1-sol";
+    if (p === "openai") return "gpt-6.2-sol";
     if (p === "gemini") return "gemini-3.1-flash-lite";
     if (p === "glm") return "glm-5.3";
     if (p === "moonshot") return "kimi-k3";

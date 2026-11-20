@@ -46,6 +46,7 @@ export default defineConfig({
     "ui/terminal-history-format": "src/ui/terminal-history-format.ts",
     "ui/login": "src/ui/login.tsx",
     "core/model-registry": "src/core/model-registry.ts",
+    "core/mcp/index": "src/core/mcp/index.ts",
   },
   format: ["esm"],
   target: "es2022",
