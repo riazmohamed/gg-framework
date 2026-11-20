@@ -128,7 +128,7 @@ pub(crate) fn resolve_chat_path(cwd: &Path, path: &str) -> Result<PathBuf, Strin
         .unwrap_or(without_anchor);
     let cleaned = strip_file_location_suffix(without_query);
     if let Some(target) = wsl_target() {
-        return open_wsl_project_path(target, &cwd, cleaned);
+        return resolve_wsl_chat_path(target, cwd, cleaned);
     }
     let candidate = PathBuf::from(cleaned);
     let resolved = if candidate.is_absolute() {
@@ -188,19 +188,18 @@ pub(crate) fn read_chat_image(
 }
 
 /// Fork: in WSL mode chat paths are Linux paths (relative ones resolve against
-/// the Linux cwd); open the matching file on the `\\wsl.localhost` share.
-fn open_wsl_project_path(target: &WslTarget, cwd: &Path, cleaned: &str) -> Result<(), String> {
+/// the Linux cwd); resolve them to the matching file on the `\\wsl.localhost` share.
+fn resolve_wsl_chat_path(target: &WslTarget, cwd: &Path, cleaned: &str) -> Result<PathBuf, String> {
     let linux = if cleaned.starts_with('/') {
         cleaned.to_string()
     } else {
         join_linux(&cwd.to_string_lossy(), cleaned)
     };
-    let canonical = strip_extended_prefix(
+    Ok(strip_extended_prefix(
         PathBuf::from(linux_to_unc(target, &linux))
             .canonicalize()
             .map_err(|_| format!("file not found: {}", cleaned))?,
-    );
-    open_with_default(&canonical.to_string_lossy())
+    ))
 }
 
 /// Image types `open_image_data` will write, mapped to the extension it uses.
