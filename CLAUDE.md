@@ -81,7 +81,14 @@ from WSL `~/.gg/gg-app.json` → `/home/riaz24/projects`. Details in `gg-app/DIS
 **Dependency chain**: `gg-core` → `gg-ai` → `gg-agent` → `ogcoder` (uses `ggcoder-eyes` for perception)
 
 Current published version: **5.106.1** (last app-update sync: 2026-11-20; gg-app upstream v0.117.1;
-last fork desktop release `og-v0.87.201` — the next `og-v*` tag will be `og-v0.117.101`).
+last published fork desktop release `og-v0.87.202`, 2026-10-12).
+**Release blocked (2026-11-20):** tag `og-v0.117.101` (→ `bdeed526`) is pushed, but GitHub Actions
+has created **no runs in this repo since 2026-10-12** — not this tag, not pushes to
+`windows`/`rebrand/abukhaled`, and the Mac's scheduled `fork-mac.yml` has never run. Repo is a
+public fork with Actions enabled, so check the Actions tab / account in the web UI. Once runs
+are created again, re-push the tag (`git push --delete <ssh-remote> og-v0.117.101`, then push
+it again) to trigger `release-windows.yml`. The Windows checkout was pulled to `bdeed526` the
+same day.
 
 Sync history note: the previous `origin/windows` had independently synced upstream to 4.5.0
 (2026-06-04) with 42 fork-only commits on top. The 2026-09-07 sync merged upstream 5.58.0 first,
