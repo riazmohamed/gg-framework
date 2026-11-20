@@ -18,9 +18,18 @@ Rules:
   `src-tauri/src/wsl.rs` (desktop WSL mode), the Windows build notes in
   `gg-app/DISTRIBUTION.md`, and the WSL fixes listed below.
 - Overlap as of 2026-10-11: both branches independently implement global `~/.gg/commands`.
-  `rebrand/abukhaled` has CLI features `windows` lacks (local models, `ogcoder local|hf|steroids`,
-  session import, `/usage`, `/health`, `/export`); porting any of them here is a deliberate,
-  one-way cherry-pick onto `windows`.
+  Porting from `rebrand/abukhaled` is a deliberate, one-way cherry-pick (`-x`) onto `windows`.
+  **Ported 2026-11-20** (Mac commits up to `c192dbdc`): TUI local models + `core/local-scan.ts`,
+  `ogcoder local|hf|steroids|openrouter`, `/git` (UI-handled here, `ui/tui-git.ts`), `!cmd`
+  (`ui/tui-shell.ts`), real per-model output cap (`ui/output-cap.ts`), `packageCooldownDays` +
+  daily threat-feed sync, gg-safe lockfile watch (`ui/safety-watch.ts`), OpenCode live model lists,
+  Claude-subscription auto-compaction via Claude Code, sessions-picker preview fix, `/add-dir` env
+  snapshot copy, hidden providers out of the picker. **Not ported** because they build on Mac-only
+  infrastructure this branch never had: the TUI slash registry (`tui-slash-commands.ts`: typed
+  `/model <target>`, `/add-dir`, `/help`, paid-switch hint), session import, `/usage`, `/health`,
+  `/export`, `ask_user` panel, keep-awake, `/compact focus`, run-verification line, the
+  outside-workspace removal guard, Matey, and pew2 Phone control / app inbox. Next port: start
+  from `git log --no-merges c192dbdc..origin/rebrand/abukhaled`.
 - Installed binaries: WSL `ogcoder` → this checkout (`windows`). Upstream's npm `ggcoder` was
   uninstalled on both sides 2026-10-11 so typing the wrong name cannot launch Ken's app.
 
