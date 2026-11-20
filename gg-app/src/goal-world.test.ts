@@ -1081,10 +1081,10 @@ describe("goal farm play", () => {
       },
     ) as unknown as CanvasRenderingContext2D;
     drawFarm(ctx, {} as CanvasImageSource, w, 30_000, 30_000, [], null, null, null, null);
-    // The crown's gold and its red jewel, and the nameplate's gold lettering.
+    // The crown's gold and its red jewel, and the nameplate's gold plate.
     expect(fills.has("#ffd23a")).toBe(true);
     expect(fills.has("#e8313f")).toBe(true);
-    expect(fills.has("#ffe48a")).toBe(true);
+    expect(fills.has("#e9af54")).toBe(true);
     // Without GG Goals on the farm, none of it.
     const alone = createFarmWorld(farm, () => 0.4);
     const workersOnly = agents.filter((a) => !a.coordinator);
@@ -1095,7 +1095,7 @@ describe("goal farm play", () => {
     fills.clear();
     drawFarm(ctx, {} as CanvasImageSource, alone, 30_000, 30_000, [], null, null, null, null);
     expect(fills.has("#e8313f")).toBe(false);
-    expect(fills.has("#ffe48a")).toBe(false);
+    expect(fills.has("#e9af54")).toBe(false);
   });
 
   it("leaves the hover glow off a thing while it reacts to a click, and back once it settles", () => {
@@ -1134,6 +1134,55 @@ describe("goal farm play", () => {
     expect(frame(20)).toBe(0);
     const until = Math.max(...play.reactions.map((r) => r.until));
     expect(frame(until + 1)).toBe(1);
+  });
+
+  it("plays a clicked critter's reaction: its wave says what it's doing", () => {
+    // Regression: a click was filed under the critter's target id
+    // ("critter:…") but the painter looked for "actor:…", so a poked critter
+    // never waved, hopped or showed a heart.
+    const w = createFarmWorld(farm, () => 0.9);
+    const workersOnly = collectWorldAgents({
+      running: true,
+      liveTools: [],
+      waitingOnUser: false,
+      workers: [worker({ status: "running" })],
+    }).filter((a) => !a.coordinator);
+    for (let t = 0; t <= 30_000; t += 100) {
+      syncFarm(w, workersOnly, t);
+      stepFarm(w, t);
+    }
+    const play = createPlay();
+    const critter = farmTargets(w, play, 30_000, 30_000).find((t) => t.kind === "critter");
+    if (!critter) throw new Error("no critter");
+    // A speech bubble is the only thing on this farm painted in bubble paper.
+    const PAPER = "#cedbf9";
+    const fills = new Set<string>();
+    let style = "";
+    const ctx = new Proxy(
+      {},
+      {
+        get: (_target, key) =>
+          key === "fillRect"
+            ? () => fills.add(style)
+            : key === "fillStyle"
+              ? style
+              : () => undefined,
+        set: (_target, key, value) => {
+          if (key === "fillStyle") style = String(value);
+          return true;
+        },
+      },
+    ) as unknown as CanvasRenderingContext2D;
+    const speaks = (now: number): boolean => {
+      fills.clear();
+      drawFarm(ctx, {} as CanvasImageSource, w, now, now, [], null, null, null, play);
+      return fills.has(PAPER);
+    };
+    expect(speaks(30_000)).toBe(false);
+    const { x, y } = critter.anchor;
+    poke(play, { target: critter.id, kind: critter.kind, name: critter.name, x, y }, 30_000, 1);
+    expect(reactionOn(play, critter.id, 30_100)?.action).toBe("wave");
+    expect(speaks(30_100)).toBe(true);
   });
 
   it("sways a poked tree smoothly and keeps its trunk's foot in the ground", () => {
@@ -1451,12 +1500,14 @@ describe("goal farm things in use", () => {
     if (!laptop) throw new Error("no laptop");
 
     const play = createPlay();
-    playUses(play, things, inUse, 1000);
+    const started = playUses(play, things, inUse, 1000);
     const first = reactionOn(play, laptop.id, 1000);
     expect(first?.action).toBe("wake");
     expect(first?.use).toBe(true);
+    // What started is reported (for its sound).
+    expect(started).toContain(first);
     // Still playing: called again (each frame), nothing restarts or stacks.
-    playUses(play, things, inUse, 1500);
+    expect(playUses(play, things, inUse, 1500)).toEqual([]);
     expect(play.reactions.filter((r) => r.target === laptop.id)).toEqual([first]);
     // Finished, still in use: the next one starts then.
     const after = (first?.until ?? 0) + 1;

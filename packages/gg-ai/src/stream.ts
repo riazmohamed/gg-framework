@@ -3,14 +3,15 @@ import { GGAIError, ProviderError, VideoUnsupportedError } from "./errors.js";
 import type { StreamResult } from "./utils/event-stream.js";
 import { streamAnthropic } from "./providers/anthropic.js";
 import { streamOpenAI } from "./providers/openai.js";
-import { streamOpenAICodex } from "./providers/openai-codex.js";
+import { streamOpenAIResponses } from "./providers/openai-responses.js";
+import { streamXaiResponses } from "./providers/xai-responses.js";
 import { streamGemini } from "./providers/gemini.js";
 import { GEMINI_EMBED_BATCH_SIZE, embedGemini } from "./providers/gemini-embeddings.js";
 import {
   embedOpenAICompatible,
   rerankCohereCompatible,
 } from "./providers/openai-compat-retrieval.js";
-import { providerRegistry } from "./provider-registry.js";
+import { providerRegistry, type ProviderStreamFn } from "./provider-registry.js";
 import {
   clampProviderContextImages,
   dropInvalidToolCalls,
@@ -18,7 +19,11 @@ import {
 } from "./providers/transform.js";
 import { sanitizeMessagesForWire } from "./utils/well-formed.js";
 import { observePreparedContext } from "./utils/context-observation.js";
+import { planDeferredTools, usesDeferredToolLoading } from "./providers/transform.js";
 import { markContinuesTurn } from "./utils/turn-continuation.js";
+import { resolveFastModeModel } from "./fast-mode.js";
+import { localBearerKey } from "./local-api-key.js";
+import { GG_CODER_USER_AGENT } from "./user-agent.js";
 
 /** OpenAI's documented cap: an embeddings `input` array may hold at most 2048 entries. */
 const OPENAI_EMBED_BATCH_SIZE = 2048;
@@ -35,32 +40,13 @@ const LOCAL_EMBED_BATCH_SIZE = 64;
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
-/** Z.AI coding API endpoint — the primary endpoint for all GLM models. */
+/**
+ * Fork-only: Z.AI's Coding Plan endpoint. Upstream routes every GLM key to the
+ * pay-per-token endpoint (api/paas/v4) because the Coding Plan is limited to the
+ * tools Z.AI lists; this fork keeps sending keys without an explicit baseUrl to
+ * the Coding Plan so plan keys keep working.
+ */
 const GLM_CODING_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
-
-/**
- * User-Agent the Kimi For Coding endpoint requires to recognize ggcoder as a
- * coding agent. The endpoint gates solely on this header; the version is
- * overridable via KIMI_CODE_VERSION for forward compatibility.
- */
-const KIMI_CODE_USER_AGENT = `kimi-code-cli/${process.env.KIMI_CODE_VERSION ?? "1.0.11"}`;
-
-/**
- * Grok CLI chat proxy — the endpoint a Grok subscription OAuth token is valid
- * against (gg-core's `grokCliBaseUrl()` persists it on the credential). Matched
- * by host so an env override of that base URL still gets the identity headers.
- */
-const GROK_CLI_PROXY_HOST = "cli-chat-proxy.grok.com";
-
-/**
- * Client identity the Grok CLI chat proxy requires. It hard-gates on this: with
- * no version it answers "Your Grok CLI version (none) is outdated. Please update
- * to version 0.1.202 or later", so the value must look like a real Grok CLI build
- * (they ship 0.1.x/0.2.x) rather than a placeholder. Overridable via
- * GROK_CLI_VERSION. Keep in sync with gg-core's `grokCliHeaders()`, the
- * login-side source of truth.
- */
-const GROK_CLI_VERSION = process.env.GROK_CLI_VERSION ?? "0.2.101";
 
 // ── Register built-in providers ────────────────────────────
 
@@ -89,13 +75,14 @@ providerRegistry.register("xiaomi", {
 
 providerRegistry.register("openai", {
   stream: (options) => {
-    // Use codex endpoint for OAuth tokens (have accountId)
-    if (options.accountId) {
-      return streamOpenAICodex(options);
+    // OpenAI itself — the ChatGPT plan (accountId) or an API key — rides the
+    // Responses API; a custom OpenAI-compatible server stays on Chat Completions.
+    if (options.accountId || isOpenAIHost(options.baseUrl)) {
+      return streamOpenAIResponses(options);
     }
     return streamOpenAI(options);
   },
-  // OpenAI API-key auth only; ChatGPT-subscription (Codex) tokens have no embeddings API.
+  // OpenAI API-key auth only; the ChatGPT plan route has no embeddings API.
   // OpenAI has no task/input-type parameter, so `inputType` is ignored.
   embed: (request) =>
     embedOpenAICompatible(request, {
@@ -107,7 +94,7 @@ providerRegistry.register("openai", {
 
 providerRegistry.register("gemini", {
   stream: (options) => streamGemini(options),
-  // Native Gemini API with an AI Studio key — not the Code Assist OAuth endpoint above.
+  // Native Gemini API with an AI Studio key.
   embed: (request) => embedGemini(request),
   embedBatchSize: GEMINI_EMBED_BATCH_SIZE,
 });
@@ -126,19 +113,14 @@ providerRegistry.register("glm", {
 });
 
 providerRegistry.register("moonshot", {
-  stream: (options) => {
-    const baseUrl = options.baseUrl ?? "https://api.moonshot.ai/v1";
-    // The Kimi For Coding (OAuth) endpoint at api.kimi.com gates access to
-    // recognized coding agents and 403s any request whose `User-Agent` isn't a
-    // known client (verified empirically: User-Agent alone is the gate). Inject
-    // it centrally here so EVERY stream — agent loop, compaction, title-gen,
-    // sub-agents — passes, instead of relying on each call site to thread
-    // headers. Caller-provided headers still win on collision.
-    const defaultHeaders = baseUrl.includes("api.kimi.com")
-      ? { "User-Agent": KIMI_CODE_USER_AGENT, ...options.defaultHeaders }
-      : options.defaultHeaders;
-    return streamOpenAI({ ...options, baseUrl, defaultHeaders });
-  },
+  // A Moonshot key goes to the public API; a Kimi Code plan key carries its
+  // own baseUrl (api.kimi.com / api.kimi.ai). Both get GG Coder's own identity.
+  stream: (options) =>
+    streamOpenAI({
+      ...options,
+      baseUrl: options.baseUrl ?? "https://api.moonshot.ai/v1",
+      defaultHeaders: { "User-Agent": GG_CODER_USER_AGENT, ...options.defaultHeaders },
+    }),
 });
 
 providerRegistry.register("deepseek", {
@@ -185,6 +167,53 @@ providerRegistry.register("huggingface", {
     }),
 });
 
+/**
+ * OpenCode model ids are namespaced by plan (`opencode-go/kimi-k3`,
+ * `opencode/kimi-k3`) because the gateway reuses the vendors' own ids, which
+ * the registry already holds for the first-party providers. The gateway only
+ * knows the bare id, so strip the prefix at the wire.
+ */
+export function openCodeWireModelId(id: string): string {
+  const match = /^opencode(?:-go)?\/(.+)$/.exec(id);
+  return match?.[1] ?? id;
+}
+
+/** Calls made outside a conversation (summaries, the prompt enhancer) share this id. */
+const OPENCODE_FALLBACK_SESSION = `ses_${crypto.randomUUID().replace(/-/g, "")}`;
+
+/**
+ * OpenCode asks every client for its own User-Agent and a stable session id
+ * per conversation; Go answers HTTP 400 without the session header
+ * (opencode.ai/docs/console/go#where-can-i-use-it).
+ */
+function openCodeStream(defaultBaseUrl: string): ProviderStreamFn {
+  return (options) => {
+    const session = options.transportSessionId;
+    return streamOpenAI({
+      ...options,
+      baseUrl: options.baseUrl ?? defaultBaseUrl,
+      model: openCodeWireModelId(options.model),
+      webSearch: false,
+      defaultHeaders: {
+        "User-Agent": GG_CODER_USER_AGENT,
+        "x-opencode-session":
+          session && /^[\w.:-]{1,128}$/.test(session) ? session : OPENCODE_FALLBACK_SESSION,
+        ...options.defaultHeaders,
+      },
+    });
+  };
+}
+
+// Chat Completions only: a Console model whose own API is Responses, Messages
+// or Gemini isn't reliably served here, so gg-core's catalog leaves those out.
+providerRegistry.register("opencode", {
+  stream: openCodeStream("https://opencode.ai/inference/openai/v1"),
+});
+
+providerRegistry.register("opencode-go", {
+  stream: openCodeStream("https://opencode.ai/inference/go/openai/v1"),
+});
+
 providerRegistry.register("sakana", {
   // Sakana Fugu is a multi-agent system exposed as a standard LLM through the
   // OpenAI-compatible Sakana API. We ride the Chat Completions transport (the
@@ -198,30 +227,11 @@ providerRegistry.register("sakana", {
 });
 
 providerRegistry.register("xai", {
-  // xAI's public API (console.x.ai key) is OpenAI-compatible — ride the Chat
-  // Completions transport like Moonshot/DeepSeek. Grok reasoning models take
-  // top-level `reasoning_effort` (low/medium/high), which the shared thinking
-  // path already sends.
-  //
-  // Subscription OAuth (SuperGrok / X Premium) routes to the Grok CLI chat proxy
-  // instead, which speaks the same Chat Completions wire but gates on Grok-CLI
-  // client identity. Inject those headers centrally here — exactly as the Kimi
-  // endpoint above — so EVERY stream (agent loop, compaction, title-gen,
-  // sub-agents) is accepted rather than depending on each call site to thread
-  // headers. Caller-provided headers still win on collision.
-  stream: (options) => {
-    const baseUrl = options.baseUrl ?? "https://api.x.ai/v1";
-    const defaultHeaders = baseUrl.includes(GROK_CLI_PROXY_HOST)
-      ? {
-          "X-XAI-Token-Auth": "xai-grok-cli",
-          "x-grok-client-version": GROK_CLI_VERSION,
-          "x-grok-client-identifier": "ggcoder",
-          "x-grok-model-override": options.model,
-          ...options.defaultHeaders,
-        }
-      : options.defaultHeaders;
-    return streamOpenAI({ ...options, baseUrl, defaultHeaders });
-  },
+  // xAI API key on xAI's Responses API (see providers/xai-responses.ts): Chat
+  // Completions is deprecated for Grok reasoning models and can't carry the
+  // encrypted reasoning that keeps long tool loops coherent.
+  stream: (options) =>
+    streamXaiResponses({ ...options, baseUrl: options.baseUrl ?? "https://api.x.ai/v1" }),
 });
 
 providerRegistry.register("minimax", {
@@ -287,21 +297,36 @@ providerRegistry.register("local", {
   // Every supported local server exposes OpenAI-compatible `/v1/embeddings`
   // (the model must be an embedding model). None has an input-type parameter.
   embed: (request) =>
-    embedOpenAICompatible(request, {
-      provider: "local",
-      baseUrl: requireLocalBaseUrl(request.baseUrl),
-      wireModel: localWireModelId(request.model),
-    }),
+    embedOpenAICompatible(
+      { ...request, apiKey: localBearerKey(request.apiKey) },
+      {
+        provider: "local",
+        baseUrl: requireLocalBaseUrl(request.baseUrl),
+        wireModel: localWireModelId(request.model),
+      },
+    ),
   embedBatchSize: LOCAL_EMBED_BATCH_SIZE,
   // llama.cpp (`llama-server --rerank`) and vLLM serve `/v1/rerank`; Ollama and
   // LM Studio don't, and answer with a 404 ProviderError.
   rerank: (request) =>
-    rerankCohereCompatible(request, {
-      provider: "local",
-      baseUrl: requireLocalBaseUrl(request.baseUrl),
-      wireModel: localWireModelId(request.model),
-    }),
+    rerankCohereCompatible(
+      { ...request, apiKey: localBearerKey(request.apiKey) },
+      {
+        provider: "local",
+        baseUrl: requireLocalBaseUrl(request.baseUrl),
+        wireModel: localWireModelId(request.model),
+      },
+    ),
 });
+
+function isOpenAIHost(baseUrl: string | undefined): boolean {
+  if (!baseUrl) return true;
+  try {
+    return new URL(baseUrl).hostname === "api.openai.com";
+  } catch {
+    return false;
+  }
+}
 
 function requireLocalBaseUrl(baseUrl: string | undefined): string {
   if (!baseUrl) {
@@ -338,7 +363,14 @@ function requireLocalBaseUrl(baseUrl: string | undefined): string {
  * const response = await stream({ provider: "openai", model: "gpt-4.1", messages });
  * ```
  */
-export function stream(options: StreamOptions): StreamResult {
+export function stream(requested: StreamOptions): StreamResult {
+  // Fast-mode ids (`claude-opus-5-5-fast`, `gpt-6.1-sol-fast`) are the base
+  // model at a faster speed tier — rewrite here so every call site (agent
+  // loop, compaction, sub-agents) and every model-id check below sees the real id.
+  const fastMode = resolveFastModeModel(requested.provider, requested.model);
+  const options: StreamOptions = fastMode.fast
+    ? { ...requested, model: fastMode.model, speed: "fast" }
+    : requested;
   const entry = providerRegistry.get(options.provider);
   if (!entry) {
     throw new GGAIError(
@@ -378,7 +410,7 @@ export function stream(options: StreamOptions): StreamResult {
         observePreparedContext(
           replayable === sanitized ? wireMessages : replayable,
           messages,
-          options.tools ?? [],
+          observedTools(options, messages),
         ),
       );
     } catch {
@@ -386,6 +418,17 @@ export function stream(options: StreamOptions): StreamResult {
     }
   }
   return entry.stream(messages === options.messages ? options : { ...options, messages });
+}
+
+/**
+ * The tools block as the wire sees it. With transcript tool loading a promoted
+ * tool does not change the block (live + whole deferred catalog), so
+ * diagnostics must not report a request_settings change for it.
+ */
+function observedTools(options: StreamOptions, messages: Message[]): StreamOptions["tools"] & {} {
+  if (!usesDeferredToolLoading(options)) return options.tools ?? [];
+  const plan = planDeferredTools(options.tools, options.deferredTools, messages);
+  return plan ? [...plan.live, ...plan.deferred] : (options.tools ?? []);
 }
 
 /** Clone provenance-bearing messages and remove internal metadata at the provider boundary. */

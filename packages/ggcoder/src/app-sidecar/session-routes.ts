@@ -1,6 +1,7 @@
 import type http from "node:http";
 import { getModel } from "../core/model-registry.js";
 import { goalNeedsKickoff, goalPhase, goalWasInterrupted } from "../core/goals-store.js";
+import { goalRunningElsewhere } from "../core/goal-run-marker.js";
 import { goalCritterPick } from "../goals-agent/goals-agent.js";
 import { getSupportedThinkingLevels } from "../core/thinking-level.js";
 import { json } from "./http.js";
@@ -23,11 +24,11 @@ function goalStatePayload(ctx: SessionRouteContext) {
     phase: goalPhase(goal.record),
     paused: Boolean(goal.record.pausedAt),
     // Started, not paused, and cut off mid-work: the app asks it to carry on.
-    needsResume: goalWasInterrupted(
-      goal.record,
-      ctx.session.getMessages(),
-      ctx.session.listSubAgents(),
-    ),
+    // Not while another process is running it: resuming would start a
+    // second coordinator on the same goal.
+    needsResume:
+      goalWasInterrupted(goal.record, ctx.session.getMessages(), ctx.session.listSubAgents()) &&
+      !goalRunningElsewhere(goal.dir),
     instructions: goal.record.instructions ?? "",
     context: goal.record.context,
     // The workers' pinned model; null: they follow GG Goals' model.
@@ -48,10 +49,20 @@ export function handleSessionRoutes(
       ...st,
       mode: ctx.mode,
       chatAgent: ctx.chatAgent,
+      // A chat window is titled by its first prompt; compaction can drop it from history.
+      sessionTitle: ctx.session.getSessionPreview() || undefined,
       goal: goalStatePayload(ctx),
+      // Skills the safety scan kept out; the app shows each once (toast).
+      blockedSkills: ctx.session.getBlockedSkills(),
+      installedThreats: ctx.session
+        .getInstalledThreats()
+        .map(({ key, message }) => ({ key, message })),
       // Questions still waiting on the user, for a window rebuilding its
       // transcript (history has the tool call, not the open card).
       openAskPrompts: ctx.asks.openPrompts(),
+      // The user's own commands still waiting to reach the agent with their
+      // next message (a reopened window shows them as pending).
+      pendingShellRuns: ctx.session.getPendingUserShellRunIds(),
       running: ctx.running,
       runState: ctx.runLifecycle.state,
       ready: true,
@@ -143,6 +154,11 @@ export function handleSessionRoutes(
           // window must stay a goal (live bug: after a daemon restart it fell
           // back to a plain project screen).
           goal: goalStatePayload(ctx),
+          // Skills the safety scan kept out; the app shows each once (toast).
+          blockedSkills: ctx.session.getBlockedSkills(),
+          installedThreats: ctx.session
+            .getInstalledThreats()
+            .map(({ key, message }) => ({ key, message })),
           // The questions this daemon can still take an answer to. After a
           // daemon restart the app's open cards belong to a run that died;
           // it closes any not listed here instead of leaving a dead button.
@@ -150,6 +166,9 @@ export function handleSessionRoutes(
           // And the questions themselves: a reloaded window lost its cards
           // while the agent still waits on one.
           openAskPrompts: ctx.asks.openPrompts(),
+          // The user's own commands still waiting to reach the agent with their
+          // next message (a reopened window shows them as pending).
+          pendingShellRuns: ctx.session.getPendingUserShellRunIds(),
           running: ctx.running,
           reviewPending: ctx.autopilotActive,
           // A reconnecting window (reload/reopen) re-opens the review box for

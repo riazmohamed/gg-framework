@@ -149,12 +149,38 @@ export interface GitHubCI {
   stale?: boolean;
 }
 
+/** A skill the sidecar's safety scan refused to load (it is simply absent). */
+export interface BlockedSkill {
+  name: string;
+  path: string;
+  /** "project", "global", "bundled" or "motion". */
+  scope: string;
+  /** Plain words: what the skill tried to do. */
+  reason: string;
+  /** Content hash; "" when the block isn't about content. */
+  hash: string;
+}
+
+/** A project lockfile pins a package now known to be malware (background check). */
+export interface SecurityNotice {
+  /** Stable id; the same notice is shown once. */
+  key: string;
+  /** One plain line for the user. */
+  message: string;
+}
+
 export interface AgentState {
+  /** Skills kept out of this session for safety. Absent on older sidecars. */
+  blockedSkills?: BlockedSkill[];
+  /** Installed packages now known to be infected. Absent on older sidecars. */
+  installedThreats?: SecurityNotice[];
   provider: string;
   model: string;
   cwd: string;
   mode: WorkspaceMode;
   chatAgent?: ChatAgentId;
+  /** The session's first user prompt; a chat window's title. Absent until there is one. */
+  sessionTitle?: string;
   running: boolean;
   runState?: "idle" | "running" | "cancelling";
   /** Current reasoning level, or null when thinking is off. May be absent on
@@ -204,6 +230,8 @@ export interface AgentState {
   goal?: GoalStateInfo | null;
   /** Questions still waiting on the user (validate with `parseOpenAskPrompts`). */
   openAskPrompts?: unknown;
+  /** The user's `!` commands whose output hasn't reached the agent yet. */
+  pendingShellRuns?: string[];
   /** Cold-prompt-cache status (sidecar /state + `cache_expiry` event). Null when
    *  the route has no known cache TTL or the chat is empty; absent on older sidecars. */
   cacheExpiry?: CacheExpiryStatus | null;
@@ -430,6 +458,17 @@ export interface ModelOption {
   /** False when the local server didn't report a real context length (we guessed). */
   contextWindowKnown?: boolean;
   supportsThinking?: boolean;
+  /**
+   * Set when picking this model changes what the user pays (fast modes,
+   * MiMo UltraSpeed). `paid` means real money, never the plan;
+   * `standardModel` is what replaces it wherever it isn't carried over.
+   */
+  billing?: { label: string; detail: string; paid: boolean; standardModel?: string };
+  /**
+   * Why this model can't run on what is connected, e.g. "Not in your ChatGPT
+   * plan" or "Needs a Kimi Code plan key". The picker shows it, disabled.
+   */
+  unavailable?: string;
 }
 
 export interface SlashCommand {
@@ -529,6 +568,74 @@ export async function getProgress(): Promise<ProgressSnapshot> {
   return invoke<ProgressSnapshot>("agent_progress");
 }
 
+// ── Trophies ─────────────────────────────────────────────────────────────
+
+export type TrophyTier = "bronze" | "silver" | "gold" | "platinum";
+
+/** One trophy, as the sidecar computed it. Secret, unearned ones arrive redacted. */
+export interface Trophy {
+  id: string;
+  title: string;
+  tier: TrophyTier;
+  category: string;
+  description: string;
+  hint: string;
+  goal: number;
+  current: number;
+  /** ISO time it was earned, or null. */
+  unlockedAt: string | null;
+  secret: boolean;
+}
+
+export interface TrophySnapshot {
+  trophies: Trophy[];
+  categories: Array<{ id: string; label: string }>;
+  earned: number;
+  total: number;
+  /** Ids earned by the event this frame came from (empty on a plain refresh). */
+  unlocked: string[];
+  eventNonce: string | null;
+  /** True only on the frame sent to the window whose action earned them. */
+  origin?: boolean;
+}
+
+/** Every trophy, earned or not (initial paint; live updates ride `trophies` frames). */
+export async function getTrophies(): Promise<TrophySnapshot> {
+  await waitForReady();
+  return invoke<TrophySnapshot>("agent_trophies");
+}
+
+// ── Weekly poll (Home) ───────────────────────────────────────────────────
+
+export interface Poll {
+  id: string;
+  question: string;
+  options: string[];
+  closesAt: number;
+}
+
+/** The open poll as the sidecar sees it. `status` is the poll server's HTTP status (0 = unreachable);
+ *  `poll` is null when none is open; `myChoice` is this install's pick. */
+export interface PollState {
+  status: number;
+  poll: Poll | null;
+  counts: number[];
+  total: number;
+  myChoice: number | null;
+  error?: string;
+}
+
+export async function getPoll(): Promise<PollState> {
+  await waitForReady();
+  return invoke<PollState>("agent_poll_get");
+}
+
+/** Vote, or move this install's vote, in the open poll. */
+export async function votePoll(pollId: string, choice: number): Promise<PollState> {
+  await waitForReady();
+  return invoke<PollState>("agent_poll_vote", { pollId, choice });
+}
+
 /** Non-2xx sidecar errors throw from the proxy; also reject a malformed body. */
 function keepAwakeEnabled(result: { enabled?: unknown; error?: unknown }): boolean {
   if (typeof result.enabled === "boolean") return result.enabled;
@@ -547,7 +654,8 @@ export async function setKeepAwake(enabled: boolean): Promise<boolean> {
   return keepAwakeEnabled(await invoke<{ enabled?: unknown }>("agent_keep_awake_set", { enabled }));
 }
 
-export type SubscriptionUsageProvider = "anthropic" | "openai" | "moonshot";
+// ChatGPT has no meter: plan usage is managed at chatgpt.com/settings/usage.
+export type SubscriptionUsageProvider = "anthropic" | "moonshot";
 
 export interface SubscriptionUsageWindow {
   kind: "current" | "weekly";
@@ -664,6 +772,134 @@ export async function openProjectPath(path: string): Promise<void> {
   }
 }
 
+// ── The user's own commands (`!cmd`) ──────────────────────
+
+export type ShellStart = { ok: true } | { ok: false; error: string };
+
+/**
+ * Run a command the user typed as `!cmd` in this window's project. Pass
+ * `confirmed` only after the user approved this exact command; otherwise the
+ * sidecar refuses with `confirmation_required` unless the project is trusted.
+ * Output arrives as `shell_output` / `shell_end` events.
+ */
+export async function runShellCommand(
+  id: string,
+  command: string,
+  confirmed: boolean,
+): Promise<ShellStart> {
+  try {
+    await waitForReady();
+    await invoke("agent_shell_run", { id, command, confirmed });
+    return { ok: true };
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    if (error !== "confirmation_required") await logError(`agent_shell_run failed: ${error}`);
+    return { ok: false, error };
+  }
+}
+
+/**
+ * Add another folder GG can work in ("Add folder" in the More panel). Throws
+ * with a user-facing message when the folder can't be added.
+ */
+export async function addWorkspaceFolder(
+  path: string,
+): Promise<{ root: string; additionalRoots: string[] }> {
+  await waitForReady();
+  return invoke<{ root: string; additionalRoots: string[] }>("agent_add_dir", { path });
+}
+
+/** Drop a folder added with "Add folder". Throws with a user-facing message. */
+export async function removeWorkspaceFolder(
+  path: string,
+): Promise<{ root: string; additionalRoots: string[] }> {
+  await waitForReady();
+  return invoke<{ root: string; additionalRoots: string[] }>("agent_remove_dir", { path });
+}
+
+/** Stop a running `!cmd` and everything it started. */
+export async function cancelShellCommand(id: string): Promise<void> {
+  try {
+    await invoke("agent_shell_cancel", { id });
+  } catch (e) {
+    await logError(`agent_shell_cancel failed: ${String(e)}`);
+  }
+}
+
+/** A `!` picker entry: a command the user ran here, or one that fits the project. */
+export interface ShellSuggestion {
+  command: string;
+  /** Times the user ran it in this project; 0 for a project suggestion. */
+  count: number;
+  /** Where a never-run suggestion comes from, e.g. "package.json". */
+  source?: string;
+}
+
+/** The `!` picker's commands for this project, most used first. */
+export async function listShellSuggestions(): Promise<ShellSuggestion[]> {
+  try {
+    await waitForReady();
+    const res = await invoke<{ suggestions?: unknown }>("agent_shell_suggestions");
+    if (!Array.isArray(res.suggestions)) return [];
+    return res.suggestions.flatMap((s): ShellSuggestion[] => {
+      if (typeof s !== "object" || s === null) return [];
+      const { command, count, source } = s as Record<string, unknown>;
+      if (typeof command !== "string" || !command) return [];
+      return [
+        {
+          command,
+          count: typeof count === "number" ? count : 0,
+          ...(typeof source === "string" ? { source } : {}),
+        },
+      ];
+    });
+  } catch (e) {
+    await logError(`agent_shell_suggestions failed: ${String(e)}`);
+    return [];
+  }
+}
+
+/** Whether this project runs the user's `!` commands without asking. */
+export async function getShellTrust(): Promise<boolean> {
+  try {
+    await waitForReady();
+    const res = await invoke<{ trusted?: unknown }>("agent_shell_trust", { trusted: null });
+    return res.trusted === true;
+  } catch (e) {
+    await logError(`agent_shell_trust failed: ${String(e)}`);
+    return false;
+  }
+}
+
+/** Save whether this project runs the user's `!` commands without asking. */
+export async function setShellTrust(trusted: boolean): Promise<boolean> {
+  await waitForReady();
+  const res = await invoke<{ trusted?: unknown }>("agent_shell_trust", { trusted });
+  return res.trusted === true;
+}
+
+/**
+ * Load a local image a reply points at (`![](/tmp/shot.png)`) as a data URL;
+ * the webview can't read disk paths itself. Null when it can't be shown.
+ */
+export async function readChatImage(path: string): Promise<string | null> {
+  let decoded = path;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    // Keep the original string if the model emitted a malformed `%` escape.
+  }
+  try {
+    const res = await invoke<{ mediaType: string; data: string }>("read_chat_image", {
+      path: decoded,
+    });
+    return `data:${res.mediaType};base64,${res.data}`;
+  } catch (e) {
+    await logError(`read_chat_image failed for ${decoded}: ${String(e)}`);
+    return null;
+  }
+}
+
 /**
  * Open an in-memory chat image (a `data:<type>;base64,...` URL from a paste or
  * attachment) in the default image viewer. It has no file of its own, so the
@@ -682,6 +918,42 @@ export async function openImageDataUrl(src: string): Promise<void> {
   }
 }
 
+/**
+ * Save a chat image where the user picks (native save dialog, opened by Rust).
+ * Pass the image's file when it has one, so the full-size original is saved
+ * rather than the smaller preview. Resolves to the saved path, or null when
+ * the dialog was cancelled; throws with a user-facing message on failure.
+ */
+export async function saveChatImage({
+  path,
+  src,
+  directory,
+}: {
+  path?: string;
+  src?: string;
+  directory?: string | null;
+}): Promise<string | null> {
+  if (path) {
+    // Only a `file://` URL is percent-encoded; a plain path may hold a real `%`.
+    let resolved = path;
+    if (path.startsWith("file://")) {
+      try {
+        resolved = decodeURIComponent(path);
+      } catch {
+        // Keep the original string if the model emitted a malformed `%` escape.
+      }
+    }
+    return invoke<string | null>("save_chat_image", { path: resolved, directory });
+  }
+  const match = src ? /^data:([^;,]+);base64,(.+)$/s.exec(src) : null;
+  if (!match) throw new Error("this image has no file or data to save");
+  return invoke<string | null>("save_chat_image", {
+    mediaType: match[1],
+    data: match[2],
+    directory,
+  });
+}
+
 export interface DroppedPathInfo {
   path: string;
   isDir: boolean;
@@ -695,6 +967,12 @@ export async function getDroppedPathInfo(paths: string[]): Promise<DroppedPathIn
     await logError(`dropped_path_info failed: ${String(e)}`);
     return paths.map((path) => ({ path, isDir: false }));
   }
+}
+
+/** A sent non-image attachment, shown by name in the user bubble. */
+export interface AttachmentChip {
+  kind: "file" | "video";
+  name: string;
 }
 
 /** A chat-input attachment (image / video / other file) sent with a prompt. */
@@ -740,6 +1018,11 @@ export interface PromptMeta {
   /** Plan feedback from the review box: the sidecar revises the plan back in
    *  read-only plan mode instead of with full write access. */
   planRevision?: boolean;
+  /** Sent from the live preview chat: the page and the element picked on it. */
+  livePreview?: {
+    url: string;
+    element: { selector: string; html: string; tag: string; text: string } | null;
+  };
 }
 
 export async function sendPrompt(
@@ -896,6 +1179,8 @@ export interface HistoryEntry {
   text: string;
   /** Attached image data URLs, reconstructed so they re-render on resume. */
   images?: string[];
+  /** Attached files and videos, by name. */
+  attachments?: AttachmentChip[];
   hook?: "ideal" | "loop_break" | "regrounding" | null;
   /** True when `text` is a recovered `/name [args]` command invocation, so the
    *  webview renders the short command chip instead of the expanded body. */
@@ -933,6 +1218,20 @@ export interface HistoryEntry {
   error?: ChatErrorData & { scope: string; headline: string };
   /** Webview-copy info row marker (e.g. the video-capability warning). */
   infoKind?: "video_warning";
+  /** Safety-block chat row. */
+  security?: { rule: string; target: string };
+  /** A command the user ran themselves (`!cmd`), with the saved end of its output. */
+  shell?: {
+    runId: string;
+    command: string;
+    cwd: string;
+    exitCode: number | null;
+    durationMs: number;
+    cancelled: boolean;
+    output: string;
+    truncated: boolean;
+    error?: string;
+  };
   /** Tool-produced images rendered inline (same as live `images` items),
    *  reconstructed from ImageContent blocks in persisted tool results. */
   toolImages?: Array<{ src: string; path?: string }>;
@@ -990,13 +1289,17 @@ export interface ApiKeyVariant {
   key: string;
   /** Display label, e.g. "Token Plan" or "API Credits". */
   label: string;
+  /** "plan" bills the user's subscription; "payg" bills per token. */
+  kind?: "plan" | "payg";
+  /** What the user spends with this key. */
+  billing?: string;
   baseUrl?: string;
 }
 
 /** What one auth method bills against and when to pick it. */
 export interface AuthMethodGuidance {
   method: AuthMethod;
-  /** Button/row label, e.g. "Sign in with Grok". */
+  /** Button/row label, e.g. "Continue with ChatGPT". */
   label: string;
   /** What the user spends on this method. */
   billing: string;
@@ -1013,6 +1316,12 @@ export interface AuthProvider {
   methods: AuthMethod[];
   apiKeyLabel?: string;
   apiKeyBaseUrl?: string;
+  /** The key may point at a compatible gateway instead of the vendor endpoint. */
+  allowCustomBaseUrl?: boolean;
+  /** Endpoint used when no custom base URL is stored. */
+  defaultBaseUrl?: string;
+  /** Custom base URL stored with the connected key, if any. */
+  currentBaseUrl?: string;
   /** When set, the API-key flow must ask which variant before submitting. */
   apiKeyVariants?: ApiKeyVariant[];
   /** Live connection status from ~/.gg/auth.json. */
@@ -1034,6 +1343,10 @@ export interface AuthProvider {
   priorityNote?: string;
   /** Per-method guidance — only set when a provider offers a real choice. */
   methodGuidance?: AuthMethodGuidance[];
+  /** An old sign-in that no longer works is still saved; ask the user to reconnect. */
+  reauthRequired?: boolean;
+  /** What to tell the user about that retired sign-in. */
+  reauthMessage?: string;
 }
 
 /**
@@ -1044,14 +1357,28 @@ export interface AuthProvider {
  * to show a blank list, the same failure mode as the project-folder bug. The
  * login ACTIONS (OAuth, key save, logout) still go through the sidecar.
  */
-export async function authStatus(): Promise<AuthProvider[]> {
+async function readAuthStatus(): Promise<{
+  providers?: AuthProvider[];
+  localConnected?: boolean;
+}> {
   try {
-    const res = await invoke<{ providers: AuthProvider[] }>("app_auth_status");
-    return res.providers ?? [];
+    return await invoke<{ providers?: AuthProvider[]; localConnected?: boolean }>(
+      "app_auth_status",
+    );
   } catch (e) {
     await logError(`app_auth_status failed: ${String(e)}`);
-    return [];
+    return {};
   }
+}
+
+export async function authStatus(): Promise<AuthProvider[]> {
+  return (await readAuthStatus()).providers ?? [];
+}
+
+/** True when the agent has something to run on: a connected provider or a local endpoint. */
+export async function hasModelSource(): Promise<boolean> {
+  const status = await readAuthStatus();
+  return status.localConnected === true || (status.providers ?? []).some((p) => p.connected);
 }
 
 /**
@@ -1060,8 +1387,38 @@ export async function authStatus(): Promise<AuthProvider[]> {
  * user's sidecar may not have booted yet, and a sidecar round-trip would hang.
  * Throws with a user-facing message on error.
  */
-export async function authApiKey(provider: string, key: string, variant?: string): Promise<void> {
-  await invoke("app_auth_apikey", { provider, key, variant });
+export async function authApiKey(
+  provider: string,
+  key: string,
+  variant?: string,
+  baseUrl?: string,
+): Promise<void> {
+  await invoke("app_auth_apikey", { provider, key, variant, baseUrl: baseUrl || undefined });
+}
+
+/** Change a connected key's base URL (empty = provider default). Throws the validation message. */
+export async function authSetBaseUrl(provider: string, baseUrl: string): Promise<void> {
+  await invoke("app_auth_baseurl", { provider, baseUrl: baseUrl.trim() || undefined });
+}
+
+export interface OpenRouterCatalogStatus {
+  synced: boolean;
+  count: number;
+  syncedAt?: number;
+  baseUrl: string;
+  /** Sync only: rows dropped because they can't call tools. */
+  skipped?: number;
+}
+
+/**
+ * The OpenRouter model list: "status", "sync" (re-read the key's endpoint
+ * `/models`; replaces the built-in list) or "reset" (back to the built-in list).
+ */
+export async function openRouterCatalog(
+  action: "status" | "sync" | "reset",
+): Promise<OpenRouterCatalogStatus> {
+  await waitForReady();
+  return await invoke<OpenRouterCatalogStatus>("agent_openrouter_catalog", { action });
 }
 
 /**
@@ -1131,7 +1488,8 @@ export async function answerAskUser(
  * drop a spent xAI API key without signing out of the Grok subscription. Omit it
  * to disconnect the provider entirely.
  */
-export async function authLogout(provider: string, method?: AuthMethod): Promise<void> {
+/** `legacy` dismisses a retired sign-in and removes nothing else. */
+export async function authLogout(provider: string, method?: AuthMethod | "legacy"): Promise<void> {
   await invoke("app_auth_logout", { provider, method });
 }
 
@@ -1196,6 +1554,8 @@ export async function setRadioVolume(volume: number): Promise<number> {
 export interface QueuedMessage {
   id: string;
   text: string;
+  /** Already handed to the agent, which reads it at its next turn: no longer cancellable. */
+  delivering?: boolean;
 }
 
 /**
@@ -1274,14 +1634,39 @@ export async function prewarmCache(): Promise<void> {
   }
 }
 
-/** Cycle the reasoning/thinking level to the next supported value (or off). */
-export async function cycleThinking(): Promise<ThinkingState | null> {
-  try {
-    return await invoke<ThinkingState>("agent_cycle_thinking");
-  } catch (e) {
-    await logError(`agent_cycle_thinking failed: ${String(e)}`);
-    return null;
-  }
+/**
+ * Set the reasoning level directly (null turns thinking off). Throws with the
+ * sidecar's message when the run is busy or the model doesn't support it.
+ */
+export async function setThinkingLevel(level: string | null): Promise<ThinkingState> {
+  return invoke<ThinkingState>("agent_set_thinking", { level });
+}
+
+export interface GitHubItem {
+  number: number;
+  title: string;
+  url: string;
+  author: string;
+  updatedAt: string;
+  draft?: boolean;
+}
+export interface ChangedFile {
+  path: string;
+  added: number | null;
+  removed: number | null;
+  status: "M" | "A" | "D" | "R";
+}
+export interface GitOverview {
+  /** null when GitHub couldn't be asked (no gh, not signed in, not GitHub). */
+  issues: GitHubItem[] | null;
+  pulls: GitHubItem[] | null;
+  changes: ChangedFile[];
+}
+
+/** The Git panel's issues, pull requests and changed files for this project. */
+export async function getGitOverview(): Promise<GitOverview> {
+  await waitForReady();
+  return invoke<GitOverview>("agent_git_overview");
 }
 
 /** List workflow (prompt-template) slash commands the agent can run. */
@@ -1325,10 +1710,16 @@ export async function listModels(): Promise<ModelOption[] | null> {
  * rather than as a thrown IPC error — so unpack it here and let the caller
  * surface it.
  */
-export async function switchModel(model: string): Promise<SwitchModelResult | { error: string }> {
+export async function switchModel(
+  model: string,
+  options: { confirmPaid?: boolean } = {},
+): Promise<SwitchModelResult | { error: string }> {
   try {
+    // `confirmPaid` is only ever set from the explicit "spend real money"
+    // confirmation; the sidecar refuses a paid model without it.
     const res = await invoke<SwitchModelResult & { error?: string }>("agent_switch_model", {
       model,
+      confirmPaid: options.confirmPaid === true,
     });
     if (res.error) {
       await logError(`agent_switch_model refused: ${res.error}`);
@@ -1390,37 +1781,6 @@ export async function getSettings(): Promise<AppSettings | null> {
  */
 export async function saveSettings(projectsRoot: string): Promise<void> {
   await invoke("app_settings_save", { projectsRoot });
-}
-
-export interface InstalledPlugin {
-  schemaVersion: 1;
-  id: string;
-  name: string;
-  version: string;
-  entry: string;
-  description?: string;
-  commands?: string[];
-  installPath: string;
-}
-
-export async function listPlugins(): Promise<InstalledPlugin[]> {
-  await waitForReady();
-  const result = await invoke<{ plugins: InstalledPlugin[] }>("agent_plugins");
-  return result.plugins;
-}
-
-export async function installPluginBundle(
-  bundlePath: string,
-): Promise<{ plugin: InstalledPlugin; restartRequired: boolean }> {
-  await waitForReady();
-  return invoke("agent_install_plugin", { bundlePath });
-}
-
-export async function removePluginBundle(
-  pluginId: string,
-): Promise<{ removed: string; restartRequired: boolean }> {
-  await waitForReady();
-  return invoke("agent_remove_plugin", { pluginId });
 }
 
 export interface PermissionsStatus {
@@ -1863,6 +2223,8 @@ export interface LocalEndpointRow {
   kind: "ollama" | "lmstudio" | "llamacpp" | "vllm" | "custom";
   /** User-added endpoints can be removed; built-in ones can't. */
   custom: boolean;
+  /** Context window the user pinned for this endpoint, when set. */
+  contextLength?: number;
   reachable: boolean;
   /** Why it's unreachable, e.g. "Not running at http://127.0.0.1:11434/v1". */
   reason?: string;
@@ -1907,12 +2269,14 @@ export async function addLocalEndpoint(
   baseUrl: string,
   label?: string,
   apiKey?: string,
+  contextLength?: number,
 ): Promise<LocalModelsState> {
   await waitForReady();
   const res = await invoke<LocalModelsState>("agent_local_endpoint_add", {
     baseUrl,
     label: label ?? null,
     apiKey: apiKey ?? null,
+    contextLength: contextLength ?? null,
   });
   return unwrapLocalState(res);
 }
@@ -2055,6 +2419,35 @@ export async function stopServe(): Promise<void> {
   await invoke("agent_serve_stop");
 }
 
+/** This window's live preview: the running web app in the browser, with the chat on it. */
+export interface LivePreviewStatus {
+  running: boolean;
+  /** The link to open in the browser. */
+  url: string | null;
+  /** The dev server it shows. */
+  target: string | null;
+  /** No dev server was found: ask the user for its address. */
+  needsUrl?: boolean;
+  error?: string;
+}
+
+/** Start (or reuse) the live preview. `url` is a dev server address the user typed. */
+export async function startLivePreview(url?: string): Promise<LivePreviewStatus> {
+  await waitForReady();
+  return invoke<LivePreviewStatus>("live_preview_start", { url: url ?? null });
+}
+
+/** Stop the live preview and close its session. */
+export async function stopLivePreview(): Promise<LivePreviewStatus> {
+  await waitForReady();
+  return invoke<LivePreviewStatus>("live_preview_stop");
+}
+
+export async function getLivePreviewStatus(): Promise<LivePreviewStatus> {
+  await waitForReady();
+  return invoke<LivePreviewStatus>("live_preview_status");
+}
+
 // ── Agent Steroids (local code corpus) ────────────────────────
 
 export interface SteroidsStatus {
@@ -2064,6 +2457,8 @@ export interface SteroidsStatus {
   version?: string;
   repos?: number;
   documents?: number;
+  /** Corpus size on disk as the CLI prints it, e.g. "2.0GB". */
+  diskSize?: string;
   path?: string;
   error?: string;
 }
@@ -2107,6 +2502,8 @@ export interface McpServerRow {
   summary: string;
   /** True when the server returned 401 and needs an interactive OAuth login. */
   requiresAuth?: boolean;
+  /** gg-safe: one line per tool hidden from the model, and why. */
+  warning?: string;
 }
 
 /** Outcome of adding an MCP server from a pasted command line. */

@@ -1,4 +1,6 @@
 import type http from "node:http";
+import fs from "node:fs/promises";
+import path from "node:path";
 import {
   isWorkflowCommandText,
   countAssistantMessages,
@@ -7,14 +9,68 @@ import {
   isMechanicalOnlyTurn,
 } from "../core/autopilot-gate.js";
 import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
-import { loadCustomCommands } from "../core/custom-commands.js";
 import { log } from "../core/logger.js";
 import { readBody, json } from "./http.js";
+import { MAX_PROMPT_BODY_BYTES } from "../utils/http-body.js";
 import { type AppAttachment, prepareAttachments } from "./attachments.js";
 import { saveAutopilot } from "./app-settings.js";
 import { lastAssistantText, buildKenContext } from "./ken-context.js";
 import { keepAwake } from "./keep-awake.js";
 import type { SessionRouteContext } from "./route-context.js";
+import { mentionedPaths, slashCommandName } from "../core/trophies/engine.js";
+import {
+  buildLivePreviewPrompt,
+  livePreviewChip,
+  parseLivePreviewMeta,
+} from "../core/live-preview.js";
+
+/**
+ * Count a sent prompt toward trophies: a slash command (and whether it's the
+ * user's own), Enhance, images, `@file` mentions that point at real files,
+ * and steering. Best-effort and off the request path.
+ */
+async function recordPromptTrophies(
+  ctx: SessionRouteContext,
+  input: { text: string; attachments: number; enhanced: boolean; steer: boolean; expands: boolean },
+): Promise<void> {
+  try {
+    const name = input.attachments === 0 ? slashCommandName(input.text) : null;
+    const command = name && (input.expands || name === "add-dir") ? name : null;
+    const customCommand =
+      command !== null &&
+      !PROMPT_COMMANDS.some((c) => c.name === command || c.aliases.includes(command)) &&
+      (await ctx.session.loadCustomCommands()).some((c) => c.name.toLowerCase() === command);
+    const root = path.resolve(ctx.cwd);
+    let fileMentions = 0;
+    for (const rel of mentionedPaths(input.text)) {
+      const abs = path.resolve(root, rel);
+      // Only paths inside the project count; the check is a stat, nothing is read.
+      if (abs !== root && !abs.startsWith(root + path.sep)) continue;
+      if (
+        await fs.stat(abs).then(
+          () => true,
+          () => false,
+        )
+      )
+        fileMentions++;
+    }
+    await ctx.trophies.recordPrompt(
+      {
+        command,
+        customCommand,
+        enhanced: input.enhanced,
+        attachments: input.attachments,
+        fileMentions,
+        steer: input.steer,
+      },
+      ctx.sessionId,
+    );
+  } catch (err) {
+    log("DEBUG", "app-sidecar", "prompt trophies failed", {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
 
 export function handlePromptRoutes(
   ctx: SessionRouteContext,
@@ -37,37 +93,18 @@ export function handlePromptRoutes(
         description: c.description,
         source: "built-in" as const,
       }));
-      // Desktop-safe registry actions belong in the same picker as workflows.
-      // Most registry commands have dedicated app controls or TUI-only flows;
-      // multi-root management has no other affordance, so expose only these.
-      const workspaceActions = [
-        {
-          name: "add-dir",
-          aliases: ["adddir"],
-          description: "Add another project folder to this workspace",
-          source: "built-in" as const,
-        },
-        {
-          name: "remove-dir",
-          aliases: ["removedir"],
-          description: "Remove an added project folder from this workspace",
-          source: "built-in" as const,
-        },
-      ];
-      const custom = (await loadCustomCommands(ctx.cwd))
-        // A custom command can't shadow a built-in name or app action.
-        .filter(
-          (c) =>
-            !PROMPT_COMMANDS.some((b) => b.name === c.name) &&
-            !workspaceActions.some((action) => action.name === c.name),
-        )
+      // Registry commands have dedicated app controls (folders: the More
+      // panel's Add folder / Remove folder) or are TUI-only, so none are listed.
+      const custom = (await ctx.session.loadCustomCommands())
+        // A custom command can't shadow a built-in name.
+        .filter((c) => !PROMPT_COMMANDS.some((b) => b.name === c.name))
         .map((c) => ({
           name: c.name,
           aliases: [] as string[],
           description: c.description,
           source: "custom" as const,
         }));
-      json(res, 200, { commands: [...workspaceActions, ...builtins, ...custom] });
+      json(res, 200, { commands: [...builtins, ...custom] });
     })();
     return true;
   }
@@ -77,7 +114,7 @@ export function handlePromptRoutes(
     // it. A bare release would let an early-returning request (bad JSON, or a
     // prompt that queued) clear a claim another request is still holding.
     let claimedStart = false;
-    void readBody(req, res)
+    void readBody(req, res, MAX_PROMPT_BODY_BYTES)
       .then(async (raw) => {
         if (raw === null) return;
         let text: string;
@@ -88,6 +125,7 @@ export function handlePromptRoutes(
               enhancements?: unknown[];
               scheduled?: boolean;
               planRevision?: boolean;
+              livePreview?: unknown;
             }
           | undefined;
         try {
@@ -99,6 +137,7 @@ export function handlePromptRoutes(
               enhancements?: unknown[];
               scheduled?: boolean;
               planRevision?: boolean;
+              livePreview?: unknown;
             };
           };
           text = body.text ?? "";
@@ -112,19 +151,53 @@ export function handlePromptRoutes(
           json(res, 400, { error: "empty prompt" });
           return;
         }
+        // Live preview: the agent gets the picked element and short-reply rules,
+        // while every transcript shows only the typed words (core/live-preview.ts).
+        const livePreview = parseLivePreviewMeta(meta?.livePreview);
+        const typed = text;
+        if (livePreview) text = buildLivePreviewPrompt(text, livePreview, ctx.cwd);
+        const announceLivePreview = (queued: boolean): void => {
+          if (!livePreview) return;
+          ctx.broadcast("live_preview_prompt", {
+            text: typed,
+            element: livePreview.element ? livePreviewChip(livePreview.element) : null,
+            queued,
+          });
+        };
+        // Before the run checks below, so the run claim stays synchronous with them.
+        if (meta?.scheduled !== true) await ctx.startGoalFromMessage(typed);
         // A typed prompt supersedes any question parked on the user: they
         // answered with a message of their own. Release the blocked tool call
         // NOW — otherwise it waits out its ten-minute timeout while this very
         // message sits behind it as steering that only drains once the tool
         // returns, so the turn looks frozen. The webview closes the band on
         // send; a racing /ask POST just 409s.
-        ctx.asks.cancelAll({ action: "cancel", superseded: true });
+        // The reply, attachments included, also goes into the question's result,
+        // so the model reads it there instead of waiting for it to arrive as
+        // steering (on Claude Code that only lands after another turn).
+        const answersAsk = ctx.asks.pendingCount > 0;
+        const preparedForAsk =
+          answersAsk && attachments.length > 0
+            ? await prepareAttachments(ctx.cwd, attachments)
+            : null;
+        ctx.asks.cancelAll({
+          action: "cancel",
+          superseded: true,
+          ...(answersAsk ? { message: text } : {}),
+          ...(preparedForAsk?.length
+            ? { attachments: ctx.session.askReplyAttachmentParts(preparedForAsk) }
+            : {}),
+        });
         if (
           ctx.runLifecycle.running &&
           ctx.runLifecycle.isCancellationRequested(ctx.runLifecycle.generation)
         ) {
+          const cancelling = ctx.runLifecycle.state === "cancelling";
           json(res, 409, {
-            error: ctx.runLifecycle.state === "cancelling" ? "run_cancelling" : "cancel_failed",
+            error: cancelling ? "run_cancelling" : "cancel_failed",
+            message: cancelling
+              ? "The last run is still stopping."
+              : "The last run couldn't be stopped. Stop it again first.",
             runState: ctx.runLifecycle.state,
           });
           return;
@@ -139,10 +212,20 @@ export function handlePromptRoutes(
           // .gg/uploads first so the queued media rides the same native-block
           // path as a non-queued attachment prompt when it drains.
           const prepared =
-            attachments.length > 0 ? await prepareAttachments(ctx.cwd, attachments) : [];
-          const count = ctx.session.queueMessage(text, prepared);
+            preparedForAsk ??
+            (attachments.length > 0 ? await prepareAttachments(ctx.cwd, attachments) : []);
+          const count = ctx.session.queueMessage(text, prepared, { answeredAsk: answersAsk });
+          announceLivePreview(true);
           ctx.broadcast("queued", { count, messages: ctx.session.listQueuedMessages() });
           json(res, 202, { queued: true, count });
+          void recordPromptTrophies(ctx, {
+            text: typed,
+            attachments: attachments.length,
+            enhanced: Array.isArray(meta?.enhancements) && meta.enhancements.length > 0,
+            // A scheduled prompt that queued behind a run isn't the user steering.
+            steer: meta?.scheduled !== true,
+            expands: false,
+          });
           return;
         }
         // Claim the run NOW, synchronously. Everything below this line may
@@ -167,6 +250,17 @@ export function handlePromptRoutes(
         // later bubble with the wrong `/name`.
         const expandsToTemplate =
           attachments.length === 0 && (await ctx.session.willExpandPromptTemplate(text));
+        if (meta?.scheduled === true) {
+          void ctx.trophies.count("scheduledRuns", ctx.sessionId);
+        } else {
+          void recordPromptTrophies(ctx, {
+            text: typed,
+            attachments: attachments.length,
+            enhanced: Array.isArray(meta?.enhancements) && meta.enhancements.length > 0,
+            steer: false,
+            expands: expandsToTemplate,
+          });
+        }
         // Webview display hint for this prompt's user bubble (kenSent shimmer
         // label / enhancer highlight segments / the `/name` a command was typed
         // as). Anchored +1 so it attaches to the user message the prompt below
@@ -204,6 +298,7 @@ export function handlePromptRoutes(
         ctx.clearPendingPlan();
         const assistantsBefore = countAssistantMessages(ctx.session.getMessages());
         const messagesBefore = ctx.session.getMessages().length;
+        announceLivePreview(false);
         await ctx.runAgent(
           text,
           async () => {
@@ -226,7 +321,7 @@ export function handlePromptRoutes(
         );
         // After the user's run settles, kick off Ken's auto-review loop — but
         // only when the turn is actually reviewable (shouldStartAutopilotCycle):
-        // workflow commands (/compare, /expand, …) end with reports or
+        // workflow commands (/expand, /init, …) end with reports or
         // A/B/C choices reserved for the USER; registry commands (/help) and
         // failed runs add no assistant work to judge; a turn that ended in plan
         // mode has a pending Accept/Reject modal Ken must not preempt. This is
@@ -254,9 +349,13 @@ export function handlePromptRoutes(
         if (decision.start) {
           log("INFO", "app-sidecar", "autopilot cycle starting", { kind: decision.kind });
           await ctx.runAutopilotCycle(text);
+          if (!ctx.autopilotCancelled) void ctx.trophies.count("autopilotReviews", ctx.sessionId);
         } else {
           ctx.broadcast("autopilot_ignored", { reason: decision.reason });
-          log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
+          // Autopilot off is the normal case, not an event worth a line per turn.
+          if (decision.reason !== "disabled") {
+            log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
+          }
         }
         // A prompt sent while Ken was reviewing (build idle) queued but had no
         // run to steer into — run it now as a fresh turn so it never strands.
@@ -320,7 +419,10 @@ export function handlePromptRoutes(
         // resume (advisory custom entry, never an LLM message). Reply is Ken's
         // last assistant message; skip persistence if he produced nothing.
         const reply = lastAssistantText(ken.getMessages());
-        if (reply.trim()) await ctx.session.persistKenTurn(text, reply);
+        if (reply.trim()) {
+          await ctx.session.persistKenTurn(text, reply);
+          void ctx.trophies.count("kenQuestions", ctx.sessionId);
+        }
       } catch (err) {
         ctx.broadcastError("ken_error", "ken run failed", err);
       } finally {
@@ -363,6 +465,7 @@ export function handlePromptRoutes(
       }
       ctx.autopilot = enabled;
       await saveAutopilot(ctx.cwd, enabled);
+      if (enabled) void ctx.trophies.count("autopilotOn", ctx.sessionId);
       log("INFO", "app-sidecar", "autopilot toggled", { enabled: String(enabled) });
       ctx.broadcast("autopilot", { autopilot: enabled });
       json(res, 200, { autopilot: enabled });

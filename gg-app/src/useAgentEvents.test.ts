@@ -140,6 +140,26 @@ function setup(
 }
 
 describe("useAgentEvents", () => {
+  it("shows a live preview message as a user bubble with the picked element", () => {
+    const { hook, getItems } = setup();
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("live_preview_prompt", {
+          text: "Change to Spanish Latte",
+          element: "<h2> Iced latte",
+          queued: false,
+        }),
+      ),
+    );
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "user",
+        text: "Change to Spanish Latte",
+        attachments: [{ kind: "file", name: "<h2> Iced latte" }],
+      }),
+    ]);
+  });
+
   it("updates task activity before an autopilot delegate consumes its event", () => {
     const { hook, deps } = setup(
       () => false,
@@ -713,6 +733,31 @@ describe("useAgentEvents", () => {
     expect(items[0]).toMatchObject({ kind: "assistant", text: "Hello world" });
   });
 
+  it("gives each model turn's text its own bubble, but keeps an auto-continued reply in one", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "those skills." }));
+      hook.result.current.handleEvent(ev("turn_end", { usage: { outputTokens: 5 } }));
+      // A mid-run message (e.g. a status update) starts another turn in the same run.
+      hook.result.current.handleEvent(ev("text_delta", { text: "**Dev isn't stuck.**" }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toMatchObject([
+      { kind: "assistant", text: "those skills." },
+      { kind: "assistant", text: "**Dev isn't stuck.**" },
+    ]);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "Cut off mid" }));
+      hook.result.current.handleEvent(ev("turn_end", { usage: { outputTokens: 5 } }));
+      hook.result.current.handleEvent(ev("truncated", { reason: "max_tokens", continued: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "-sentence." }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()[2]).toMatchObject({ kind: "assistant", text: "Cut off mid-sentence." });
+    expect(getItems()).toHaveLength(3);
+  });
+
   it("grows a streaming reply in the live-text store, not the transcript, until it ends", () => {
     vi.useFakeTimers();
     try {
@@ -1093,12 +1138,45 @@ describe("useAgentEvents", () => {
       );
       hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "r1", isError: false }));
     });
-    expect(getItems().filter((it) => it.kind === "generating_image")).toHaveLength(1);
+    const placeholders = getItems().filter((it) => it.kind === "generating_image");
+    expect(placeholders).toHaveLength(1);
+    expect(placeholders[0]).toMatchObject({ prompt: "a cat", gif: false });
 
     act(() => {
       hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "g1", isError: false }));
     });
     expect(getItems().filter((it) => it.kind === "generating_image")).toHaveLength(0);
+  });
+
+  it("shows a generated GIF as an animated image in the transcript", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_start", {
+          toolCallId: "g1",
+          name: "generate_image",
+          args: { prompt: "x", gif: {} },
+        }),
+      );
+    });
+    expect(getItems().find((it) => it.kind === "generating_image")).toMatchObject({ gif: true });
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_end", {
+          toolCallId: "g1",
+          isError: false,
+          details: {
+            imagePreviews: [
+              { base64: "R0lGODlhAQ", mediaType: "image/gif", path: "/p/.gg/generated/a.gif" },
+            ],
+          },
+        }),
+      );
+    });
+    const images = getItems().find((it) => it.kind === "images");
+    expect(images).toMatchObject({
+      images: [{ src: "data:image/gif;base64,R0lGODlhAQ", path: "/p/.gg/generated/a.gif" }],
+    });
   });
 
   it("turn_end accumulates output tokens across turns", () => {
@@ -1225,6 +1303,16 @@ describe("useAgentEvents", () => {
     // The approved marker lands in the transcript (rendered as a Ken bubble).
     const marker = getItems().find((i) => i.kind === "autopilot");
     expect(marker).toMatchObject({ kind: "autopilot", phase: "plan_approved" });
+  });
+
+  it("counts steps the model skipped marking before a later [DONE:n]", () => {
+    const { hook, deps } = setup();
+    deps.planTotalRef.current = 15;
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "[DONE:2] Step 3 now. " }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Step 7 done. [DONE:7]" }));
+    });
+    expect([...deps.planDoneRef.current].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 
   it("uses sidecar plan progress as the authoritative live-file snapshot", () => {
@@ -1654,6 +1742,30 @@ describe("models_change", () => {
         hook.result.current.handleEvent(ev("run_end", {}));
       });
       expect(getItems()).toEqual([expect.not.objectContaining({ cancelled: true })]);
+    });
+
+    it("shows Ken's answer and Ken leaving a card to the user", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [question] }));
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-2", questions: [question] }));
+        hook.result.current.handleEvent(
+          ev("ask_user_answered", { id: "ask-1", answers: { flag: "Yes" }, by: "ken" }),
+        );
+        hook.result.current.handleEvent(ev("ask_user_left", { id: "ask-2", reason: "Your call." }));
+      });
+      expect(getItems()).toEqual([
+        expect.objectContaining({
+          prompt: expect.objectContaining({ id: "ask-2" }),
+          kenLeft: "Your call.",
+        }),
+        expect.objectContaining({
+          prompt: expect.objectContaining({ id: "ask-1" }),
+          answers: { flag: "Yes" },
+          sent: true,
+          answeredBy: "ken",
+        }),
+      ]);
     });
   });
 });

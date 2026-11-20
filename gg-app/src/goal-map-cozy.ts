@@ -4,6 +4,7 @@
 // the odds and ends that make a farm feel lived in. Same rules as
 // goal-map-props.ts: light from the top left, tinted outlines, pure.
 
+import { BARK_CHERRY, barkTrunk } from "./goal-map-bark";
 import {
   PixelBuffer,
   WARM_INK,
@@ -87,12 +88,14 @@ interface Tones {
   readonly deep: Rgb;
 }
 
+/** Blossom, from a near-white lit edge down to a deep rose in the shade
+ * (wider than the petal colours themselves, so the clumps model). */
 const SAKURA: Tones = {
-  hi: K.sakuraLight,
-  light: mix(K.sakura, K.sakuraLight, 0.5),
+  hi: 0xfff0f4,
+  light: K.sakuraLight,
   base: K.sakura,
-  dark: K.sakuraDark,
-  deep: K.sakuraDeep,
+  dark: mix(K.sakuraDark, 0xb0587a, 0.35),
+  deep: mix(K.sakuraDeep, 0x6a2a4a, 0.3),
 };
 const LEAF: Tones = {
   hi: K.leafLight,
@@ -101,23 +104,18 @@ const LEAF: Tones = {
   dark: K.leafDark,
   deep: K.leafDeep,
 };
-const OLIVE: Tones = {
-  hi: 0xb9b04a,
-  light: 0x9c9a3a,
-  base: 0x84822e,
-  dark: 0x636224,
-  deep: 0x45441a,
-};
-const AMBER: Tones = {
-  hi: 0xd9a24a,
-  light: 0xc0862f,
-  base: 0xa66d22,
-  dark: 0x84521a,
-  deep: 0x5e3910,
-};
 
 /** A rounded, bumpy clump of foliage, shaded on its own. */
 function clump(b: PixelBuffer, cx: number, cy: number, r: number, t: Tones, seed: number): void {
+  // The shade this clump throws on whatever it overlaps: a band just below
+  // and right of its rim, where the sun (up and left) can't reach.
+  for (let y = Math.floor(cy - r); y <= cy + r + 3; y++) {
+    for (let x = Math.floor(cx - r); x <= cx + r + 3; x++) {
+      if (!b.opaque(x, y)) continue;
+      if (Math.hypot(x + 0.5 - cx - 1.4, y + 0.5 - cy - 1.6) > r + 0.4) continue;
+      b.set(x, y, t.deep, 0.5);
+    }
+  }
   for (let y = Math.floor(cy - r - 1); y <= cy + r + 1; y++) {
     for (let x = Math.floor(cx - r - 1); x <= cx + r + 1; x++) {
       const dx = x + 0.5 - cx;
@@ -125,10 +123,11 @@ function clump(b: PixelBuffer, cx: number, cy: number, r: number, t: Tones, seed
       const dist = Math.hypot(dx, dy);
       const rim = r + (noise(x, y, 2, seed) - 0.5) * 1.6;
       if (dist > rim) continue;
-      const covered = b.opaque(x, y);
-      let shade = -(dx / r) * 0.55 - (dy / r) * 0.8 + (noise(x, y, 2, seed + 3) - 0.5) * 0.6;
-      if (covered && dy < 0 && dist > rim - 1.4) shade -= 0.9;
-      const c =
+      // Lit from the top left as one dome, in solid steps; the noise only
+      // nudges the steps, so the clump reads as a shape, not a smear.
+      const shade = -(dx / r) * 0.55 - (dy / r) * 0.8 + (noise(x, y, 3, seed + 3) - 0.5) * 0.22;
+      const edge = rim - dist;
+      let c =
         shade > 0.6
           ? t.hi
           : shade > 0.2
@@ -138,11 +137,23 @@ function clump(b: PixelBuffer, cx: number, cy: number, r: number, t: Tones, seed
               : shade > -0.75
                 ? t.dark
                 : t.deep;
+      // A dark lower rim and a lit upper-left one, a pixel each.
+      if (edge < 1 && dy > -r * 0.15) c = t.deep;
+      else if (edge < 1 && dx < r * 0.2 && dy < 0) c = t.hi;
+      // Little cups of blossom or leaf: a lit top over its own shade, in a
+      // loose staggered grid across the lit half.
+      const row = Math.floor(y / 3);
+      const sx = x + (row % 2) * 2;
+      if (shade > -0.25 && edge > 1.2 && hash(Math.floor(sx / 4), row, seed + 7) < 0.45) {
+        if (y % 3 === 0 && sx % 4 > 0 && sx % 4 < 3) c = shade > 0.3 ? t.hi : t.light;
+        else if (y % 3 === 1 && sx % 4 === 3) c = shade > 0.3 ? t.base : t.dark;
+      }
       b.set(x, y, c);
     }
   }
 }
 
+/** A trunk from its left edge `x` and top `y`, `w` wide and `h` tall (see goal-map-bark.ts). */
 function trunk(
   b: PixelBuffer,
   x: number,
@@ -151,17 +162,17 @@ function trunk(
   h: number,
   seed: number,
   lean = 0,
+  cherry = false,
 ): void {
-  for (let yy = 0; yy < h; yy++) {
-    const off = Math.round(lean * (1 - yy / h) * 3);
-    for (let xx = 0; xx < w; xx++) {
-      let c: Rgb = xx === 0 ? K.woodLight : xx >= w - 2 ? K.woodDeep : K.woodDark;
-      if (hash(xx, Math.floor(yy / 3), seed) < 0.18 && xx > 0) c = K.woodDeep;
-      b.set(x + xx + off, y + yy, c);
-    }
-  }
-  b.set(x - 1, y + h - 1, K.woodDark);
-  b.set(x + w, y + h - 1, K.woodDeep);
+  barkTrunk(b, {
+    x: x + w / 2,
+    foot: y + h - 1,
+    top: y,
+    width: w,
+    lean: lean * 3,
+    seed,
+    ...(cherry ? { tones: BARK_CHERRY, lenticels: true } : {}),
+  });
 }
 
 // ── Trees ────────────────────────────────────────────────────
@@ -182,7 +193,7 @@ export function sakuraTree(seed: number, large = true): Sprite {
     Math.round(cx),
     trunkTop + trunkH,
     (b) => {
-      trunk(b, Math.round(cx - 2), trunkTop, 4, trunkH, seed, 0.6);
+      trunk(b, Math.round(cx - 2), trunkTop, large ? 5 : 4, trunkH, seed, 0.6, true);
       const blobs: Array<[number, number, number]> = [
         [0, 0, R * 0.62],
         [-R * 0.5, -R * 0.15, R * 0.5],
@@ -262,66 +273,6 @@ export function yuzuTree(seed: number): Sprite {
       }
     },
     { a: 0.28, canopy: true },
-  );
-}
-
-/** A broad, gnarled shade tree with flat, layered clouds of leaves (niwaki style). */
-export function niwakiTree(seed: number): Sprite {
-  const w = 44;
-  const h = 46;
-  return make(
-    w,
-    h,
-    22,
-    43,
-    (b) => {
-      // A twisting trunk with two arms.
-      for (let y = 22; y < 43; y++) {
-        const off = Math.round(Math.sin(y / 5 + seed) * 2);
-        for (let x = 0; x < 5; x++) {
-          b.set(20 + off + x, y, x === 0 ? K.woodLight : x >= 3 ? K.woodDeep : K.woodDark);
-        }
-      }
-      for (let i = 0; i < 9; i++) {
-        b.set(19 - i, 24 - Math.round(i * 0.6), K.woodDark);
-        b.set(19 - i, 25 - Math.round(i * 0.6), K.woodDeep);
-        b.set(25 + i, 22 - Math.round(i * 0.5), K.woodDark);
-        b.set(25 + i, 23 - Math.round(i * 0.5), K.woodDeep);
-      }
-      // Cloud pads.
-      clump(b, 10, 17, 7, LEAF, seed);
-      clump(b, 34, 15, 7.5, LEAF, seed + 1);
-      clump(b, 22, 9, 8, LEAF, seed + 2);
-    },
-    { a: 0.28, canopy: true },
-  );
-}
-
-/** A clipped, round shrub (o-karikomi); olive, green or autumn-amber. */
-export function roundShrub(
-  seed: number,
-  kind: "green" | "olive" | "amber" = "green",
-  large = false,
-): Sprite {
-  const r = large ? 12 : 9;
-  const tones = kind === "olive" ? OLIVE : kind === "amber" ? AMBER : LEAF;
-  const w = r * 2 + 8;
-  const h = r * 2 + 4;
-  return make(
-    w,
-    h,
-    Math.round(w / 2),
-    h - 2,
-    (b) => {
-      const cx = w / 2;
-      const base = h - r - 2;
-      // Back lump, then two side lumps, then the front: a soft, bumpy dome.
-      clump(b, cx, base - r * 0.25, r * 0.72, tones, seed);
-      clump(b, cx - r * 0.45, base + r * 0.1, r * 0.66, tones, seed + 1);
-      clump(b, cx + r * 0.45, base + r * 0.1, r * 0.66, tones, seed + 2);
-      clump(b, cx, base + r * 0.32, r * 0.62, tones, seed + 3);
-    },
-    { a: 0.3 },
   );
 }
 
@@ -672,344 +623,6 @@ export function torii(): Sprite {
 
 // ── Garden pieces ────────────────────────────────────────────
 
-/** A stone lantern (tōrō), softly lit. */
-export function stoneLantern(): Sprite {
-  return make(
-    14,
-    26,
-    7,
-    24,
-    (b) => {
-      // Cap.
-      b.rect(1, 6, 12, 3, K.stone);
-      b.rect(1, 6, 12, 1, K.stoneLight);
-      b.rect(3, 4, 8, 2, K.stone);
-      b.rect(5, 2, 4, 2, K.stoneDark);
-      b.set(6, 1, K.stoneDark);
-      // Light box with a glowing window.
-      b.rect(3, 9, 8, 6, K.stoneDark);
-      b.rect(5, 10, 4, 4, K.lantern);
-      b.set(5, 10, 0xfff0b8);
-      // Post and base.
-      b.rect(5, 15, 4, 6, K.stone);
-      b.rect(5, 15, 1, 6, K.stoneLight);
-      b.rect(2, 21, 10, 3, K.stoneDark);
-      b.rect(2, 21, 10, 1, K.stone);
-    },
-    { a: 0.28 },
-  );
-}
-
-/** A koi pond: a jade basin inside a wall of big, rounded grey boulders. */
-export function koiPond(width: number, height: number, seed: number): Sprite {
-  const pad = 14;
-  const w = width + pad * 2;
-  const h = height + pad * 2;
-  const cx = w / 2;
-  const cy = h / 2;
-  const rx = width / 2;
-  const ry = height / 2;
-  return make(
-    w,
-    h,
-    Math.round(cx),
-    h - 5,
-    (b) => {
-      // Boulders: sorted top to bottom so lower ones overlap upper ones.
-      const stones = Math.round((rx + ry) * 0.3);
-      const ring: Array<[number, number, number]> = [];
-      for (let i = 0; i < stones; i++) {
-        const a = (i / stones) * Math.PI * 2 + hash(i, 1, seed) * 0.18;
-        const r = 7.2 + hash(i, 0, seed) * 2.6;
-        ring.push([cx + Math.cos(a) * (rx + 3.5), cy + Math.sin(a) * (ry + 3.5), r]);
-      }
-      ring.sort((p, q) => p[1] - q[1]);
-      for (const [sx, sy, r] of ring) {
-        for (let yy = Math.floor(sy - r); yy <= sy + r; yy++) {
-          for (let xx = Math.floor(sx - r * 1.15); xx <= sx + r * 1.15; xx++) {
-            const ddx = (xx + 0.5 - sx) / (r * 1.15);
-            const ddy = (yy + 0.5 - sy) / r;
-            const d = ddx * ddx + ddy * ddy;
-            if (d > 1) continue;
-            const lit = -ddx * 0.55 - ddy * 0.85;
-            let c: Rgb =
-              lit > 0.5
-                ? K.stoneLight
-                : lit > -0.15
-                  ? K.stone
-                  : lit > -0.6
-                    ? K.stoneDark
-                    : K.stoneDeep;
-            if (d > 0.82 && ddy > 0) c = K.stoneDeep; // the underside in shadow
-            b.set(xx, yy, c);
-          }
-        }
-      }
-      // Water inside the ring: pale, icy jade crossed by a light crackle of
-      // ripples (the edges of a few cells), deeper toward the middle.
-      const cells: Array<[number, number]> = [];
-      const rnd = stream(seed + 40);
-      for (let i = 0; i < 9; i++)
-        cells.push([cx + (rnd() - 0.5) * rx * 1.8, cy + (rnd() - 0.5) * ry * 1.8]);
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          const dx = (x + 0.5 - cx) / rx;
-          const dy = (y + 0.5 - cy) / ry;
-          const d = dx * dx + dy * dy;
-          if (d > 1) continue;
-          let near = Infinity;
-          let next = Infinity;
-          for (const [px, py] of cells) {
-            const dist = Math.hypot(x + 0.5 - px, (y + 0.5 - py) * 1.3);
-            if (dist < near) {
-              next = near;
-              near = dist;
-            } else if (dist < next) next = dist;
-          }
-          let c: Rgb = d < 0.45 ? mix(K.water, K.waterDark, 0.35) : K.water;
-          if (next - near < 1.1)
-            c = K.waterLight; // a ripple line
-          else if (next - near < 2 && d > 0.3) c = mix(K.water, K.waterLight, 0.5);
-          b.set(x, y, c);
-        }
-      }
-      // The stones throw a band of shade onto the top of the water.
-      for (let x = 0; x < w; x++) {
-        for (let y = 0; y < h; y++) {
-          const dx = (x + 0.5 - cx) / rx;
-          const dy = (y + 0.5 - cy) / ry;
-          if (dx * dx + dy * dy > 1 || dy > -0.55) continue;
-          const above = dx * dx + ((y - 2.5 + 0.5 - cy) / ry) ** 2 > 1;
-          if (above) b.set(x, y, K.waterDark);
-        }
-      }
-      // Koi: two orange fish, one with white patches, and a lily pad.
-      const fx = Math.round(cx - 7);
-      const fy = Math.round(cy + 2);
-      b.rect(fx, fy, 7, 2, K.koi);
-      b.set(fx - 1, fy + 1, K.koi);
-      b.set(fx - 1, fy - 1, K.koi);
-      b.set(fx + 3, fy, 0xffffff);
-      b.set(fx + 6, fy, 0x2a1a14);
-      const gx = Math.round(cx + 5);
-      const gy = Math.round(cy - 5);
-      b.rect(gx, gy, 2, 6, K.koi);
-      b.set(gx, gy + 2, 0xffffff);
-      b.set(gx + 1, gy + 3, 0xffffff);
-      b.ellipse(cx + 9, cy + 4, 2.6, 2, K.leaf);
-      b.set(Math.round(cx + 9), Math.round(cy + 4), K.leafLight);
-    },
-    undefined,
-  );
-}
-
-/** A bamboo water spout (kakei) dripping into a stone basin. */
-export function bambooSpout(): Sprite {
-  return make(
-    24,
-    20,
-    12,
-    18,
-    (b) => {
-      // Stone basin.
-      b.ellipse(15, 14, 6, 4, K.stone);
-      b.ellipse(15, 13, 4, 2.4, K.water);
-      b.set(14, 12, K.waterLight);
-      // Bamboo post and spout.
-      b.rect(2, 2, 3, 16, K.bamboo);
-      b.rect(4, 2, 1, 16, K.bambooDark);
-      for (const y of [6, 11]) b.rect(2, y, 3, 1, K.bambooDark);
-      for (let x = 4; x < 14; x++) b.set(x, 4 + Math.round((x - 4) * 0.3), K.bamboo);
-      for (let x = 4; x < 14; x++) b.set(x, 5 + Math.round((x - 4) * 0.3), K.bambooDark);
-      b.set(14, 9, K.waterLight);
-      b.set(14, 10, K.water);
-    },
-    { a: 0.25 },
-  );
-}
-
-/** A low bamboo fence section. */
-export function bambooFence(segments: number): Sprite {
-  const w = segments * 10 + 2;
-  return make(
-    w,
-    14,
-    Math.round(w / 2),
-    12,
-    (b) => {
-      for (let x = 0; x < w; x += 10) {
-        b.rect(x, 0, 3, 13, K.bamboo);
-        b.rect(x + 2, 0, 1, 13, K.bambooDark);
-        b.rect(x, 3, 3, 1, K.bambooDark);
-      }
-      for (const y of [4, 8]) {
-        b.rect(0, y, w, 2, K.bamboo);
-        b.rect(0, y + 1, w, 1, K.bambooDark);
-      }
-    },
-    undefined,
-  );
-}
-
-/** A flat, rounded stepping stone, set into the ground. */
-export function steppingStone(seed: number): Sprite {
-  // A plump, rounded stepping stone: an oval that bulges a little toward the
-  // viewer, a bright cream-grey top with a white sheen, a cooler grey belly,
-  // a heavy dark underside, and the same dark-brown line as everything else.
-  const w = 22 + Math.floor(hash(seed, 0, 1) * 4);
-  const h = 15 + Math.floor(hash(seed, 1, 1) * 2);
-  const cx = w / 2 + (hash(seed, 2, 1) - 0.5);
-  const cy = h / 2 - 0.5;
-  const rx = w / 2 - 1;
-  const ry = h / 2 - 1;
-  // A softened oval (between an ellipse and a cushion), slightly flattened on top.
-  const p = 2.4;
-  const inside = (x: number, y: number): boolean => {
-    const dx = Math.abs((x + 0.5 - cx) / rx);
-    const dyRaw = (y + 0.5 - cy) / ry;
-    const dy = Math.abs(dyRaw < 0 ? dyRaw * 1.05 : dyRaw);
-    return dx ** p + dy ** p <= 1;
-  };
-  const buf = new PixelBuffer(w, h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      if (!inside(x, y)) continue;
-      const below = (k: number): boolean => !inside(x, y + k);
-      const above = (k: number): boolean => !inside(x, y - k);
-      const dx = (x + 0.5 - cx) / rx;
-      const dy = (y + 0.5 - cy) / ry;
-      let c: Rgb;
-      if (below(1))
-        c = 0x5a4a44; // the underside, in shadow
-      else if (below(2)) c = 0x8a817a;
-      else if (below(3) || dy > 0.42)
-        c = 0xa69e96; // the belly
-      else if (above(1))
-        c = 0xd9d3cb; // the top rim catches light
-      else if (above(2) && dx > -0.6 && dx < 0.35)
-        c = 0xfcfaf6; // a white sheen
-      else c = dx > 0.55 ? 0xb9b1a8 : 0xcac3ba; // the face, a touch darker right
-      // A couple of pits and a crack, so it reads as stone.
-      if (c === 0xcac3ba && hash(x, y, seed + 5) < 0.04) c = 0xb3aba2;
-      buf.set(x, y, c);
-    }
-  }
-  buf.outline(0.92, 0x3a1608);
-  return {
-    buf,
-    ax: Math.round(cx),
-    ay: h - 1,
-    shadow: { a: 0.18 },
-  };
-}
-
-/** A raised bed of crops: rows of soil with sprouts, in a wooden frame. */
-export function cropBed(
-  cols: number,
-  rows: number,
-  kind: "daikon" | "carrot" | "rice" | "cabbage",
-  seed: number,
-): Sprite {
-  const w = cols * 12 + 8;
-  const h = rows * 12 + 8;
-  return make(
-    w,
-    h,
-    Math.round(w / 2),
-    h - 1,
-    (b) => {
-      // Soil furrows.
-      for (let y = 2; y < h - 2; y++) {
-        for (let x = 2; x < w - 2; x++) {
-          const furrow = (y - 2) % 6;
-          b.set(x, y, furrow === 0 ? K.soilDeep : furrow < 3 ? 0x6a4317 : 0x7d521d);
-        }
-      }
-      // Wooden frame.
-      b.rect(0, 0, w, 2, K.wood);
-      b.rect(0, h - 2, w, 2, K.woodDark);
-      b.rect(0, 0, 2, h, K.wood);
-      b.rect(w - 2, 0, 2, h, K.woodDark);
-      // Plants.
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          const x = 5 + c * 12;
-          const y = 3 + r * 12;
-          const rnd = stream(seed + r * 13 + c);
-          if (kind === "rice") {
-            for (let k = 0; k < 4; k++) {
-              const sx = x + Math.round(rnd() * 5);
-              b.rect(sx, y + 1, 1, 7, K.leafLight);
-              b.set(sx, y, 0xe0c35a);
-              b.set(sx + 1, y + 1, 0xe0c35a);
-            }
-            continue;
-          }
-          if (kind === "carrot") b.rect(x + 2, y + 6, 3, 3, K.koi);
-          if (kind === "daikon") b.rect(x + 2, y + 6, 3, 3, 0xf3f0e2);
-          if (kind === "cabbage") {
-            b.ellipse(x + 3.5, y + 5, 4, 3.4, K.leafLight);
-            b.ellipse(x + 3.5, y + 5, 2.2, 1.8, 0xc8d878);
-            continue;
-          }
-          // Leafy tops.
-          b.set(x + 3, y + 1, K.leafLight);
-          b.rect(x + 1, y + 2, 5, 2, K.leaf);
-          b.rect(x + 2, y + 4, 3, 2, K.leafDark);
-          b.set(x, y + 1, K.leafLight);
-          b.set(x + 6, y + 1, K.leafLight);
-        }
-      }
-    },
-    { a: 0.2 },
-  );
-}
-
-/** A campfire ringed with stones, with a kettle hanging over it. */
-export function cozyCampfire(): Sprite {
-  return make(
-    26,
-    26,
-    13,
-    22,
-    (b) => {
-      // Stones.
-      for (let i = 0; i < 9; i++) {
-        const a = (i / 9) * Math.PI * 2;
-        b.ellipse(
-          13 + Math.cos(a) * 8,
-          19 + Math.sin(a) * 4,
-          2.6,
-          2,
-          i % 2 ? K.stone : K.stoneDark,
-        );
-      }
-      // Logs.
-      for (let x = 7; x < 19; x++) {
-        b.set(x, 18 + Math.round((x - 7) * 0.15), K.woodDark);
-        b.set(x, 19 + Math.round((x - 7) * 0.15), K.woodDeep);
-        b.set(x, 20 - Math.round((x - 7) * 0.15), K.wood);
-      }
-      // Flames.
-      b.ellipse(13, 15, 4, 5, K.ember);
-      b.ellipse(13, 16, 2.6, 3.4, K.lantern);
-      b.ellipse(13, 17, 1.4, 2, 0xfff3c8);
-      b.set(11, 9, K.ember);
-      b.set(15, 10, K.ember);
-      // A tripod and a hanging kettle.
-      for (let y = 2; y < 18; y++) {
-        b.set(6 + Math.round((y - 2) * 0.15), y, K.woodDark);
-        b.set(20 - Math.round((y - 2) * 0.15), y, K.woodDark);
-      }
-      b.rect(6, 2, 15, 1, K.woodDark);
-      b.rect(12, 3, 1, 4, 0x3a3a3a);
-      b.ellipse(12.5, 9, 3.4, 2.6, 0x3a3a3a);
-      b.set(11, 8, 0x6a6a6a);
-    },
-    { a: 0.25 },
-  );
-}
-
 /** A low wooden bench with a cushion. */
 export function bench(): Sprite {
   return make(
@@ -1029,36 +642,6 @@ export function bench(): Sprite {
   );
 }
 
-/** A washing line between two posts, with laundry drying. */
-export function washingLine(): Sprite {
-  return make(
-    40,
-    28,
-    20,
-    26,
-    (b) => {
-      for (const x of [2, 36]) {
-        b.rect(x, 4, 2, 22, K.woodDark);
-        b.rect(x, 4, 1, 22, K.wood);
-      }
-      for (let x = 3; x < 37; x++)
-        b.set(x, 6 + Math.round(Math.sin(((x - 3) / 34) * Math.PI) * 2), 0x3a3a3a);
-      const items: Array<[number, number, Rgb]> = [
-        [7, 7, 0x6a8ad0],
-        [16, 10, 0xf3f0e2],
-        [24, 10, 0xd8394a],
-        [31, 7, 0xe0c35a],
-      ];
-      for (const [x, w, c] of items) {
-        b.rect(x, 8, 6, w, c);
-        b.rect(x, 8, 6, 1, mix(c, 0xffffff, 0.35));
-        b.rect(x + 5, 8, 1, w, darken(c, 0.25));
-      }
-    },
-    undefined,
-  );
-}
-
 /** A wooden water bucket and a ladle. */
 export function bucket(): Sprite {
   return make(
@@ -1073,26 +656,6 @@ export function bucket(): Sprite {
       for (const y of [6, 10]) b.rect(2, y, 8, 1, 0x3a3a3a);
       b.rect(3, 4, 6, 1, K.water);
       b.rect(8, 0, 1, 5, K.woodLight);
-    },
-    { a: 0.25 },
-  );
-}
-
-/** A sleepy cat, curled up. */
-export function sleepingCat(): Sprite {
-  return make(
-    14,
-    9,
-    7,
-    8,
-    (b) => {
-      b.ellipse(7, 5, 6, 3.4, 0xe8a24a);
-      b.ellipse(7, 4, 4.4, 2.2, 0xf2c27a);
-      b.rect(2, 5, 3, 2, 0xe8a24a);
-      b.set(2, 3, 0xe8a24a);
-      b.set(4, 3, 0xe8a24a);
-      b.set(3, 5, 0x3a2a1a);
-      b.rect(9, 6, 4, 1, 0xc0782a);
     },
     { a: 0.25 },
   );
@@ -1163,27 +726,6 @@ export function shrine(): Sprite {
   );
 }
 
-/** A low stack of firewood. */
-export function woodpile(): Sprite {
-  return make(
-    22,
-    12,
-    11,
-    10,
-    (b) => {
-      for (let r = 0; r < 3; r++) {
-        for (let c = 0; c < 4 - (r === 2 ? 1 : 0); c++) {
-          const x = 2 + c * 5 + (r % 2) * 2;
-          const y = 7 - r * 3;
-          b.ellipse(x + 2, y + 1.5, 2.4, 1.8, K.woodLight);
-          b.set(x + 2, y + 1, K.woodDark);
-        }
-      }
-    },
-    { a: 0.25 },
-  );
-}
-
 // ── Farm life and filler ─────────────────────────────────────
 
 /** A clump of tall, spiky grass: the filler that makes a farm feel overgrown. */
@@ -1191,6 +733,8 @@ export function tallGrass(seed: number, tone: "green" | "gold" = "green"): Sprit
   const light = tone === "gold" ? 0xd8c25a : K.grassLight;
   const base = tone === "gold" ? 0xb39a34 : K.grass;
   const dark = tone === "gold" ? 0x7d6a1e : K.grassDark;
+  // The tips catch the sun: a warm, pale step above the light.
+  const hi = mix(light, 0xfff4cc, 0.38);
   return make(
     16,
     13,
@@ -1206,23 +750,45 @@ export function tallGrass(seed: number, tone: "green" | "gold" = "green"): Sprit
       const lean = habit === 3 ? (hash(seed, 4, 7) < 0.5 ? -1 : 1) * 0.6 : 0;
       const heads = hash(seed, 5, 7) < 0.3;
       const x0 = 8 - widthOf / 2;
+      // The clump's own shade at its foot, where the blades crowd out the light.
       b.ellipse(8, 11, widthOf / 2 + 0.5, 1.6, dark);
       const blades = Math.max(3, Math.round(widthOf * 0.75) + Math.floor(rnd() * 3));
-      for (let i = 0; i < blades; i++) {
+      // Back blades (the middle ones, tallest) first, so the outer ones cross them.
+      const order = Array.from({ length: blades }, (_, i) => i).sort(
+        (p, q) => Math.abs(p - (blades - 1) / 2) - Math.abs(q - (blades - 1) / 2),
+      );
+      for (const i of order) {
         const bx = x0 + (i / Math.max(1, blades - 1)) * widthOf + (rnd() - 0.5) * 1.5;
         const height = Math.max(2, Math.round(tallest * (0.45 + rnd() * 0.55)));
         const splay = (bx - 8) * 0.22 + lean + (rnd() - 0.5) * 0.6;
+        // A blade leaning toward the sun (left) is lit along its length; one
+        // leaning away stays in its own shade until its tip.
+        const sunward = splay < 0;
         let tipX = 0;
         for (let k = 0; k < height; k++) {
           const t = k / height;
           const x = Math.round(bx + splay * t * 2);
           const y = 11 - k;
-          b.set(x, y, t > 0.7 ? light : t > 0.3 ? base : dark);
+          const c =
+            t > 0.82
+              ? hi
+              : t > 0.55
+                ? sunward
+                  ? light
+                  : base
+                : t > 0.25
+                  ? sunward
+                    ? base
+                    : dark
+                  : dark;
+          b.set(x, y, c);
           tipX = x;
         }
         if (heads && i % 2 === 0 && height > 4) {
-          b.set(tipX, 11 - height, 0xe8d8a0);
-          b.set(tipX, 10 - height, 0xd8c070);
+          // A seed head: a lit grain over a shaded one, nodding over.
+          b.set(tipX, 11 - height, 0xf2e6b4);
+          b.set(tipX + (splay < 0 ? -1 : 1), 11 - height, 0xd8c070);
+          b.set(tipX, 10 - height, 0xb89a48);
         }
       }
     },
@@ -1232,96 +798,34 @@ export function tallGrass(seed: number, tone: "green" | "gold" = "green"): Sprit
 
 /** A low clump of flowers on leaves. */
 export function flowerClump(seed: number, petal: Rgb): Sprite {
+  // A low clump of leaves (pads lit from the upper left, shade between them)
+  // with a few five-petal flowers on it: each petal lit on the sunny side
+  // and a shade darker on the far one, round a gold centre with a lit pixel.
   return make(
     14,
     10,
     7,
     9,
     (b) => {
-      b.ellipse(7, 7, 5.5, 2.4, K.leafDark);
-      b.ellipse(6, 6.5, 3, 1.6, K.leaf);
+      clump(b, 4.6, 7, 2.8, LEAF, seed);
+      clump(b, 9.4, 7.2, 2.8, LEAF, seed + 1);
+      clump(b, 7, 6, 2.6, LEAF, seed + 2);
       const rnd = stream(seed);
-      for (let i = 0; i < 4; i++) {
-        const x = Math.round(2 + rnd() * 9);
-        const y = Math.round(2 + rnd() * 4);
-        b.set(x, y - 1, petal);
-        b.set(x - 1, y, petal);
+      const lit = mix(petal, 0xffffff, 0.35);
+      const shade = mix(petal, WARM_INK, 0.22);
+      for (let i = 0; i < 3; i++) {
+        const x = Math.round(3 + rnd() * 8);
+        const y = Math.round(3 + rnd() * 3);
+        b.set(x, y - 1, lit);
+        b.set(x - 1, y, lit);
         b.set(x + 1, y, petal);
-        b.set(x, y + 1, mix(petal, WARM_INK, 0.2));
+        b.set(x - 1, y + 1, petal);
+        b.set(x + 1, y + 1, shade);
         b.set(x, y, 0xf6d24a);
+        b.set(x, y + 1, 0xc8941a);
       }
     },
     undefined,
-  );
-}
-
-/** A green-banded wooden tub on a ring of stones (a well bucket / rain tub). */
-export function waterTub(): Sprite {
-  const green = 0x4f8a3a;
-  const greenLight = 0x74b04e;
-  const greenDark = 0x2f5a24;
-  return make(
-    22,
-    24,
-    11,
-    22,
-    (b) => {
-      // Stones it stands on.
-      for (const [x, y, r] of [
-        [4, 19, 3.4],
-        [11, 21, 3.6],
-        [18, 19, 3.4],
-        [7, 16, 2.8],
-        [15, 16, 2.8],
-      ] as const) {
-        b.ellipse(x, y, r * 1.1, r * 0.8, K.stone);
-        b.ellipse(x - 0.8, y - 0.8, r * 0.6, r * 0.4, K.stoneLight);
-      }
-      // The tub: staves, two bands, a rim with dark water inside.
-      for (let y = 4; y < 17; y++) {
-        const bulge = Math.round(Math.sin(((y - 4) / 13) * Math.PI) * 1.2);
-        for (let x = 4 - bulge; x < 18 + bulge; x++) {
-          const lit = x < 8 ? greenLight : x > 14 ? greenDark : green;
-          b.set(x, y, (x - 4) % 3 === 0 ? mix(lit, greenDark, 0.35) : lit);
-        }
-      }
-      for (const y of [7, 13]) b.rect(3, y, 16, 1, 0x3a3a2a);
-      b.ellipse(11, 4, 7, 2.4, green);
-      b.ellipse(11, 4, 5.6, 1.6, 0x2a4a4a);
-      b.rect(8, 4, 4, 1, 0x5fa8a8);
-    },
-    { a: 0.28 },
-  );
-}
-
-/** A shiba inu, curled up asleep. */
-export function shibaDog(): Sprite {
-  const fur = 0xe08a3a;
-  const furLight = 0xf2b06a;
-  const cream = 0xf8e6c4;
-  return make(
-    18,
-    12,
-    9,
-    11,
-    (b) => {
-      b.ellipse(10, 7, 6.5, 3.6, fur);
-      b.ellipse(9, 5.8, 4.6, 2.2, furLight);
-      // Head resting on its paws, facing left.
-      b.ellipse(4.5, 7, 3.4, 2.8, fur);
-      b.ellipse(3.6, 8.2, 2.2, 1.4, cream);
-      b.set(3, 4, fur);
-      b.set(5, 4, fur);
-      b.set(3, 5, furLight);
-      b.set(5, 5, furLight);
-      b.rect(3, 7, 2, 1, 0x3a2414); // a closed, sleepy eye
-      b.set(1, 8, 0x2a1a10); // nose
-      // A curled tail on top.
-      b.ellipse(15, 5, 2.2, 1.8, cream);
-      b.set(15, 5, fur);
-      b.rect(6, 10, 6, 1, cream);
-    },
-    { a: 0.26 },
   );
 }
 
@@ -1403,132 +907,6 @@ export function kura(seed: number): Sprite {
   );
 }
 
-/**
- * A bed of tilled soil with rounded corners, crops in rows, and (optionally)
- * a low wooden fence along its front.
- */
-export function soilBed(
-  cols: number,
-  rows: number,
-  kind: "carrot" | "daikon" | "cabbage" | "rice" | "eggplant",
-  seed: number,
-  fenced = true,
-): Sprite {
-  const w = cols * 13 + 8;
-  const bedH = rows * 13 + 6;
-  const h = bedH + (fenced ? 10 : 2);
-  const rice = kind === "rice";
-  const soil = rice ? 0xa47c34 : 0x6a3c14;
-  const ridge = rice ? 0xc49a48 : 0x86501e;
-  const furrow = rice ? 0x7c5a22 : 0x4c2a0c;
-  return make(
-    w,
-    h,
-    Math.round(w / 2),
-    h - 1,
-    (b) => {
-      for (let y = 0; y < bedH; y++) {
-        for (let x = 0; x < w; x++) {
-          const corner =
-            (x < 2 || x > w - 3) &&
-            (y < 2 || y > bedH - 3) &&
-            !(x > 0 && x < w - 1 && y > 0 && y < bedH - 1);
-          if (corner) continue;
-          const r = y % 13;
-          b.set(x, y, r === 0 ? furrow : r < 4 ? ridge : soil);
-        }
-      }
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          const x = 5 + c * 13;
-          const y = 2 + r * 13;
-          const rnd = stream(seed + r * 17 + c);
-          if (rice) {
-            for (let k = 0; k < 5; k++) {
-              const sx = x + Math.round(rnd() * 7);
-              const top = y + Math.round(rnd() * 2);
-              for (let yy = top; yy < y + 10; yy++)
-                b.set(sx, yy, yy < top + 3 ? 0xe8cf62 : K.leafLight);
-              b.set(sx + 1, top + 1, 0xe8cf62);
-            }
-            continue;
-          }
-          if (kind === "cabbage") {
-            b.ellipse(x + 4, y + 6, 5, 4.2, K.leafDark);
-            b.ellipse(x + 4, y + 5.5, 3.8, 3, K.leafLight);
-            b.ellipse(x + 3.5, y + 5, 2.2, 1.6, 0xc8d878);
-            continue;
-          }
-          if (kind === "eggplant") {
-            b.ellipse(x + 4, y + 4, 4, 3, K.leaf);
-            b.ellipse(x + 3, y + 8, 1.6, 2.4, 0x5a2a6a);
-            b.ellipse(x + 6, y + 8, 1.6, 2.4, 0x6a3a7a);
-            continue;
-          }
-          // Leafy tops over a root showing at the soil.
-          const root = kind === "carrot" ? K.koi : 0xf3f0e2;
-          b.rect(x + 2, y + 7, 4, 3, root);
-          b.set(x + 2, y + 7, mix(root, 0xffffff, 0.4));
-          b.set(x + 4, y + 1, K.leafLight);
-          b.rect(x + 2, y + 2, 4, 2, K.leafLight);
-          b.rect(x + 1, y + 4, 6, 2, K.leaf);
-          b.set(x, y + 3, K.leaf);
-          b.set(x + 7, y + 3, K.leaf);
-          b.rect(x + 3, y + 6, 2, 1, K.leafDark);
-        }
-      }
-      if (fenced) {
-        const fy = bedH + 1;
-        for (let x = 1; x < w - 1; x++) {
-          b.set(x, fy + 2, K.wood);
-          b.set(x, fy + 5, K.wood);
-          b.set(x, fy + 3, K.woodDark);
-          b.set(x, fy + 6, K.woodDark);
-        }
-        for (let x = 1; x < w - 1; x += 10) {
-          b.rect(x, fy, 2, 9, K.woodDark);
-          b.rect(x, fy, 1, 9, K.woodLight);
-        }
-        b.rect(w - 3, fy, 2, 9, K.woodDark);
-      }
-    },
-    { a: 0.2 },
-  );
-}
-
-/** Long, rounded rows of a clipped crop (like rolls of tea or cabbage), on soil. */
-export function cropRolls(width: number, rolls: number): Sprite {
-  const h = rolls * 13 + 8;
-  return make(
-    width + 6,
-    h,
-    Math.round(width / 2) + 3,
-    h - 1,
-    (b) => {
-      for (let y = 0; y < h - 2; y++) {
-        for (let x = 0; x < width + 6; x++) b.set(x, y, y % 13 === 12 ? 0x4c2a0c : 0x6a3c14);
-      }
-      for (let r = 0; r < rolls; r++) {
-        const top = 2 + r * 13;
-        for (let y = top; y < top + 10; y++) {
-          for (let x = 3; x < width + 3; x++) {
-            const endCut = (x === 3 || x === width + 2) && (y === top || y === top + 9);
-            if (endCut) continue;
-            const t = (y - top) / 10;
-            const c = t < 0.2 ? 0xc8dc5a : t < 0.6 ? 0xa2c040 : t < 0.85 ? K.leaf : K.leafDark;
-            b.set(
-              x,
-              y,
-              x === 3 ? mix(c, 0xffffff, 0.15) : x > width ? darken(c, 0.2, WARM_INK) : c,
-            );
-          }
-        }
-      }
-    },
-    { a: 0.2 },
-  );
-}
-
 /** A small wooden stake with a crossbar (a field marker). */
 export function stake(): Sprite {
   return make(
@@ -1548,6 +926,11 @@ export function stake(): Sprite {
 
 /** A wisp of steam or smoke: a few soft puffs drifting up and to the side. */
 export function steam(seed: number): Sprite {
+  // Steam drawn the way GG Royale draws smoke: rounded puffs, each lit white
+  // on its upper left with a cool shade on its lower right, getting bigger
+  // and thinner as they rise (pixels drop out through an ordered dither,
+  // rather than the puff going see-through).
+  const BY = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5] as const;
   return make(
     10,
     18,
@@ -1558,11 +941,19 @@ export function steam(seed: number): Sprite {
       for (let i = 0; i < 4; i++) {
         const y = 15 - i * 4;
         const x = 4 + Math.round(Math.sin(i * 1.3 + rnd()) * 2) + (i > 1 ? 1 : 0);
-        const r = 1.4 + i * 0.4;
+        const r = 1.4 + i * 0.45;
+        // How much of the puff's rim is left: full low down, thin high up
+        // (its middle stays solid, so it never breaks into a checker).
+        const keep = 1 - i * 0.28;
         for (let yy = Math.floor(y - r); yy <= y + r; yy++) {
           for (let xx = Math.floor(x - r); xx <= x + r; xx++) {
-            if (Math.hypot(xx + 0.5 - x, yy + 0.5 - y) <= r)
-              b.set(xx, yy, 0xffffff, 0.55 - i * 0.1);
+            const dx = (xx + 0.5 - x) / r;
+            const dy = (yy + 0.5 - y) / r;
+            if (dx * dx + dy * dy > 1) continue;
+            const t = ((BY[(yy & 3) * 4 + (xx & 3)] ?? 0) + 0.5) / 16;
+            if (dx * dx + dy * dy > 0.4 && t > keep) continue;
+            const lit = -dx * 0.55 - dy * 0.7;
+            b.set(xx, yy, lit > 0.3 ? 0xffffff : lit > -0.35 ? 0xe8e6ec : 0xc4c2d0);
           }
         }
       }
@@ -1574,8 +965,12 @@ export function steam(seed: number): Sprite {
 
 /** Sakura petals scattered on the ground under a tree. */
 export function petals(seed: number, count = 9, spread = 18): Sprite {
+  // Fallen cherry petals lying on the ground: each a little oval (two or
+  // three pixels, turned its own way), lit on its sunny end and a deeper
+  // rose on the other, the odd one curled with its notch showing.
   const w = spread * 2 + 4;
   const h = Math.round(spread * 0.8) + 4;
+  const deep = mix(K.sakuraDark, 0xb0587a, 0.35);
   return make(
     w,
     h,
@@ -1586,46 +981,44 @@ export function petals(seed: number, count = 9, spread = 18): Sprite {
       for (let i = 0; i < count; i++) {
         const x = Math.round(2 + rnd() * (w - 4));
         const y = Math.round(2 + rnd() * (h - 4));
-        b.set(x, y, K.sakuraLight);
-        if (rnd() < 0.6) b.set(x + 1, y, K.sakura);
+        const turn = Math.floor(rnd() * 4);
+        const big = rnd() < 0.45;
+        // Its lit end, then its body, then (bigger ones) the shaded tip.
+        const steps: ReadonlyArray<readonly [number, number]> =
+          turn === 0
+            ? [
+                [0, 0],
+                [1, 0],
+                [2, 0],
+              ]
+            : turn === 1
+              ? [
+                  [0, 0],
+                  [0, 1],
+                  [0, 2],
+                ]
+              : turn === 2
+                ? [
+                    [0, 0],
+                    [1, 1],
+                    [2, 1],
+                  ]
+                : [
+                    [0, 0],
+                    [1, 0],
+                    [1, 1],
+                  ];
+        const tones = [K.sakuraLight, K.sakura, deep] as const;
+        steps.forEach(([dx, dy], k) => {
+          if (k === 2 && !big) return;
+          b.set(x + dx, y + dy, tones[k] ?? K.sakura);
+        });
+        // A curled petal shows its paler underside notch.
+        if (big && rnd() < 0.3) b.set(x, y + (turn === 1 ? 0 : 1), 0xfff0f4);
       }
     },
     undefined,
     false,
-  );
-}
-
-/** A tabby cat, mid-stride. */
-export function walkingCat(): Sprite {
-  const fur = 0xc89060;
-  const stripe = 0x8a5a34;
-  const belly = 0xf2dcc0;
-  return make(
-    16,
-    12,
-    8,
-    11,
-    (b) => {
-      b.ellipse(8, 7, 5.5, 2.6, fur);
-      b.rect(5, 8, 6, 1, belly);
-      for (const x of [6, 9, 12]) b.rect(x, 5, 1, 2, stripe);
-      // Head, facing right, ears up.
-      b.ellipse(13, 5, 2.6, 2.4, fur);
-      b.set(12, 2, fur);
-      b.set(14, 2, fur);
-      b.set(14, 5, 0x2a1a10);
-      b.set(15, 6, 0xd88a8a);
-      // Tail curling up behind.
-      b.rect(2, 4, 1, 4, fur);
-      b.set(3, 3, fur);
-      b.set(2, 3, stripe);
-      // Legs, one forward one back.
-      b.rect(5, 9, 1, 2, fur);
-      b.rect(8, 9, 1, 2, stripe);
-      b.rect(10, 9, 1, 2, fur);
-      b.rect(12, 9, 1, 2, stripe);
-    },
-    { a: 0.25 },
   );
 }
 

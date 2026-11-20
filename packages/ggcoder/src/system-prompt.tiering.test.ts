@@ -1,10 +1,11 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { buildSystemPrompt } from "./system-prompt.js";
+import { buildSubAgentSystemPrompt, buildSystemPrompt } from "./system-prompt.js";
 import { createTools } from "./tools/index.js";
+import { buildToolSteering } from "./tools/prompt-hints.js";
 import {
   AUTO_LOADED_TOOL_NAMES,
   CORE_TOOL_NAMES,
@@ -68,6 +69,75 @@ describe("tool tiering in the system prompt", () => {
       expect(countOccurrences(prompt, `- **${name}**:`), `index line for ${name}`).toBe(expected);
     }
     expect(prompt).toContain("On demand (call by name;");
+  });
+
+  it("tells Claude Code sessions to search before calling a deferred tool", async () => {
+    const cwd = await makeProject();
+    const core = ["read", "edit", "bash", "tool_search"];
+    const deferred = ["web_fetch", "web_search"];
+    const native = await buildSystemPrompt(
+      cwd,
+      undefined,
+      false,
+      undefined,
+      core,
+      undefined,
+      "anthropic",
+      undefined,
+      deferred,
+    );
+    const claudeCode = await buildSystemPrompt(
+      cwd,
+      undefined,
+      false,
+      undefined,
+      core,
+      undefined,
+      "anthropic",
+      undefined,
+      deferred,
+      undefined,
+      true,
+    );
+    const searchFirst =
+      "On demand (not loaded yet: run `tool_search` with the name first, then call it;";
+    expect(native).toContain("On demand (call by name;");
+    expect(native).not.toContain("not loaded yet");
+    expect(claudeCode).toContain(searchFirst);
+    expect(claudeCode).not.toContain("call by name");
+    // Only the lead-in differs, so the tool index is the same on both routes.
+    expect(claudeCode.replace(searchFirst, "On demand (call by name;")).toBe(native);
+
+    const child = { cwd, toolNames: core, deferredToolNames: deferred, context: "none" as const };
+    expect(await buildSubAgentSystemPrompt("You are Owl.", child)).toContain(
+      "On demand (call by name;",
+    );
+    expect(
+      await buildSubAgentSystemPrompt("You are Owl.", { ...child, deferredNeedSearch: true }),
+    ).toContain(searchFirst);
+  });
+
+  it("tells the agent it can make images and GIFs only when OpenAI is connected", async () => {
+    const cwd = await makeProject();
+    const core = ["read", "edit", "bash", "tool_search"];
+    const build = (deferred: string[]) =>
+      buildSystemPrompt(
+        cwd,
+        undefined,
+        false,
+        undefined,
+        core,
+        undefined,
+        "anthropic",
+        undefined,
+        deferred,
+      );
+    // generate_image is only registered (and so deferred) with OpenAI auth.
+    const connected = await build(["web_fetch", "generate_image"]);
+    expect(connected).toMatch(/- \*\*generate_image\*\*: Make images and animated GIFs/);
+    expect(connected).toContain("not code");
+    const disconnected = await build(["web_fetch"]);
+    expect(disconnected).not.toContain("generate_image");
   });
 
   it("keeps cross-tool steering without repeating live tool descriptions", async () => {
@@ -199,5 +269,105 @@ describe("tool tiering in the system prompt", () => {
     // of truth (corpus-gap and not-installed fallbacks); the index block cap
     // is still the tiering guard.
     expect(prompt.length).toBeLessThan(13_100);
+  });
+});
+
+describe("parallel tool-call steering", () => {
+  it("tells a bash-equipped agent that non-shell calls in one reply run in parallel", () => {
+    const steering = buildToolSteering(["bash", "read", "grep", "steroids"]);
+    expect(steering).toContain(
+      "Calls in one reply run in parallel, except shell commands and edits",
+    );
+    expect(steering).not.toContain("reads/searches");
+  });
+
+  it("keeps the read/search batching line for agents without bash", () => {
+    const steering = buildToolSteering(["read", "grep"]);
+    expect(steering).toContain("Batch independent reads/searches in one turn");
+    expect(steering).not.toContain("Calls in one reply run in parallel");
+  });
+});
+
+describe("one-command change steering", () => {
+  let previousGgBash: string | undefined;
+  beforeEach(() => {
+    // Force the POSIX shell branch so this holds on the Windows CI leg too.
+    previousGgBash = process.env.GG_BASH;
+    process.env.GG_BASH = "/bin/bash";
+  });
+  afterEach(() => {
+    if (previousGgBash === undefined) delete process.env.GG_BASH;
+    else process.env.GG_BASH = previousGgBash;
+  });
+
+  it("replaces the edit preference and script rule when bash is available", async () => {
+    const cwd = await makeProject();
+    const prompt = await buildSystemPrompt(cwd, [], false, undefined, ["bash", "edit", "write"]);
+    expect(prompt).toContain("Make each change in one `bash` command that writes only what's new");
+    expect(prompt).not.toContain("Prefer `edit` over `write`");
+    expect(prompt).not.toContain("Mechanical multi-file changes");
+  });
+
+  it("keeps the edit preference and script rule without bash", async () => {
+    const cwd = await makeProject();
+    const prompt = await buildSystemPrompt(cwd, [], false, undefined, ["edit", "write"]);
+    expect(prompt).toContain("Prefer `edit` over `write` for changes to existing files.");
+    expect(prompt).toContain("Mechanical multi-file changes");
+    expect(prompt).not.toContain("Make each change in one `bash` command");
+  });
+
+  it("falls back to the edit preference under the cmd.exe shell", () => {
+    expect(buildToolSteering(["bash", "edit", "write"], false)).toContain(
+      "Prefer `edit` over `write`",
+    );
+    expect(buildToolSteering(["bash", "edit", "write"], false)).not.toContain("one `bash` command");
+  });
+});
+
+describe("Environment file list", () => {
+  it("renders the files it is given, noting when the list is capped", async () => {
+    const cwd = await makeProject();
+    const prompt = await buildSystemPrompt(
+      cwd,
+      [],
+      false,
+      undefined,
+      ["bash"],
+      undefined,
+      undefined,
+      {
+        projectFiles: { total: 75, shown: ["package.json", "src/a.js"] },
+      },
+    );
+    expect(prompt).toContain(
+      `- Working directory: ${cwd}\n- Files (75, shallowest 2 shown): package.json, src/a.js\n`,
+    );
+  });
+
+  it("omits the line outside a git work tree", async () => {
+    const cwd = await makeProject();
+    const prompt = await buildSystemPrompt(cwd, [], false, undefined, ["bash"]);
+    expect(prompt).not.toContain("- Files (");
+  });
+});
+
+describe("plan mode steering", () => {
+  it("says when to enter plan mode, and that small changes skip it", () => {
+    const steering = buildToolSteering(["read", "bash", "enter_plan"]);
+    expect(steering).toContain("Call `enter_plan` first only when the request needs research");
+    expect(steering).toContain("Go straight to work on small or clear changes");
+    expect(buildToolSteering(["read", "bash"])).not.toContain("enter_plan");
+  });
+});
+
+describe("plan mode research tools", () => {
+  it("names steroids and web research only when the session can reach them", async () => {
+    const { renderPlanModeSection } = await import("./system-prompt.js");
+    const full = renderPlanModeSection(["read", "bash", "steroids", "web_search"]);
+    expect(full).toContain("`steroids` for how real projects solve it");
+    expect(full).toContain("the web for current docs");
+    const bare = renderPlanModeSection(["read", "bash"]);
+    expect(bare).toContain("Use read/search tools and read-only bash;");
+    expect(bare).not.toContain("steroids");
   });
 });

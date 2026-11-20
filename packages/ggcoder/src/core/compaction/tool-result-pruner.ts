@@ -47,6 +47,38 @@ export function shouldPruneToolResults(activeTokens: number, compactionTarget: n
   return activeTokens >= compactionTarget * PRUNE_START_FRACTION;
 }
 
+/**
+ * With a warm prompt cache, a prune must free at least this share of the active
+ * context: pruning rewrites everything after the first stub, so freeing ~20k on a
+ * ~430k context re-caches ~430k tokens for a ~5% gain (a live session paid 5.6M
+ * cache-write tokens over 13 such prunes). A cold/expired cache is re-read in
+ * full anyway, so then the flat {@link PRUNE_MINIMUM_TOKENS} floor applies.
+ *
+ * Raised from 0.2: 40 prunes in five days of logs cost ~6.4M uncached tokens,
+ * many freeing 41–56k right at that floor only 5–10 minutes apart, which is too
+ * few turns to pay back a full rewrite.
+ */
+export const PRUNE_WARM_MIN_SHARE = 0.35;
+
+/**
+ * From this share of the compaction trigger up, the flat floor applies even on
+ * a warm cache: compaction rewrites the whole prefix too, so a small prune that
+ * prevents it is the cheaper of the two.
+ */
+export const PRUNE_NEAR_TRIGGER_FRACTION = 0.9;
+
+/** Minimum freed tokens that make a prune worth its cache rewrite. */
+export function pruneMinimumTokens(
+  activeTokens: number,
+  cacheCold: boolean,
+  compactionTarget: number,
+): number {
+  if (cacheCold || activeTokens >= compactionTarget * PRUNE_NEAR_TRIGGER_FRACTION) {
+    return PRUNE_MINIMUM_TOKENS;
+  }
+  return Math.max(PRUNE_MINIMUM_TOKENS, Math.ceil(activeTokens * PRUNE_WARM_MIN_SHARE));
+}
+
 /** Tools whose output is instruction, not reproducible data — never pruned. */
 export const PRUNE_PROTECTED_TOOLS = new Set(["skill"]);
 

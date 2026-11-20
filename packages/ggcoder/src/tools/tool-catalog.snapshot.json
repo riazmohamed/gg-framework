@@ -3,7 +3,7 @@
   "tools": [
     {
       "name": "bash",
-      "description": "Run a non-interactive bash command (TERM=dumb, pipefail) in the project root. Servers/watchers/REPLs: run_in_background + wake.pattern, then task_output wait_ms; never `&`, nohup or sleep. Leave servers running. Kill by exact PID.",
+      "description": "Run a non-interactive bash command (TERM=dumb, pipefail) in the project root. Servers/watchers/REPLs: run_in_background + wake.pattern, then task_output wait_ms; never `&`, nohup or sleep. Leave servers running. Kill by exact PID, never by name or pattern (pkill, killall, taskkill /IM): you run inside a host process.",
       "schema": {
         "type": "object",
         "properties": {
@@ -46,11 +46,11 @@
           "command"
         ]
       },
-      "hash": "23b49343843555ff1a22ece3ab3796e58a867fb685da2d8226a5101be0d4be27"
+      "hash": "fb1336438cf245042ec08c5d854b3926e13b8e91a0e53aefc26f1af426dee718"
     },
     {
       "name": "checklist",
-      "description": "Read or record the project health checklist (stored in .gg-checklist.json). `status` lists every item with its status and last check; items older than 30 days are due. `record` saves the result of checking one item: the date and Git commit are filled in automatically. `issues` needs at least one finding; `pass` takes none; `evidence` lists what you actually ran or read, including scope and exclusions. Record completed checklist reviews or checks requested in normal chat; never start extra audits unasked. After fixing an item's recorded findings, re-check them and record that item again (`pass`, or `issues` with what remains) so the checklist doesn't keep showing fixed findings. Findings the user explicitly chose to leave go in `accepted` with the reason, not `findings`, so the item can pass once everything else is fixed.",
+      "description": "Project health checklist (.gg-checklist.json). `status`: every item; older than 30 days = due. `record`: save one item's check (date and commit auto-filled); `issues` needs findings, `pass` none; `evidence` = what you ran or read, incl. scope. Record completed reviews or requested checks; never start audits unasked. After fixing findings, re-check and record the item again. Findings the user chose to leave go in `accepted` with the reason, so the item can still pass.",
       "schema": {
         "type": "object",
         "properties": {
@@ -145,80 +145,11 @@
           "action"
         ]
       },
-      "hash": "f98a045f33438ea0a876478cc380ede7436542697d4ffbcffbb399df51080e4d"
-    },
-    {
-      "name": "code_nav",
-      "description": "Language server: exact definition, references (callers), file outline, type.",
-      "schema": {
-        "type": "object",
-        "properties": {
-          "op": {
-            "type": "string",
-            "enum": [
-              "definition",
-              "references",
-              "symbols",
-              "hover"
-            ],
-            "description": "symbols = file outline; hover = type/signature"
-          },
-          "file": {
-            "type": "string"
-          },
-          "line": {
-            "description": "Not needed when `symbol` is given",
-            "type": "integer",
-            "minimum": 1
-          },
-          "column": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "symbol": {
-            "description": "Symbol name",
-            "type": "string"
-          },
-          "max_results": {
-            "description": "Default 60",
-            "type": "integer",
-            "minimum": 1
-          }
-        },
-        "required": [
-          "op",
-          "file"
-        ]
-      },
-      "hash": "4734eceb00cd72a9bbccfa12e306a9b4e7ba6e017ae4f2fffe111c490611b79c"
-    },
-    {
-      "name": "code_search",
-      "description": "Find functions/classes by what they do; returns whole symbols.",
-      "schema": {
-        "type": "object",
-        "properties": {
-          "query": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          },
-          "max_results": {
-            "description": "Default 8",
-            "type": "integer",
-            "minimum": 1
-          }
-        },
-        "required": [
-          "query"
-        ]
-      },
-      "hash": "26e7c3d13be1bff57c79530753790d4345a8d0a40de04b8130ed2c9b4fd9a3ed"
+      "hash": "5e5248c22755d3e1cd14ca357f2c7b36398c411078739122f7db1b1f93f0f076"
     },
     {
       "name": "debug",
-      "description": "Debug a Node.js program (JS, or TS run by Node's type stripping) with real breakpoints. Use it when a bug depends on runtime state: launch with breakpoints, read variables at the stop, step, and evaluate expressions in the paused frame — instead of adding prints and re-running. launch, continue, step_* and pause return where it stopped, the source around it and the local variables. It pauses on uncaught exceptions by default. One session at a time; launching again stops the previous program. To debug a node:test file, launch it with node_args [\"--test\", \"--test-isolation=none\"]. Test runners that run tests in worker processes (vitest, jest) do not reach breakpoints this way.",
+      "description": "Debug a Node.js program (JS, or TS via type stripping) with real breakpoints when a bug depends on runtime state, instead of adding prints. launch/continue/step_*/pause return the stop location, surrounding source and locals; pauses on uncaught exceptions by default. One session at a time (launch stops the previous). node:test files: node_args [\"--test\", \"--test-isolation=none\"]. Worker-process runners (vitest, jest) never reach breakpoints.",
       "schema": {
         "type": "object",
         "properties": {
@@ -239,7 +170,7 @@
               "output",
               "stop"
             ],
-            "description": "What to do. Every action that runs code returns where the program stopped."
+            "description": "What to do"
           },
           "program": {
             "description": "launch: script to run (.js/.mjs/.cjs/.ts)",
@@ -335,7 +266,7 @@
           "action"
         ]
       },
-      "hash": "912efe81b45c6511bd17eebbfb5b57228938b0b16a5a99daff6d04a905d37274"
+      "hash": "0c24bb40af86b49f45d143c2fb22efb40397975f61f824d2ded602bbabe34e30"
     },
     {
       "name": "edit",
@@ -461,7 +392,7 @@
     },
     {
       "name": "grep",
-      "description": "Regex search of file contents → path:line:text. Skips .gitignored and binary files.",
+      "description": "Regex search of file contents → matches grouped by file (path, then line:text rows). Skips .gitignored and binary files.",
       "schema": {
         "type": "object",
         "properties": {
@@ -488,7 +419,7 @@
           "pattern"
         ]
       },
-      "hash": "fca2f3ad82151cecaa09d52c16967cb8d190468497beed8a9079e4c90945b351"
+      "hash": "aea09b5cbebb692cd0adc330f8b2a8bbcfc623493875474ee6555fdd276cc6aa"
     },
     {
       "name": "ls",
@@ -537,13 +468,13 @@
     },
     {
       "name": "screenshot",
-      "description": "Open a URL or local dev server in a headless browser and capture a PNG so you can visually verify rendered output. Optionally wait for a selector, run click/type/wait actions, set the viewport, or capture the full page. Returns the image so you can see it. Requires the optional 'playwright' dependency and 'npx playwright install chromium'.",
+      "description": "Capture a PNG of a URL or dev server in headless Chromium to verify rendered output (optional selector wait, click/type/wait actions, viewport, full page); returns the image. Needs the optional 'playwright' dependency and 'npx playwright install chromium'.",
       "schema": {
         "type": "object",
         "properties": {
           "url": {
             "type": "string",
-            "description": "URL or local dev-server address to open (e.g. http://localhost:3000)"
+            "description": "URL to open, e.g. http://localhost:3000"
           },
           "out_path": {
             "description": "Output PNG path (defaults to .gg/screenshots/<timestamp>.png)",
@@ -576,7 +507,7 @@
             "type": "boolean"
           },
           "actions": {
-            "description": "Optional interactions (click/type/wait) to run before capturing",
+            "description": "Interactions run before capture",
             "type": "array",
             "items": {
               "type": "object",
@@ -588,7 +519,7 @@
                     "type",
                     "wait"
                   ],
-                  "description": "Action to perform on the page"
+                  "description": "Action"
                 },
                 "selector": {
                   "description": "CSS selector for click/type actions",
@@ -614,7 +545,7 @@
           "url"
         ]
       },
-      "hash": "06c1f0dce0aea6ce6c27f8c6b8f2699169aff8c6641e2c7252878e440230f6da"
+      "hash": "1f938e29e130f42bccb9c94a29bfb5ee83b0ac58a1c5c6fd118857d721e7855f"
     },
     {
       "name": "source_path",
@@ -651,17 +582,17 @@
             "type": "boolean"
           },
           "wait_ms": {
-            "description": "Block until exit or a wake fires (max 600000)",
+            "description": "Block until exit or a wake fires (max 300000)",
             "type": "integer",
             "minimum": 1000,
-            "maximum": 600000
+            "maximum": 300000
           }
         },
         "required": [
           "id"
         ]
       },
-      "hash": "ec5e60d8eb2d3f09cff4ef9929a308bd7f2b8f967bdb5f410a27ab7e10aafa11"
+      "hash": "f6bdb9c86b756b1bd14d074068190940af83368c034d8c775161989673a9a82c"
     },
     {
       "name": "task_send",
@@ -830,7 +761,7 @@
             "exclusiveMinimum": 0
           },
           "max_length": {
-            "description": "Default 10000 (2000 for outline)",
+            "description": "Default 10000, max 20000 (2000 for outline)",
             "type": "number"
           },
           "format": {
@@ -842,12 +773,17 @@
               "outline"
             ]
           },
+          "offset": {
+            "description": "Continue a truncated page from this character (single url)",
+            "type": "integer",
+            "minimum": 0
+          },
           "prefer_llms_txt": {
             "type": "boolean"
           }
         }
       },
-      "hash": "523ccaa4ac316bcabf0055c7d35dfdb3cc314b60a8a19b1d719c69c3ad502311"
+      "hash": "28a840e270717ecad54c273639f8fabebd106077fe489b6dc214b47a14c79b8a"
     },
     {
       "name": "write",

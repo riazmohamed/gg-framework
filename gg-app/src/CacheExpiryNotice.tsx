@@ -10,13 +10,13 @@ import { pinSize, usePresenceList } from "./usePresenceList";
  *
  * Shown only when the cache is expired, the context is large enough to matter
  * (the sidecar's `minTokens`, 40k), and no run is active. "Compact first"
- * shrinks the context before paying for the re-read; "Send anyway" dismisses.
+ * shrinks the context before paying for the re-read; "Dismiss" hides it.
  * Either choice is remembered once per expiry per chat: the key is the session
  * plus the last cache-anchoring request, so a fresh request (which re-warms the
  * cache) and a later lapse show the notice again — but a re-render, a /state
  * poll, or a remount for the same lapse does not.
  *
- * Reuses QueuedBar's `.queued-bar*` classes so both strips share one look and
+ * Uses the `.queued-bar*` strip classes so both strips share one look and
  * one motion: it grows open when shown and folds shut when hidden (dismiss,
  * compact, or a run starting), held mounted for EXIT_MS so the exit can play.
  * Sending a message hides it at once instead: the send is the choice the
@@ -151,7 +151,6 @@ export function CacheExpiryNotice({
       style={{ borderColor: theme.border, color: theme.textMuted }}
     >
       <div className="queued-bar-row">
-        <span className="queued-dot" style={{ background: theme.warning }} />
         <span className="queued-bar-text">
           {lead} — your next message re-reads {tokens} tokens at full price.
         </span>
@@ -171,10 +170,10 @@ export function CacheExpiryNotice({
           type="button"
           className="queued-toggle"
           style={{ color: theme.textDim }}
-          title="Dismiss — send your next message as is"
+          title="Hide this. Your next message sends as is"
           onClick={dismiss}
         >
-          Send anyway
+          Dismiss
         </button>
       </div>
     </div>

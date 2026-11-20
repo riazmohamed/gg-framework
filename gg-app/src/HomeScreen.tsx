@@ -1,35 +1,26 @@
-import { useEffect, useId, useMemo, useState, type CSSProperties } from "react";
-import {
-  CodeIcon,
-  ChatCircleTextIcon,
-  DownloadSimpleIcon,
-  FilmSlateIcon,
-  GearSixIcon,
-  TargetIcon,
-} from "@phosphor-icons/react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { error as logError } from "@tauri-apps/plugin-log";
-import { AsciiLogo } from "./AsciiLogo";
+import { HomeTitle } from "./HomeTitle";
+import { PixelIconButton } from "./PixelIconButton";
+import { PixelTip } from "./PixelTip";
+import { PlateButton } from "./PlateButton";
 import { HomeScenery, withScenery } from "./HomeScenery";
 import { HomeCritters } from "./HomeCritters";
+import { HomeUpdateButton } from "./HomeUpdateButton";
 import { useHomeBackgroundEnabled } from "./home-background";
 import { groundFilter, lightAt } from "./scene-light";
 import { useLocalHour } from "./use-local-hour";
 import { useRandomBiome } from "./use-random-biome";
 import type { SettingsTabId } from "./SettingsScreen";
 import {
-  openUrl,
   waitForReady,
   getSettings,
-  authStatus,
+  hasModelSource,
   openWhatsNewWindow,
-  getProgress,
   setRemoteActive,
   getServeStatus,
-  type ProgressSnapshot,
 } from "./agent";
-import { RankBadge } from "./RankBadge";
-import { ScorecardModal } from "./ScorecardModal";
 import { useAppUpdate } from "./update";
 import { toast } from "./toast";
 
@@ -56,7 +47,7 @@ interface Props {
 
 /**
  * App entry screen: the shimmering GG Coder banner over the primary actions.
- * Code, Chat and Motion require a configured workspace folder and connected AI provider;
+ * Code, Goals, Chat and Motion require a configured workspace folder and connected AI provider;
  * everything else lives in full-screen Settings (the bottom-right gear).
  */
 export function HomeScreen({
@@ -68,33 +59,30 @@ export function HomeScreen({
   refreshSignal = 0,
 }: Props): React.ReactElement {
   const [folderSet, setFolderSet] = useState(false);
-  const [providerCount, setProviderCount] = useState(0);
+  const [providerConnected, setProviderConnected] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
-  const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
-  const [showScorecard, setShowScorecard] = useState(false);
+  // The version row stays hidden until the version is read, so What's new
+  // never shifts sideways when the number arrives.
+  const [versionRead, setVersionRead] = useState(false);
   const appUpdate = useAppUpdate();
-  const goalsNoteId = useId();
 
   useEffect(() => {
     void getVersion()
       .then(setVersion)
-      .catch(() => {});
-    void waitForReady()
-      .then(() => getProgress())
-      .then(setProgress)
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setVersionRead(true));
   }, []);
 
   async function refresh(): Promise<void> {
     // Settings + auth are read NATIVELY (Rust) — do them first, WITHOUT waiting on
     // the sidecar, so the workspace gate never stays dimmed just because the
     // agent is slow/crashed.
-    const [settings, providers] = await Promise.all([getSettings(), authStatus()]);
+    const [settings, connected] = await Promise.all([getSettings(), hasModelSource()]);
     // Prefer the explicit `configured` flag; fall back to a non-empty root so an
     // older sidecar (one that predates the flag) degrades to "set" instead of
     // dimming forever.
     setFolderSet(settings?.configured ?? Boolean(settings?.projectsRoot));
-    setProviderCount(providers.filter((p) => p.connected).length);
+    setProviderConnected(connected);
     // Keep the macOS tray's Remote label in step with the sidecar (it may have
     // respawned). Best-effort, and never blocks the native reads above.
     void waitForReady()
@@ -117,7 +105,7 @@ export function HomeScreen({
     if (refreshSignal > 0) void refresh().catch(logSetupCheckFailure);
   }, [refreshSignal]);
 
-  const ready = folderSet && providerCount > 0;
+  const ready = folderSet && providerConnected;
 
   function handleWorkspace(open: () => void): void {
     if (ready) {
@@ -129,7 +117,7 @@ export function HomeScreen({
     if (!folderSet) {
       toast("Set a workspace folder first.", "warning");
       onSettings("general");
-    } else if (providerCount === 0) {
+    } else if (!providerConnected) {
       toast("Connect an AI provider first.", "warning");
       onSettings("providers");
     }
@@ -150,146 +138,79 @@ export function HomeScreen({
   return (
     <div className="home" data-tauri-drag-region style={sceneStyle}>
       {backgroundOn && <HomeScenery hour={hour} />}
-      {/* Above the banner: your rank and What's new. */}
-      <div className="home-version-row">
-        <RankBadge
-          snapshot={progress}
-          onClick={() => setShowScorecard(true)}
-          className="home-rank-badge"
-        />
-        <button
-          className="home-whatsnew"
-          type="button"
-          title="See the latest updates"
-          onClick={() => void openWhatsNewWindow("calm").catch(() => {})}
-        >
-          What&apos;s new
-        </button>
+      {/* Above the banner: the running version, and what's new in it. */}
+      <div className={`home-version-row${versionRead ? "" : " is-pending"}`}>
+        {version && (
+          <>
+            <span className="home-version">{`v${version}`}</span>
+            <span className="home-version-sep" aria-hidden="true">
+              {"\u00b7"}
+            </span>
+          </>
+        )}
+        <PixelTip text="What's new: the latest updates, and everything since.">
+          <button
+            className="home-whatsnew"
+            type="button"
+            onClick={() => void openWhatsNewWindow("calm").catch(() => {})}
+          >
+            What&apos;s new
+          </button>
+        </PixelTip>
       </div>
-      <AsciiLogo />
+      <HomeTitle />
       <div className="home-tagline">Cause the other coding agents piss me off</div>
       <div className="home-actions">
-        <button
-          type="button"
-          className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
-          aria-disabled={ready ? undefined : true}
-          onClick={() => handleWorkspace(onProjects)}
-        >
-          <CodeIcon size={18} weight="bold" aria-hidden="true" />
-          Code
-        </button>
-        {/* Goals is new, so its button says so underneath. */}
-        <div className="home-action-slot">
-          <button
-            type="button"
-            className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
-            aria-disabled={ready ? undefined : true}
-            aria-describedby={goalsNoteId}
+        {/* GG Royale's plate buttons, its word in Alagard, each with a pixel tip. */}
+        <PixelTip text="Code: open a project and build it with the agent.">
+          <PlateButton
+            className="home-action"
+            label="Code"
+            dimmed={!ready}
+            onClick={() => handleWorkspace(onProjects)}
+          />
+        </PixelTip>
+        <PixelTip text="Goals: hand over a bigger goal and let a team of agents work on it.">
+          <PlateButton
+            className="home-action"
+            label="Goals"
+            dimmed={!ready}
             onClick={() => handleWorkspace(onGoals)}
-          >
-            <TargetIcon size={18} weight="bold" aria-hidden="true" />
-            Goals
-          </button>
-          <span id={goalsNoteId} className="home-action-note">
-            In beta
-          </span>
-        </div>
-        <button
-          type="button"
-          className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
-          aria-disabled={ready ? undefined : true}
-          onClick={() => handleWorkspace(onChat)}
-        >
-          <ChatCircleTextIcon size={18} weight="bold" aria-hidden="true" />
-          Chat
-        </button>
-        <button
-          type="button"
-          className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
-          aria-disabled={ready ? undefined : true}
-          onClick={() => handleWorkspace(onMotion)}
-        >
-          <FilmSlateIcon size={18} weight="bold" aria-hidden="true" />
-          Motion
-        </button>
+          />
+        </PixelTip>
+        <PixelTip text="Chat: talk things through, no project needed.">
+          <PlateButton
+            className="home-action"
+            label="Chat"
+            dimmed={!ready}
+            onClick={() => handleWorkspace(onChat)}
+          />
+        </PixelTip>
+        <PixelTip text="Motion: make videos and animations.">
+          <PlateButton
+            className="home-action"
+            label="Motion"
+            dimmed={!ready}
+            onClick={() => handleWorkspace(onMotion)}
+          />
+        </PixelTip>
       </div>
-      <button
-        type="button"
-        className="icon-circle home-settings"
-        aria-label="Settings"
-        title="Settings"
-        onClick={() => onSettings()}
-      >
-        <GearSixIcon size={20} weight="bold" aria-hidden="true" />
-      </button>
-      {/* Along the bottom edge: every critter, out playing. The links sit just
-        above their lane. */}
+      {/* The owner's weekly feature poll, on the What's new board. */}
+      {/* Settings: a GG Royale pixel gear. */}
+      <PixelTip text="Settings: AI providers, your projects folder, and more.">
+        <PixelIconButton
+          className="home-settings"
+          icon="gear"
+          label="Settings"
+          onClick={() => onSettings()}
+        />
+      </PixelTip>
+      {/* Along the bottom edge: every critter, out playing. */}
       <HomeCritters biome={biome} />
-      {/* Bottom centre: your links. */}
-      <div className="home-byline home-links">
-        By Ken Kai
-        <span className="home-byline-sep" aria-hidden="true">
-          {"\u00b7"}
-        </span>
-        <a
-          className="home-link"
-          href="https://skool.com/kenkai"
-          onClick={(e) => {
-            e.preventDefault();
-            void openUrl("https://skool.com/kenkai");
-          }}
-        >
-          Skool
-        </a>
-        <span className="home-byline-sep" aria-hidden="true">
-          {"\u00b7"}
-        </span>
-        <a
-          className="home-link"
-          href="https://youtube.com/@kenkaidoesai"
-          onClick={(e) => {
-            e.preventDefault();
-            void openUrl("https://youtube.com/@kenkaidoesai");
-          }}
-        >
-          YouTube
-        </a>
-      </div>
-      {/* Top centre: the version, or the update button when one is ready. */}
+      {/* Top centre: the update button, only while an update is out. */}
       <div className="home-version-corner">
-        {appUpdate.phase === "available" || appUpdate.phase === "installing" ? (
-          <button
-            className={`home-update${appUpdate.phase === "installing" ? " home-update-progress" : ""}`}
-            disabled={appUpdate.phase === "installing"}
-            title={`Update to ${appUpdate.version} — installs and restarts the app`}
-            onClick={() => void appUpdate.install()}
-          >
-            {appUpdate.phase === "installing" && (
-              <span className="home-update-fill" style={{ width: `${appUpdate.progress ?? 0}%` }} />
-            )}
-            <DownloadSimpleIcon size={14} weight="bold" aria-hidden="true" />
-            {/* Both labels occupy the same grid cell; the inactive one is
-              visibility:hidden, so the pill is ALWAYS sized to the wider of
-              the two and never resizes when the install starts or the
-              percentage climbs. */}
-            <span className="home-update-swap">
-              <span className={appUpdate.phase === "installing" ? "home-update-hidden" : undefined}>
-                {`Update to ${appUpdate.version}`}
-              </span>
-              <span className={appUpdate.phase === "installing" ? undefined : "home-update-hidden"}>
-                {"Installing\u2026"}
-                <span className="home-update-pct">{`${appUpdate.progress ?? 0}%`}</span>
-              </span>
-            </span>
-          </button>
-        ) : (
-          version && <span className="home-version">{`v${version}`}</span>
-        )}
+        <HomeUpdateButton appUpdate={appUpdate} current={version} />
       </div>
-
-      {showScorecard && progress && (
-        <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
-      )}
     </div>
   );
 }

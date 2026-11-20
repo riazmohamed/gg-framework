@@ -4,6 +4,7 @@ import {
   MCPClientManager,
   type MCPScope,
   type MCPServerConfig,
+  hiddenToolMessage,
 } from "../core/mcp/index.js";
 
 // ── MCP server management (mirrors `ggcoder mcp`) ───────────────────────────
@@ -23,6 +24,8 @@ export interface McpWireRow {
   summary: string;
   /** True when the server needs an interactive OAuth login before it connects. */
   requiresAuth?: boolean;
+  /** gg-safe: one line per tool the guard hid from the model. */
+  warning?: string;
 }
 
 /** A short transport summary for display (URL for http/sse, command+args for stdio). */
@@ -68,6 +71,9 @@ export async function buildMcpRows(cwd: string, settingsFile: string): Promise<M
           kind: s.config.url ? "http" : "stdio",
           summary: mcpRowSummary(s.config),
           requiresAuth: result?.requiresAuth,
+          ...(result?.hidden?.length
+            ? { warning: result.hidden.map(hiddenToolMessage).join("\n") }
+            : {}),
         };
       }),
       ...blocked.map((s): McpWireRow => ({

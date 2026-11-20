@@ -166,6 +166,60 @@ export function applyServerFallbackReplay(
   return out.every(isServerFallbackBlock) ? [] : out;
 }
 
+/** Id of a server-tool call block (`server_tool_call` part or raw `server_tool_use`). */
+function serverToolUseId(part: ContentPart): string | undefined {
+  if (part.type === "server_tool_call") return part.id;
+  if (
+    part.type === "raw" &&
+    part.data.type === "server_tool_use" &&
+    typeof part.data.id === "string"
+  )
+    return part.data.id;
+  return undefined;
+}
+
+/**
+ * Ids of server-tool calls that must not be replayed: no result block for them
+ * exists anywhere in the history, and the turn they belong to is closed.
+ *
+ * When Claude calls a server tool (web_search) alongside a client tool, the API
+ * defers the server tool: the response holds a `server_tool_use` with no result,
+ * and the result arrives at the start of the NEXT response — but only if the
+ * follow-up user message holds nothing except `tool_result` blocks. Anything
+ * after the results (a re-grounding or steering note, a new prompt after an
+ * error) closes the turn, and the API 400s on the still-unresolved call:
+ * "`web_search` tool use with id … was found without a corresponding
+ * `web_search_tool_result` block". Every later request repeats it, so the
+ * session is stuck. So a resultless call is kept only while it can still
+ * resolve: in the last assistant message, followed by nothing but tool results
+ * (or nothing at all — a `pause_turn` resend).
+ */
+function unresolvedServerToolUseIds(messages: Message[]): Set<string> {
+  const resultIds = new Set<string>();
+  let lastAssistantIdx = -1;
+  messages.forEach((msg, idx) => {
+    if (msg.role !== "assistant") return;
+    lastAssistantIdx = idx;
+    if (typeof msg.content === "string") return;
+    for (const part of msg.content) {
+      if (part.type === "server_tool_result") resultIds.add(part.toolUseId);
+      else if (part.type === "raw" && typeof part.data.tool_use_id === "string")
+        resultIds.add(part.data.tool_use_id);
+    }
+  });
+  const turnStillOpen = messages.slice(lastAssistantIdx + 1).every((m) => m.role === "tool");
+  const dropped = new Set<string>();
+  messages.forEach((msg, idx) => {
+    if (msg.role !== "assistant" || typeof msg.content === "string") return;
+    if (idx === lastAssistantIdx && turnStillOpen) return;
+    for (const part of msg.content) {
+      const id = serverToolUseId(part);
+      if (id !== undefined && !resultIds.has(id)) dropped.add(id);
+    }
+  });
+  return dropped;
+}
+
 /** Map a single assistant content part to its Anthropic wire block (or null to drop). */
 function toAnthropicAssistantPart(
   part: ContentPart,
@@ -423,8 +477,8 @@ function isDefaultOrHost(baseUrl: string | undefined, host: string): boolean {
 
 /**
  * Pick the tool-name rule for the transport a request will actually use. Mirrors
- * the routing in `stream.ts`: `openai` with an `accountId` is the Codex
- * (Responses) endpoint, MiniMax rides the Anthropic transport but is a third
+ * the routing in `stream.ts`: `openai` itself (the ChatGPT plan or an API key)
+ * is the Responses API, MiniMax rides the Anthropic transport but is a third
  * party, and an `openai` pointed at a custom baseUrl is an unknown compatible
  * server.
  */
@@ -438,7 +492,7 @@ export function toolCallNameRuleFor(
     case "openai":
       if (options?.accountId) return TOOL_CALL_NAME_RULES["openai-responses"];
       return isDefaultOrHost(options?.baseUrl, "api.openai.com")
-        ? TOOL_CALL_NAME_RULES["openai-chat"]
+        ? TOOL_CALL_NAME_RULES["openai-responses"]
         : TOOL_CALL_NAME_RULES.generic;
     case "gemini":
       return TOOL_CALL_NAME_RULES.gemini;
@@ -710,6 +764,99 @@ function toolResultVideos(content: ToolResultContent): VideoContent[] {
   return content.filter((b): b is VideoContent => b.type === "video");
 }
 
+// ── Deferred tool loading ──────────────────────────────────
+
+/**
+ * How a request carries on-demand tools when the provider can load a tool
+ * through the transcript instead of the `tools` block (Anthropic
+ * `defer_loading` + `tool_reference`, OpenAI client `tool_search_output`).
+ * Changing `tools` rewrites the whole cached prefix (tools come first), so a
+ * promotion that grows it costs a full cache miss.
+ */
+export interface DeferredToolPlan {
+  /** Tools sent as ordinary definitions, in `tools` order. */
+  live: Tool[];
+  /** Catalog tools not sent live, in catalog order. */
+  deferred: Tool[];
+  /** Deferred tools a tool result loaded (`ToolResult.loadedTools`). */
+  loaded: ReadonlySet<string>;
+  /** Catalog definition by name. */
+  byName: ReadonlyMap<string, Tool>;
+}
+
+/**
+ * A catalog tool is loaded through the transcript once a tool result names it
+ * in `loadedTools`; until then (or when it went live some other way, e.g. a
+ * plan-mode switch between turns) it is handled as before. Pure function of
+ * the request, so every later request rebuilds the identical prefix.
+ */
+export function planDeferredTools(
+  tools: readonly Tool[] | undefined,
+  catalog: readonly Tool[] | undefined,
+  messages: readonly Message[],
+): DeferredToolPlan | undefined {
+  if (!catalog?.length) return undefined;
+  const byName = new Map<string, Tool>();
+  for (const tool of catalog) if (!byName.has(tool.name)) byName.set(tool.name, tool);
+  const loaded = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== "tool") continue;
+    for (const result of message.content) {
+      for (const name of result.loadedTools ?? []) if (byName.has(name)) loaded.add(name);
+    }
+  }
+  const live = (tools ?? []).filter((tool) => !(byName.has(tool.name) && loaded.has(tool.name)));
+  // Providers require at least one ordinary tool next to deferred ones.
+  if (live.length === 0) return undefined;
+  const liveNames = new Set(live.map((tool) => tool.name));
+  const deferred = [...byName.values()].filter((tool) => !liveNames.has(tool.name));
+  return { live, deferred, loaded, byName };
+}
+
+/**
+ * First-party Anthropic models with tool search (`defer_loading` and
+ * client `tool_reference` results): Sonnet/Opus 4.5+, Haiku 4.5 and every 5.x
+ * family. Opus 4.1 and earlier do not support it.
+ */
+export function supportsAnthropicDeferredTools(model: string): boolean {
+  return /opus-4[-.][5-9]|sonnet-4[-.][5-9]|haiku-4[-.]5|opus-5|sonnet-5|haiku-5|fable-5|mythos-5/.test(
+    model,
+  );
+}
+
+/** Responses models with client-executed `tool_search` (GPT-5.4 and later). */
+export function supportsResponsesToolSearch(model: string): boolean {
+  return /^gpt-(5\.[4-9]|[6-9])/.test(model);
+}
+
+/**
+ * Whether this request's transport loads `deferredTools` through the
+ * transcript: first-party Anthropic with a tool-search model, or the Codex
+ * backend (OpenAI OAuth) on GPT-5.4+. OpenAI Chat Completions, Gemini, xAI and
+ * the OpenAI-compatible providers have no deferred-loading API and keep
+ * appending promoted tools to `tools`.
+ */
+export function usesDeferredToolLoading(options: {
+  provider: string;
+  model: string;
+  baseUrl?: string;
+  accountId?: string;
+}): boolean {
+  if (options.provider === "anthropic") {
+    const firstParty = !options.baseUrl || options.baseUrl.includes("api.anthropic.com");
+    return firstParty && supportsAnthropicDeferredTools(options.model);
+  }
+  // OpenAI API keys only: the ChatGPT plan route (accountId) rejects
+  // `tool_search`, so promoted tools are appended to `tools` there instead.
+  if (options.provider === "openai" && !options.accountId) {
+    return (
+      isDefaultOrHost(options.baseUrl, "api.openai.com") &&
+      supportsResponsesToolSearch(options.model)
+    );
+  }
+  return false;
+}
+
 // ── Anthropic Transforms ───────────────────────────────────
 
 export function toAnthropicCacheControl(
@@ -788,6 +935,9 @@ export function toAnthropicMessages(
      * request carries the server-side-fallback beta; otherwise they are
      * stripped (after applying the replay rules). Default false. */
     fallbackBlocks?: boolean;
+    /** Deferred tools to load in place: a tool result that names one in
+     * `loadedTools` carries `tool_reference` blocks (see planDeferredTools). */
+    toolReferences?: ReadonlySet<string>;
   },
 ): {
   system: Anthropic.TextBlockParam[] | undefined;
@@ -801,6 +951,9 @@ export function toAnthropicMessages(
   const keepFallbackBlocks = options?.fallbackBlocks === true;
   // Client tool calls dropped by the fallback replay rules; their results go too.
   const droppedToolCallIds = new Set<string>();
+  const unresolvedServerToolIds = unresolvedServerToolUseIds(messages);
+  const toolReferences = options?.toolReferences;
+  const referencedTools = new Set<string>();
 
   // Thinking is preserved across the ACTIVE trajectory: every assistant turn
   // after the last real user message (tool results are role "tool", not "user").
@@ -885,11 +1038,18 @@ export function toAnthropicMessages(
       // filter below and would reach the wire as an empty string — Anthropic
       // 400s on it just like an empty text block. Drop it (baseline #20 D).
       if (typeof msg.content === "string" && msg.content === "") continue;
-      const content =
-        typeof msg.content === "string"
+      const replayable =
+        typeof msg.content === "string" || unresolvedServerToolIds.size === 0
           ? msg.content
+          : msg.content.filter((part) => {
+              const id = serverToolUseId(part);
+              return id === undefined || !unresolvedServerToolIds.has(id);
+            });
+      const content =
+        typeof replayable === "string"
+          ? replayable
           : toAnthropicAssistantContent(
-              applyServerFallbackReplay(msg.content, keepFallbackBlocks, droppedToolCallIds),
+              applyServerFallbackReplay(replayable, keepFallbackBlocks, droppedToolCallIds),
               msgIdx > trajectoryStartIdx,
               idMap,
             );
@@ -905,16 +1065,68 @@ export function toAnthropicMessages(
         ? msg.content.filter((r) => !droppedToolCallIds.has(r.toolCallId))
         : msg.content;
       if (results.length === 0) continue;
+      // A `tool_reference` cannot share a tool_result with other content (API
+      // 400), so a loading result carries only the references and its own
+      // output follows the tool_result blocks as ordinary user content.
+      const trailing: unknown[] = [];
+      const blocks = results.map((result) => {
+        const toolUseId = remapAnthropicToolCallId(result.toolCallId, idMap);
+        const refs = toolReferences
+          ? (result.loadedTools ?? []).filter(
+              (name) => toolReferences.has(name) && !referencedTools.has(name),
+            )
+          : [];
+        if (refs.length === 0) {
+          const content = toAnthropicToolResultContent(result.content);
+          if (
+            result.isError &&
+            typeof content !== "string" &&
+            content.some((part) => part.type !== "text")
+          ) {
+            // An is_error tool_result must be text-only (API 400), so its media
+            // follows the tool_result blocks as ordinary user content.
+            const text = content.filter((part) => part.type === "text" && part.text !== "");
+            trailing.push({ type: "text", text: `Attachments from tool call ${toolUseId}:` });
+            for (const part of content) if (part.type !== "text") trailing.push(part);
+            return {
+              type: "tool_result" as const,
+              tool_use_id: toolUseId,
+              content: text.length > 0 ? text : "Tool call failed; its attachments follow.",
+              is_error: true,
+            };
+          }
+          return {
+            type: "tool_result" as const,
+            tool_use_id: toolUseId,
+            content,
+            is_error: result.isError,
+          };
+        }
+        for (const name of refs) referencedTools.add(name);
+        const original = toAnthropicToolResultContent(result.content);
+        const parts = typeof original === "string" ? [{ type: "text", text: original }] : original;
+        const first = parts.findIndex((part) => part.type === "text" && part.text !== "");
+        parts.forEach((part, index) => {
+          if (part.type === "text" && part.text === "") return;
+          trailing.push(
+            index === first && part.type === "text"
+              ? { type: "text", text: `Result of tool call ${toolUseId}:\n${part.text}` }
+              : part,
+          );
+        });
+        return {
+          type: "tool_result" as const,
+          tool_use_id: toolUseId,
+          content: refs.map((name) => ({ type: "tool_reference" as const, tool_name: name })),
+          // tool_reference isn't text, so is_error would 400; the error text trails.
+          is_error: undefined,
+        };
+      });
       out.push({
         role: "user",
-        // Cast covers the video block (used by the Anthropic-compatible MiniMax
-        // API), which isn't in the first-party Anthropic tool_result types.
-        content: results.map((result) => ({
-          type: "tool_result" as const,
-          tool_use_id: remapAnthropicToolCallId(result.toolCallId, idMap),
-          content: toAnthropicToolResultContent(result.content),
-          is_error: result.isError,
-        })) as unknown as Anthropic.ContentBlockParam[],
+        // Cast covers the video and tool_reference blocks, which aren't in this
+        // SDK's first-party tool_result types.
+        content: [...blocks, ...trailing] as unknown as Anthropic.ContentBlockParam[],
       });
     }
   }
@@ -947,7 +1159,13 @@ export function toAnthropicMessages(
           markAnthropicCacheBreakpoint(out, tail, cacheControl);
         } else {
           if (anchor !== undefined) markAnthropicCacheBreakpoint(out, anchor, cacheControl);
-          markAnthropicCacheBreakpoint(out, tail, { type: "ephemeral" });
+          // A 1-h breakpoint never reads a 5-min entry, so switching the tail's
+          // TTL mid-run re-writes the whole loop (measured live: the read fell
+          // back to the turn anchor). Switch only for a blocking/wait tool,
+          // whose wait would likely expire a 5-min tail anyway; an ordinary
+          // tool loop keeps its 5-min tail however long it runs.
+          const blocking = calledBlockingTool(messages, trajectoryStartIdx);
+          markAnthropicCacheBreakpoint(out, tail, blocking ? cacheControl : { type: "ephemeral" });
         }
       } else {
         markAnthropicCacheBreakpoint(out, tail, cacheControl);
@@ -983,6 +1201,28 @@ export function toAnthropicMessages(
   return { system, messages: out };
 }
 
+/** Tools that block for an unbounded time (child agents, background output, the user). */
+export const BLOCKING_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "wait_agent",
+  "task_output",
+  "subagent",
+  "ask_user",
+]);
+/** True once the active run has called a blocking tool. */
+export function calledBlockingTool(
+  messages: readonly Message[],
+  trajectoryStartIdx: number,
+): boolean {
+  for (let i = Math.max(0, trajectoryStartIdx + 1); i < messages.length; i++) {
+    const m = messages[i];
+    if (m?.role !== "assistant" || typeof m.content === "string") continue;
+    for (const part of m.content) {
+      if (part.type === "tool_call" && BLOCKING_TOOL_NAMES.has(part.name)) return true;
+    }
+  }
+  return false;
+}
+
 /** Put `cache_control` on the last content block of `out[index]` (a user-role message). */
 function markAnthropicCacheBreakpoint(
   out: Anthropic.MessageParam[],
@@ -1009,6 +1249,29 @@ function markAnthropicCacheBreakpoint(
 }
 
 export function toAnthropicTools(
+  tools: Tool[],
+  options?: {
+    cacheControl?: { type: "ephemeral"; ttl?: "1h" };
+    enableFineGrainedToolStreaming?: boolean;
+    /** Catalog tools appended with `defer_loading: true` (never cache_control). */
+    deferred?: readonly Tool[];
+  },
+): Anthropic.Tool[] {
+  const deferred = (options?.deferred ?? []).map(
+    (tool) =>
+      ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: (tool.rawInputSchema ??
+          zodToJsonSchema(tool.parameters)) as Anthropic.Tool["input_schema"],
+        ...(options?.enableFineGrainedToolStreaming ? { eager_input_streaming: true } : {}),
+        defer_loading: true,
+      }) as Anthropic.Tool,
+  );
+  return [...toAnthropicLiveTools(tools, options), ...deferred];
+}
+
+function toAnthropicLiveTools(
   tools: Tool[],
   options?: {
     cacheControl?: { type: "ephemeral"; ttl?: "1h" };
@@ -1061,14 +1324,26 @@ export function toAnthropicThinking(
   maxTokens: number;
   outputConfig?: { effort: string };
 } {
+  if (model.startsWith("MiniMax-M3.1")) {
+    // MiniMax's own wire shape: adaptive thinking (it rejects `disabled`) with
+    // low/medium/high/xhigh/max effort. No `display` — that's Anthropic-only.
+    return {
+      thinking: { type: "adaptive" },
+      maxTokens,
+      outputConfig: { effort: level === "ultra" ? "max" : level },
+    };
+  }
   if (isAdaptiveThinkingModel(model)) {
     // Adaptive thinking — model decides when/how much to think.
     // budget_tokens is deprecated on Opus 5.x / 4.8 / 4.7 / 4.6 and Sonnet 5.
     // Anthropic's output_config.effort accepts low, medium, high, xhigh, and max.
-    // xhigh is supported by Opus 5.x / 4.8 / 4.7, Sonnet 5.5 and Haiku 5.5;
-    // all support max.
+    // xhigh is supported by Fable/Mythos 5.x, Opus 5.x / 4.8 / 4.7, Sonnet 5.5
+    // and Haiku 5.5; all support max (platform.claude.com effort docs).
     let effort: string = level;
-    if (effort === "xhigh" && !/opus-5|opus-4-8|opus-4-7|sonnet-5[-.]5|haiku-5[-.]5/.test(model)) {
+    if (
+      effort === "xhigh" &&
+      !/fable-5|mythos-5|opus-5|opus-4-8|opus-4-7|sonnet-5[-.]5|haiku-5[-.]5/.test(model)
+    ) {
       effort = "high";
     }
     return {
@@ -1474,7 +1749,7 @@ export function toGlmReasoningEffort(
 }
 
 /**
- * Codex Ultra is a local delegation preset. Astra/Sol declare xhigh as their
+ * Codex Ultra is a local delegation preset. Astra/Sol/Terra declare xhigh as their
  * multi_agent_reasoning_effort; older catalogs without that override use max.
  * Source: openai/codex 4c9f42f4, models-manager/models.json and
  * protocol/src/openai_models/reasoning_effort.rs.
@@ -1484,7 +1759,32 @@ export function toCodexReasoningEffort(
   model: string,
 ): Exclude<ThinkingLevel, "ultra"> {
   if (level !== "ultra") return level;
-  return model === "gpt-6-astra" || model === "gpt-6.1-sol" ? "xhigh" : "max";
+  return model === "gpt-6-astra" || model === "gpt-6.1-sol" || model === "gpt-6.1-terra"
+    ? "xhigh"
+    : "max";
+}
+
+const DECLARED_EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"] as const;
+type DeclaredEffort = (typeof DECLARED_EFFORT_ORDER)[number];
+
+/**
+ * The `reasoning_effort` to send. When the endpoint declared its own ladder
+ * (a synced gateway catalog), send the chosen rung as-is (so `max` stays
+ * `max`), or the nearest declared rung at or below it; otherwise clamp as usual.
+ */
+export function effortForRequest(
+  level: ThinkingLevel,
+  model: string,
+  declared?: readonly ThinkingLevel[],
+): DeclaredEffort {
+  const rungs = DECLARED_EFFORT_ORDER.filter((rung) => declared?.includes(rung));
+  if (rungs.length === 0) return toOpenAIReasoningEffort(level, model);
+  const wanted =
+    level === "ultra"
+      ? DECLARED_EFFORT_ORDER.length - 1
+      : DECLARED_EFFORT_ORDER.indexOf(level as DeclaredEffort);
+  const atOrBelow = rungs.filter((rung) => DECLARED_EFFORT_ORDER.indexOf(rung) <= wanted);
+  return atOrBelow[atOrBelow.length - 1] ?? rungs[0]!;
 }
 
 export function toOpenAIReasoningEffort(

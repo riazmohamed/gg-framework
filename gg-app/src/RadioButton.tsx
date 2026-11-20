@@ -1,86 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { PauseIcon, PlayIcon, RadioIcon, SpeakerHighIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
-import { getRadioState, setRadio, setRadioVolume, type RadioStation } from "./agent";
 import { Modal } from "./Modal";
 import { Dropdown } from "./Dropdown";
+import { useRadio } from "./useRadio";
 
 /** Titlebar control and modal player for the app-wide internet radio. */
 export function RadioButton(): React.ReactElement {
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [stations, setStations] = useState<RadioStation[]>([]);
-  const [selected, setSelected] = useState("");
-  const [current, setCurrent] = useState<string | null>(null);
-  const [volume, setVolume] = useState(70);
-  const [error, setError] = useState<string | null>(null);
-  const volumeRef = useRef(70);
-  const syncedVolumeRef = useRef(70);
-  const volumeSaveRef = useRef(0);
-
-  const applyState = useCallback((state: Awaited<ReturnType<typeof getRadioState>>): void => {
-    setStations(state.stations);
-    setCurrent(state.current);
-    setSelected((previous) => state.current ?? (previous || state.stations[0]?.id || ""));
-    volumeRef.current = state.volume;
-    syncedVolumeRef.current = state.volume;
-    setVolume(state.volume);
-  }, []);
+  const radio = useRadio();
+  const { stations, selected, current, volume, busy, error, refresh } = radio;
 
   useEffect(() => {
-    void getRadioState().then(applyState);
-  }, [applyState]);
-
-  useEffect(() => {
-    if (open) void getRadioState().then(applyState);
-  }, [applyState, open]);
-
-  function updateVolume(nextVolume: number): void {
-    volumeRef.current = nextVolume;
-    setVolume(nextVolume);
-  }
-
-  function saveVolume(): void {
-    const nextVolume = volumeRef.current;
-    const previousVolume = syncedVolumeRef.current;
-    if (nextVolume === previousVolume) return;
-    const saveId = ++volumeSaveRef.current;
-    syncedVolumeRef.current = nextVolume;
-    setError(null);
-    void setRadioVolume(nextVolume)
-      .then((saved) => {
-        if (volumeSaveRef.current !== saveId) return;
-        syncedVolumeRef.current = saved;
-        if (volumeRef.current === nextVolume) updateVolume(saved);
-      })
-      .catch((reason: unknown) => {
-        if (volumeSaveRef.current !== saveId) return;
-        syncedVolumeRef.current = previousVolume;
-        setError(reason instanceof Error ? reason.message : String(reason));
-      });
-  }
-
-  async function play(station: string): Promise<void> {
-    if (busy || !station) return;
-    setBusy(true);
-    setError(null);
-    try {
-      setCurrent(await setRadio(station));
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function togglePlayback(): Promise<void> {
-    await play(current === null ? selected : "off");
-  }
-
-  function changeStation(station: string): void {
-    setSelected(station);
-    if (current !== null) void play(station);
-  }
+    if (open) refresh();
+  }, [open, refresh]);
 
   const playing = current !== null;
   const selectedStation = stations.find((station) => station.id === selected);
@@ -110,7 +43,7 @@ export function RadioButton(): React.ReactElement {
             value={selected}
             disabled={busy || stations.length === 0}
             placeholder={stations.length === 0 ? "Loading stations\u2026" : "Choose a station"}
-            onChange={changeStation}
+            onChange={radio.changeStation}
           />
           <div className="modal-hint radio-station-description" style={{ color: theme.textDim }}>
             {selectedStation?.description ?? "Choose a station to start listening."}
@@ -120,7 +53,7 @@ export function RadioButton(): React.ReactElement {
             <button
               className="modal-btn primary radio-play-button"
               disabled={busy || !selected}
-              onClick={() => void togglePlayback()}
+              onClick={radio.togglePlayback}
             >
               {playing ? <PauseIcon size={17} /> : <PlayIcon size={17} />}
               {playing ? "Pause" : "Play"}
@@ -146,11 +79,11 @@ export function RadioButton(): React.ReactElement {
                 max="100"
                 value={volume}
                 aria-label="Radio volume"
-                onChange={(event) => updateVolume(Number(event.target.value))}
-                onPointerUp={saveVolume}
-                onPointerCancel={saveVolume}
-                onKeyUp={saveVolume}
-                onBlur={saveVolume}
+                onChange={(event) => radio.updateVolume(Number(event.target.value))}
+                onPointerUp={radio.saveVolume}
+                onPointerCancel={radio.saveVolume}
+                onKeyUp={radio.saveVolume}
+                onBlur={radio.saveVolume}
               />
             </div>
           </div>

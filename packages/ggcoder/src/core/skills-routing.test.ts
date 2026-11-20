@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { discoverSkills, formatSkillsForPrompt, type Skill } from "./skills.js";
-import { createSkillTool } from "../tools/skill.js";
+import { createSkillTool, DELEGATION_RULES, HOST_RULES } from "../tools/skill.js";
 import { resolveContextLimits } from "./context-limits.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 
@@ -34,6 +34,9 @@ describe("skill routing prompts", () => {
       "When the work is in a skill's scope below, load it before writing code",
     );
     expect(tool.description).toContain("Respect exclusions");
+    // Reviews write no code; without this Haiku 5.5 answered "is our data
+    // safe?" with no skill in 9/10 bench runs (skills-ab-haiku55).
+    expect(tool.description).toContain("before giving a review or a safety verdict");
   });
 
   it("fails loudly when asked for a skill that does not exist, pointing at a same-named tool", async () => {
@@ -72,7 +75,7 @@ describe("skill routing prompts", () => {
     expect(prompt).toContain("never reload one");
     // A "ready to launch?" ask matches several skills at once; without a fixed
     // order the model picks one and silently skips the rest.
-    expect(prompt).toContain("durable, bulletproof, compliance-guard, lean, evidence-led-ui");
+    expect(prompt).toContain("(durable, compliance-guard)");
     expect(prompt).toContain('a failed child is "not checked", never clean');
 
     const tool = createSkillTool([skill]);
@@ -84,20 +87,33 @@ describe("skill routing prompts", () => {
     expect(tool.description).toContain("never reload one");
   });
 
-  it("routes requested API behavior changes away from the pure-refactor workflow", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bundled-skill-contract-"));
+  it("keeps Checklist-only skills out of every list the model sees", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bundled-hidden-"));
     try {
       const skills = await discoverSkills({ globalSkillsDir: path.join(root, "global") });
-      const refactoring = skills.find((candidate) => candidate.name === "refactoring");
-      expect(refactoring?.description).toContain("behind an unchanged contract");
-      expect(refactoring?.description).toContain("Do NOT use for renames, bug fixes");
-      expect(refactoring?.content).toContain('not the word "refactor"');
-      expect(refactoring?.content).toContain("Do not manufacture a separate pure-rename stage");
-      expect(refactoring?.content).toContain(
-        "Existing authorization and safety controls still apply",
+      const visible = skills
+        .filter((s) => !s.hidden)
+        .map((s) => s.name)
+        .sort();
+      expect(visible).toEqual(["compliance-guard", "durable", "gg-guide"]);
+      expect(
+        skills
+          .filter((s) => s.hidden)
+          .map((s) => s.name)
+          .sort(),
+      ).toEqual(["bulletproof", "lean"]);
+      const catalog = formatSkillsForPrompt(skills);
+      const tool = createSkillTool(skills);
+      for (const hidden of ["bulletproof", "lean"]) {
+        expect(catalog).not.toContain(`**${hidden}**`);
+        expect(tool.description).not.toContain(`**${hidden}**`);
+      }
+      // The Checklist's Security audit still loads it by name.
+      const loaded = await tool.execute(
+        { skill: "bulletproof" },
+        { signal: new AbortController().signal, toolCallId: "checklist" },
       );
-      expect(refactoring?.content).toContain("The baseline is a gate");
-      expect(refactoring?.content).toContain("Red means revert");
+      expect(loaded).toContain('<skill_content name="bulletproof">');
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -122,6 +138,12 @@ describe("skill routing prompts", () => {
     }
   });
 
+  it("tells the model the skill name is required", () => {
+    const tool = createSkillTool([skill]);
+    expect(tool.parameters.shape.skill.description).toContain("Required");
+    expect(tool.parameters.safeParse({ args: "context only" }).success).toBe(false);
+  });
+
   it("keeps loaded skill instructions below project and file/module rules", async () => {
     const tool = createSkillTool([skill]);
     const result = await tool.execute(
@@ -136,6 +158,57 @@ describe("skill routing prompts", () => {
     // skill path or the delegated slice runs without the skill's rules.
     expect(result).toContain("it cannot see these instructions");
     expect(result).toContain("(/skills/evidence-led-ui)");
+  });
+
+  it("appends one shared delegation protocol instead of per-skill copies", async () => {
+    const tool = createSkillTool([skill]);
+    const result = await tool.execute(
+      { skill: skill.name },
+      { signal: new AbortController().signal, toolCallId: "delegation" },
+    );
+    // Goals mode lists builder/scout/researcher/checker, Code mode owl/bee/
+    // auditor/skeptic: helpers are matched by role to whatever spawn_agent lists.
+    expect(result).toContain(DELEGATION_RULES);
+    expect(DELEGATION_RULES).toContain("use agent types your spawn_agent tool actually lists");
+    expect(DELEGATION_RULES).toContain('"not checked", never clean');
+    // Skills assume a user at the keyboard; a running goal says not to ask.
+    expect(result).toContain(HOST_RULES);
+    expect(HOST_RULES).toContain("Host rules on branches, commits and installs override the skill");
+  });
+
+  it("shows the launch-readiness rule in the live skill tool, not only the fallback prompt", () => {
+    const named = (name: string): Skill => ({ ...skill, name, root: `/skills/${name}` });
+    const tool = createSkillTool([skill, named("durable"), named("compliance-guard")]);
+    expect(tool.description).toContain("(durable, compliance-guard)");
+    expect(tool.description).toContain("report-only child");
+  });
+
+  it("leaves out the launch-readiness rule when its skills aren't listed (Chat, Motion)", () => {
+    const tool = createSkillTool([skill]);
+    expect(tool.description).not.toContain("Launch-readiness");
+    expect(tool.description).toContain("Respect exclusions; never reload one.\n\n- ");
+  });
+
+  it("never names a mode-specific helper agent as a bare agent type in a bundled skill", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bundled-skills-"));
+    try {
+      const skills = await discoverSkills({ globalSkillsDir: path.join(root, "global") });
+      const bundled = skills.filter((candidate) => candidate.source === "bundled");
+      for (const candidate of bundled) {
+        // `owl`/`bee`/`auditor`/`skeptic`/`worker` exist only in Code mode; a
+        // skill that tells Goals mode to spawn one makes the spawn fail.
+        expect(candidate.content, candidate.name).not.toMatch(/`(owl|bee|auditor|skeptic|worker)`/);
+        // A skill that delegates defers the mechanics to the loader rather
+        // than carrying its own (drifting) copy.
+        if (/\bhelpers?\b/i.test(candidate.content)) {
+          expect(candidate.content, candidate.name).toContain(
+            "Helper types, brief contents and merge rules come with the skill loader",
+          );
+        }
+      }
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("keeps every bundled skill routable and its reference paths real", async () => {
@@ -170,22 +243,6 @@ describe("skill routing prompts", () => {
     }
   });
 
-  it("discovers evidence-led-ui for a fresh user from bundled assets", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bundled-skills-"));
-    try {
-      const skills = await discoverSkills({ globalSkillsDir: path.join(root, "global") });
-      const evidenceSkill = skills.find((candidate) => candidate.name === "evidence-led-ui");
-
-      expect(evidenceSkill?.source).toBe("bundled");
-      // `root` is a real filesystem path and uses the platform separator, so
-      // build the expected fragment the same way instead of hardcoding "/".
-      expect(evidenceSkill?.root).toContain(path.join("assets", "skills", "evidence-led-ui"));
-      expect(evidenceSkill?.content).toContain("# Evidence-Led UI");
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  });
-
   it("discovers compliance-guard for a fresh user from bundled assets", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "bundled-skills-"));
     try {
@@ -197,14 +254,17 @@ describe("skill routing prompts", () => {
       expect(complianceSkill?.content).toContain("# Compliance Guard");
       // The skill must never present itself as legal advice or certification.
       expect(complianceSkill?.content).toContain("Never certify");
+      // The description says what the skill is for (legal review), not a topic
+      // list: "privacy, AI features, user content" made a "where are the data
+      // leaks" trace in a client app load it (omarx, Oct 2026).
+      expect(complianceSkill?.description).toContain("legal side of shipping");
+      expect(complianceSkill?.description).not.toContain("AI features");
 
       // A beginner will half-answer or ignore the intake questions, so the
       // defaults ARE the analysis. Promising defaults without stating them
       // lets the model invent a quieter reading than the user deserves.
       expect(complianceSkill?.content).toContain("Default if unanswered");
       expect(complianceSkill?.content).toContain("the cautious reading");
-      // Findings a novice cannot act on produce no fixes.
-      expect(complianceSkill?.content).toContain("never read a statute");
       // Reading code shows intent; running it shows what ships. A review that
       // asserts from grep alone misses runtime-injected tags entirely, and a
       // fix reported without verification is worse than the original finding.
@@ -214,33 +274,44 @@ describe("skill routing prompts", () => {
       expect(complianceSkill?.content).toContain("DEDUCED");
       expect(complianceSkill?.content).toContain("Never relabel upward");
       expect(complianceSkill?.content).toContain("Never report a fix you did not verify");
+      // Licensed activity without authorisation must stay ILLEGAL, not BLOCKER;
+      // it sits with the severity ladder so even an inline gate sees it.
+      expect(complianceSkill?.content).toContain("Severity rule for licensed activities");
+
+      // The full-review workflow lives in one reference so a one-line inline
+      // gate does not load it; SKILL.md must route every full review there.
+      expect(complianceSkill?.content).toContain("`references/full-review.md`");
+      const fullReview = await fs.readFile(
+        path.join(complianceSkill?.root ?? "", "references", "full-review.md"),
+        "utf8",
+      );
+      // Findings a novice cannot act on produce no fixes.
+      expect(fullReview).toContain("never read a statute");
       // Narrative review silently drops the boring blockers; the sweep is what
       // turns "did I notice it" into "did I check it".
-      expect(complianceSkill?.content).toContain("coverage ledger");
+      expect(fullReview).toContain("coverage ledger");
       // An item never written down is an item never checked: evaluation showed
       // blockers 1 and 2 dropped while dramatic findings were reported.
-      expect(complianceSkill?.content).toContain("one row per numbered item");
+      expect(fullReview).toContain("one row per numbered item");
       // Audience and product claims live in prose, not in the schema.
-      expect(complianceSkill?.content).toContain("Read the prose, not only the code");
+      expect(fullReview).toContain("Read the prose, not only the code");
       // Held-out evaluation: the code sweep reliably missed obligations that
-      // arise from the product model or from two facts combined, and it
-      // downgraded unlicensed-activity gates to BLOCKER.
-      expect(complianceSkill?.content).toContain("second pass on the product model");
-      expect(complianceSkill?.content).toContain("Severity rule for licensed activities");
+      // arise from the product model or from two facts combined.
+      expect(fullReview).toContain("second pass on the product model");
       // Held-out evaluation: the review named the first instantiation of a duty
       // it thought of (DMCA, auto-renewal) and never reached the EU equivalent
       // (DSA, withdrawal rights) for an EU-established company.
-      expect(complianceSkill?.content).toContain("Name every jurisdiction's version");
+      expect(fullReview).toContain("Name every jurisdiction's version");
       // Mandatory coverage lived only in the ledger, so a findings-only output
       // format silently dropped it. Coverage must belong to the findings.
-      expect(complianceSkill?.content).toContain("coverage survives the output format");
+      expect(fullReview).toContain("coverage survives the output format");
       // A prohibition reported as a disclosure duty authorises the banned
       // feature; and leading with the wrong jurisdiction sends the user to the
       // wrong kind of lawyer. Both were observed in evaluation runs.
-      expect(complianceSkill?.content).toContain("Check for an outright ban");
-      expect(complianceSkill?.content).toContain("Lead with the jurisdiction");
+      expect(fullReview).toContain("Check for an outright ban");
+      expect(fullReview).toContain("Lead with the jurisdiction");
       // A point-in-time register rots; a failing test does not.
-      expect(complianceSkill?.content).toContain("leave the check behind");
+      expect(fullReview).toContain("leave the check behind");
 
       // Every referenced file must exist, since the skill routes the model to them by path.
       const referenced = [...complianceSkill!.content.matchAll(/`(references\/[\w.-]+\.md)`/g)].map(
@@ -312,62 +383,6 @@ describe("skill routing prompts", () => {
         await expect(
           fs.access(path.join(skillRoot, ...relative.split("/"))),
         ).resolves.toBeUndefined();
-      }
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("discovers the workflow skills for a fresh user from bundled assets", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bundled-skills-"));
-    try {
-      const skills = await discoverSkills({ globalSkillsDir: path.join(root, "global") });
-
-      // Each bundled workflow skill carries the one discipline marker that
-      // makes it work — a skill that loses its marker has become prose.
-      const expectations: Array<{ name: string; markers: string[] }> = [
-        // Interviews must not outsource homework to the user.
-        { name: "clarify", markers: ["Never ask for facts", "Ask only the frontier"] },
-        // Seams are agreed before tests exist; expected values never recompute
-        // the implementation's logic.
-        { name: "tdd", markers: ["No test at an unagreed seam", "outside source of truth"] },
-        // Theory is gated behind a red, deterministic, fast repro command;
-        // a "why" question must end at the answer, not a fix the user never
-        // asked for (skills outrank the prompt, so the guard lives here too).
-        {
-          name: "root-cause",
-          markers: [
-            "No red command, no Phase 2",
-            "One variable",
-            "change code only when the user asks for the fix",
-            // Suiteless projects: a mandated regression test would contradict
-            // the prompt's "no suite unless asked" rule.
-            "never introduce a suite unasked",
-          ],
-        },
-        // The glossary stays a glossary; ADRs are superseded, never edited.
-        // CONTEXT.md is not in CONTEXT_FILES, so the glossary only pays off
-        // across sessions via the pointer line the skill plants.
-        {
-          name: "shared-language",
-          markers: [
-            "glossary and nothing else",
-            "supersede, never edit",
-            "CONTEXT.md is not auto-loaded",
-          ],
-        },
-        // Spec and standards findings stay unlabeled-merge-proof; security
-        // defers to bulletproof instead of duplicating its lane.
-        { name: "code-review", markers: ["never merge the lists", "bulletproof"] },
-      ];
-
-      for (const { name, markers } of expectations) {
-        const skill = skills.find((candidate) => candidate.name === name);
-        expect(skill?.source, name).toBe("bundled");
-        expect(skill?.root, name).toContain(path.join("assets", "skills", name));
-        for (const marker of markers) {
-          expect(skill?.content, `${name}: ${marker}`).toContain(marker);
-        }
       }
     } finally {
       await fs.rm(root, { recursive: true, force: true });

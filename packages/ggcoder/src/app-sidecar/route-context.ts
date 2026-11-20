@@ -1,6 +1,6 @@
 import type { JiwaStore } from "../chat-agents/jiwa.js";
 import type { MemoryStore } from "../chat-agents/memory.js";
-import type { AgentSession } from "../core/agent-session.js";
+import type { AgentSession, McpServerChange } from "../core/agent-session.js";
 import type { AskUserBridge } from "../core/ask-user.js";
 import type { AuthMethod, AuthMethodMeta, AuthProviderMeta } from "../core/auth-providers.js";
 import type { WorkflowCommandSpec } from "../core/autopilot-gate.js";
@@ -15,6 +15,8 @@ import type { ServeController } from "../modes/serve-mode.js";
 import type { GitHubCI } from "../utils/github-ci.js";
 import type { ProjectHealth } from "../core/project-health-score.js";
 import type { ProgressManager } from "./progress-manager.js";
+import type { TrophyManager } from "./trophy-manager.js";
+import type { ShellRunner } from "./shell-runs.js";
 import type { HfPullState, SseClient, WorkspaceMode } from "./session-types.js";
 import type { Provider } from "@abukhaled/gg-ai";
 import type {
@@ -50,6 +52,9 @@ export interface SessionRouteContext {
     additionalRoots: string[];
   };
   readonly progress: ProgressManager;
+  /** Commands the user runs themselves (`!cmd`). */
+  readonly shell: ShellRunner;
+  readonly trophies: TrophyManager;
   readonly memoryStore: MemoryStore;
   readonly jiwaStore: JiwaStore;
   clientSeq: number;
@@ -67,6 +72,8 @@ export interface SessionRouteContext {
   readonly sessionId: string;
   /** Ids of every live window session whose cwd is `cwd`, this one included. */
   readonly sessionIdsAt: (cwd: string) => string[];
+  /** Apply a saved MCP server change to every open window; result per session id. */
+  readonly syncMcpServer: (name: string) => Promise<Map<string, McpServerChange | null>>;
   /** Whether any live window session in `cwd` is working right now (see goal list status). */
   readonly busyAt: (cwd: string) => boolean;
   /** Set when this session's cwd is a Goal folder; null for every other session. */
@@ -103,6 +110,9 @@ export interface SessionRouteContext {
   readonly auth: AuthStorage;
   localProbes: LocalEndpointProbe[];
   readonly localModelBlocker: (modelId: string) => Promise<string | undefined>;
+  readonly learnServedContext: (modelId: string, load: boolean) => Promise<void>;
+  /** Starts a goal in its briefing when the user's message says to. */
+  readonly startGoalFromMessage: (text: string) => Promise<void>;
   kenModelOverride: KenModelPref | null;
   readonly syncKenAutoModel: (provider: Provider, model: string) => Promise<void>;
   autopilotReviewing: boolean;
@@ -115,14 +125,17 @@ export interface SessionRouteContext {
   readonly activateApprovedPlan: (planPath: string | undefined) => Promise<number>;
   readonly planProgressPayload: () => { total: number; completed: number[] };
   readonly authStatusPayload: () => Promise<{
-    providers: (AuthProviderMeta & {
+    providers: (Omit<AuthProviderMeta, "methodDetails"> & {
       connected: boolean;
       connectedMethods: AuthMethod[];
       activeMethod?: AuthMethod | undefined;
       oauthExhaustedUntil?: number | undefined;
       priorityNote?: string | undefined;
       methodGuidance: AuthMethodMeta[];
+      claudeCodeInstalled?: boolean | undefined;
+      reauthMessage?: string | undefined;
     })[];
+    localConnected: boolean;
   }>;
   readonly broadcastAll: (type: string, data: unknown) => void;
   oauthInFlight: boolean;

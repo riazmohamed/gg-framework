@@ -238,7 +238,9 @@ export function createTerminalHistoryPrinter({
           const imageLeftPad = "   ";
           const canLink = supportsHyperlinks();
           for (const preview of previews) {
-            if (protocol !== "none") {
+            // kitty's graphics protocol takes PNG only; a GIF keeps its open link below.
+            const unsupported = protocol === "kitty" && preview.mediaType === "image/gif";
+            if (protocol !== "none" && !unsupported) {
               // Fixed-height block whose newline count equals its visual rows —
               // a raw escape (many rows, zero newlines) desyncs Ink's live-frame
               // erase math and strands orphaned rows around the image.
@@ -1129,8 +1131,9 @@ function getCompactDoneLabel(name: string, args: Record<string, unknown>, result
   switch (name) {
     case "grep": {
       const lines = result.split("\n").filter((lineText) => lineText.length > 0);
+      // Match rows in either layout (grouped `line:text` or flat `path:line:text`).
       const matchCount = lines.filter(
-        (lineText) => !/^\d+ match|^\[Truncated/.test(lineText),
+        (lineText) => /^\d+:/.test(lineText) || /^.+?:\d+:/.test(lineText),
       ).length;
       return `Searched for 1 pattern${matchCount > 0 ? ` (${matchCount} match${matchCount !== 1 ? "es" : ""})` : ""}`;
     }

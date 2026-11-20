@@ -1,9 +1,18 @@
 {
   "name": "@abukhaled/gg-core",
-  "version": "5.79.2",
+  "version": "5.103.0",
   "type": "module",
-  "description": "Provider-agnostic, UI-free shared foundation: model registry, auth, paths, telegram, voice",
-  "license": "MIT",
+  "description": "Model registry, sign-in and stored credentials, and local model discovery for apps built on gg-ai. No UI, no agent loop.",
+  "author": "Ken Kai",
+  "keywords": [
+    "llm",
+    "ai",
+    "model-registry",
+    "oauth",
+    "ollama",
+    "local-models"
+  ],
+  "license": "AGPL-3.0-only",
   "engines": {
     "node": ">=22"
   },
@@ -11,6 +20,10 @@
     "type": "git",
     "url": "git+https://github.com/abukhaled/gg-framework.git",
     "directory": "packages/gg-core"
+  },
+  "homepage": "https://github.com/KenKaiii/gg-framework/tree/main/packages/gg-core#readme",
+  "bugs": {
+    "url": "https://github.com/KenKaiii/gg-framework/issues"
   },
   "exports": {
     ".": {
@@ -33,7 +46,8 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsup",
@@ -44,11 +58,11 @@
     "@abukhaled/gg-ai": "workspace:*"
   },
   "optionalDependencies": {
-    "@huggingface/transformers": "4.2.0",
+    "@huggingface/transformers": "4.3.2",
     "ogg-opus-decoder": "^1.7.5"
   },
   "devDependencies": {
-    "@types/node": "^25.6.0",
+    "@types/node": "^26.6.6",
     "typescript": "^6.0.3",
     "vitest": "^4.1.4"
   },

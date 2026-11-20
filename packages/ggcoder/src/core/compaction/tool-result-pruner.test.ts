@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ContentPart, Message, ToolCall, ToolResult } from "@abukhaled/gg-ai";
-import { pruneStaleToolResults, shouldPruneToolResults } from "./tool-result-pruner.js";
+import {
+  PRUNE_MINIMUM_TOKENS,
+  pruneMinimumTokens,
+  pruneStaleToolResults,
+  shouldPruneToolResults,
+} from "./tool-result-pruner.js";
 
 function toolTurn(
   id: string,
@@ -397,5 +402,24 @@ describe("shouldPruneToolResults", () => {
     expect(shouldPruneToolResults(117_000, 850_000)).toBe(false);
     expect(shouldPruneToolResults(425_000, 850_000)).toBe(true);
     expect(shouldPruneToolResults(160_000, 170_000)).toBe(true);
+  });
+});
+
+describe("pruneMinimumTokens", () => {
+  it("requires a meaningful share of a warm context, the flat floor when cold", () => {
+    expect(pruneMinimumTokens(430_000, false, 850_000)).toBe(150_500);
+    expect(pruneMinimumTokens(50_000, false, 850_000)).toBe(PRUNE_MINIMUM_TOKENS);
+    expect(pruneMinimumTokens(430_000, true, 850_000)).toBe(PRUNE_MINIMUM_TOKENS);
+  });
+
+  it("does not rewrite a warm cache for the 41–56k prunes the old 20% share let through", () => {
+    // 56k freed at ~250k active passed the old floor (50k) and cost a full rewrite.
+    expect(pruneMinimumTokens(250_000, false, 850_000)).toBeGreaterThan(56_000);
+  });
+
+  it("drops to the flat floor near the compaction trigger, where a prune can prevent one", () => {
+    expect(pruneMinimumTokens(764_999, false, 850_000)).toBe(267_750);
+    expect(pruneMinimumTokens(765_000, false, 850_000)).toBe(PRUNE_MINIMUM_TOKENS);
+    expect(pruneMinimumTokens(800_000, false, 850_000)).toBe(PRUNE_MINIMUM_TOKENS);
   });
 });

@@ -55,7 +55,24 @@ jobs:
           case "$RUNNER_OS" in
             Linux) sudo apt-get install -y --no-install-recommends ripgrep ;;
             macOS) HOMEBREW_NO_AUTO_UPDATE=1 brew install ripgrep ;;
-            Windows) choco install ripgrep -y --no-progress ;;
+            Windows)
+              # The Chocolatey community feed intermittently 504s, and choco
+              # can exit 0 after installing nothing ("installed 0/0"), so
+              # retry until `rg` actually exists; fail if every attempt fails.
+              for attempt in 1 2 3 4; do
+                choco install ripgrep -y --no-progress || true
+                if command -v rg >/dev/null 2>&1; then
+                  break
+                fi
+                if [ "$attempt" -eq 4 ]; then
+                  echo "choco install ripgrep failed after $attempt attempts" >&2
+                  exit 1
+                fi
+                delay=$((attempt * 30))
+                echo "choco install ripgrep failed (attempt $attempt); retrying in ${delay}s" >&2
+                sleep "$delay"
+              done
+              ;;
           esac
           rg --version
 
@@ -76,15 +93,18 @@ jobs:
           pnpm --filter @abukhaled/ogcoder build
 
       # Bundle growth is informational; measured CLI startup remains blocking.
-      # Reference sizes live in bench/baseline/sizes.json.
+      # Reference sizes live in .github/ci/baseline/sizes.json.
       - name: Size report + startup gate
         shell: bash
         run: |
           # --only: a positional arg is ignored by the script, which then checks
           # every artifact — including the sidecar this job never builds (that
           # one is reported in the `app` job, which bundles it).
-          node bench/size-gate.mjs --only dist:ggcoder
-          node bench/startup-gate.mjs
+          node .github/ci/size-gate.mjs --only dist:ggcoder
+          # Fixed cost of every request: the cached system-prompt prefix.
+          node .github/ci/size-gate.mjs --only prompt:prefix
+          node .github/ci/startup-gate.mjs
+          node .github/ci/sidecar-startup-gate.mjs
 
       # Lint and formatting are OS-independent, so one leg is enough.
       - name: Lint + format check
@@ -93,6 +113,8 @@ jobs:
         run: |
           pnpm lint
           pnpm format:check
+          # The on-demand Claude Code download must match the pinned Agent SDK.
+          node .github/ci/claude-code-manifest.mjs --check
 
       - name: Typecheck
         shell: bash
@@ -160,8 +182,8 @@ jobs:
   app:
     name: app · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # 30 not 15: the Windows leg compiles the Tauri tree and builds/launches
-    # an MSI (~12 min warm; the Rust compile is much slower cold-cache).
+    # 30 not 15: the Windows and Linux legs compile the Tauri tree and
+    # build/launch an MSI or .deb (~12 min warm; much slower cold-cache).
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -219,18 +241,19 @@ jobs:
         run: node gg-app/scripts/smoke-sidecar.mjs
         shell: bash
 
-      # OS-independent slice of the sidecar bundle (app-sidecar.mjs + skills;
-      # node_modules carries platform-conditional binaries so one baseline
-      # cannot hold across the matrix).
+      # app-sidecar.mjs + skills share one baseline; the copied node_modules
+      # carries native binaries, so size-gate baselines it per OS/arch.
       - name: Sidecar size report
-        run: node bench/size-gate.mjs --only sidecar
+        run: |
+          node .github/ci/size-gate.mjs --only sidecar
+          node .github/ci/size-gate.mjs --only sidecar:deps
         shell: bash
 
       - name: Frontend build + initial JavaScript size report
         shell: bash
         run: |
           pnpm --filter gg-app build
-          node bench/size-gate.mjs --only frontend:initial
+          node .github/ci/size-gate.mjs --only frontend:initial
 
       - name: Frontend platform-class test
         run: pnpm --filter gg-app test
@@ -261,9 +284,20 @@ jobs:
       # throwaway user profile, and requires a visible window plus a packaged
       # ggnode child running the packaged bundle.
       #
-      # Only the Windows matrix leg pays the release-build cost; the macOS and
-      # Linux legs run in parallel and stay fast.
+      # The macOS leg skips the release build; it runs in parallel and stays fast.
       - name: Packaged app smoke (MSI build + launch)
         if: runner.os == 'Windows'
         working-directory: gg-app
         run: pnpm smoke:packaged
+
+      # Linux twin of the step above: builds a .deb, unpacks it with
+      # `dpkg-deb -x` (installs nothing), launches it on a virtual X display
+      # with a throwaway profile, and requires a visible window plus the
+      # packaged ggnode child running the packaged bundle.
+      - name: Packaged app smoke (deb build + launch, Linux)
+        if: runner.os == 'Linux'
+        working-directory: gg-app
+        shell: bash
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb xdotool dbus
+          xvfb-run -a dbus-run-session -- pnpm smoke:packaged:linux

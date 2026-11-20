@@ -25,6 +25,28 @@ export const SIGNATURE_LABELS = {
 } as const satisfies Readonly<Record<string, string>>;
 
 type SignatureSpecies = keyof typeof SIGNATURE_LABELS;
+
+/** What a critter's tag says while it does its signature move (critter-tag.ts). */
+const SIGNATURE_DOING: Readonly<Record<SignatureSpecies, string>> = {
+  bee: "Doing a loop-de-loop",
+  fox: "Pouncing on nothing",
+  cat: "Being a cat",
+  owl: "Head swivel",
+  frog: "Catching a fly",
+  robot: "Beep boop scan",
+  wizard: "Casting a spell",
+  knight: "Sword practice",
+  builder: "Checking the floor",
+  crab: "Crab dance",
+  axolotl: "Blowing bubbles",
+  dino: "Tiny roar",
+  slime: "Jiggling",
+};
+
+/** The tag's words for a signature move; species without one just show off. */
+export function signatureDoing(id: string): string {
+  return isSignatureSpecies(id) ? SIGNATURE_DOING[id] : "Showing off";
+}
 type Move = (c: Critter, ok: Ok) => Promise<void>;
 
 interface Fidget extends Variant {
@@ -157,7 +179,7 @@ export function makeCritterIdle(api: CritterApi): CritterIdle {
       if (ok()) fx.say(c, pick(["hoo?", "hoo hoo", "who?"]), 900, true);
     },
     async frog(c, ok) {
-      const fly = prop(c, "fly", { at: { x: 21, y: 6 }, flicker: 80, mirror: false });
+      const fly = prop(c, "fly", { at: { x: 25, y: 8 }, flicker: 80, mirror: false });
       const buzz = fly.node.animate(
         [
           { transform: "none" },
@@ -253,7 +275,7 @@ export function makeCritterIdle(api: CritterApi): CritterIdle {
       if (chance(0.5)) fx.say(c, pick(["hah!", "en garde", "for the repo!"]), 900);
     },
     async builder(c, ok) {
-      const hammer = prop(c, "hammer", { at: { x: 11, y: 2 } });
+      const hammer = prop(c, "hammer", { at: { x: 14, y: 3 } });
       for (let i = 0; i < 3 && ok(); i++) {
         await play(
           hammer.node,
@@ -399,7 +421,7 @@ export function makeCritterIdle(api: CritterApi): CritterIdle {
       w: 1,
       run: async (c, ok) => {
         // Raised near the face so the mug (handle + coffee) reads at real size.
-        const mug = prop(c, "mug", { at: { x: 11, y: 6 } });
+        const mug = prop(c, "mug", { at: { x: 14, y: 8 } });
         for (let i = 0; i < 2 && ok(); i++) {
           fx.steam(c, fx.frontX(c, 15), 24, 2);
           await wait(rand(500, 800));

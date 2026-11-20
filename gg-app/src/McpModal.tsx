@@ -5,6 +5,7 @@ import { Modal } from "./Modal";
 import { ModalDismissButton, useModalEmbedState } from "./modal-embed";
 import { ListSkeleton } from "./Skeleton";
 import { SettingsCard, SettingsSection } from "./settings-section";
+import { useSettingsPageReady } from "./settings-ready";
 import { SettingsHeaderAction } from "./settings-header";
 import {
   openUrl,
@@ -31,13 +32,56 @@ interface Props {
  *
  * Scope: Global writes to ~/.gg/mcp.json (all sessions). Project writes to a
  * chosen project's `.gg/mcp.json` — a project picker appears when Project is
- * selected, since the modal has no inherent project context. Like the CLI, a
- * newly-added server needs an app restart to load (MCP connects once at startup).
+ * selected, since the modal has no inherent project context. Open windows load
+ * an added/removed server right away (the sidecar syncs every session).
  */
+/** Most hidden-tool lines shown under a row; the rest are counted. */
+const MAX_NOTE_LINES = 3;
+
+/**
+ * Why a server isn't fully usable, under its row: the connect error (e.g.
+ * blocked as malware), and each tool the safety guard hid. Never a prompt.
+ */
+function McpRowNotes({ server }: { server: McpServerRow }): React.ReactElement | null {
+  const lines: { text: string; tone: string }[] = [];
+  if (!server.ok && !server.requiresAuth && server.error) {
+    const error = server.error.split("\n")[0] ?? "";
+    lines.push({
+      text: error,
+      tone: /^blocked/i.test(error) ? theme.warning : theme.textMuted,
+    });
+  }
+  const hidden = (server.warning ?? "")
+    .split("\n")
+    .filter(Boolean)
+    // The row already names the server.
+    .map((line) => line.replace(` from server "${server.name}"`, ""));
+  for (const line of hidden.slice(0, MAX_NOTE_LINES))
+    lines.push({ text: line, tone: theme.warning });
+  if (hidden.length > MAX_NOTE_LINES) {
+    lines.push({
+      text: `and ${hidden.length - MAX_NOTE_LINES} more hidden`,
+      tone: theme.textMuted,
+    });
+  }
+  if (lines.length === 0) return null;
+  return (
+    <ul className="mcp-notes">
+      {lines.map((line, i) => (
+        <li key={i} style={{ color: line.tone }}>
+          {line.text}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function McpModal({ onClose }: Props): React.ReactElement {
   const embedded = useModalEmbedState() === "embed";
   const [servers, setServers] = useState<McpServerRow[]>([]);
   const [loading, setLoading] = useState(true);
+  // In Settings, show the list rather than a frame of skeleton when it's quick.
+  useSettingsPageReady(!loading);
   // The last list request failed; shown instead of "No MCP's configured".
   const [loadError, setLoadError] = useState(false);
   const [line, setLine] = useState("");
@@ -212,54 +256,57 @@ export function McpModal({ onClose }: Props): React.ReactElement {
       ) : (
         <div className="mcp-list">
           {visible.map((s) => (
-            <div className="mcp-item" key={`${s.scope}:${s.name}`}>
-              <span
-                className="mcp-dot"
-                style={{
-                  color: s.ok ? theme.success : s.requiresAuth ? theme.warning : theme.error,
-                }}
-              >
+            <div className="mcp-entry" key={`${s.scope}:${s.name}`}>
+              <div className="mcp-item">
+                <span
+                  className="mcp-dot"
+                  style={{
+                    color: s.ok ? theme.success : s.requiresAuth ? theme.warning : theme.error,
+                  }}
+                >
+                  {s.ok ? (
+                    <CheckCircleIcon size={15} />
+                  ) : s.requiresAuth ? (
+                    <LockIcon size={14} />
+                  ) : (
+                    <XCircleIcon size={15} />
+                  )}
+                </span>
+                <span className="mcp-name" style={{ color: theme.text }} title={s.summary}>
+                  {s.name}
+                </span>
                 {s.ok ? (
-                  <CheckCircleIcon size={15} />
+                  <span className="mcp-meta" style={{ color: theme.textDim }}>
+                    {`${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`}
+                  </span>
                 ) : s.requiresAuth ? (
-                  <LockIcon size={14} />
-                ) : (
-                  <XCircleIcon size={15} />
+                  <span className="mcp-meta" style={{ color: theme.warning }}>
+                    Requires login
+                  </span>
+                ) : null}
+                {s.requiresAuth && !s.ok && (
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    disabled={loggingIn === s.name}
+                    title={`Sign in to "${s.name}"`}
+                    onClick={() => void signIn(s.name, s.scope)}
+                  >
+                    {loggingIn === s.name ? "Signing in\u2026" : "Sign in"}
+                  </button>
                 )}
-              </span>
-              <span className="mcp-name" style={{ color: theme.text }} title={s.summary}>
-                {s.name}
-              </span>
-              {s.ok ? (
-                <span className="mcp-meta" style={{ color: theme.textDim }}>
-                  {`${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`}
-                </span>
-              ) : s.requiresAuth ? (
-                <span className="mcp-meta" style={{ color: theme.warning }}>
-                  Requires login
-                </span>
-              ) : null}
-              {s.requiresAuth && !s.ok && (
                 <button
                   type="button"
-                  className="btn btn-primary btn-sm"
-                  disabled={loggingIn === s.name}
-                  title={`Sign in to "${s.name}"`}
-                  onClick={() => void signIn(s.name, s.scope)}
+                  className="mcp-delete"
+                  style={{ color: theme.textDim }}
+                  aria-label={`Delete ${s.name}`}
+                  title={`Remove "${s.name}"`}
+                  onClick={() => void remove(s.name, s.scope)}
                 >
-                  {loggingIn === s.name ? "Signing in\u2026" : "Sign in"}
+                  <XIcon size={12} weight="bold" aria-hidden="true" />
                 </button>
-              )}
-              <button
-                type="button"
-                className="mcp-delete"
-                style={{ color: theme.textDim }}
-                aria-label={`Delete ${s.name}`}
-                title={`Remove "${s.name}"`}
-                onClick={() => void remove(s.name, s.scope)}
-              >
-                <XIcon size={12} weight="bold" aria-hidden="true" />
-              </button>
+              </div>
+              <McpRowNotes server={s} />
             </div>
           ))}
         </div>
@@ -286,7 +333,7 @@ export function McpModal({ onClose }: Props): React.ReactElement {
           <SettingsSection
             title="Add a server"
             dialogTitle="Add an MCP"
-            description="Paste a claude mcp add command. Loads after a restart."
+            description="Paste a claude mcp add command. Open windows load it right away."
           >
             <input
               className="modal-input"
@@ -347,7 +394,7 @@ export function McpModal({ onClose }: Props): React.ReactElement {
               className="modal-hint"
               style={{ color: theme.textDim, marginTop: "var(--space-6)" }}
             >
-              New servers load on next app restart.
+              Open windows load new servers right away.
             </div>
           )}
 

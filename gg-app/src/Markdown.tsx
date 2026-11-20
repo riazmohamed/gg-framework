@@ -8,16 +8,18 @@ import {
   useState,
   createContext,
 } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { CheckIcon, CopyIcon, ArrowElbowDownLeftIcon } from "@phosphor-icons/react";
-import { openProjectPath, openUrl, sendPrompt } from "./agent";
+import { openProjectPath, openUrl, readChatImage, sendPrompt } from "./agent";
 import { toast } from "./toast";
+import { ImageCard } from "./ImageCard";
 import { codeLanguage, codeNodeText } from "./markdown-prompt";
 import { collapsedCode, shouldCollapseCode, visibleBlockCount } from "./collapse";
 import { marked } from "marked";
 import { rehypeAnimateWords } from "./rehype-animate-words";
+import { rehypeArrows } from "./rehype-arrows";
 import { useAnimatedHeight } from "./animated-height";
 import "highlight.js/styles/github-dark.css";
 
@@ -75,6 +77,86 @@ function ExternalLink({
   );
 }
 
+function fileName(path: string): string {
+  return (
+    path
+      .replace(/[?#].*$/, "")
+      .split(/[\\/]/)
+      .filter(Boolean)
+      .pop() ?? path
+  );
+}
+
+type LocalImage = { path: string; url: string | null };
+
+/**
+ * An image in a reply. The webview can't load disk paths (or, by CSP, web
+ * images), so local files are read through the app and anything that still
+ * can't be shown becomes a link to it instead of a broken "?" icon.
+ * Spans throughout: markdown images sit inside a <p>.
+ */
+function MarkdownImage({ src, alt }: { src?: string; alt?: string }): React.ReactElement | null {
+  const inline = src !== undefined && /^(data|blob):/i.test(src);
+  const local = src && !inline && !isExternalHref(src) ? src : undefined;
+  const [loaded, setLoaded] = useState<LocalImage | null>(null);
+  const [broken, setBroken] = useState<string | null>(null);
+  useEffect(() => {
+    if (!local) return;
+    let live = true;
+    void readChatImage(local).then((url) => {
+      if (live) setLoaded({ path: local, url });
+    });
+    return () => {
+      live = false;
+    };
+  }, [local]);
+
+  // Still streaming in, or a URL react-markdown's filter removed.
+  if (!src) return alt ? <span className="md-img-alt">{alt}</span> : null;
+  // Web images stay blocked (CSP: no tracking pixels from model output).
+  const url = inline ? src : !local ? null : loaded?.path === local ? loaded.url : undefined;
+  if (url === undefined) {
+    return (
+      <span className="md-img-loading" role="status">
+        Loading image {fileName(src)}…
+      </span>
+    );
+  }
+  if (url === null || broken === url) {
+    return (
+      <span className="md-img-missing">
+        Couldn't show image: <ExternalLink href={src}>{alt || fileName(src)}</ExternalLink>
+      </span>
+    );
+  }
+  return (
+    <ImageCard
+      inline
+      className="md-img"
+      src={url}
+      alt={alt ?? ""}
+      path={local}
+      caption={local ? alt || fileName(local) : undefined}
+      title={local}
+      onOpen={local ? () => void openProjectPath(local) : undefined}
+      onError={() => setBroken(url)}
+    />
+  );
+}
+
+// Keep `file://` and raster `data:` image sources (react-markdown strips them) so MarkdownImage can
+// read the file; everything else gets the default safety filter.
+function urlTransform(url: string, key: string, node: { tagName?: string }): string {
+  if (
+    key === "src" &&
+    node.tagName === "img" &&
+    /^(file:\/\/|data:image\/(png|jpeg|gif|webp|bmp);)/i.test(url)
+  ) {
+    return url;
+  }
+  return defaultUrlTransform(url);
+}
+
 /**
  * A markdown table inside its own sideways-scrolling frame. Cells wrap only
  * between words (see `.md-table-scroll` in App.css), so when the columns'
@@ -83,6 +165,26 @@ function ExternalLink({
  * `display: table` (a block-display table loses its table semantics for
  * VoiceOver), and the frame is focusable so a keyboard can scroll it.
  */
+/**
+ * A numbered list. Replies show top-level steps as rows numbered by a CSS
+ * counter; a list GG continues after a code block arrives as `start="4"`, so
+ * the counter starts where the list does instead of restarting at 1.
+ */
+function StepList({
+  start,
+  children,
+}: {
+  start?: number;
+  children?: React.ReactNode;
+}): React.ReactElement {
+  const first = typeof start === "number" && Number.isFinite(start) ? start : 1;
+  return (
+    <ol start={first === 1 ? undefined : first} style={{ counterReset: `step ${first - 1}` }}>
+      {children}
+    </ol>
+  );
+}
+
 function ScrollTable({ children }: { children?: React.ReactNode }): React.ReactElement {
   return (
     <div className="md-table-scroll" tabIndex={0} role="region" aria-label="Table">
@@ -358,15 +460,22 @@ function isPromptBlockComplete(raw: string): boolean {
   return /`{3,}\s*$/.test(body);
 }
 
-const ANIMATED_PLUGINS = [rehypeHighlight, rehypeAnimateWords];
+const ANIMATED_PLUGINS = [rehypeHighlight, rehypeArrows, rehypeAnimateWords];
 /**
  * How long a block keeps its word spans after a newer block starts below it.
  * Covers the reveal catching up plus the word fade (`--dur-row`, 220ms), so the
  * last words of a finished paragraph finish fading instead of snapping solid.
  */
 const WORD_FADE_HOLD_MS = 450;
-const PLUGINS = [rehypeHighlight];
-const COMPONENTS = { a: ExternalLink, pre: PreBlock, table: ScrollTable, td: TableCell };
+const PLUGINS = [rehypeHighlight, rehypeArrows];
+const COMPONENTS = {
+  a: ExternalLink,
+  img: MarkdownImage,
+  ol: StepList,
+  pre: PreBlock,
+  table: ScrollTable,
+  td: TableCell,
+};
 
 const MemoizedMarkdownBlock = memo(
   function MarkdownBlock({
@@ -385,6 +494,7 @@ const MemoizedMarkdownBlock = memo(
           remarkPlugins={[remarkGfm]}
           rehypePlugins={animate ? ANIMATED_PLUGINS : PLUGINS}
           components={COMPONENTS}
+          urlTransform={urlTransform}
         >
           {normalized}
         </ReactMarkdown>

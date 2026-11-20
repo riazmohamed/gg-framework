@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import { theme } from "./theme";
 import { INITIAL_ACTIVITY, type TaskActivity, type TaskPhase } from "./task-activity";
 import { describe, expect, it, vi } from "vitest";
-import { ActivityBar, ggMoodFor } from "./ActivityBar";
+import { ActivityBar } from "./ActivityBar";
 
 const baseProps = {
   running: true,
@@ -12,7 +12,6 @@ const baseProps = {
   isThinking: false,
   thinkingStartTs: null,
   thinkingAccumMs: 0,
-  onCancel: vi.fn(),
 };
 
 describe("ActivityBar plan progress", () => {
@@ -98,9 +97,6 @@ describe("ActivityBar task outcomes", () => {
       theme.error,
     );
     expect(container.querySelector("canvas")).toBeTruthy();
-    expect(
-      (screen.getByRole("button", { name: "Cancel agent run" }) as HTMLButtonElement).disabled,
-    ).toBe(false);
   });
 
   it.each([
@@ -199,7 +195,7 @@ describe("ActivityBar task outcomes", () => {
     expect(screen.queryByText("Run the missing tests before using the changes.")).toBeNull();
     expect(container.querySelector(".activity-details")).toBeNull();
   });
-  it("stops animation while waiting for a decision but keeps cancellation available", () => {
+  it("stops animation while waiting for a decision", () => {
     const { container } = render(
       <ActivityBar
         {...baseProps}
@@ -212,29 +208,37 @@ describe("ActivityBar task outcomes", () => {
       />,
     );
     expect(container.querySelector("canvas")).toBeNull();
-    expect(screen.getByRole("button", { name: "Cancel agent run" })).toBeTruthy();
     expect(screen.getByRole("status").textContent).toContain("Your call from here");
   });
 });
 
 describe("ActivityBar cancellation state", () => {
-  it("shows an enabled cancel action during a normal run", () => {
-    render(<ActivityBar {...baseProps} />);
-    expect(
-      (screen.getByRole("button", { name: "Cancel agent run" }) as HTMLButtonElement).disabled,
-    ).toBe(false);
+  it("has no Stop of its own: the composer's send key stops runs and reviews", () => {
+    const { rerender } = render(<ActivityBar {...baseProps} />);
+    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
     const orb = screen.getByRole("status").querySelector("canvas");
     expect(orb?.getAttribute("aria-hidden")).toBe("true");
     expect(orb?.getAttribute("aria-label")).toBe("Listening…");
     expect(orb?.style.width).toBe("20px");
+    rerender(
+      <ActivityBar
+        {...baseProps}
+        running={false}
+        activity={{
+          ...INITIAL_ACTIVITY,
+          phase: "reviewing",
+          label: "Ken is reviewing",
+          startedAt: 1,
+        }}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
   });
 
-  it("announces and disables cancellation while awaiting settlement", () => {
+  it("says the task is stopping while cancellation settles", () => {
     render(<ActivityBar {...baseProps} cancelling />);
-    const button = screen.getByRole("button", { name: "Cancellation in progress" });
-    expect((button as HTMLButtonElement).disabled).toBe(true);
-    expect(button.textContent).toContain("Stopping…");
     expect(screen.getByRole("status")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
   });
 });
 
@@ -253,43 +257,18 @@ describe("ActivityBar robot face", () => {
   });
 
   it.each([
-    ["done", settled("done", "Done · checks passed"), "happy"],
-    ["stopped", settled("stopped", "Stopped · unfinished"), "sad"],
-    ["review capped", settled("stopped", "Paused · review limit reached"), "sad"],
-    ["needs you", settled("attention", "Your decision needed"), "curious"],
-    ["not verified", settled("unverified", "Verification incomplete"), "worried"],
-    ["cut short", settled("unverified", "Response incomplete"), "worried"],
-    ["checks failed", settled("failed", "Checks failed"), "shocked"],
-    ["task failed", settled("failed", "Task failed"), "shocked"],
-  ] as const)("%s shows the %s robot instead of a dot", (_name, activity, mood) => {
+    ["done", settled("done", "Done · checks passed"), theme.success],
+    ["stopped", settled("stopped", "Stopped · unfinished"), theme.warning],
+    ["needs you", settled("attention", "Your decision needed"), theme.warning],
+    ["checks failed", settled("failed", "Checks failed"), theme.error],
+  ] as const)("%s says so in its colour, with no lead marker", (_name, activity, colour) => {
     const { container } = render(
       <ActivityBar {...baseProps} running={false} activity={activity} />,
     );
-    const face = container.querySelector(".gg-face");
-    expect(face?.classList.contains(`gg-face-${mood}`)).toBe(true);
-    expect(face?.getAttribute("aria-hidden")).toBe("true");
-    expect(container.querySelector(".statusrow-icon")).toBeNull();
-  });
-
-  it("is the ready robot when idle and gives way to the orb while working", () => {
-    const { container, rerender } = render(<ActivityBar {...baseProps} running={false} />);
-    expect(container.querySelector(".gg-face-ready")).not.toBeNull();
-    rerender(<ActivityBar {...baseProps} />);
-    expect(container.querySelector(".gg-face")).toBeNull();
-  });
-});
-
-describe("ggMoodFor", () => {
-  it.each([
-    [theme.success, "done", "happy"],
-    [theme.error, "failed", "shocked"],
-    [theme.warning, "stopped", "sad"],
-    [theme.warning, "attention", "curious"],
-    [theme.warning, "unverified", "worried"],
-    [theme.warning, "working", "worried"],
-    [theme.textMuted, "idle", "ready"],
-  ] as const)("tone %s, phase %s → %s", (tone, phase, mood) => {
-    expect(ggMoodFor({ ...INITIAL_ACTIVITY, phase }, tone)).toBe(mood);
+    const left = container.querySelector(".statusrow-left");
+    expect(left?.firstElementChild?.classList.contains("activity-label-reveal")).toBe(true);
+    const words = left?.querySelector<HTMLElement>(".activity-label-reveal > span");
+    expect(words?.style.color).toBe(colour);
   });
 });
 

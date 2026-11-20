@@ -52,6 +52,8 @@ mod commands;
 mod daemon;
 mod daemon_job;
 mod events;
+#[cfg(target_os = "macos")]
+mod macos_event_guard;
 mod paths;
 mod process;
 mod settings;
@@ -88,9 +90,23 @@ fn install_rustls_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// Record panics in gg-app.log: a GUI app's stderr goes nowhere, and a panic
+/// on the AppKit main thread aborts with a crash report that omits the message.
+fn install_panic_log_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        log::error!("[panic] {info}\n{backtrace}");
+        default_hook(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_rustls_provider();
+    install_panic_log_hook();
+    #[cfg(target_os = "macos")]
+    macos_event_guard::install();
 
     // Per-launch daemon auth token (see `Daemon::token`). The shared reqwest
     // client attaches it as a default header so all ~60 proxy call sites are
@@ -149,6 +165,8 @@ pub fn run() {
             commands::files::read_dropped_file_attachment,
             commands::files::open_project_path,
             commands::files::open_image_data,
+            commands::files::read_chat_image,
+            commands::files::save_chat_image,
             commands::files::open_url,
             wsl::app_agent_path,
             commands::agent::agent_state,
@@ -157,6 +175,9 @@ pub fn run() {
             commands::agent::agent_jiwa,
             commands::agent::agent_delete_jiwa,
             commands::agent::agent_progress,
+            commands::agent::agent_trophies,
+            commands::poll::agent_poll_get,
+            commands::poll::agent_poll_vote,
             commands::agent::agent_keep_awake_get,
             commands::agent::agent_keep_awake_set,
             commands::agent::agent_usage,
@@ -165,6 +186,12 @@ pub fn run() {
             commands::agent::agent_ken_prompt,
             commands::agent::agent_ken_cancel,
             commands::agent::agent_autopilot_set,
+            commands::agent::agent_shell_run,
+            commands::agent::agent_add_dir,
+            commands::agent::agent_remove_dir,
+            commands::agent::agent_shell_cancel,
+            commands::agent::agent_shell_trust,
+            commands::agent::agent_shell_suggestions,
             commands::agent::agent_accept_plan,
             commands::agent::agent_new_session,
             commands::agent::agent_history,
@@ -181,9 +208,10 @@ pub fn run() {
             commands::agent::agent_radio_volume,
             commands::agent::agent_tasks,
             commands::agent::agent_checklist,
+            commands::agent::agent_git_overview,
             commands::agent::agent_run_tasks,
             commands::agent::agent_delete_task,
-            commands::agent::agent_cycle_thinking,
+            commands::agent::agent_set_thinking,
             commands::agent::agent_prewarm,
             commands::agent::agent_models,
             commands::agent::agent_switch_model,
@@ -206,20 +234,20 @@ pub fn run() {
             commands::agent_admin::agent_set_critter_model,
             commands::agent_admin::agent_sessions,
             commands::agent_admin::agent_files,
-            commands::agent::agent_plugins,
-            commands::agent::agent_install_plugin,
-            commands::agent::agent_remove_plugin,
             commands::agent_admin::agent_set_project_hidden,
             settings::app_settings_get,
             settings::app_settings_save,
             settings::app_create_project,
             auth::app_auth_status,
             auth::app_auth_apikey,
+            auth::app_auth_baseurl,
+            auth::app_auth_baseurl,
             auth::app_auth_logout,
             commands::agent_admin::agent_telegram_get,
             commands::agent_admin::agent_telegram_save,
             commands::agent_admin::agent_local,
             commands::agent_admin::agent_local_scan,
+            commands::agent_admin::agent_openrouter_catalog,
             commands::agent_admin::agent_local_endpoint_add,
             commands::agent_admin::agent_local_endpoint_remove,
             commands::agent_admin::agent_hf_search,
@@ -229,6 +257,9 @@ pub fn run() {
             commands::agent_admin::agent_serve_status,
             commands::agent_admin::agent_serve_start,
             commands::agent_admin::agent_serve_stop,
+            commands::live_preview::live_preview_start,
+            commands::live_preview::live_preview_stop,
+            commands::live_preview::live_preview_status,
             commands::agent_admin::agent_steroids_status,
             commands::agent_admin::agent_steroids_install,
             commands::agent_admin::agent_mcp_list,
@@ -316,6 +347,19 @@ pub fn run() {
                 }
                 // Update peers: the closed window is gone from the reading order.
                 broadcast_window_order(app);
+                // The last workspace window closed: transient windows (the
+                // whatsnew) must not keep the app alive
+                // on their own, so close them and let the normal quit run.
+                if is_workspace_window(window.label())
+                    && !app
+                        .webview_windows()
+                        .keys()
+                        .any(|l| l != window.label() && is_workspace_window(l))
+                {
+                    if let Some(w) = app.get_webview_window("whatsnew") {
+                        let _ = w.close();
+                    }
+                }
             }
             // Track which window holds keyboard focus and notify peers so each
             // can dim/brighten its position label + input border.

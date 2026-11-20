@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 
 const host = process.env.TAURI_DEV_HOST;
 
-// Split big libraries so no chunk exceeds Vite's 500 kB advisory. Groups keep
+// Split big libraries into their own cacheable chunks. Groups keep
 // their dependencies (the default), which avoids circular chunks; react gets
 // the highest priority so no other group can absorb it. Paths match / and \
 // (Windows).
@@ -20,8 +20,15 @@ const VENDOR_CHUNKS = [
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react()],
+  // Scan only the app's own entry for dependencies. Without this Vite also scans every .html under gg-app, including
+  // the bundled Motion previews in src-tauri/sidecar (they import three from a CDN map), the scan fails, deps are found
+  // late, and the dev page reloads mid-load with "504 Outdated Optimize Dep".
+  optimizeDeps: { entries: ["index.html"] },
   build: {
     manifest: true, // Lets CI budget initial JS separately from lazy chunks.
+    // The app entry (~980 kB) and lazy three.js (~560 kB) can't split under 500 kB;
+    // warn only past today's size. size-gate tracks initial JS.
+    chunkSizeWarningLimit: 1024,
     rolldownOptions: {
       output: {
         codeSplitting: { groups: VENDOR_CHUNKS },

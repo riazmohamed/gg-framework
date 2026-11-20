@@ -13,6 +13,7 @@ import type * as McpModule from "./mcp/index.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 import { stream, StreamResult, type StreamEvent, type StreamResponse } from "@abukhaled/gg-ai";
 import { getModel } from "./model-registry.js";
+import { outputCapForRequest } from "./agent-session.js";
 import { AuthStorage } from "./auth-storage.js";
 
 vi.mock("@abukhaled/gg-ai", async (importOriginal) => ({
@@ -65,20 +66,24 @@ beforeEach(async () => {
     );
   await fs.mkdir(path.join(tempHome, ".gg"), { recursive: true });
   await fs.writeFile(
-    path.join(tempHome, ".gg", "claude-code-version.json"),
-    JSON.stringify({ version: "2.1.75", fetchedAt: Date.now() }),
-  );
-  await fs.writeFile(
     path.join(tempHome, ".gg", "auth.json"),
     JSON.stringify({
-      gemini: {
-        accessToken: "test-gemini-token",
-        refreshToken: "test-gemini-refresh",
+      "gemini-api": {
+        accessToken: "test-gemini-key",
+        refreshToken: "",
         expiresAt: Date.now() + 3_600_000,
-        projectId: "test-google-project",
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta",
       },
-      anthropic: { accessToken: "t", refreshToken: "t", expiresAt: Date.now() + 3_600_000 },
-      openai: { accessToken: "t", refreshToken: "t", expiresAt: Date.now() + 3_600_000 },
+      anthropic: { accessToken: "t", refreshToken: "", expiresAt: Date.now() + 3_600_000 },
+      "openai-chatgpt": {
+        accessToken: "t",
+        refreshToken: "t",
+        expiresAt: Date.now() + 3_600_000,
+        accountId: "user-sub",
+        clientId: "oaiapp_test",
+        baseUrl: "https://api.openai.com/v1",
+      },
+      moonshot: { accessToken: "t", refreshToken: "", expiresAt: Date.now() + 3_600_000 },
     }),
   );
 });
@@ -130,7 +135,7 @@ describe("AgentSession model switch", () => {
     try {
       for (const [provider, model] of [
         ["openai", "gpt-6.1-sol"],
-        ["anthropic", "claude-fable-5-1"],
+        ["anthropic", "claude-fable-5-2"],
         ["gemini", "gemini-3.1-pro-preview"],
         ["openai", "custom-future-model"],
       ]) {
@@ -146,17 +151,62 @@ describe("AgentSession model switch", () => {
           thinking: "high",
           maxTokens: getModel(model)?.maxOutputTokens ?? 16384,
         });
-        if (provider === "anthropic") {
-          expect(request.userAgent).toMatch(/^claude-cli\//);
-        }
-        if (provider === "gemini") {
-          expect(request.projectId).toBe("test-google-project");
-        }
+        expect(request).not.toHaveProperty("userAgent");
+        expect(request).not.toHaveProperty("projectId");
       }
     } finally {
       await session.dispose();
     }
   }, 30_000);
+
+  it("never asks for more output than the window leaves above the compaction trigger", async () => {
+    // Kimi K2.7 Code's output ceiling equals its whole 262,144 window, so
+    // sending it as max_tokens left no room for any prompt.
+    const session = await createSession();
+    try {
+      await session.switchModel("moonshot", "kimi-k2.7-code");
+      await session.enhancePrompt("fix bug");
+      const request = vi.mocked(stream).mock.lastCall![0];
+      expect(getModel("kimi-k2.7-code")?.maxOutputTokens).toBe(262_144);
+      // 262,144 window − 222,823 trigger (0.85 × 262,144).
+      expect(request.maxTokens).toBe(39_321);
+    } finally {
+      await session.dispose();
+    }
+  }, 30_000);
+
+  it("caps output against the model's total window, not the Codex route's input budget", () => {
+    const threshold = 0.85;
+    // Kimi K2.7 Code: its 262,144 ceiling would fill the whole window.
+    expect(
+      outputCapForRequest({
+        provider: "moonshot",
+        model: "kimi-k2.7-code",
+        maxTokens: 262_144,
+        threshold,
+      }),
+    ).toBe(39_321);
+    // GPT-6 on the ChatGPT/Codex route: 272K is an input budget, so the 128K
+    // output stays (the total window is 1.05M).
+    expect(
+      outputCapForRequest({
+        provider: "openai",
+        model: "gpt-6.1-sol",
+        maxTokens: 128_000,
+        threshold,
+        accountId: "acct",
+      }),
+    ).toBe(128_000);
+    // Claude: 128K output fits beside an 850K trigger in a 1M window.
+    expect(
+      outputCapForRequest({
+        provider: "anthropic",
+        model: "claude-opus-5-5",
+        maxTokens: 128_000,
+        threshold,
+      }),
+    ).toBe(128_000);
+  });
 
   it("keeps the click-time model paired with its credentials during a switch", async () => {
     const session = await createSession();
@@ -177,7 +227,7 @@ describe("AgentSession model switch", () => {
     try {
       session.setThinkingLevel("high");
       const enhancement = session.enhancePrompt("fix bug");
-      await session.switchModel("anthropic", "claude-fable-5-1");
+      await session.switchModel("anthropic", "claude-fable-5-2");
       session.setThinkingLevel("low");
       release();
       await enhancement;
@@ -242,6 +292,29 @@ describe("AgentSession model switch", () => {
         provider: "openai",
         fromProvider: "openai",
       });
+    } finally {
+      await session.dispose();
+    }
+  }, 30_000);
+
+  it("refuses a model that spends real money without the user's explicit yes", async () => {
+    const session = await createSession();
+    try {
+      const before = [...session.getMessages()];
+      await expect(session.switchModel("anthropic", "claude-opus-5-5-fast")).rejects.toMatchObject({
+        name: "PaidModelConfirmationError",
+        modelName: "Claude Opus 5.5 Fast",
+      });
+      // Nothing changed: same model, no switch note, no marker.
+      expect(session.getState().model).toBe("gpt-6.1-sol");
+      expect(session.getMessages()).toHaveLength(before.length);
+      expect(session.getAppMarkers().filter((m) => m.kind === "model_switch")).toHaveLength(0);
+
+      await session.switchModel("anthropic", "claude-opus-5-5-fast", { confirmPaid: true });
+      expect(session.getState().model).toBe("claude-opus-5-5-fast");
+      // A plan-usage fast tier (Codex) needs no confirmation.
+      await session.switchModel("openai", "gpt-6-luna-fast");
+      expect(session.getState().model).toBe("gpt-6-luna-fast");
     } finally {
       await session.dispose();
     }

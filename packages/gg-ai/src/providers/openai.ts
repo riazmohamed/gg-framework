@@ -25,7 +25,7 @@ import {
   toOpenAIMessages,
   toGlmReasoningEffort,
   toLocalReasoningEffort,
-  toOpenAIReasoningEffort,
+  effortForRequest,
   toOpenAIToolChoice,
   toOpenAITools,
 } from "./transform.js";
@@ -33,6 +33,7 @@ import { supportsStrictToolSampling } from "../utils/strict-tool-schema.js";
 import { normalizePromptCacheKey } from "./prompt-cache-key.js";
 import { uploadMoonshotVideos } from "./moonshot-video.js";
 import {
+  DEFAULT_REASONING_FIELD,
   getReasoningField,
   readReasoning,
   reasoningFieldKey,
@@ -40,6 +41,8 @@ import {
 } from "./reasoning-field.js";
 import { parseToolArguments } from "../utils/json.js";
 import { getEnvironment } from "../utils/env.js";
+import { PROVIDER_TRANSPORT_TIMEOUT_MS, providerFetch } from "../utils/provider-fetch.js";
+import { localBearerKey } from "../local-api-key.js";
 
 // Kimi K3's declared effort rungs (server-validated; anything else 400s).
 // Official alias mapping from Moonshot's K3 third-party-tools docs:
@@ -105,7 +108,7 @@ function extractOpenAIUsage(usage: OpenAI.CompletionUsage): {
  *  See anthropic.ts for rationale. Keyed by identity-relevant fields. */
 const openaiClientCache = new Map<string, OpenAI>();
 
-function createClient(options: StreamOptions): OpenAI {
+export function createClient(options: StreamOptions): OpenAI {
   const cacheKey = `${options.apiKey ?? ""}|${options.baseUrl ?? ""}|${JSON.stringify(options.defaultHeaders ?? {})}`;
 
   // Skip cache when a custom fetch is provided (tests, React Native, etc.).
@@ -114,11 +117,21 @@ function createClient(options: StreamOptions): OpenAI {
     if (cached) return cached;
   }
 
+  // A keyless local endpoint gets no Authorization header (null drops the SDK's bearer).
+  const omitAuth = options.provider === "local" && localBearerKey(options.apiKey) === undefined;
+  const defaultHeaders = omitAuth
+    ? { ...options.defaultHeaders, Authorization: null }
+    : options.defaultHeaders;
   const client = new OpenAI({
     apiKey: options.apiKey,
     ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
-    ...(options.fetch ? { fetch: options.fetch } : {}),
-    ...(options.defaultHeaders ? { defaultHeaders: options.defaultHeaders } : {}),
+    // Default transport lifts undici's 300s header/body caps (see provider-fetch.ts).
+    fetch: options.fetch ?? providerFetch,
+    // The agent loop owns retries (classified backoff, Retry-After, UI retry
+    // events). The SDK default of 2 silent retries stacked under it: one 5xx
+    // cost up to 3 hidden requests plus SDK sleeps before the loop even saw it.
+    maxRetries: 0,
+    ...(defaultHeaders ? { defaultHeaders } : {}),
   });
 
   if (!options.fetch) {
@@ -151,6 +164,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   // top-level `reasoning_effort`; the managed endpoint keeps the official
   // CLI's nested shape.
   const isLocal = options.provider === "local";
+  const isOpenCode = options.provider === "opencode" || options.provider === "opencode-go";
   // K2.8 Preview (`kimi-for-coding`) shares K3's effort ladder and wire shape.
   const isKimiK3 =
     options.provider === "moonshot" &&
@@ -194,7 +208,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     // official CLI: reasoning is preserved only while thinking is enabled).
     thinking: isKimiK27 || !!options.thinking,
     supportsImages: options.supportsImages,
-    reasoningField: getReasoningField(endpointKey),
+    // OpenCode can stream thinking as `reasoning`, but its Kimi backends 400
+    // unless it comes back as `reasoning_content`.
+    reasoningField: isOpenCode ? DEFAULT_REASONING_FIELD : getReasoningField(endpointKey),
   });
 
   // GLM models default to 0.6 temperature when not in thinking mode
@@ -208,7 +224,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     ...(options.maxTokens
       ? options.provider === "deepseek" ||
         options.provider === "glm" ||
-        options.provider === "moonshot"
+        options.provider === "moonshot" ||
+        // OpenCode's gateway reads only max_tokens and ignores the newer name.
+        isOpenCode
         ? { max_tokens: options.maxTokens }
         : { max_completion_tokens: options.maxTokens }
       : {}),
@@ -218,7 +236,13 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     ...(options.topP != null && !hasFixedKimiSampling ? { top_p: options.topP } : {}),
     ...(options.stop ? { stop: options.stop } : {}),
     ...(options.thinking && !usesThinkingParam && !isKimiK3 && !isKimiK27 && !isLocal
-      ? { reasoning_effort: toOpenAIReasoningEffort(options.thinking, options.model) }
+      ? {
+          reasoning_effort: effortForRequest(
+            options.thinking,
+            options.model,
+            options.thinkingLevels,
+          ),
+        }
       : {}),
     ...(options.tools?.length
       ? {
@@ -277,8 +301,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     (params as unknown as Record<string, unknown>).reasoning_effort = "max";
   }
 
-  if (options.provider === "openai" && options.serviceTier) {
-    (params as unknown as Record<string, unknown>).service_tier = options.serviceTier;
+  // Fast mode on the public API is priority processing; an explicit tier wins.
+  const serviceTier = options.serviceTier ?? (options.speed === "fast" ? "priority" : undefined);
+  if (options.provider === "openai" && serviceTier) {
+    (params as unknown as Record<string, unknown>).service_tier = serviceTier;
   }
 
   if (isKimiK3) {
@@ -358,6 +384,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     try {
       const completion = (await client.chat.completions.create(requestParams, {
         signal: options.signal ?? undefined,
+        // The whole reply arrives in one response, so the SDK's 10min default
+        // would undercut the agent loop's 15min thinking cap for this call.
+        timeout: PROVIDER_TRANSPORT_TIMEOUT_MS,
       })) as OpenAI.ChatCompletion;
       yield* synthesizeEventsFromCompletion(completion, !!options.thinking, endpointKey);
       return completionToResponse(completion, endpointKey);
@@ -426,6 +455,11 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         thinkingAccum += reasoning.text;
         if (options.thinking) {
           yield { type: "thinking_delta", text: reasoning.text };
+        } else {
+          // Hidden reasoning is still proof of life. Without this, a model
+          // that always reasons (MiMo, Grok) looks silent to the agent loop's
+          // first-event watchdog while it thinks, and gets aborted mid-turn.
+          yield { type: "keepalive", reasoning: true };
         }
       }
 
@@ -752,7 +786,7 @@ function classifyOpenAICompatLimit(args: {
   return null;
 }
 
-function toError(err: unknown, provider: string = "openai"): ProviderError {
+export function toError(err: unknown, provider: string = "openai"): ProviderError {
   // Already classified (e.g. an in-stream gateway error frame). Re-wrapping via
   // the generic Error branch below would discard statusCode/resetsAt and demote
   // a 429 to an unclassified failure.

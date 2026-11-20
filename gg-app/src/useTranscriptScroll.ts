@@ -31,18 +31,30 @@ export function useTranscriptScroll({
   // The transcript's offset as last seen by a scroll event or left by our own
   // scrollToBottom — the baseline that tells an up-scroll from a down-scroll.
   const lastScrollTopRef = useRef(0);
+  // The transcript's viewport size as last seen, so a scroll caused by a
+  // resize or a zoom step isn't mistaken for the reader's (transcript-pin.ts).
+  const lastViewportRef = useRef({ width: 0, height: 0 });
+  const noteTranscriptViewport = useCallback((el: HTMLElement): boolean => {
+    const last = lastViewportRef.current;
+    if (last.width === el.clientWidth && last.height === el.clientHeight) return false;
+    lastViewportRef.current = { width: el.clientWidth, height: el.clientHeight };
+    return true;
+  }, []);
 
   // Pin to the bottom. Images (screenshots / attachments) load asynchronously
   // and grow the content after this fires, so it's also called from each image's
   // onLoad to keep the newest content visible.
   const scrollToBottom = useCallback(() => {
-    chatLayout.settle();
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTo({ top: el.scrollHeight });
-    // A reader's scroll landing in this same frame shares one scroll event with
-    // this jump; measuring it from the pre-jump offset would read up as down.
-    lastScrollTopRef.current = el.scrollTop;
+    // Lifted, not cancelled: this also runs every frame the dock resizes, and
+    // ending a glide there snapped the chat the rest of the way in one frame.
+    chatLayout.still(() => {
+      el.scrollTo({ top: el.scrollHeight });
+      // A reader's scroll landing in this same frame shares one scroll event with
+      // this jump; measuring it from the pre-jump offset would read up as down.
+      lastScrollTopRef.current = el.scrollTop;
+    });
   }, [chatLayout, scrollRef]);
 
   // Same as scrollToBottom, but a no-op while the user has scrolled up to read.
@@ -130,10 +142,11 @@ export function useTranscriptScroll({
       stickToBottomRef.current,
       lastScrollTopRef.current,
       el,
+      noteTranscriptViewport(el),
     );
     lastScrollTopRef.current = el.scrollTop;
     syncReaderPosition(el);
-  }, [syncReaderPosition, chatLayout, scrollRef]);
+  }, [syncReaderPosition, chatLayout, scrollRef, noteTranscriptViewport]);
   const onTranscriptWheel = useCallback(
     (e: React.WheelEvent<HTMLDivElement>) => {
       const el = scrollRef.current;
@@ -262,6 +275,7 @@ export function useTranscriptScroll({
   return {
     stickToBottomRef,
     lastScrollTopRef,
+    noteTranscriptViewport,
     scrollToBottom,
     maybeScrollToBottom,
     windowStartId,

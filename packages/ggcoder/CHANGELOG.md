@@ -1,5 +1,619 @@
 # @abukhaled/ogcoder
 
+## 5.103.0
+
+### Minor Changes
+
+- Add Live Preview: open a project's running dev server in the browser with GG's chat on the page and point-and-ask element picking; `review` on a command that can't carry one now runs the command with a skip note instead of rejecting it.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.103.0
+- @kenkaiiii/gg-agent@5.103.0
+- @kenkaiiii/gg-core@5.103.0
+
+## 5.102.0
+
+### Patch Changes
+
+- Updated dependencies [188a0ca]
+  - @kenkaiiii/gg-core@5.102.0
+  - @kenkaiiii/gg-ai@5.102.0
+  - @kenkaiiii/gg-agent@5.102.0
+
+## 5.101.0
+
+### Minor Changes
+
+- Autopilot Ken now answers ask_user cards in your place (or leaves them to you with a reason), /init writes much leaner context files, and CI tracks the cached system-prompt prefix size.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.101.0
+- @kenkaiiii/gg-agent@5.101.0
+- @kenkaiiii/gg-core@5.101.0
+
+## 5.100.3
+
+### Patch Changes
+
+- Fix Claude Code going missing: a missing pinned binary is now re-downloaded instead of asking you to sign in again, and installing one version no longer deletes newer versions that other apps on gg-core pinned.
+  - @kenkaiiii/gg-ai@5.100.3
+  - @kenkaiiii/gg-agent@5.100.3
+  - @kenkaiiii/gg-core@5.100.3
+
+## 5.100.2
+
+### Patch Changes
+
+- Refresh dependencies and the Claude Code manifest (claude-agent-sdk 0.3.321), and update the GG Coder guide for the new critter name tags, Home crew and Goals farm visitors.
+  - @kenkaiiii/gg-ai@5.100.2
+  - @kenkaiiii/gg-agent@5.100.2
+  - @kenkaiiii/gg-core@5.100.2
+
+## 5.100.1
+
+### Patch Changes
+
+- Update the gg-guide skill: queued messages are cancelled from the x on each queued bubble, not a strip above the input
+  - @kenkaiiii/gg-ai@5.100.1
+  - @kenkaiiii/gg-agent@5.100.1
+  - @kenkaiiii/gg-core@5.100.1
+
+## 5.100.0
+
+### Minor Changes
+
+- 4175416: Add a light `@kenkaiiii/ggcoder/web` entry point (web_search, web_fetch and the side search, with no UI code) and an optional `guardUrl` hook on `createWebFetchTool` that checks the first URL and every redirect hop.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.100.0
+- @kenkaiiii/gg-agent@5.100.0
+- @kenkaiiii/gg-core@5.100.0
+
+## 5.99.0
+
+### Minor Changes
+
+- Add `!claude mcp …` / `!ggcoder mcp …` server management in the app with live MCP loading in open windows, any pasted Claude Code `mcp add` line, the bundled gg-guide skill, Add/Remove folder sidecar routes, and a short answer before every ask_user card.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.99.0
+- @kenkaiiii/gg-agent@5.99.0
+- @kenkaiiii/gg-core@5.99.0
+
+## 5.98.2
+
+### Patch Changes
+
+- Fix "Continue with ChatGPT" sign-in failing with `invalid_grant`: when OpenAI refuses the one-time code after a first registration, sign-in now retries once with the app ID it just issued, reports refusals as a typed `ChatGPTSignInError`, and frees the callback port immediately when cancelled. Also removes dead code and the unused `@bokuweb/zstd-wasm` dependency.
+  - @kenkaiiii/gg-ai@5.98.2
+  - @kenkaiiii/gg-agent@5.98.2
+  - @kenkaiiii/gg-core@5.98.2
+
+## 5.98.1
+
+### Patch Changes
+
+- Fix the run-all task sweep letting a prompt or new session start between two tasks: the sweep now holds the run claim from first task to last, and `/tasks/run` and `/new-session` refuse while a run is starting or Autopilot is active.
+  - @kenkaiiii/gg-ai@5.98.1
+  - @kenkaiiii/gg-agent@5.98.1
+  - @kenkaiiii/gg-core@5.98.1
+
+## 5.98.0
+
+### Minor Changes
+
+- ec684b8: Add OpenCode as two providers: **OpenCode Go** (the subscription) and **OpenCode** (pay-as-you-go), each connected with an OpenCode Console API key (#142). Every request carries GG Coder's own User-Agent and a stable `x-opencode-session` per conversation, which Go requires; calls made outside a conversation (summaries, the prompt enhancer) share one fallback id. Models are listed as `opencode-go/<id>` and `opencode/<id>` and run over the gateway's Chat Completions API, so only the models OpenCode serves on that API are offered (19 of Go's 30 today); models whose own API is Responses, Anthropic Messages or Gemini are left out for now. Requests cap output with `max_tokens` and return earlier thinking as `reasoning_content`, which the gateway's backends require. The desktop app reads each connected plan's public model list (context, output cap, image input, effort levels) and refreshes it every six hours; pay-as-you-go leaves out the free tier, which only runs inside OpenCode. Kimi K3, GLM-5.3 and GLM-5.3-Flash are built in for the CLI and offline starts.
+
+  - gg-ai: new `opencode` and `opencode-go` providers.
+  - gg-core: `parseOpenCodeCatalog`, `OPENCODE_CATALOG_URLS`, `OPENCODE_PROVIDERS`, `formatOpenCodeModelId`.
+
+### Patch Changes
+
+- Updated dependencies [ec684b8]
+  - @kenkaiiii/gg-ai@5.98.0
+  - @kenkaiiii/gg-core@5.98.0
+  - @kenkaiiii/gg-agent@5.98.0
+
+## 5.97.1
+
+### Patch Changes
+
+- Fix the Claude subscription route failing a resume whose Claude Code transcript is gone: the session now seeds a fresh one from its own history, holds the transcript it would resume against the retention pass, and reloads the on-demand tools a restored conversation already used (the prompt now says to run `tool_search` first on that route). A Claude Code summary that keeps streaming is no longer dropped at the attempt timeout, a caller's access token is refreshed before reuse, and an unfinished run owned by another live process is left open instead of being treated as a crash.
+
+  Prune tool results less often on a warm cache (warm floor 0.2 → 0.35 of active tokens, flat floor near the compaction trigger), halve the `ask_user` interactive deadline to 5 min and the `task_output` wait cap to 300s, keep three rotated `debug.log` generations, and stop repeating unchanged log lines (local-model scan, autopilot disabled, unknown agent tools). The Claude Code route now logs `cache_health` and `retry` like the public-API route.
+
+- Updated dependencies
+  - @kenkaiiii/gg-core@5.97.1
+  - @kenkaiiii/gg-ai@5.97.1
+  - @kenkaiiii/gg-agent@5.97.1
+
+## 5.97.0
+
+### Minor Changes
+
+- 4900c19: Add Claude Fable 5.2 (`claude-fable-5-2`, released 2026-11-09) to the model registry — 1M context, 128k output, image input, always-on adaptive thinking, now $8/$40 MTok (down from $10/$50) with cache reads at $0.20/MTok. It replaces Fable 5.1, which is retired from the registry, model picker and login copy — a session still pinned to it falls back to the provider default on next start. The API surface matches 5.1 (no forced tool use, no prefill, no sampling params), so no call path changes.
+
+  Add Claude Fable 5.2 Fast (`claude-fable-5-2-fast`): the same model in fast mode at up to 2.5x output speed, billed to Claude usage credits at $16/$80 MTok, with the same paid-model confirmation as Opus 5.5 Fast. The thinking picker now offers `xhigh` on the Fable line, which Anthropic supports on all five effort levels. Fast-mode refusals now point back to "the same model without Fast" instead of always naming Opus 5.5.
+
+### Patch Changes
+
+- Updated dependencies [4900c19]
+  - @kenkaiiii/gg-ai@5.97.0
+  - @kenkaiiii/gg-core@5.97.0
+  - @kenkaiiii/gg-agent@5.97.0
+
+## 5.96.2
+
+### Patch Changes
+
+- Claude subscription sessions (via Claude Code) now use GG's own auto-compaction before and after each run, so long chats compact at the same limit as every other route instead of growing until Claude Code's near-full fallback.
+  - @kenkaiiii/gg-ai@5.96.2
+  - @kenkaiiii/gg-agent@5.96.2
+  - @kenkaiiii/gg-core@5.96.2
+
+## 5.96.1
+
+### Patch Changes
+
+- Fix filler "[Awaiting the user's next message.]" replies: a typed answer to a question card now hands its attachments to the agent along with the text.
+  - @kenkaiiii/gg-ai@5.96.1
+  - @kenkaiiii/gg-agent@5.96.1
+  - @kenkaiiii/gg-core@5.96.1
+
+## 5.96.0
+
+### Minor Changes
+
+- Give Code, Chat and Motion their own skills: Chat and Motion load only skills from their own `.gg/skills` folder, each agent's prompt says where new skills go, and chats now live in a `GG Chat` folder inside the projects root.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.96.0
+- @kenkaiiii/gg-agent@5.96.0
+- @kenkaiiii/gg-core@5.96.0
+
+## 5.95.4
+
+### Patch Changes
+
+- Claude Code chats: a message typed instead of answering `ask_user` now goes into the question's result, so the model acts on it instead of saying it will wait; a run keeps going until Claude Code has answered every message sent to it (tracked by the uuids each result reports, since `queued_turn_count` reads 0), so a reply to a message sent mid-answer is no longer lost; and a message sent while a tool runs (e.g. a long `task_output` wait) cuts that tool short, as on the native loop. The sign-in dialog no longer shows CLI `ggcoder login` advice, and failed sign-ins are logged.
+  - @kenkaiiii/gg-ai@5.95.4
+  - @kenkaiiii/gg-agent@5.95.4
+  - @kenkaiiii/gg-core@5.95.4
+
+## 5.95.3
+
+### Patch Changes
+
+- Claude Code chats keep one live Claude Code process across messages (closed after 15 idle minutes, restarted when wedged) instead of spawning a fresh one per run, and messages queued mid-run are delivered into the running turn. The approved-plan prompt now asks for `[DONE:n]` markers in reply text, so progress no longer stays at 0 when a model echoes them from a tool call.
+- a17ea1e: The app daemon serves Home's weekly feature poll: `GET /poll` reads the open poll and its counts, and `POST /poll/vote` votes or moves a vote under a salted SHA-256 of the OS machine id (so deleting `~/.gg` or reinstalling doesn't add a vote), falling back to a random id in `~/.gg/poll.json`.
+- a17ea1e: GG World is retired. The app no longer has the World game, its online save or its live multiplayer link, and the app daemon no longer serves the `/world/*` routes.
+  - @kenkaiiii/gg-ai@5.95.3
+  - @kenkaiiii/gg-agent@5.95.3
+  - @kenkaiiii/gg-core@5.95.3
+
+## 5.95.2
+
+### Patch Changes
+
+- 538741d: On a Claude subscription, a message you send while the agent is working no longer stays labelled "Queued" after Claude has already picked it up. GG Coder handed the message to Claude Code before reporting it as queued, so the app never saw it pending and never cleared the label; the message is now taken a moment later, after the app has been told.
+  - @kenkaiiii/gg-ai@5.95.2
+  - @kenkaiiii/gg-agent@5.95.2
+  - @kenkaiiii/gg-core@5.95.2
+
+## 5.95.1
+
+### Patch Changes
+
+- 488d9b2: On a Claude subscription, a tool loaded with `tool_search` (such as `web_search`, `web_fetch`, `screenshot` or `subagent`) now works on its first call. GG Coder used to answer `tool_search` before Claude Code had re-read the tool list, so the next call failed with "No such tool available" and had to be retried; it now waits (up to 3 seconds) for Claude Code to pick up the new tool first.
+  - @kenkaiiii/gg-ai@5.95.1
+  - @kenkaiiii/gg-agent@5.95.1
+  - @kenkaiiii/gg-core@5.95.1
+
+## 5.95.0
+
+### Minor Changes
+
+- f5d115b: Every provider now connects only in a way its owner allows, and GG Coder no longer poses as Codex CLI, Kimi Code CLI, Grok CLI or Gemini CLI anywhere (#139).
+
+  - **OpenAI:** "Continue with ChatGPT" uses OpenAI's official Sign in with ChatGPT for open-source apps: GG Coder registers itself once per ChatGPT account, checks the ID token against OpenAI's keys, needs the "Use your ChatGPT plan" permission, and revokes the session on sign-out. Requests go to the public Responses API (`api.openai.com/v1/responses`) with GG Coder's own User-Agent. An OpenAI API key is new and rides the same Responses transport, so GPT-6 models can call tools on a key; it takes over while the plan's usage is out. The ChatGPT usage meter is replaced by a "Using ChatGPT plan · Manage usage" link, and plan usage-limit errors point to chatgpt.com/settings/usage.
+  - **Models your plan or keys can't run** are greyed out in the app's model picker with the reason ("Not in your ChatGPT plan", read from the account's own model list; "Needs a Kimi Code plan key"; "Needs an API Credits key"). Requests that still hit those limits say so: "gpt-6.1-sol isn't included in your ChatGPT plan", "Fast mode isn't included in your ChatGPT plan".
+  - **Kimi:** the Kimi sign-in is gone. Paste a Kimi Code plan key (from the Kimi Code Console; `api.kimi.com` or `api.kimi.ai` is detected) or a Moonshot API key. K2.8 Preview needs the plan key.
+  - **xAI:** API key only (xAI offers SuperGrok and X Premium usage only in apps it partners with).
+  - **Gemini:** the Google sign-in and Code Assist route are gone; Gemini is back in the provider list with a Google AI Studio key.
+  - **GLM:** keys use Z.AI's standard pay-per-token endpoint, because the GLM Coding Plan is limited to the tools Z.AI lists.
+  - **MiniMax and Xiaomi:** each key type now says what it bills (plan or pay-per-token).
+  - Old sign-ins (Codex, Kimi, Grok, Google) are never used and never read as API keys. The app and CLI ask once to reconnect, and connecting again or dismissing removes them.
+  - gg-agent: the per-turn credential refresh now drops the ChatGPT account when the credential switches to an API key, so a key never rides the plan route.
+  - `generate_image` moves to OpenAI's public Image API (GPT Image 2.6) and needs an OpenAI API key; with only the ChatGPT plan it explains that.
+  - gg-core: `loginOpenAI`/`refreshOpenAIToken` become `loginChatGPT`/`refreshChatGPTToken`/`revokeChatGPTSignIn`; `loginKimi`, `loginXai`, `loginGemini` and their helpers are removed; new `KIMI_CODE_KEY`, `OPENAI_CHATGPT_KEY`, `RETIRED_SIGN_INS`, `AuthStorage.legacySignIns()`/`takeLegacySignIn()`/`hasApiKey()`/`resolveApiKey()` and `detectKimiCodeBaseUrl`. gg-ai: `streamOpenAICodex` becomes `streamOpenAIResponses`, `CODEX_CLIENT_VERSION` and the `responsesLite`/`projectId` stream options are removed, and `GG_CODER_USER_AGENT` is exported. The `codexResponsesLite` setting is removed.
+
+### Patch Changes
+
+- Updated dependencies [f5d115b]
+  - @kenkaiiii/gg-ai@5.95.0
+  - @kenkaiiii/gg-agent@5.95.0
+  - @kenkaiiii/gg-core@5.95.0
+
+## 5.94.0
+
+### Minor Changes
+
+- 5092ebc: Updated Claude sign-in. Claude Pro/Max plans now connect through Anthropic's official sign-in, and an Anthropic API key is also an option. If you were signed in to Claude before, sign in once more (`ggcoder login`, or AI Providers in the desktop app) to keep using Claude models. Removed `loginAnthropic`, `refreshAnthropicToken` and `getClaudeCliUserAgent`.
+- 5092ebc: Add GPT-6.1 Terra (`gpt-6.1-terra`, released 2026-10-26) and its Fast mode (`gpt-6.1-terra-fast`, 1.5x speed). It has a 1.05M context window on the public Responses API, 500K on the ChatGPT OAuth/Codex route, 128K output and text+image input, and costs $1/$5 per MTok (cached input $0.05). It starts at `low` effort and runs the full ladder up to `ultra`, which maps to xhigh plus the async-subagent orchestration prompt, the same as Sol and Astra. GPT-6.1 Sol stays the OpenAI default.
+
+### Patch Changes
+
+- Updated dependencies [5092ebc]
+- Updated dependencies [5092ebc]
+  - @kenkaiiii/gg-ai@5.94.0
+  - @kenkaiiii/gg-agent@5.94.0
+  - @kenkaiiii/gg-core@5.94.0
+
+## 5.93.0
+
+### Minor Changes
+
+- Plan mode is now always available and only used for work that needs research: it names the research tools a session can reach, asks before guessing, and can run read-only helper agents. Removed unused internal modules and the source-map dependency.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.93.0
+- @kenkaiiii/gg-agent@5.93.0
+- @kenkaiiii/gg-core@5.93.0
+
+## 5.92.0
+
+### Minor Changes
+
+- `generate_image` makes animated GIFs (native GPT Image 2.6 output, or a sprite sheet stitched locally when a ChatGPT login has native GIF off), with animated, size-capped previews. Image previews are no longer cut off by redaction, the Codex client identity is now 0.166.0, and a Windows file-lock race (pending-delete EPERM) is fixed.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.92.0
+- @kenkaiiii/gg-agent@5.92.0
+- @kenkaiiii/gg-core@5.92.0
+
+## 5.91.2
+
+### Patch Changes
+
+- Fix chat attachments: `/prompt` accepts up to 100 MB of attachments, refused prompts return a readable error, the `read` tool extracts text from PDF and EPUB files, files that could not be saved are reported to the model, and restored sessions keep file and video attachment names.
+  - @kenkaiiii/gg-ai@5.91.2
+  - @kenkaiiii/gg-agent@5.91.2
+  - @kenkaiiii/gg-core@5.91.2
+
+## 5.91.1
+
+### Patch Changes
+
+- 8627ee6: Radio no longer keeps playing after the app crashes or is force-quit: the next start stops the leftover player, but only when it is still playing that station, so an unrelated process that reused the ID is never touched. On Windows, stopping a station now stops the real player behind a launcher too. Custom local endpoints can pin a context length (a new field in Local models), and llama.cpp-style servers that report `meta.n_ctx` get their real window. OpenRouter keys can point at a compatible gateway with an optional base URL, changeable without pasting the key again, and "Sync models" replaces the built-in OpenRouter list with what that endpoint actually serves (tool-capable models only, with their context, output cap, image support and effort levels). A model that lists its own effort levels gets exactly those in the picker, and the chosen one is sent as-is, so `max` is no longer sent as `xhigh`.
+- Updated dependencies
+- Updated dependencies [8627ee6]
+  - @kenkaiiii/gg-core@5.91.1
+  - @kenkaiiii/gg-ai@5.91.1
+  - @kenkaiiii/gg-agent@5.91.1
+
+## 5.91.0
+
+### Minor Changes
+
+- Add MiniMax M3.1 Flash (now the MiniMax default) with a real effort ladder, route MiniMax and Xiaomi Token Plan keys to the region that issued them, name the real provider in Anthropic-compatible errors, update the Anthropic SDK to 1.4, and fix goals not starting on local models.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.91.0
+- @kenkaiiii/gg-agent@5.91.0
+- @kenkaiiii/gg-core@5.91.0
+
+## 5.90.0
+
+### Minor Changes
+
+- Local models: keyless endpoints send no auth header, Ollama's real served context is learned, custom endpoints read their context size, and a saved local model is restored at startup. Web search on Anthropic runs as a side request, web_fetch reads pages in windows (offset, #section) with a length cap, bash inlines less output, and language style packs are removed.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.90.0
+- @kenkaiiii/gg-agent@5.90.0
+- @kenkaiiii/gg-core@5.90.0
+
+## 5.89.0
+
+### Minor Changes
+
+- Add the app sidecar's `!` command runner: user-confirmed shell commands in the project folder with streamed output, Stop, per-project trust, run history and project suggestions, with the output handed to the agent on the user's next message.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.89.0
+- @kenkaiiii/gg-agent@5.89.0
+- @kenkaiiii/gg-core@5.89.0
+
+## 5.88.1
+
+### Patch Changes
+
+- Fix restored Anthropic sessions whose history used native web search failing with HTTP 400 ("server_tool_use block references web_search"), drop the duplicate sub-agent completion notice after wait_agent collects a result, and prune old checkpoint folders at desktop app startup.
+  - @kenkaiiii/gg-ai@5.88.1
+  - @kenkaiiii/gg-agent@5.88.1
+  - @kenkaiiii/gg-core@5.88.1
+
+## 5.88.0
+
+### Minor Changes
+
+- Speed and cost pass: cache-safe tool loading on Anthropic and Codex, 1h cache tail anchor, earlier default compaction (400k) with overflow-safe summaries, leaner sub-agent and tool output, OpenAI SDK retries removed, 30s keep-alive and connection pre-open, faster find/read and session resume, log volume cut and retention for diagnostics, checkpoints and sub-agent files, plus new compactAtTokens and bashPath settings.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.88.0
+- @kenkaiiii/gg-agent@5.88.0
+- @kenkaiiii/gg-core@5.88.0
+
+## 5.87.3
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@5.87.3
+  - @kenkaiiii/gg-agent@5.87.3
+  - @kenkaiiii/gg-core@5.87.3
+
+## 5.87.2
+
+### Patch Changes
+
+- Fix the stall watchdog killing long silent Anthropic thinking: SSE pings now count as stream activity, and the streaming thinking cap is raised to 30 minutes
+  - @kenkaiiii/gg-ai@5.87.2
+  - @kenkaiiii/gg-agent@5.87.2
+  - @kenkaiiii/gg-core@5.87.2
+
+## 5.87.1
+
+### Patch Changes
+
+- Retire the seeded find-skills skill and the /setup-skills command (untouched seeded copies are cleaned from ~/.gg/skills), add a light-comments rule to the system prompt, and sharpen the bulletproof, compliance-guard, durable and lean skill descriptions so they load only for the work they cover.
+  - @kenkaiiii/gg-ai@5.87.1
+  - @kenkaiiii/gg-agent@5.87.1
+  - @kenkaiiii/gg-core@5.87.1
+
+## 5.87.0
+
+### Minor Changes
+
+- World mode replaces GG Royale (live multiplayer hangout, online save). Skills trimmed to the two that change results (compliance-guard, durable); bulletproof and lean stay for Checklist audits only; the rest are removed. OpenAI models get a skill-loading rule; the skill tool now requires a skill name. Removed the unused code_search and code_nav tools.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.87.0
+- @kenkaiiii/gg-agent@5.87.0
+- @kenkaiiii/gg-core@5.87.0
+
+## 5.86.3
+
+### Patch Changes
+
+- Fix the threat feed cache serving a stale feed when a rewrite keeps the same file mtime (coarse Windows timestamps).
+  - @kenkaiiii/gg-ai@5.86.3
+  - @kenkaiiii/gg-agent@5.86.3
+  - @kenkaiiii/gg-core@5.86.3
+
+## 5.86.2
+
+### Patch Changes
+
+- ba10f31: Faster code changes: when a POSIX `bash` is available, the prompt now asks for each change in one command that writes only what's new (heredoc for a small file, an asserted replace for a few lines of a bigger one, appended tests) and ends with the test command. It replaces the "prefer edit over write" line and the scripted-edit rule; without bash, or under the cmd.exe fallback, those stay. The Environment section also lists the project's files once per session (shallowest 60, from `git ls-files`), so the first call reads the right files instead of listing them. On Claude Haiku 5.5 this ran the benchmark suite about 21% faster on about 19% less usage, with no whole-file rewrites of a one-line fix in a 700-line file.
+  - @kenkaiiii/gg-ai@5.86.2
+  - @kenkaiiii/gg-agent@5.86.2
+  - @kenkaiiii/gg-core@5.86.2
+
+## 5.86.1
+
+### Patch Changes
+
+- 1c91814: Remove Gemini from login lists, model pickers and startup. Google is suspending accounts that use their Gemini subscription through third-party harnesses (any of them, not just GG Coder), so GG Coder no longer supports signing in to Gemini. Existing stored credentials are left untouched but are no longer used.
+- 1c91814: Trim routine boilerplate from small bash output: `git log` headers fold to one line per commit, `git status` drops its `(use "git …")` hints, `ls -l` states a shared owner/group once, and all-green vitest/jest runs list a count instead of every passing file. Failing runs, file lists and anything that doesn't match these shapes pass through unchanged.
+- Updated dependencies [1c91814]
+- Updated dependencies [1c91814]
+  - @kenkaiiii/gg-core@5.86.1
+  - @kenkaiiii/gg-ai@5.86.1
+  - @kenkaiiii/gg-agent@5.86.1
+
+## 5.86.0
+
+### Minor Changes
+
+- Hedge a late first stream event with one duplicate request when the prompt prefix is provably warm, so a hung provider request no longer costs ~2 minutes of retrying; add the GG Royale sidecar endpoints (linking, bug-fixed and deploy signals); refresh the bundled skills.
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-agent@5.86.0
+  - @kenkaiiii/gg-ai@5.86.0
+  - @kenkaiiii/gg-core@5.86.0
+
+## 5.85.0
+
+### Minor Changes
+
+- Add Trophies: 144 achievements earned by using GG Coder, from a first slash command to a 365-day streak. The app sidecar records them in `~/.gg/trophies.json` (counting only what happens from now on), serves `GET /trophies`, and broadcasts a `trophies` event when one is earned. `getAppPaths()` gains `trophiesFile`.
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-core@5.85.0
+  - @kenkaiiii/gg-ai@5.85.0
+  - @kenkaiiii/gg-agent@5.85.0
+
+## 5.84.3
+
+### Patch Changes
+
+- Updated dependencies [dd2c2e6]
+- Updated dependencies [dd2c2e6]
+  - @kenkaiiii/gg-core@5.84.3
+  - @kenkaiiii/gg-ai@5.84.3
+  - @kenkaiiii/gg-agent@5.84.3
+
+## 5.84.2
+
+### Patch Changes
+
+- Fix Anthropic 400 "web_search tool use … without a corresponding web_search_tool_result" that bricked sessions after a deferred web search, and keep a run's post-compaction messages when the run fails.
+  - @kenkaiiii/gg-ai@5.84.2
+  - @kenkaiiii/gg-agent@5.84.2
+  - @kenkaiiii/gg-core@5.84.2
+
+## 5.84.1
+
+### Patch Changes
+
+- Installs of a package version with HIGH or CRITICAL known security flaws are now moved to the newest fixed release in the same major version (for example `axios@0.21.1` → `0.34.0`), with no prompt. Versions with no fix yet, or only fixed in a new major, are left alone, and clean installs make no extra requests.
+  - @kenkaiiii/gg-ai@5.84.1
+  - @kenkaiiii/gg-agent@5.84.1
+  - @kenkaiiii/gg-core@5.84.1
+
+## 5.84.0
+
+### Minor Changes
+
+- Add a security layer that blocks infected packages, malicious skills, poisoned MCP tools and prompt-injection actions without ever asking the user. Installs skip versions under 2 days old (the window every recent hijack lived in) and are checked against the public OSV malware list live and through a daily background feed; projects are re-checked for packages flagged after install. Skills with malware patterns are not loaded, poisoned or quietly changed MCP tools are hidden, and harmful actions (sending secrets out, DNS leaks, switching on auto-run in other tools, launching AI CLIs with safety off) are blocked. Each block leaves a chat row, and blocked packages are recorded in the project's CLAUDE.md or AGENTS.md so later sessions avoid them.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.84.0
+- @kenkaiiii/gg-agent@5.84.0
+- @kenkaiiii/gg-core@5.84.0
+
+## 5.83.5
+
+### Patch Changes
+
+- a69cc27: The titlebar no longer shows a project as "not a git repo, 0 changed files" when git is just slow to answer. On a busy machine, git could miss GG's 2-second limit when a window opened, and that timeout was reported as "not a repo" with nothing to correct it until the next run. GG now treats a timeout as unknown, and re-reads the git state in the background with more time.
+- Leaner, faster requests. On Anthropic, the built-in web search tool (about 2,500 tokens on every request) is now attached only when a session needs the web, either when the prompt asks for it or when the model looks it up. `tool_search` now loads only the best match instead of up to five loosely related tools. Grep output lists each file path once instead of on every matching line. Oversized bash output is held to its 50 KB cap even when it is made of a few huge lines, such as minified bundles. The Claude Code version lookup no longer blocks the first message. On Claude Haiku 5.5 across 270 benchmark runs, input tokens fell 24% with more tasks passing.
+  - @kenkaiiii/gg-ai@5.83.5
+  - @kenkaiiii/gg-agent@5.83.5
+  - @kenkaiiii/gg-core@5.83.5
+
+## 5.83.4
+
+### Patch Changes
+
+- 420b1ad: The bash tool no longer appends a "Verification evidence rejected" note to checks whose exit status can't prove success (e.g. `npm test | grep x; git diff`). The model almost always re-ran the suite after it, and the output it already had was correct. Such checks still don't count as verification: run status reports the turn as incomplete, as before. On Claude Haiku 5.5 this cut model requests about 7% and input tokens about 9%, with no change in pass rate.
+- 420b1ad: Shorter replies and a cleaner system prompt. After changing code, the agent's summary now aims for under ~100 words: a bold headline, then a few flat bullets with what changed, the check result, and any caveat or change made beyond the request. Answers and reviews keep the length they need. Progress messages between steps are one sentence. On Claude Haiku 5.5 this cut task time about 15% and cost about 15%, with no change in pass rate or test reporting. The prompt also drops a few contradictions. Language style packs no longer override a project's own conventions or push it to install a schema library. The agent runs one check after its edits instead of deferring checks to /commit. Detailed hardening rules now live only in the bulletproof skill.
+- 420b1ad: Turns no longer show as unverified when the agent's tests actually passed. Agents often run tests inside a longer command (`npm test 2>&1 | tail; node -e '…'`), and that command's exit status comes from its last part, so the tests never counted. When a turn would end unverified that way, GG now runs that test command once more on its own and records its real result. It never runs checks the agent skipped. If nothing was edited since, a pass counts as verification. A failed re-run leaves the turn unverified without marking it failed.
+- Updated dependencies [420b1ad]
+  - @kenkaiiii/gg-ai@5.83.4
+  - @kenkaiiii/gg-agent@5.83.4
+  - @kenkaiiii/gg-core@5.83.4
+
+## 5.83.3
+
+### Patch Changes
+
+- Fix provider requests dying at Node's 300s fetch cap (all providers now run on a transport with a 30-minute backstop), ask the model to split oversized tool calls after a stall, report exhausted stalls as `ResponseStalledError` instead of a network failure, keep hidden reasoning on always-reasoning models from tripping the stall watchdog, and move Grok to xAI's Responses API with encrypted reasoning replayed across turns.
+  - @kenkaiiii/gg-ai@5.83.3
+  - @kenkaiiii/gg-agent@5.83.3
+  - @kenkaiiii/gg-core@5.83.3
+
+## 5.83.2
+
+### Patch Changes
+
+- `generate_image` now reports the size it actually delivered. The ChatGPT image backend can return a smaller image than requested (2048x2048 came back as 1254x1254), so the result states the real dimensions and warns plainly on a mismatch instead of reading as a clean success. The file is still saved exactly as OpenAI sent it, with no resizing and no repeat request. Image requests also follow the Codex CLI's retry policy: up to 4 retries with backoff (or the server's `Retry-After`) on server errors and dropped connections, and never on a usage limit or other client error, so no extra quota is spent.
+  - @kenkaiiii/gg-ai@5.83.2
+  - @kenkaiiii/gg-agent@5.83.2
+  - @kenkaiiii/gg-core@5.83.2
+
+## 5.83.1
+
+### Patch Changes
+
+- Fix `generate_image`, which failed for every ChatGPT login because it drove image generation through the retired `gpt-5.5` chat model. It now calls Codex's own image endpoints (`codex/images/generations` and `codex/images/edits`) with the same request shape and client headers as the Codex CLI, supports transparent backgrounds and up to five edit references, and explains a refused account (free ChatGPT plans get a 403) or a used-up image quota instead of passing through a bare HTTP error.
+  - @kenkaiiii/gg-ai@5.83.1
+  - @kenkaiiii/gg-agent@5.83.1
+  - @kenkaiiii/gg-core@5.83.1
+
+## 5.83.0
+
+### Minor Changes
+
+- Gemini API key login for accounts Code Assist no longer serves, per-provider compaction triggers from sourced evidence (MiMo, DeepSeek, Kimi and Qwen use their full windows; price-line caps for Grok, GPT-6, Gemini 3.1 Pro and MiniMax), the agent wakes on background failures instead of waiting for exit or a timeout, MiMo UltraSpeed needs paid-model confirmation, Grok sends x-grok-conv-id for prompt-cache hits, and Fable xhigh, Kimi K2.7 output caps and Gemini licence errors are fixed.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.0
+- @kenkaiiii/gg-agent@5.83.0
+- @kenkaiiii/gg-core@5.83.0
+
+## 5.82.0
+
+### Minor Changes
+
+- Add fast-mode models over subscription logins: Claude Opus 5.5 Fast (`speed: "fast"`, billed to Claude usage credits) and GPT-6 Astra/6.1 Sol/Luna Fast (Codex `service_tier: "priority"`), with a clear error when Claude usage credits are off.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.82.0
+- @kenkaiiii/gg-agent@5.82.0
+- @kenkaiiii/gg-core@5.82.0
+
+## 5.81.0
+
+### Minor Changes
+
+- Add a `/git/overview` sidecar route (changed files with line counts plus open GitHub issues and PRs), let `POST /thinking` set a specific level or turn thinking off, and mark live goal runs across processes so the app and `ggcoder acp` never resume a goal the other is running.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.81.0
+- @kenkaiiii/gg-agent@5.81.0
+- @kenkaiiii/gg-core@5.81.0
+
+## 5.80.1
+
+### Patch Changes
+
+- Load custom slash commands from every workspace root, so a goal's attached repos and folders added with `/add-dir` bring their own `.gg/commands`.
+  - @kenkaiiii/gg-ai@5.80.1
+  - @kenkaiiii/gg-agent@5.80.1
+  - @kenkaiiii/gg-core@5.80.1
+
+## 5.80.0
+
+### Minor Changes
+
+- Add GG Goals, Autopilot Ken and the desktop's session extras to `ggcoder acp`. ACP clients can now list, create, update, pause and delete goals and follow their workers (`_gg/goals/*`, `_gg/goal/*`, `_gg/goal_state`). They can also turn autopilot on and follow its review cycle (`_gg/autopilot/set`, `_gg/autopilot_state`, `_gg/autopilot_event`), steer a run mid-turn through a prompt queue (`_gg/queue`), read the checklist, answer the agent's questions (`_gg/ask_user`) and follow plan review (`_gg/plan_state`). Goal list rows now come from one summary shared with the desktop sidecar. The in-process grep now scans large trees on worker threads, rejects files with a byte prefilter, skips gitignored directories during the walk instead of after it, and raises its file cap from 10k to 100k, so it no longer hides matches beyond the first 10k files.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.80.0
+- @kenkaiiii/gg-agent@5.80.0
+- @kenkaiiii/gg-core@5.80.0
+
+## 5.79.4
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-core@5.79.4
+  - @kenkaiiii/gg-ai@5.79.4
+  - @kenkaiiii/gg-agent@5.79.4
+
+## 5.79.3
+
+### Patch Changes
+
+- Report the Steroids corpus size on disk, and give GG Goals' builder and checker workers the `steroids` tool with guidance to use it
+  - @kenkaiiii/gg-ai@5.79.3
+  - @kenkaiiii/gg-agent@5.79.3
+  - @kenkaiiii/gg-core@5.79.3
+
 ## 5.79.2
 
 ### Patch Changes

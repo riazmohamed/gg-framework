@@ -6,7 +6,7 @@ import type { KenModelPref } from "../core/ken-model.js";
 import { SettingsManager, type Settings } from "../core/settings-manager.js";
 import { log } from "../core/logger.js";
 import { atomicWrite } from "../core/session-storage.js";
-import { withFileLock } from "@abukhaled/gg-core";
+import { withFileLock, withoutPaidTier } from "@abukhaled/gg-core";
 
 export const ALL_PROVIDERS: Provider[] = [
   // US
@@ -22,6 +22,9 @@ export const ALL_PROVIDERS: Provider[] = [
   "deepseek",
   // Open-community gateway, before the provider-agnostic one
   "huggingface",
+  // OpenCode Console: the Go subscription, then pay-as-you-go
+  "opencode-go",
+  "opencode",
   // Japan, then provider-agnostic gateway last
   "sakana",
   "openrouter",
@@ -58,6 +61,8 @@ export interface AppSettings {
   projectRoots?: string[];
   /** Project paths dismissed from the picker, as normalized cwds. */
   hiddenProjects?: string[];
+  /** Projects (normalized cwds) where the user's own `!` commands run without asking. */
+  shellTrusted?: string[];
 }
 
 export function stringArray(value: unknown): string[] | undefined {
@@ -103,6 +108,7 @@ export async function loadAppSettings(): Promise<AppSettings> {
       kenModels: raw.kenModels && typeof raw.kenModels === "object" ? raw.kenModels : undefined,
       projectRoots: stringArray(raw.projectRoots),
       hiddenProjects: stringArray(raw.hiddenProjects),
+      shellTrusted: stringArray(raw.shellTrusted),
     };
   } catch {
     return { projectsRoot: defaultProjectsRoot() };
@@ -134,22 +140,27 @@ export async function updateAppSettings<T = void>(
 /** Read this project's persisted model/thinking prefs, if any. */
 export async function loadProjectModelPrefs(cwd: string): Promise<ProjectModelPrefs | undefined> {
   const s = await loadAppSettings();
-  return s.projectModels?.[projectModelKey(cwd)];
+  const prefs = s.projectModels?.[projectModelKey(cwd)];
+  // A paid tier (Claude fast mode) never comes back on its own: a restored or
+  // new session starts on the standard model and the user opts in again.
+  return prefs ? { ...prefs, model: withoutPaidTier(prefs.model) } : undefined;
 }
 
 /** Persist this project's model/thinking prefs via read-modify-write so the rest
  *  of the settings file (projectsRoot, other projects' entries) is preserved. */
 export async function saveProjectModelPrefs(cwd: string, prefs: ProjectModelPrefs): Promise<void> {
   const key = projectModelKey(cwd);
+  const safe = { ...prefs, model: withoutPaidTier(prefs.model) };
   await updateAppSettings((s) => {
-    s.projectModels = { ...(s.projectModels ?? {}), [key]: prefs };
+    s.projectModels = { ...(s.projectModels ?? {}), [key]: safe };
   });
 }
 
 /** Read this project's persisted Ken model override, if any. */
 export async function loadKenModelPref(cwd: string): Promise<KenModelPref | undefined> {
   const s = await loadAppSettings();
-  return s.kenModels?.[projectModelKey(cwd)];
+  const pref = s.kenModels?.[projectModelKey(cwd)];
+  return pref ? { ...pref, model: withoutPaidTier(pref.model) } : undefined;
 }
 
 /** Persist (or with null, clear) this project's Ken model override via
@@ -179,6 +190,20 @@ export async function saveAutopilot(cwd: string, enabled: boolean): Promise<void
   });
 }
 
+/** Whether the user's own `!` commands in this project run without asking. */
+export async function loadShellTrusted(cwd: string): Promise<boolean> {
+  const s = await loadAppSettings();
+  return s.shellTrusted?.includes(projectModelKey(cwd)) ?? false;
+}
+
+export async function saveShellTrusted(cwd: string, trusted: boolean): Promise<void> {
+  const key = projectModelKey(cwd);
+  await updateAppSettings((s) => {
+    const rest = (s.shellTrusted ?? []).filter((p) => p !== key);
+    s.shellTrusted = trusted ? [...rest, key] : rest.length > 0 ? rest : undefined;
+  });
+}
+
 /**
  * Persist the active model selection to ~/.gg/settings.json so it survives app
  * restarts. Mirrors the CLI's handleModelSelect persistence (App.tsx).
@@ -192,7 +217,8 @@ export async function persistModelSelection(
     const sm = new SettingsManager(settingsFile);
     await sm.load();
     await sm.set("defaultProvider", provider as Settings["defaultProvider"]);
-    await sm.set("defaultModel", model);
+    // Never persist a paid tier as the default every new session boots with.
+    await sm.set("defaultModel", withoutPaidTier(model));
   } catch (err) {
     log("WARN", "app-sidecar", "failed to persist model selection", { err: String(err) });
   }

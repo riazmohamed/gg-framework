@@ -3,6 +3,7 @@ import {
   stream,
   EventStream,
   GGAIError,
+  ResponseStalledError,
   type Message,
   type ToolCall,
   type ToolResult,
@@ -27,6 +28,7 @@ import type {
   ToolExecuteResult,
   StructuredToolResult,
 } from "./types.js";
+import { firstEventHedgeDelayMs, hedgedStream } from "./hedged-stream.js";
 import { isLocalBackendUrl } from "./local-backend.js";
 import { argumentHints, unknownToolMessage } from "./tool-call-hints.js";
 import {
@@ -50,7 +52,7 @@ const DEFAULT_TOOL_TIMEOUT_MS = 300_000;
  * interruptible tool that ignores its AbortSignal gets this long to settle
  * before the loop records it as interrupted and moves on without it.
  */
-const PREEMPT_GRACE_MS = 500;
+export const PREEMPT_GRACE_MS = 500;
 
 /** Result text for a tool call cut short by a mid-run steering message. */
 export const STEER_INTERRUPTED_TEXT = "Interrupted: the user sent a new message.";
@@ -61,12 +63,12 @@ export const STEER_INTERRUPTED_TEXT = "Interrupted: the user sent a new message.
  */
 const ATOMIC_TOOL_NAMES = new Set(["edit", "write", "multi_edit", "apply_patch", "notebook_edit"]);
 
-function isInterruptibleTool(tool: AgentTool | undefined, name: string): boolean {
+export function isInterruptibleTool(tool: AgentTool | undefined, name: string): boolean {
   if (tool?.interruptible !== undefined) return tool.interruptible;
   return !ATOMIC_TOOL_NAMES.has(name);
 }
 
-function markSteerInterrupted(record: ToolExecutionRecord): ToolExecutionRecord {
+export function markSteerInterrupted(record: ToolExecutionRecord): ToolExecutionRecord {
   const content = record.content;
   let next: ToolResultContent;
   if (typeof content === "string") {
@@ -386,10 +388,6 @@ export function classifyOverload(
   return null;
 }
 
-export function isOverloaded(err: unknown): boolean {
-  return classifyOverload(err) !== null;
-}
-
 /**
  * Detect malformed-stream errors — the SDK's SSE decoder threw a JSON parse
  * error mid-stream, typically because a chunk was truncated or corrupted by
@@ -626,6 +624,9 @@ export async function* agentLoop(
   const totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
   let latestProviderUsage: Usage | undefined;
   let usageAnchorIndex: number | undefined;
+  // When `latestProviderUsage` arrived — its cached prefix is only provably
+  // warm for a few minutes (gates the first-event hedge).
+  let latestProviderUsageAt = 0;
   let turn = 0;
   // Set when a turn executes tools and completes but the turn budget is now
   // exhausted — the loop is about to stop mid-task. Drives the terminal
@@ -640,6 +641,16 @@ export async function* agentLoop(
   let overloadRetries = 0;
   let emptyResponseRetries = 0;
   let stallRetries = 0;
+  // Set once per logical turn when a stall killed a long-running tool call,
+  // so the replay asks for smaller pieces instead of regenerating the same
+  // oversized call (which dies the same way every time).
+  let splitToolCallHintAdded = false;
+  // Sticky across the stall retries of one logical turn: any attempt died while
+  // a tool call's input was still open. Feeds the exhausted-retries error.
+  let stalledInToolCall = false;
+  // Sticky across the same retries: some attempt received provider events, so
+  // the provider was reachable and the replies just never finished.
+  let stalledAfterConnecting = false;
   let runawayToolcallRetries = 0;
   let overflowCompactionAttempts = 0;
   let toolResultTruncationAttempted = false;
@@ -678,6 +689,12 @@ export async function* agentLoop(
     "[Your previous response was cut off by a connection failure. The text " +
     "above is what was already delivered to the user. Continue exactly from " +
     "where it stopped — do not repeat or restart it.]";
+  const SPLIT_TOOL_CALL_PROMPT =
+    "[Your previous response was cut off while you were still writing a tool " +
+    "call's arguments, after minutes without data from the provider. None of " +
+    "that call was applied. Do not resend it as one large call: split the " +
+    "work into smaller pieces (e.g. a shorter first version, then further " +
+    "edits, or one file per call).]";
   // Bounded auto-continue after the model hits its output-token limit
   // (stopReason "max_tokens" with no tool calls). The assistant partial is
   // already in history, so the continuation resumes exactly where the output
@@ -738,7 +755,9 @@ export async function* agentLoop(
   // planning turns were observed thinking silently for 3.5-4min and past 5min,
   // so 5min here aborted real work and replayed it from zero.
   const STREAM_THINKING_IDLE_TIMEOUT_MS = 600_000; // 10min idle after thinking
-  const STREAM_THINKING_HARD_TIMEOUT_MS = 900_000; // 15min hard cap with thinking
+  // A live stream (deltas or SSE pings) is never idle, so this cap alone ends it.
+  // A long think plus a big file write passes 15min; Claude Code's longest wait is 30min.
+  const STREAM_THINKING_HARD_TIMEOUT_MS = 1_800_000; // 30min hard cap with thinking
   // Non-streaming mode has no per-event idle -- the entire response arrives in
   // one HTTP round-trip. Use a single generous hard cap instead. This matches
   // Claude Code's v2.1.110/111 behaviour: cap non-streaming retries so API
@@ -746,9 +765,13 @@ export async function* agentLoop(
   // that slow-but-healthy backends get killed.
   const NON_STREAMING_HARD_TIMEOUT_MS = 300_000; // 5min for full non-streaming response
   // A thinking turn replayed non-streaming must still fit silent thinking plus
-  // the full visible output in one round-trip, so it gets the thinking cap.
+  // the full visible output in one round-trip. Nothing arrives until it's done,
+  // so a hung request can't be told apart from a slow one: keep this at 15min.
+  const NON_STREAMING_THINKING_HARD_TIMEOUT_MS = 900_000;
   const nonStreamingHardTimeoutMs =
-    options.thinking != null ? STREAM_THINKING_HARD_TIMEOUT_MS : NON_STREAMING_HARD_TIMEOUT_MS;
+    options.thinking != null
+      ? NON_STREAMING_THINKING_HARD_TIMEOUT_MS
+      : NON_STREAMING_HARD_TIMEOUT_MS;
   // A stall retry is announced when the failed attempt already kept the user
   // waiting this long; quick transient blips stay silent.
   const VISIBLE_STALL_AFTER_MS = 60_000;
@@ -761,8 +784,14 @@ export async function* agentLoop(
   // accounts or network paths repeatedly trip the 45s first-event / 90s hard
   // caps even though the model is still working. Once output starts flowing,
   // the normal mid-stream timeout takes over.
+  // xAI is in this set unconditionally: Grok 4.7 cannot disable reasoning, so
+  // even a thinking-off turn reasons first, and whether reasoning summaries
+  // stream while it does is not guaranteed on every route (the subscription
+  // CLI proxy is undocumented). xAI asks clients to allow >=900s per request.
   const usesSilentReasoningBudget =
-    options.provider === "sakana" || (options.provider === "openai" && options.thinking != null);
+    options.provider === "sakana" ||
+    options.provider === "xai" ||
+    (options.provider === "openai" && options.thinking != null);
   // A local backend (llama.cpp, vLLM, Ollama, LM Studio) can prefill a large
   // prompt for minutes before its first token. Aborting there guarantees a
   // retry that prefills from cold again, so the first-event watchdog is off for
@@ -776,7 +805,7 @@ export async function* agentLoop(
       : STREAM_FIRST_EVENT_TIMEOUT_MS; // 45s
   const baseHardTimeoutMs =
     localBackend || usesSilentReasoningBudget
-      ? STREAM_THINKING_HARD_TIMEOUT_MS // 10min absolute cap before output
+      ? STREAM_THINKING_HARD_TIMEOUT_MS // 30min absolute cap before output
       : STREAM_HARD_TIMEOUT_MS; // 90s
   // Runaway tool-call circuit breaker. When a model glitches mid-tool-call it
   // can emit tens of thousands of toolcall_delta events without ever closing.
@@ -1052,54 +1081,105 @@ export async function* agentLoop(
         const routerOverrodeCredentials = turnApiKey !== options.apiKey;
         let liveApiKey = turnApiKey;
         let liveAccountId = options.accountId;
-        let liveProjectId = options.projectId;
         if (options.resolveCredentials && !routerOverrodeCredentials) {
           try {
             const fresh = await options.resolveCredentials();
             liveApiKey = fresh.apiKey;
-            if (fresh.accountId !== undefined) liveAccountId = fresh.accountId;
-            if (fresh.projectId !== undefined) liveProjectId = fresh.projectId;
+            // The account belongs to the credential: a ChatGPT plan that fell
+            // back to an OpenAI API key must drop it, or the key rides the plan route.
+            liveAccountId = fresh.accountId;
           } catch (credErr) {
             diag("credential_refresh_failed", {
               error: (credErr instanceof Error ? credErr.message : String(credErr)).slice(0, 200),
             });
           }
         }
-        const result = stream({
-          provider: turnProvider,
-          model: turnModel,
-          messages,
-          tools: options.tools,
-          serverTools: options.serverTools,
-          toolChoice: options.toolChoice,
-          webSearch: options.webSearch,
-          // Clamped to whatever ceiling this route has already rejected us for
-          // (identity when nothing has been learned).
-          maxTokens: clampOutputTokens(ceilingKey, options.maxTokens),
-          temperature: options.temperature,
-          thinking: options.thinking,
-          apiKey: liveApiKey,
-          baseUrl: turnBaseUrl,
+        // Hedge a late first event with one duplicate request — only on the
+        // plain remote streaming path (local/silent-reasoning budgets are long
+        // by design; non-streaming has no first event) and only when the
+        // previous response proves the prompt prefix is warm in cache.
+        const hedgeAfterMs =
+          baseFirstEventTimeoutMs === STREAM_FIRST_EVENT_TIMEOUT_MS && !useNonStreamingFallback
+            ? firstEventHedgeDelayMs({
+                priorUsage: latestProviderUsage,
+                msSincePriorResponse: Date.now() - latestProviderUsageAt,
+                newPromptTokens: Math.ceil(
+                  countMessageChars(
+                    usageAnchorIndex === undefined
+                      ? messages
+                      : messages.slice(usageAnchorIndex + 1),
+                  ) / 3,
+                ),
+                firstEventTimeoutMs,
+                prefillMsPer1kTokens: PREFILL_TIMEOUT_MS_PER_1K_TOKENS,
+              })
+            : null;
+        const hedgeStartedAt = Date.now();
+        // The hedge must send the identical request; snapshot the history.
+        const requestMessages = hedgeAfterMs === null ? messages : messages.slice();
+        const result = hedgedStream({
           signal: streamController.signal,
-          accountId: liveAccountId,
-          transportSessionId: options.transportSessionId,
-          projectId: liveProjectId,
-          cacheRetention: options.cacheRetention,
-          onContextPrepared: options.onContextPrepared,
-          promptCacheKey: options.promptCacheKey,
-          serviceTier: options.serviceTier,
-          responsesLite: options.responsesLite,
-          strictTools: options.strictTools,
-          supportsImages: options.supportsImages,
-          supportsVideo: options.supportsVideo,
-          compaction: options.compaction,
-          clearToolUses: options.clearToolUses,
-          userAgent: options.userAgent,
-          defaultHeaders: options.defaultHeaders,
-          providerOptions: options.providerOptions,
-          fetch: options.fetch,
-          // Flip to non-streaming fallback after repeated stream stalls.
-          ...(useNonStreamingFallback ? { streaming: false } : {}),
+          hedgeAfterMs,
+          onHedgeStarted: () => {
+            diag("hedge_started", {
+              afterMs: Date.now() - hedgeStartedAt,
+              provider: options.provider,
+              model: options.model,
+            });
+          },
+          onSettled: (winner, hedged) => {
+            if (hedged) {
+              diag("hedge_settled", {
+                winner,
+                ttfMs: Date.now() - hedgeStartedAt,
+                provider: options.provider,
+                model: options.model,
+              });
+            }
+          },
+          start: (signal, arm) =>
+            stream({
+              provider: turnProvider,
+              model: turnModel,
+              messages: requestMessages,
+              tools: options.tools,
+              deferredTools: options.deferredTools,
+              serverTools: options.serverTools,
+              toolChoice: options.toolChoice,
+              webSearch:
+                typeof options.webSearch === "function" ? options.webSearch() : options.webSearch,
+              // Clamped to whatever ceiling this route has already rejected us for
+              // (identity when nothing has been learned).
+              maxTokens: clampOutputTokens(ceilingKey, options.maxTokens),
+              temperature: options.temperature,
+              thinking: options.thinking,
+              thinkingLevels: options.thinkingLevels,
+              apiKey: liveApiKey,
+              baseUrl: turnBaseUrl,
+              signal,
+              accountId: liveAccountId,
+              transportSessionId: options.transportSessionId,
+              cacheRetention: options.cacheRetention,
+              // A hedge duplicates an already-observed request; observe it once.
+              onContextPrepared: arm === "primary" ? options.onContextPrepared : undefined,
+              promptCacheKey: options.promptCacheKey,
+              serviceTier: options.serviceTier,
+              strictTools: options.strictTools,
+              supportsImages: options.supportsImages,
+              supportsVideo: options.supportsVideo,
+              compaction: options.compaction,
+              clearToolUses: options.clearToolUses,
+              defaultHeaders: options.defaultHeaders,
+              providerOptions: options.providerOptions,
+              fetch: options.fetch,
+              // Raw bytes (incl. SSE pings) prove the connection is alive during
+              // silent thinking; only re-arm an armed timer, never mid-yield.
+              onTransportActivity: () => {
+                if (idleTimer && !streamController.signal.aborted) resetIdleTimer();
+              },
+              // Flip to non-streaming fallback after repeated stream stalls.
+              ...(useNonStreamingFallback ? { streaming: false } : {}),
+            }),
         });
         diag("stream_created", { setupMs: Date.now() - streamCallStart });
 
@@ -1162,7 +1242,13 @@ export async function* agentLoop(
           }
           // Track thinking events — extends idle timeout and hard timeout
           // so reasoning models aren't killed during thinking→output transition.
-          if (event.type === "thinking_delta" && !hasReceivedThinking) {
+          // Hidden reasoning (thinking display off on a model that always
+          // reasons) arrives as a flagged keepalive; it needs the same budget.
+          if (
+            (event.type === "thinking_delta" ||
+              (event.type === "keepalive" && event.reasoning === true)) &&
+            !hasReceivedThinking
+          ) {
             hasReceivedThinking = true;
             // Extend the hard timeout now that we know the model is reasoning
             if (hardTimer) clearTimeout(hardTimer);
@@ -1569,6 +1655,12 @@ export async function* agentLoop(
         const socketDrop = isTransportFailure(err);
         const transportFailure =
           (idleTimedOut || malformed || socketDrop) && !options.signal?.aborted;
+        const attemptMs = Date.now() - streamCallStart;
+        if (transportFailure && toolInputOpen) stalledInToolCall = true;
+        // The provider answered and then went quiet — as opposed to never
+        // answering at all. Non-streamed attempts carry no events, so this
+        // stays sticky from the streamed attempts that preceded them.
+        if (transportFailure && streamEventCount > 0) stalledAfterConnecting = true;
         if (transportFailure && stallRetries < MAX_STALL_RETRIES) {
           stallRetries++;
           const cause = malformed
@@ -1610,6 +1702,24 @@ export async function* agentLoop(
             });
             preservedChars = attemptText.length;
           }
+          // A tool call that stayed open for minutes before the stream died is
+          // almost always one oversized write: the replay regenerates the same
+          // call and hits the same wall. Ask for smaller pieces, once per turn.
+          // The partial call was never added to history, so only the hint lands.
+          let splitHint = false;
+          if (toolInputOpen && attemptMs >= VISIBLE_STALL_AFTER_MS && !splitToolCallHintAdded) {
+            splitToolCallHintAdded = true;
+            splitHint = true;
+            messages.push({
+              role: "user" as const,
+              content: SPLIT_TOOL_CALL_PROMPT,
+              provenance: {
+                source: "runtime" as const,
+                kind: "continuation" as const,
+                visibility: "hidden" as const,
+              },
+            });
+          }
           diag("retry", {
             reason: cause,
             attempt: stallRetries,
@@ -1618,6 +1728,7 @@ export async function* agentLoop(
             events: streamEventCount,
             nonStreaming: useNonStreamingFallback,
             preservedChars,
+            splitHint,
           });
           yield {
             type: "retry" as const,
@@ -1650,9 +1761,28 @@ export async function* agentLoop(
             eventTypes: eventTypeCounts,
             lastEventType,
             sinceLastEventMs: Date.now() - lastEventTime,
-            attemptDurationMs: Date.now() - streamCallStart,
+            attemptDurationMs: attemptMs,
             maxConsumerLagMs,
+            stalledAfterConnecting,
+            stalledInToolCall,
           });
+          if (stalledAfterConnecting) {
+            yield {
+              type: "error" as const,
+              error: new ResponseStalledError(
+                `The provider stopped sending data before the response finished, ` +
+                  `${MAX_STALL_RETRIES} automatic retries in a row. Your conversation is preserved.`,
+                {
+                  inToolCall: stalledInToolCall,
+                  hint: stalledInToolCall
+                    ? "The model was writing one very large tool call each time. Ask it to make the change in smaller pieces (shorter files or several edits), then retry."
+                    : "Retry once. If it keeps happening, choose another model or lower the thinking level, and disable any VPN or proxy that may buffer streamed responses.",
+                  cause: err,
+                },
+              ),
+            };
+            break;
+          }
           yield {
             type: "error" as const,
             error: new GGAIError(
@@ -1712,6 +1842,9 @@ export async function* agentLoop(
 
       overloadRetries = 0;
       stallRetries = 0;
+      splitToolCallHintAdded = false;
+      stalledInToolCall = false;
+      stalledAfterConnecting = false;
       runawayToolcallRetries = 0;
 
       // Detect empty/degenerate responses — the API occasionally returns 0 tokens
@@ -1810,6 +1943,7 @@ export async function* agentLoop(
       if (!emptyExhausted) {
         messages.push(response.message);
         latestProviderUsage = response.usage;
+        latestProviderUsageAt = Date.now();
         usageAnchorIndex = messages.length - 1;
       }
 
@@ -2166,11 +2300,12 @@ function canonicalToolArgs(value: unknown): unknown {
   return value;
 }
 
-interface ToolExecutionRecord {
+export interface ToolExecutionRecord {
   toolCallId: string;
   content: ToolResultContent;
   isError: boolean;
   endRun?: boolean;
+  loadedTools?: string[];
 }
 
 interface ToolBatchExecutionOptions {
@@ -2243,11 +2378,16 @@ async function executeSingleToolCall(
   let isError = false;
   let endRun = false;
   let invalidArgAttempt: number | undefined;
+  const loadedTools = new Set<string>();
 
   let tool = options.toolMap.get(toolCall.name);
   if (!tool && options.resolveTool) {
     tool = options.resolveTool(toolCall.name);
-    if (tool) options.toolMap.set(tool.name, tool);
+    if (tool) {
+      options.toolMap.set(tool.name, tool);
+      // Called by name before any load: this result is where it loads.
+      loadedTools.add(tool.name);
+    }
   }
   if (tool) {
     // Only deduplicate within this assistant response. Sort object keys so
@@ -2320,6 +2460,7 @@ async function executeSingleToolCall(
       const raw = await tool.execute(parsed, ctx);
       const normalized = normalizeToolResult(raw);
       endRun = normalized.endRun === true;
+      for (const name of normalized.loadedTools ?? []) loadedTools.add(name);
       resultContent = redactValue(normalized.content, toolRedactionOptions());
       details = redactValue(normalized.details, toolRedactionOptions());
       if (options.transformToolResult) {
@@ -2424,7 +2565,13 @@ async function executeSingleToolCall(
     ...(invalidArgAttempt === undefined ? {} : { invalidArgAttempt }),
   });
 
-  return { toolCallId: toolCall.id, content: resultContent, isError, endRun: endRun && !isError };
+  return {
+    toolCallId: toolCall.id,
+    content: resultContent,
+    isError,
+    endRun: endRun && !isError,
+    ...(loadedTools.size > 0 ? { loadedTools: [...loadedTools].sort() } : {}),
+  };
 }
 
 /**
@@ -2711,6 +2858,7 @@ function buildToolResults(
         toolCallId: toolCall.id,
         content: result.content,
         isError: result.isError || undefined,
+        ...(result.loadedTools?.length ? { loadedTools: result.loadedTools } : {}),
       });
     } else {
       // No record: either the abort landed before this call was dispatched

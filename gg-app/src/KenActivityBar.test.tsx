@@ -7,10 +7,6 @@ import { theme } from "./theme";
 const baseProps = {
   runStartTs: null,
   tokens: 1234,
-  isThinking: false,
-  thinkingStartTs: null,
-  thinkingAccumMs: 0,
-  onCancel: vi.fn(),
 };
 
 describe("KenActivityBar", () => {
@@ -29,12 +25,19 @@ describe("KenActivityBar", () => {
     expect(label.style.getPropertyValue("--shimmer-base")).toBe(theme.ken);
   });
 
-  it("preserves token counts, thinking feedback, and cancellation", () => {
-    const onCancel = vi.fn();
-    render(<KenActivityBar {...baseProps} isThinking thinkingAccumMs={2000} onCancel={onCancel} />);
-    expect(screen.getByText("↓ 1.2k tokens")).toBeTruthy();
-    expect(screen.getByText("thinking for 2s")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "esc to cancel" }));
-    expect(onCancel).toHaveBeenCalledOnce();
+  it("matches the main bar's running row, with Stop left to the composer's send key", () => {
+    const { container } = render(<KenActivityBar {...baseProps} />);
+    expect(container.querySelector(".task-activity > .statusrow.running")).toBeTruthy();
+    expect(screen.getByTitle("Output tokens").textContent).toBe(" · 1.2k tok");
+    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /tool panel/ })).toBeNull();
+  });
+
+  it("shows the tool panel chevron, like the main bar", () => {
+    const onToggleTools = vi.fn();
+    render(<KenActivityBar {...baseProps} toolsHidden onToggleTools={onToggleTools} />);
+    const chevron = screen.getByRole("button", { name: "Show tool panel" });
+    fireEvent.click(chevron);
+    expect(onToggleTools).toHaveBeenCalledOnce();
   });
 });

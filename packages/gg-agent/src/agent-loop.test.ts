@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { z } from "zod";
-import { GGAIError, ProviderError } from "@abukhaled/gg-ai";
+import { GGAIError, ProviderError, ResponseStalledError, formatChatError } from "@abukhaled/gg-ai";
 import {
   agentLoop,
   setStreamDiagnostic,
@@ -1089,6 +1089,94 @@ describe("agentLoop", () => {
     expect(events.some((event) => event.type === "agent_done")).toBe(true);
   });
 
+  // Grok's Chat Completions stream carries no reasoning tokens, and Grok 4.7
+  // reasons even with thinking off — so a normal coding turn was silent past
+  // the 45s first-event / 90s hard caps and got aborted and replayed forever.
+  it.each([{ thinking: "high" as const }, { thinking: undefined }])(
+    "lets Grok reason silently past the normal first-event caps (thinking=$thinking)",
+    async ({ thinking }) => {
+      vi.useFakeTimers();
+      mockStream.mockImplementation((opts: StreamOptions) => {
+        return {
+          [Symbol.asyncIterator]: async function* () {
+            await new Promise<void>((resolve, reject) => {
+              const timer = setTimeout(resolve, 240_000);
+              opts.signal?.addEventListener(
+                "abort",
+                () => {
+                  clearTimeout(timer);
+                  reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+                },
+                { once: true },
+              );
+            });
+            yield { type: "text_delta" as const, text: "Done." };
+          },
+          response: Promise.resolve(makeResponse("Done.")),
+        } as unknown as ReturnType<typeof stream>;
+      });
+
+      const loopPromise = collectLoop(
+        [
+          { role: "system", content: "sys" },
+          { role: "user", content: "fix the bug" },
+        ],
+        { provider: "xai", model: "grok-4.7", ...(thinking ? { thinking } : {}) },
+      );
+      await vi.advanceTimersByTimeAsync(241_000);
+      const { events } = await loopPromise;
+      vi.useRealTimers();
+
+      expect(mockStream).toHaveBeenCalledTimes(1);
+      expect(events.some((event) => event.type === "retry")).toBe(false);
+      expect(events.some((event) => event.type === "agent_done")).toBe(true);
+    },
+  );
+
+  // Thinking display off on a model that always reasons (MiMo, Codex lite):
+  // the provider flags hidden reasoning on its keepalives. Without honouring
+  // the flag, the 90s pre-output hard cap killed every long think.
+  it("gives hidden reasoning the thinking budget, not the 90s pre-output cap", async () => {
+    vi.useFakeTimers();
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          for (let i = 0; i < 6; i++) {
+            yield { type: "keepalive" as const, reasoning: true as const };
+            await new Promise<void>((resolve, reject) => {
+              const timer = setTimeout(resolve, 30_000);
+              opts.signal?.addEventListener(
+                "abort",
+                () => {
+                  clearTimeout(timer);
+                  reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+                },
+                { once: true },
+              );
+            });
+          }
+          yield { type: "text_delta" as const, text: "Done." };
+        },
+        response: Promise.resolve(makeResponse("Done.")),
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    const loopPromise = collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "go" },
+      ],
+      { provider: "xiaomi", model: "mimo-test" },
+    );
+    await vi.advanceTimersByTimeAsync(181_000);
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    expect(mockStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === "retry")).toBe(false);
+    expect(events.some((event) => event.type === "agent_done")).toBe(true);
+  });
+
   it.each([
     {
       name: "a pause inside an open tool call",
@@ -1114,6 +1202,55 @@ describe("agentLoop", () => {
             opts.signal?.addEventListener(
               "abort",
               () => {
+                clearTimeout(timer);
+                reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+              },
+              { once: true },
+            );
+          });
+          yield { type: "text_delta" as const, text: "Done." };
+        },
+        response: Promise.resolve(makeResponse("Done.")),
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    const loopPromise = collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "go" },
+      ],
+      { provider: "anthropic", model: "test", thinking: "high" },
+    );
+    await vi.advanceTimersByTimeAsync(pauseMs + 1_000);
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    expect(mockStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === "retry")).toBe(false);
+    expect(events.some((event) => event.type === "agent_done")).toBe(true);
+  });
+
+  it.each([
+    { name: "past the idle budget", pauseMs: 720_000 },
+    { name: "past the old 15min hard cap", pauseMs: 1_200_000 },
+  ])("keeps silent thinking alive $name while transport pings arrive", async ({ pauseMs }) => {
+    // help-me session: Opus thought silently >10 min; Anthropic only sent SSE pings
+    // (every 30s), which the SDK swallows, so the watchdog killed healthy requests.
+    vi.useFakeTimers();
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: "thinking_delta" as const, text: "" };
+          await new Promise<void>((resolve, reject) => {
+            const ping = setInterval(() => opts.onTransportActivity?.(), 30_000);
+            const timer = setTimeout(() => {
+              clearInterval(ping);
+              resolve();
+            }, pauseMs);
+            opts.signal?.addEventListener(
+              "abort",
+              () => {
+                clearInterval(ping);
                 clearTimeout(timer);
                 reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
               },
@@ -1349,6 +1486,67 @@ describe("agentLoop", () => {
     expect(terminal.error.message).toContain("after 5 automatic retries");
   }, 30_000);
 
+  // Regression for the 2026-10-17 incident: Opus thought, opened one very large
+  // `bash` write, then went silent for 5min mid tool input. Every replay
+  // regenerated the same oversized call and died the same way, and after six
+  // ~5min attempts the app said "Couldn't reach the provider" although every
+  // attempt had connected and streamed.
+  it("asks for smaller pieces after a long open tool call stalls, and reports a stall", async () => {
+    vi.useFakeTimers();
+    const capturedMessages: Message[][] = [];
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      capturedMessages.push([...opts.messages]);
+      const abortPromise = new Promise<never>((_, reject) => {
+        opts.signal?.addEventListener(
+          "abort",
+          () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          { once: true },
+        );
+      });
+      abortPromise.catch(() => {});
+      const streaming = opts.streaming !== false;
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          if (streaming) {
+            yield { type: "thinking_delta" as const, text: "" };
+            yield { type: "toolcall_delta" as const, id: "t1", name: "bash", argsJson: '{"c":"' };
+          }
+          await abortPromise;
+        },
+        response: abortPromise,
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    const loopPromise = collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "write the variations board" },
+      ],
+      { provider: "anthropic", model: "test", thinking: "high" },
+    );
+    for (let i = 0; i < 25; i++) await vi.advanceTimersByTimeAsync(310_000);
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    const isSplitHint = (m: Message) =>
+      m.role === "user" &&
+      typeof m.content === "string" &&
+      m.content.includes("split the work into smaller pieces");
+    expect(capturedMessages.length).toBe(6);
+    // The first replay already carries the hint, and it is added only once.
+    expect(capturedMessages[0]?.some(isSplitHint)).toBe(false);
+    expect(capturedMessages[1]?.at(-1)).toSatisfy(isSplitHint);
+    expect(capturedMessages[5]?.filter(isSplitHint)).toHaveLength(1);
+
+    const terminal = events.find((event) => event.type === "error");
+    if (terminal?.type !== "error") throw new Error("expected terminal error");
+    expect(terminal.error).toBeInstanceOf(ResponseStalledError);
+    expect((terminal.error as ResponseStalledError).inToolCall).toBe(true);
+    const formatted = formatChatError(terminal.error);
+    expect(formatted.headline).toBe("The response kept stalling");
+    expect(formatted.headline).not.toContain("reach");
+  }, 30_000);
+
   it("automatically replays a turn after a runaway tool-call stream", async () => {
     vi.useFakeTimers();
     mockStream
@@ -1479,6 +1677,76 @@ describe("agentLoop", () => {
     });
     expect(texts[partialIdx + 1]).toContain("cut off");
     expect(texts.some((t) => t === "and the second half.")).toBe(true);
+  }, 30_000);
+
+  it("hedges a hung first event on a warm cached prompt instead of stall-retrying", async () => {
+    // 2026-10-22 gg-addict: on a fully cached ~370K-token prompt, Anthropic
+    // sometimes sent nothing for 90-118s until the watchdog fired
+    // ("Retrying…"); the identical retry answered in ~6-14s.
+    vi.useFakeTimers();
+    const diagnostics: string[] = [];
+    setStreamDiagnostic((phase) => diagnostics.push(phase));
+    const signals: AbortSignal[] = [];
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      signals.push(opts.signal as AbortSignal);
+      if (signals.length === 1) {
+        return mockToolCallResult("context_probe", {
+          inputTokens: 200,
+          outputTokens: 20,
+          cacheRead: 370_000,
+        }) as unknown as ReturnType<typeof stream>;
+      }
+      if (signals.length === 2) {
+        const hung = new Promise<never>((_, reject) => {
+          opts.signal?.addEventListener(
+            "abort",
+            () => reject(Object.assign(new Error("Aborted"), { name: "AbortError" })),
+            { once: true },
+          );
+        });
+        hung.catch(() => {});
+        return {
+          [Symbol.asyncIterator]: async function* () {
+            yield* [];
+            await hung;
+          },
+          response: hung,
+        } as unknown as ReturnType<typeof stream>;
+      }
+      return mockOkResult("answered by the hedge") as unknown as ReturnType<typeof stream>;
+    });
+
+    const loopPromise = collectLoop(
+      [
+        { role: "system", content: "sys" },
+        // Large enough that the first-event watchdog (~66s) leaves room to hedge.
+        { role: "user", content: "x".repeat(100_000) },
+      ],
+      {
+        provider: "anthropic",
+        model: "test",
+        tools: [
+          {
+            name: "context_probe",
+            description: "continue the test",
+            parameters: emptyParams,
+            execute: () => "ok",
+          },
+        ],
+      },
+    );
+    await vi.advanceTimersByTimeAsync(40_000);
+    const { events } = await loopPromise;
+    setStreamDiagnostic(null);
+    vi.useRealTimers();
+
+    expect(events.some((e) => e.type === "retry")).toBe(false);
+    expect(signals).toHaveLength(3);
+    expect(signals[1]?.aborted).toBe(true);
+    expect(diagnostics).toContain("hedge_started");
+    expect(diagnostics).toContain("hedge_settled");
+    expect(diagnostics).not.toContain("idle_timeout_fired");
+    expect(events).toContainEqual({ type: "text_delta", text: "answered by the hedge" });
   }, 30_000);
 
   it("discards a sub-threshold partial on transport-failure retry", async () => {
@@ -2342,6 +2610,33 @@ describe("agentLoop resolveTool", () => {
     expect(end).toMatchObject({ isError: false, result: "late result" });
     expect(resolveTool).toHaveBeenCalledWith("late_tool");
     expect(tools.map((t) => t.name)).toEqual(["late_tool"]);
+    // The resolved tool loads at this result (transcript tool loading).
+    const secondCall = mockStream.mock.calls[1]?.[0] as { messages: Message[] };
+    const toolMsg = secondCall.messages.find((m) => m.role === "tool");
+    expect(toolMsg?.role === "tool" && toolMsg.content[0]?.loadedTools).toEqual(["late_tool"]);
+  });
+
+  it("copies a structured result's loadedTools onto the provider tool result", async () => {
+    const usage: Usage = { inputTokens: 1, outputTokens: 1 };
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("loader", usage) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+    const loader: AgentTool = {
+      name: "loader",
+      description: "loads",
+      parameters: emptyParams,
+      execute: () => ({ content: "ok", loadedTools: ["b", "a"] }),
+    };
+    await collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+      tools: [loader],
+    });
+    const secondCall = mockStream.mock.calls[1]?.[0] as { messages: Message[] };
+    const toolMsg = secondCall.messages.find((m) => m.role === "tool");
+    expect(toolMsg?.role === "tool" && toolMsg.content[0]?.loadedTools).toEqual(["a", "b"]);
   });
 });
 
@@ -2971,6 +3266,44 @@ describe("agentLoop — per-turn credential resolution", () => {
     });
 
     expect(mockStream.mock.calls[0]?.[0].apiKey).toBe("token-captured");
+  });
+
+  it("drops the ChatGPT account when the resolved credential switches to an API key", async () => {
+    // Plan usage ran out mid-run in another window: the next turn resolves the
+    // OpenAI API key, which has no account and must not ride the plan route.
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("context_probe", {
+          inputTokens: 10,
+          outputTokens: 5,
+        }) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+    const creds = [{ apiKey: "plan-token", accountId: "user-sub" }, { apiKey: "sk-key" }];
+    let calls = 0;
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "openai",
+      model: "test",
+      apiKey: "plan-token",
+      accountId: "user-sub",
+      resolveCredentials: async () => creds[calls++] ?? { apiKey: "sk-key" },
+      tools: [
+        {
+          name: "context_probe",
+          description: "continue the test",
+          parameters: emptyParams,
+          execute: () => "ok",
+        },
+      ],
+    });
+
+    expect(mockStream.mock.calls[0]?.[0]).toMatchObject({
+      apiKey: "plan-token",
+      accountId: "user-sub",
+    });
+    expect(mockStream.mock.calls[1]?.[0].apiKey).toBe("sk-key");
+    expect(mockStream.mock.calls[1]?.[0].accountId).toBeUndefined();
   });
 });
 

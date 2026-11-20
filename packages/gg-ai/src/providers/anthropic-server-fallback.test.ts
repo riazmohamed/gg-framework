@@ -184,7 +184,6 @@ describe("server-side fallback request", () => {
   it.each<[string, Partial<StreamOptions>, boolean]>([
     ["direct API (default)", {}, true],
     ["direct API (explicit)", { baseUrl: "https://api.anthropic.com" }, true],
-    ["OAuth on direct API", { apiKey: "sk-ant-oat-x" }, true],
     ["Bedrock", { baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com" }, false],
     ["Vertex", { baseUrl: "https://us-east5-aiplatform.googleapis.com/v1" }, false],
     ["custom proxy", { baseUrl: "https://llm-proxy.internal" }, false],
@@ -207,18 +206,9 @@ describe("server-side fallback request", () => {
 
   it("merges the beta with existing betas", async () => {
     const rec = recorder(() => sse(SIMPLE_EVENTS));
-    await streamAnthropic(
-      baseOptions({ apiKey: "sk-ant-oat-x", compaction: true, fetch: rec.fetch }),
-    );
+    await streamAnthropic(baseOptions({ compaction: true, fetch: rec.fetch }));
     const betas = rec.calls[0]!.headers["anthropic-beta"]!.split(",");
-    expect(betas).toEqual(
-      expect.arrayContaining([
-        "claude-code-20250219",
-        "oauth-2025-04-20",
-        "compact-2026-01-12",
-        SERVER_FALLBACK_BETA,
-      ]),
-    );
+    expect(betas).toEqual(expect.arrayContaining(["compact-2026-01-12", SERVER_FALLBACK_BETA]));
   });
 
   it("also applies to the non-streaming path", async () => {
@@ -305,11 +295,6 @@ describe("server-side fallback 400 fail-safe", () => {
     await streamAnthropic(baseOptions({ fetch: rec2.fetch }));
     expect(rec2.calls).toHaveLength(1);
     expect(rec2.calls[0]!.body.fallbacks).toBeUndefined();
-
-    // A different auth kind is tracked separately.
-    const rec3 = recorder(() => sse(SIMPLE_EVENTS));
-    await streamAnthropic(baseOptions({ apiKey: "sk-ant-oat-x", fetch: rec3.fetch }));
-    expect(rec3.calls[0]!.body.fallbacks).toBe("default");
   });
 
   it("does not retry an unrelated 400", async () => {
@@ -541,5 +526,29 @@ describe("fallback replay rules", () => {
     const out = toOpenAIMessages(HISTORY_WITH_FALLBACK);
     expect(JSON.stringify(out)).not.toContain('"fallback"');
     expect(JSON.stringify(out)).toContain("answer.");
+  });
+});
+
+describe("no Claude Code impersonation", () => {
+  it("never sends Claude Code identity, even for an old sign-in token", async () => {
+    for (const apiKey of ["sk-ant-api03-x", "sk-ant-oat01-x"]) {
+      const rec = recorder(() => sse(SIMPLE_EVENTS));
+      await streamAnthropic(
+        baseOptions({
+          apiKey,
+          messages: [
+            { role: "system", content: "Be brief." },
+            { role: "user", content: "hi" },
+          ],
+          fetch: rec.fetch,
+        }),
+      );
+      const { headers, body } = rec.calls[0]!;
+      expect(headers["user-agent"]).toMatch(/^Anthropic\/JS /);
+      expect(headers["x-app"]).toBeUndefined();
+      expect(headers["user-agent"] ?? "").not.toMatch(/claude-cli/);
+      expect(headers["anthropic-beta"] ?? "").not.toMatch(/claude-code-|oauth-/);
+      expect(JSON.stringify(body.system)).not.toContain("Claude Code");
+    }
   });
 });

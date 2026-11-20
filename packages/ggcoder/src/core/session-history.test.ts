@@ -7,6 +7,7 @@ import type {
 } from "./session-manager.js";
 import { STEERING_PREFIX, buildNotificationSteeringText } from "./steering.js";
 import { frameAutopilotInjection } from "./autopilot-cycle.js";
+import { buildLivePreviewPrompt } from "./live-preview.js";
 import {
   normalizeAutopilotMarkersForHistory,
   normalizeAppMarkersForHistory,
@@ -154,6 +155,26 @@ describe("normalizeKenTurnsForHistory", () => {
 });
 
 describe("restoreUserRow", () => {
+  it("shows a live-preview message as the typed words plus the element chip, queued or not", () => {
+    const prompt = buildLivePreviewPrompt(
+      "Change to Spanish Latte",
+      {
+        url: "http://localhost:5173/",
+        element: { selector: "h2", html: "<h2>Iced latte</h2>", tag: "h2", text: "Iced latte" },
+      },
+      "/proj",
+    );
+    for (const content of [
+      prompt,
+      `${STEERING_PREFIX}${prompt}`,
+      [{ type: "text" as const, text: prompt }],
+    ]) {
+      const row = restoreUserRow(content);
+      expect(row.text).toBe("Change to Spanish Latte");
+      expect(row.attachments).toEqual([{ kind: "file", name: "<h2> Iced latte" }]);
+    }
+  });
+
   it("strips the mid-run steering wrapper so queued prompts resume clean", () => {
     const row = restoreUserRow(`${STEERING_PREFIX}also add dark mode`);
     expect(row.text).toBe("also add dark mode");
@@ -242,6 +263,31 @@ describe("restoreUserRow", () => {
     ]);
     expect(row.text).toBe("summarize this clip");
     expect(row.videoWarning).toBe(true);
+    expect(row.attachments).toEqual([{ kind: "video", name: "clip.mp4" }]);
+  });
+
+  it("recovers attached file and video chips, including a file-only message", () => {
+    const row = restoreUserRow([
+      {
+        type: "text",
+        text: "Attached files (inspect with your tools):\n- My Book (2nd ed).epub (saved at /p/.gg/uploads/lx1-My_Book_2nd_ed_.epub)\n- spec.pdf (saved at /p/.gg/uploads/lx2-spec.pdf)\nThe read tool opens PDF and EPUB files as text.",
+      },
+      {
+        type: "text",
+        text: "The user attached a video at /p/.gg/uploads/lx3-demo.mov. You CAN watch it: call the read tool on this exact path now.",
+      },
+      {
+        type: "text",
+        text: `[User attached a file "notes.txt" but it could not be saved, so it can't be opened.]`,
+      },
+    ]);
+    expect(row.text).toBe("");
+    expect(row.attachments).toEqual([
+      { kind: "file", name: "My Book (2nd ed).epub" },
+      { kind: "file", name: "spec.pdf" },
+      { kind: "video", name: "demo.mov" },
+      { kind: "file", name: "notes.txt" },
+    ]);
   });
 });
 

@@ -11,22 +11,31 @@
  * The agent spine (gg-ai → gg-agent → gg-core) and every tool are reused
  * unchanged via AgentSession — this file is only a network seam.
  */
+import { startThreatFeedSync } from "./core/threat-feed.js";
 import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { environmentSecrets, formatChatError, redactValue } from "@abukhaled/gg-ai";
 import type { AddressInfo } from "node:net";
 import { createAppErrorPayload } from "./app-error.js";
 import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { Provider, ThinkingLevel } from "@abukhaled/gg-ai";
 import { setStreamDiagnostic } from "@abukhaled/gg-agent";
+import { streamDiagLevel } from "./core/stream-diag-level.js";
 import { AgentSession } from "./core/agent-session.js";
 import { RunLifecycle } from "./core/run-lifecycle.js";
 import { RunClaim } from "./core/run-claim.js";
-import { shouldOfferPendingPlan } from "./core/plan-handoff.js";
+import { IdleWakeController } from "./core/idle-wake.js";
 import {
+  IMPLEMENT_PLAN_PROMPT as SHARED_IMPLEMENT_PLAN_PROMPT,
+  PLAN_SUBMITTED_FOR_REVIEW,
+  shouldOfferPendingPlan,
+} from "./core/plan-handoff.js";
+import { discoverSkillsWithBlocked, loadBundledSkill } from "./core/skills.js";
+import {
+  chatWorkspaceDir,
   createChatAgent,
   parseChatAgentId,
   switchChatAgent,
@@ -36,23 +45,39 @@ import { createMotionAgentSession } from "./motion-agent/motion-agent.js";
 import { buildJiwaTools, JiwaStore } from "./chat-agents/jiwa.js";
 import { buildMemoryTools, MemoryStore } from "./chat-agents/memory.js";
 import { buildKenSystemPrompt, buildKenAutopilotSystemPrompt } from "./core/ken-prompt.js";
-import { countAssistantMessages, type WorkflowCommandSpec } from "./core/autopilot-gate.js";
+import {
+  countAssistantMessages,
+  extractTurnToolCalls,
+  type WorkflowCommandSpec,
+} from "./core/autopilot-gate.js";
 import { describeRunVerification, describeTurnVerification } from "./core/run-status.js";
 import { validateKenModelPref, effectiveKenModel, type KenModelPref } from "./core/ken-model.js";
 import type { RunOutcome } from "./core/session-manager.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
+import { pruneDiagnosticsRecords } from "./core/internal-diagnostics.js";
+import { pruneCheckpointSessions } from "./core/checkpoint-store.js";
 import {
   dualAuthProvider,
   discoverLocalModels,
+  findProbedModel,
+  isLocalModelId,
   formatLocalModelId,
   parseLocalModelId,
   probeEndpoint,
+  ollamaServedContext,
+  resolveClaudeCodeBinary,
   toModelInfo as localModelInfo,
   type LocalEndpoint,
   type LocalEndpointProbe,
 } from "@abukhaled/gg-core";
-import { listAllEndpoints, syncEndpointCredentials } from "./core/local-endpoint-store.js";
+import {
+  listAllEndpoints,
+  listCustomEndpoints,
+  syncEndpointCredentials,
+} from "./core/local-endpoint-store.js";
+import { loadOpenRouterCatalog } from "./core/openrouter-catalog-store.js";
+import { openCodeCatalogs } from "./core/opencode-catalog-store.js";
 import type { OAuthLoginCallbacks } from "./core/oauth/types.js";
 import {
   AUTH_PROVIDERS,
@@ -66,6 +91,7 @@ import { ensureAppDirs, loadSavedSettings } from "./config.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import {
   getModel,
+  withoutPaidTier,
   getDefaultThinkingLevel,
   getContextWindow,
   clearRuntimeModels,
@@ -77,14 +103,15 @@ import type { GitHubCI } from "./utils/github-ci.js";
 import type { ProjectHealthScan } from "./core/project-health-scan.js";
 import { scoreProjectHealth, type ProjectHealth } from "./core/project-health-score.js";
 import { type RepoPolls, createRepoPolls } from "./app-sidecar/repo-polls.js";
-import { extractPlanSteps } from "./utils/plan-steps.js";
+import { extractPlanSteps, stepsDoneThrough } from "./utils/plan-steps.js";
+import { desktopGuidance } from "./app-sidecar/desktop-guidance.js";
 import { getSupportedThinkingLevels, isThinkingLevelSupported } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
-import { loadCustomCommands } from "./core/custom-commands.js";
 import { pruneDoneTasksSync } from "./core/tasks-store.js";
 import { initLogger, log } from "./core/logger.js";
 import { installTerminationHandlers } from "./core/shutdown.js";
 import { stopRadio } from "./core/radio.js";
+import { reapOrphanedRadioPlayers } from "./core/radio-players.js";
 import { enrichProcessPath } from "./core/shell-path.js";
 import type { ServeController } from "./modes/serve-mode.js";
 import { createElicitationBridge } from "./core/mcp/index.js";
@@ -93,6 +120,7 @@ import {
   createAskUserBridge,
   deliverLateAnswer,
   type AskQuestion,
+  type AskUserPrompt,
   type AskUserResult,
 } from "./core/ask-user.js";
 import { createAskUserTool } from "./tools/ask-user.js";
@@ -113,6 +141,9 @@ import {
 } from "./app-sidecar/app-settings.js";
 import { KEN_ALLOWED_TOOLS } from "./app-sidecar/ken-context.js";
 import { type ProgressManager, createProgressManager } from "./app-sidecar/progress-manager.js";
+import { createPollClient } from "./app-sidecar/poll.js";
+import { type TrophyManager, createTrophyManager } from "./app-sidecar/trophy-manager.js";
+import { localTrophyDate } from "./core/trophies/engine.js";
 import { handleSessionRoutes } from "./app-sidecar/session-routes.js";
 import { handleGoalRoutes } from "./app-sidecar/goal-routes.js";
 import { readGitState, resolveGitCwd } from "./app-sidecar/git-target.js";
@@ -120,6 +151,7 @@ import {
   goalPhase,
   goalsRoot,
   isGoalDir,
+  isGoalStartMessage,
   startGoalOnAnswer,
   readGoal,
 } from "./core/goals-store.js";
@@ -136,10 +168,23 @@ import { handleRunControlRoutes } from "./app-sidecar/run-control-routes.js";
 import { handleAuthRoutes } from "./app-sidecar/auth-routes.js";
 import { handleIntegrationRoutes } from "./app-sidecar/integration-routes.js";
 import { handleMcpRoutes } from "./app-sidecar/mcp-routes.js";
+import { finishShellRun, handleShellRoutes } from "./app-sidecar/shell-routes.js";
+import {
+  createLivePreviewManager,
+  findLivePreviewAssets,
+} from "./app-sidecar/live-preview/manager.js";
+import { handleLivePreviewRoutes } from "./app-sidecar/live-preview/routes.js";
+import { findProjectServers, probePort } from "./app-sidecar/live-preview/servers.js";
+import { createLivePreviewTool, type LivePreviewResult } from "./tools/live-preview.js";
+import { ShellRunner } from "./app-sidecar/shell-runs.js";
+import { syncMcpServerAcross } from "./app-sidecar/mcp-sync.js";
 import type { SessionRouteContext } from "./app-sidecar/route-context.js";
 import { createHfPullManager } from "./app-sidecar/hf-pull-manager.js";
 import { keepAwake } from "./app-sidecar/keep-awake.js";
 import { createAutopilotRunner } from "./app-sidecar/autopilot-runner.js";
+
+/** Limit for re-reading git state in the background when git missed the usual 2 s. */
+const SLOW_GIT_READ_TIMEOUT_MS = 15_000;
 
 async function main(): Promise<void> {
   // Hidden persistent-worker dispatch must win before strict JSON/server parsing.
@@ -181,9 +226,9 @@ async function main(): Promise<void> {
       phase === "idle_timeout_fired" ||
       phase === "hard_timeout_fired" ||
       phase === "stall_exhausted";
-    // A session stuck on the non-streaming fallback costs real money and real
-    // latency; it does not belong in the INFO noise floor.
-    log(phase === "non_streaming_session" ? "WARN" : "INFO", "stream", phase, {
+    const level = streamDiagLevel(phase, data);
+    if (level === null) return;
+    log(level, "stream", phase, {
       ...(data ?? {}),
       ...(includeRuntime
         ? {
@@ -225,12 +270,42 @@ async function main(): Promise<void> {
   // omits Homebrew/Cargo/version-manager dirs, so the agent can't find node,
   // git, python, rg, etc. Enrich process.env.PATH from the login shell once,
   // before anything spawns (bash tool, background tasks, LSP, git helpers all
-  // inherit it). Best-effort — never blocks startup beyond its internal cap.
-  await enrichProcessPath();
+  // inherit it). Best-effort, capped internally. Not awaited here: it overlaps
+  // the rest of boot (nothing below spawns), and the HTTP handler holds every
+  // request until it settles, so no window-driven spawn can see the bare PATH.
+  let pathReady = false;
+  const pathReadyPromise = enrichProcessPath()
+    .catch(() => {})
+    .finally(() => {
+      pathReady = true;
+    });
 
   // Sweep recoverable full tool outputs (~/.gg/tool-output/) older than 48h.
   // Fire-and-forget: cleanup must never delay or break startup.
   void cleanupToolOutputs().catch(() => {});
+  // ~/.gg/diagnostics/sessions records older than 30 days (best-effort, non-blocking).
+  void pruneDiagnosticsRecords()
+    .then(({ removed, freedBytes }) => {
+      if (removed > 0) {
+        log("INFO", "diagnostics", "Pruned old diagnostics records", {
+          removed: String(removed),
+          freedBytes: String(freedBytes),
+        });
+      }
+    })
+    .catch(() => {});
+  // ~/.gg/checkpoints/<session> folders untouched for 30 days (best-effort, non-blocking).
+  void pruneCheckpointSessions()
+    .then(({ removed }) => {
+      if (removed > 0) {
+        log("INFO", "checkpoints", "Pruned old checkpoint folders", { removed: String(removed) });
+      }
+    })
+    .catch(() => {});
+
+  // Daily malicious-package feed (OSV MAL-, npm + PyPI): deferred, background,
+  // fail-silent; at most one sync a day (core/threat-feed.ts).
+  startThreatFeedSync();
 
   const auth = new AuthStorage(paths.authFile);
   await auth.load();
@@ -252,6 +327,22 @@ async function main(): Promise<void> {
     for (const ctx of sessions.values()) ctx.broadcast(type, data);
   };
 
+  // A synced OpenRouter catalog replaces the built-in list; never fatal.
+  void loadOpenRouterCatalog(auth)
+    .then((s) => {
+      if (s.synced) broadcastAll("models_change", {});
+    })
+    .catch((err: unknown) => {
+      log("WARN", "app-sidecar", "openrouter catalog load failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+  // OpenCode's cached model lists; `/models` reads them again when stale.
+  void openCodeCatalogs.load().then((installed) => {
+    if (installed) broadcastAll("models_change", {});
+  });
+
   const sessionIdsAt = (cwd: string): string[] => {
     const target = path.resolve(cwd);
     return [...sessions.values()]
@@ -259,6 +350,9 @@ async function main(): Promise<void> {
       .map((ctx) => ctx.id)
       .sort();
   };
+  /** Apply a saved MCP server change to every open window, no restart needed. */
+  const syncMcpServer = (name: string) =>
+    syncMcpServerAcross(sessions.values(), name, paths.settingsFile);
   /** Whether any live window session in `cwd` is working right now. */
   const busyAt = (cwd: string): boolean => {
     const target = path.resolve(cwd);
@@ -287,12 +381,100 @@ async function main(): Promise<void> {
   // XP/rank progress — loaded once per daemon; awards fan out to every window.
   // Each frame is tagged `origin: true` only for the session that earned the
   // XP, so that window alone plays sounds/chips while the rest just re-render.
+  // Home's weekly poll (daemon-level; one random voter id in ~/.gg/poll.json).
+  const poll = createPollClient({ agentDir: paths.agentDir });
   const progress = await createProgressManager(paths.agentDir, (snapshot, originId) => {
     for (const ctx of sessions.values())
       ctx.broadcast("progress", { ...snapshot, origin: ctx.id === originId });
   });
 
+  // Trophies — daemon-level like progress. XP totals (commits, streak, level)
+  // come from the progress snapshot rather than being counted twice.
+  const trophies = await createTrophyManager(
+    () => {
+      const p = progress.snapshot();
+      return {
+        prompts: p.totals.prompts,
+        commits: p.totals.commits,
+        linesShipped: p.totals.linesShipped,
+        level: p.level,
+      };
+    },
+    (snapshot, originId) => {
+      for (const ctx of sessions.values())
+        ctx.broadcast("trophies", { ...snapshot, origin: ctx.id === originId });
+    },
+  );
+
   const { subscriptionUsage } = createUsageService(auth);
+
+  /** Create a session and register it under a fresh id (a window's, or a live preview's). */
+  const openSession = async (
+    opts: {
+      mode: ReturnType<typeof parseWorkspaceMode>;
+      chatAgent: ReturnType<typeof parseChatAgentId>;
+      cwd: string;
+      sessionPath?: string;
+    },
+    { preview = false }: { preview?: boolean } = {},
+  ): Promise<SessionContext> => {
+    const id = randomUUID();
+    const ctx = await createSession(
+      {
+        auth,
+        paths,
+        progress,
+        trophies,
+        memoryStore,
+        jiwaStore,
+        broadcastAll,
+        oauthInFlightProviders,
+        repoPolls,
+        sessionIdsAt,
+        busyAt,
+        syncMcpServer,
+        // The preview's own session has no window to preview from.
+        ...(preview
+          ? {}
+          : {
+              livePreview: async (sessionId: string, url: string | undefined) => {
+                const window = sessions.get(sessionId);
+                if (!window) throw new Error("This window's session is gone.");
+                return livePreview.start(window, url ? { url } : {});
+              },
+            }),
+      },
+      { id, ...opts },
+    );
+    sessions.set(id, ctx);
+    log("INFO", "app-sidecar", "session created", {
+      id,
+      mode: opts.mode,
+      chatAgent: opts.chatAgent,
+      cwd: opts.cwd,
+    });
+    return ctx;
+  };
+  const closeSession = async (id: string): Promise<void> => {
+    const ctx = sessions.get(id);
+    if (!ctx) return;
+    sessions.delete(id);
+    log("INFO", "app-sidecar", "session disposed", { id });
+    await ctx.dispose().catch(() => {});
+  };
+
+  // Live preview: one per window, each with its own session in the window's project.
+  const livePreview = createLivePreviewManager({
+    assetsDir: findLivePreviewAssets(),
+    scan: (cwd) => findProjectServers(cwd),
+    probe: (port) => probePort(port),
+    createSession: (cwd) =>
+      openSession({ mode: "code", chatAgent: parseChatAgentId(undefined), cwd }, { preview: true }),
+    closeSession,
+    usage: subscriptionUsage,
+    log: (message, fields) => log("INFO", "live-preview", message, fields),
+    onChange: (windowId, status) => sessions.get(windowId)?.broadcast("live_preview", status),
+  });
 
   // git status / GitHub counts / CI pollers, one per repo however many windows
   // have it open (each window used to run its own).
@@ -311,6 +493,13 @@ async function main(): Promise<void> {
   }
 
   const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
+    if (!pathReady) {
+      void pathReadyPromise.then(() => handleRequest(req, res));
+      return;
+    }
+    handleRequest(req, res);
+  });
+  function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
     const url = req.url ?? "/";
     const method = req.method ?? "GET";
 
@@ -357,35 +546,13 @@ async function main(): Promise<void> {
             : (process.env.GG_APP_CWD ?? process.cwd());
         const sessionPath =
           typeof body.sessionPath === "string" && body.sessionPath ? body.sessionPath : undefined;
-        const id = randomUUID();
         try {
-          const ctx = await createSession(
-            {
-              auth,
-              paths,
-              progress,
-              memoryStore,
-              jiwaStore,
-              broadcastAll,
-              oauthInFlightProviders,
-              repoPolls,
-              sessionIdsAt,
-              busyAt,
-            },
-            { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
-          );
-          sessions.set(id, ctx);
-          log("INFO", "app-sidecar", "session created", {
-            id,
-            mode,
-            chatAgent,
-            cwd: sessionCwd,
-          });
+          const ctx = await openSession({ mode, chatAgent, cwd: sessionCwd, sessionPath });
           // The conversation file too, so the app can reopen this exact
           // session if the daemon restarts (a new session has no path yet
           // on the app's side).
           daemonJson(res, 200, {
-            sessionId: id,
+            sessionId: ctx.id,
             sessionPath: ctx.session.getState().sessionPath ?? null,
           });
         } catch (err) {
@@ -400,12 +567,9 @@ async function main(): Promise<void> {
     // Dispose a session: DELETE /session/:id.
     if (method === "DELETE" && url.startsWith("/session/")) {
       const id = decodeURIComponent(url.slice("/session/".length));
-      const ctx = sessions.get(id);
-      if (ctx) {
-        sessions.delete(id);
-        void ctx.dispose().catch(() => {});
-        log("INFO", "app-sidecar", "session disposed", { id });
-      }
+      // A closing window takes its live preview (and the preview's session) with it.
+      void livePreview.onSessionClosed(id);
+      void closeSession(id);
       daemonJson(res, 200, { ok: true });
       return;
     }
@@ -449,13 +613,44 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Trophies are app-wide too: earned anywhere, shown in every window.
+    if (method === "GET" && url === "/trophies") {
+      daemonJson(res, 200, trophies.snapshot());
+      return;
+    }
+
+    // The weekly poll is app-wide, so no session header. Always 200 with the poll state; its
+    // `status` tells the app the poll server's answer (0 = unreachable).
+    if (method === "GET" && url === "/poll") {
+      void poll.current().then((state) => daemonJson(res, 200, state));
+      return;
+    }
+    if (method === "POST" && url === "/poll/vote") {
+      void daemonReadBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let parsed: { pollId?: unknown; choice?: unknown };
+        try {
+          parsed = JSON.parse(raw || "{}") as { pollId?: unknown; choice?: unknown };
+        } catch {
+          daemonJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (typeof parsed.pollId !== "string" || typeof parsed.choice !== "number") {
+          daemonJson(res, 400, { error: "pollId and choice are required" });
+          return;
+        }
+        daemonJson(res, 200, await poll.vote(parsed.pollId, parsed.choice));
+      });
+      return;
+    }
+
     // Subscription quota is account-wide, not project/session-specific. OAuth
     // tokens stay in this daemon; only the active provider's normalized snapshot
     // reaches the webview.
     if (method === "GET" && (url === "/usage" || url.startsWith("/usage?"))) {
       void (async () => {
         const provider = new URL(url, `http://${host}`).searchParams.get("provider");
-        if (provider !== "anthropic" && provider !== "openai" && provider !== "moonshot") {
+        if (provider !== "anthropic" && provider !== "moonshot") {
           daemonJson(res, 400, { error: "unsupported usage provider" });
           return;
         }
@@ -476,8 +671,9 @@ async function main(): Promise<void> {
       daemonJson(res, 404, { error: "unknown session" });
       return;
     }
+    if (handleLivePreviewRoutes(livePreview, ctx, req, res, url, method)) return;
     ctx.handle(req, res, url, method);
-  });
+  }
   server.listen(port, host, () => {
     const addr = server.address() as AddressInfo;
     // The Rust shell reads this line to learn the daemon port (it already
@@ -485,6 +681,10 @@ async function main(): Promise<void> {
     process.stdout.write(`GG_APP_LISTENING ${addr.port} ${authToken}\n`);
     log("INFO", "app-sidecar", "daemon listening", { port: String(addr.port), host });
   });
+
+  // A daemon killed hard never stopped its radio player; stop it now so the
+  // next play doesn't stack a second stream on top.
+  void reapOrphanedRadioPlayers().catch(() => {});
 
   const shellPid = process.ppid;
   // Session teardown awaits MCP servers, LSP servers and third-party extension
@@ -506,6 +706,8 @@ async function main(): Promise<void> {
       keepAwake.dispose();
       // Close the ~/.gg progress fs.watch handle (baseline #8 leak fix).
       progress.dispose();
+      // Previews first: they close their own sessions, which then aren't disposed twice.
+      await livePreview.stopAll().catch(() => {});
       await Promise.all([...sessions.values()].map((c) => c.dispose().catch(() => {})));
       server.close();
     },
@@ -537,6 +739,9 @@ async function main(): Promise<void> {
   parentWatch.unref?.();
 }
 
+/** Daemon-wide: the last local-model scan result that was logged. */
+let lastLocalScanSummary: string | undefined;
+
 /**
  * Build one in-process agent session: its AgentSession, SSE client set, event
  * bridge, task runner, auth/login bridge, and the full HTTP route table exposed
@@ -549,6 +754,7 @@ async function createSession(
     auth: AuthStorage;
     paths: Awaited<ReturnType<typeof ensureAppDirs>>;
     progress: ProgressManager;
+    trophies: TrophyManager;
     memoryStore: MemoryStore;
     jiwaStore: JiwaStore;
     /** Fan one frame out to EVERY window, not just this session's. */
@@ -564,6 +770,9 @@ async function createSession(
     sessionIdsAt: (cwd: string) => string[];
     /** Whether any live window session in `cwd` is working right now. */
     busyAt: (cwd: string) => boolean;
+    syncMcpServer: SessionRouteContext["syncMcpServer"];
+    /** Start this window's live preview (the `live_preview` tool); absent for the preview's own session. */
+    livePreview?: (sessionId: string, url: string | undefined) => Promise<LivePreviewResult>;
   },
   opts: {
     id: string;
@@ -576,6 +785,7 @@ async function createSession(
   const {
     auth,
     progress,
+    trophies,
     memoryStore,
     jiwaStore,
     broadcastAll,
@@ -583,14 +793,17 @@ async function createSession(
     repoPolls,
     sessionIdsAt,
     busyAt,
+    syncMcpServer,
   } = deps;
   const paths = deps.paths;
   const mode = opts.mode;
   let chatAgent = opts.chatAgent;
-  const cwd = opts.cwd;
+  const cwd = mode === "chat" ? chatWorkspaceDir(opts.cwd) : opts.cwd;
   // Motion's workspace is a dedicated folder the app names inside the projects
   // root; create it on first use so a fresh install can start a video at once.
-  if (mode === "motion") await fs.mkdir(cwd, { recursive: true });
+  // GG Chat's folder likewise; both get a ready skills folder.
+  if (mode === "motion" || mode === "chat")
+    await fs.mkdir(path.join(cwd, ".gg", "skills"), { recursive: true });
   // A coding session whose cwd is a Goal folder is that goal's coordinator.
   let goal =
     mode === "code" && isGoalDir(goalsRoot(paths.agentDir), cwd)
@@ -600,7 +813,7 @@ async function createSession(
   // parsing); the daemon owns the real listen host.
   const host = "127.0.0.1";
 
-  const saved = loadSavedSettings(paths.settingsFile);
+  const saved = loadSavedSettings(paths.settingsFile, { localModels: true });
   // Native login/logout and other live sessions share auth.json. Refresh the
   // daemon-level snapshot before choosing this session's provider so a project
   // never boots against credentials that were just replaced or disconnected.
@@ -649,54 +862,29 @@ async function createSession(
     for (const c of clients) c.res.write(frame);
   }
 
-  // Replace CLI-specific guidance (slash commands, CLI tool names) with
-  // desktop-app equivalents so the webview never shows "run ggcoder login".
-  // Applied to BOTH the message and guidance fields — the auth "Not logged in…
-  // Run "ggcoder login"" string lives in `message`, not `guidance`.
-  function desktopGuidance(guidance: string): string {
-    return (
-      guidance
-        // Auth: `Run "ggcoder login"` / `Run 'ggcoder login'` / `Run `ggcoder login``
-        // (any quote style, or none) → button. Do this first so the whole phrase
-        // is rewritten cleanly instead of leaving a dangling `Run "…"`.
-        .replaceAll(/Run ["'`]?ggcoder login["'`]?/gi, "Use the Login to AI Providers button")
-        // Any remaining bare mention.
-        .replaceAll(/ggcoder login/gi, "the Login to AI Providers button")
-        // /compact: the app has NO manual compact command or button — it only
-        // auto-compacts (and now auto-recovers on overflow). If this guidance is
-        // reached, auto-compaction already couldn't reduce enough, so the only
-        // real affordance is a fresh session. Don't tell the user to run a
-        // command that doesn't exist in the app.
-        .replaceAll(
-          /Run \/compact to shrink history, or start a new session\./gi,
-          "Start a new session to reset the context.",
-        )
-        // /model: handle each phrasing pattern
-        .replaceAll(/switch to (\S+) with \/model/gi, "switch to $1 using the model selector")
-        .replaceAll(/Switch with \/model\./gi, "Switch using the model selector.")
-        .replaceAll(
-          /try a different model with \/model\./gi,
-          "try a different model using the model selector.",
-        )
-        .replaceAll(/Use \/model to switch/gi, "Use the model selector to switch")
-        // /help
-        .replaceAll(/see \/help/gi, "check the help menu")
-    );
-  }
-
   /**
-   * Guidance for a connection failure against the ACTIVE local endpoint, or
+   * Guidance for a connection or auth failure against the ACTIVE local endpoint, or
    * undefined when that isn't the situation (so the generic wording stands).
    * "Disable your VPN / allow us through the firewall" is useless advice for a
    * server running on this machine — name what the user has to restart.
    */
-  function localNetworkGuidance(source: string | undefined): string | undefined {
-    if (source !== "network") return undefined;
+  function localEndpointGuidance(
+    source: string | undefined,
+    reason: string | undefined,
+  ): string | undefined {
+    if (source !== "network" && reason !== "auth") return undefined;
     const state = session.getState();
     if (state.provider !== "local") return undefined;
     const parsed = parseLocalModelId(state.model);
     const probe = localProbes.find((p) => p.endpoint.id === parsed?.endpointId);
     if (!probe) return undefined;
+    // Custom endpoints live in the Local models tile, not the provider sign-in tiles.
+    if (reason === "auth") {
+      return (
+        `${probe.endpoint.label} rejected the request at ${probe.endpoint.baseUrl}. ` +
+        "Check its key under Local models in AI Providers settings."
+      );
+    }
     return (
       `${probe.endpoint.label} stopped responding at ${probe.endpoint.baseUrl}. ` +
       "Start it again and retry, or pick another model."
@@ -716,7 +904,7 @@ async function createSession(
   ): void {
     const f = formatChatError(err);
     const message = f.message ? desktopGuidance(f.message) : undefined;
-    const guidance = localNetworkGuidance(f.source) ?? desktopGuidance(f.guidance);
+    const guidance = localEndpointGuidance(f.source, f.reason) ?? desktopGuidance(f.guidance);
     const payload = createAppErrorPayload(
       { ...f, ...(message ? { message } : {}), guidance },
       type,
@@ -762,7 +950,11 @@ async function createSession(
   // run-all, a scheduled prompt).
   let scheduledRunActive = false;
   const asks = createAskUserBridge({
-    broadcast: (prompt) => broadcast("ask_user", prompt),
+    broadcast: (prompt) => {
+      broadcast("ask_user", prompt);
+      // Code windows only: GG Goals' start card and chat/motion stay with the user.
+      if (autopilot && mode !== "chat" && mode !== "motion" && !goal) kenAnswerAsk(prompt);
+    },
     timeoutMs: () =>
       askSoftDeadlineMs(autopilot || autopilotActive || taskRunAll || scheduledRunActive),
     onTimeout: (prompt) => {
@@ -806,15 +998,52 @@ async function createSession(
       new Date(),
       questions,
     ).catch((err: unknown) => {
-      log("WARN", "app-sidecar", "couldn't record goal start", {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const message = err instanceof Error ? err.message : String(err);
+      log("WARN", "app-sidecar", "couldn't record goal start", { error: message });
+      // Silent, GG Goals just asked the start question again and again.
+      broadcastError("error", "goal start", new Error(`Couldn't start the goal: ${message}`));
       return null;
     });
     if (started) {
       goal = { dir: current.dir, record: started };
       broadcast("goal_state", { id: started.id, phase: goalPhase(started) });
+      void trophies.count("goalsStarted", opts.id);
     }
+  };
+  // A typed "start the goal now" starts it like the card does: small local
+  // models often never show the card (#133).
+  const startGoalFromMessage = async (text: string): Promise<void> => {
+    if (!goal || goal.record.startedAt || !isGoalStartMessage(text)) return;
+    await startGoalFrom({ action: "answer", answers: { message: text } }, []);
+  };
+  // Autopilot: Ken answers a card in the user's place or leaves it to them.
+  // The user can still answer first; the first answer wins. A failure only
+  // leaves the card with the user, who can still answer, so no error frame.
+  const isAskPending = (id: string): boolean =>
+    asks.openPrompts().some((open) => open.prompt.id === id && !open.deferred);
+  const kenAnswerAsk = (prompt: AskUserPrompt): void => {
+    answerAskWithKen(prompt, () => isAskPending(prompt.id)).then(
+      (reply) => {
+        if (!reply) return;
+        if (reply.kind === "human") {
+          if (asks.openIds().includes(prompt.id)) {
+            broadcast("ask_user_left", { id: prompt.id, reason: reply.reason });
+          }
+          return;
+        }
+        // Past the deadline the agent already moved on: drop Ken's answer.
+        if (!isAskPending(prompt.id)) return;
+        if (asks.settle(prompt.id, { action: "answer", answers: reply.answers, by: "ken" })) {
+          log("INFO", "app-sidecar", "ken answered ask_user", { id: prompt.id });
+          broadcast("ask_user_answered", { id: prompt.id, answers: reply.answers, by: "ken" });
+        }
+      },
+      (err: unknown) =>
+        log("WARN", "app-sidecar", "ken couldn't answer ask_user", {
+          id: prompt.id,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+    );
   };
   const askUserTool = createAskUserTool(async (request) => {
     const result = await asks.park(request);
@@ -857,9 +1086,22 @@ async function createSession(
   };
   let session!: AgentSession;
   if (mode === "chat") {
+    // Only GG Chat's own skills: GG Coder's global and built-in ones stay in code mode.
+    const chatSkills = await discoverSkillsWithBlocked({
+      globalSkillsDir: paths.skillsDir,
+      projectDir: cwd,
+      workspaceOnly: true,
+    });
+    // GG's own guide is the one built-in skill Chat gets: people ask it how the app works.
+    // A workspace skill with the same name still wins.
+    const guide = chatSkills.skills.some((s) => s.name === "gg-guide")
+      ? undefined
+      : await loadBundledSkill("gg-guide");
     session = createChatAgent(chatAgent, {
       ...baseSessionOptions,
       sessionsDir: paths.sessionsDir,
+      skills: guide ? [...chatSkills.skills, guide] : chatSkills.skills,
+      blockedSkills: chatSkills.blocked,
       additionalTools: [
         askUserTool,
         ...buildMemoryTools(memoryStore),
@@ -878,9 +1120,17 @@ async function createSession(
       },
     });
   } else if (mode === "motion") {
+    // Only GG Motion's own skills, added to the built-in Motion ones.
+    const motionSkills = await discoverSkillsWithBlocked({
+      globalSkillsDir: paths.skillsDir,
+      projectDir: cwd,
+      workspaceOnly: true,
+    });
     session = await createMotionAgentSession({
       ...baseSessionOptions,
       sessionsDir: paths.sessionsDir,
+      workspaceSkills: motionSkills.skills,
+      blockedSkills: motionSkills.blocked,
       additionalTools: [askUserTool],
     });
   } else if (goal) {
@@ -896,9 +1146,12 @@ async function createSession(
       additionalTools: [askUserTool],
     });
   } else {
+    const startLivePreview = deps.livePreview;
     session = new AgentSession({
       ...baseSessionOptions,
-      additionalTools: [askUserTool],
+      additionalTools: startLivePreview
+        ? [askUserTool, createLivePreviewTool((url) => startLivePreview(opts.id, url))]
+        : [askUserTool],
       // A run must not end mid-plan with nothing submitted: nobody could review it.
       planSubmissionGate: true,
       // Plan mode belongs only to the coding agent.
@@ -919,7 +1172,7 @@ async function createSession(
         }
         setPendingPlan(planPath, content);
         broadcast("plan_exit", { planPath, content });
-        return "Plan submitted for user review. Wait for the user to approve, reject, or dismiss it before implementing.";
+        return PLAN_SUBMITTED_FOR_REVIEW;
       },
     });
   }
@@ -952,9 +1205,66 @@ async function createSession(
   // frame when it lands.
   let localProbes: LocalEndpointProbe[] = [];
 
+  // Context Ollama served each model with, learned when it was last loaded
+  // ("<endpointId>/<rawId>"). A model Ollama has since unloaded keeps its size.
+  const servedContexts = new Map<string, number>();
+
+  function withServedContexts(probe: LocalEndpointProbe): LocalEndpointProbe {
+    if (probe.endpoint.kind !== "ollama") return probe;
+    return {
+      ...probe,
+      models: probe.models.map((m) => {
+        const served = servedContexts.get(`${m.endpointId}/${m.rawId}`);
+        return served === undefined || m.contextWindowKnown
+          ? m
+          : { ...m, contextWindow: served, contextWindowKnown: true };
+      }),
+    };
+  }
+
+  /**
+   * Learn the context an Ollama model really runs with and use it everywhere.
+   * `load` (on an explicit pick) loads the model first; after a run it's
+   * already loaded and `/api/ps` alone answers.
+   */
+  async function learnServedContext(modelId: string, load: boolean): Promise<void> {
+    const parsed = parseLocalModelId(modelId);
+    const probe = localProbes.find((p) => p.endpoint.id === parsed?.endpointId);
+    if (!parsed || !probe || probe.endpoint.kind !== "ollama") return;
+    const served = await ollamaServedContext(probe.endpoint, parsed.rawId, { load });
+    if (served === undefined) return;
+    const known = probe.models.find((m) => m.rawId === parsed.rawId);
+    if (known?.contextWindowKnown && known.contextWindow === served) return;
+    servedContexts.set(`${parsed.endpointId}/${parsed.rawId}`, served);
+    localProbes = localProbes.map((p) =>
+      p.endpoint.id !== parsed.endpointId
+        ? p
+        : {
+            ...p,
+            models: p.models.map((m) =>
+              m.rawId === parsed.rawId
+                ? { ...m, contextWindow: served, contextWindowKnown: true }
+                : m,
+            ),
+          },
+    );
+    const updated = findProbedModel(localProbes, modelId);
+    if (updated) registerRuntimeModels([localModelInfo(updated.model, updated.endpoint)]);
+    log("INFO", "app-sidecar", "learned served context", {
+      model: modelId,
+      contextWindow: String(served),
+    });
+    broadcast("extras", footerExtras());
+    broadcast("models_change", { local: localStatePayload() });
+  }
+
   async function scanLocalModels(force: boolean): Promise<LocalEndpointProbe[]> {
     const endpoints = await listAllEndpoints();
-    const { probes, models } = await discoverLocalModels(endpoints, { force });
+    const discovered = await discoverLocalModels(endpoints, { force });
+    const probes = discovered.probes.map(withServedContexts);
+    const models = probes.flatMap((probe) =>
+      probe.models.map((model) => localModelInfo(model, probe.endpoint)),
+    );
     localProbes = probes;
     // Only endpoints that answered get a credential: writing one for a server
     // that isn't running would make `hasProviderAuth("local")` true forever.
@@ -963,10 +1273,13 @@ async function createSession(
     );
     clearRuntimeModels((m) => m.provider === "local");
     registerRuntimeModels(models);
-    log("INFO", "app-sidecar", "local model scan", {
-      reachable: probes.filter((p) => p.reachable).length + "/" + probes.length,
-      models: String(models.length),
-    });
+    const reachable = probes.filter((p) => p.reachable).length + "/" + probes.length;
+    // Every window re-scans; only a changed result is news.
+    const summary = `${reachable} ${models.length}`;
+    if (summary !== lastLocalScanSummary) {
+      lastLocalScanSummary = summary;
+      log("INFO", "app-sidecar", "local model scan", { reachable, models: String(models.length) });
+    }
     return probes;
   }
 
@@ -978,6 +1291,7 @@ async function createSession(
       baseUrl: string;
       kind: LocalEndpoint["kind"];
       custom: boolean;
+      contextLength?: number;
       reachable: boolean;
       reason?: string;
       models: {
@@ -999,6 +1313,7 @@ async function createSession(
         baseUrl: probe.endpoint.baseUrl,
         kind: probe.endpoint.kind,
         custom: probe.endpoint.custom === true,
+        ...(probe.endpoint.contextLength ? { contextLength: probe.endpoint.contextLength } : {}),
         reachable: probe.reachable,
         ...(probe.reason ? { reason: probe.reason } : {}),
         models: probe.models.map((m) => ({
@@ -1039,7 +1354,7 @@ async function createSession(
     if (!endpoint)
       return `Unknown local endpoint "${parsed.endpointId}" — re-scan for local models.`;
 
-    const probe = await probeEndpoint(endpoint);
+    const probe = withServedContexts(await probeEndpoint(endpoint));
     // Keep the cached view honest: this probe is fresher than the last scan.
     localProbes = localProbes.map((p) => (p.endpoint.id === endpoint.id ? probe : p));
     if (!probe.reachable) {
@@ -1079,7 +1394,8 @@ async function createSession(
   // follows the active model. A Goal window reads git from its attached
   // project folder, not the goal folder (see resolveGitCwd), and re-targets
   // when the goal's folders change (`retargetGit`).
-  let gitCwd = await resolveGitCwd(cwd, goal?.record ?? null);
+  const initialTarget = await resolveGitCwd(cwd, goal?.record ?? null);
+  let gitCwd = initialTarget.dir;
   const initialGit = await readGitState(gitCwd);
   let gitBranch: string | null = initialGit.branch;
   let gitIsRepo: boolean = initialGit.isRepo;
@@ -1145,8 +1461,26 @@ async function createSession(
     };
   }
 
-  void scanLocalModels(false)
-    .then(() => {
+  // Startup resolves the model before discovery runs, so a saved local model
+  // isn't registered yet and boot falls back. Switch to it once the scan finds it,
+  // unless the user has already picked something else or a run has started.
+  async function restoreSavedLocalModel(): Promise<void> {
+    if (preferred !== "local" || !savedModel || parseLocalModelId(savedModel) === undefined) return;
+    const stillBootModel = (): boolean => !running && session.getState().model === model;
+    if (savedModel === model || !stillBootModel() || !getModel(savedModel)) return;
+    const blocker = await localModelBlocker(savedModel);
+    if (blocker) {
+      log("WARN", "app-sidecar", "saved local model not restored", { model: savedModel, blocker });
+      return;
+    }
+    if (!stillBootModel()) return;
+    await session.switchModel("local", savedModel);
+    log("INFO", "app-sidecar", "restored saved local model", { model: savedModel });
+  }
+
+  const initialLocalScan = scanLocalModels(false)
+    .then(async () => {
+      await restoreSavedLocalModel();
       clampLocalThinking();
       broadcast("extras", footerExtras());
     })
@@ -1158,6 +1492,18 @@ async function createSession(
         error: err instanceof Error ? err.message : String(err),
       });
     });
+  // A run that starts before the scan would run on the fallback model; a goal's
+  // kickoff fires as its window opens and lost that race (#133). Never rejects.
+  let savedLocalModelPending: Promise<void> | null =
+    preferred === "local" &&
+    savedModel !== undefined &&
+    savedModel !== model &&
+    isLocalModelId(savedModel)
+      ? initialLocalScan
+      : null;
+  void initialLocalScan.finally(() => {
+    savedLocalModelPending = null;
+  });
 
   // tool_call_end carries no tool name (only the id), so remember each call's
   // name from tool_call_start to log a useful line on completion. Mirrors the
@@ -1180,10 +1526,10 @@ async function createSession(
   let planProgressSync: Promise<boolean> = Promise.resolve(false);
 
   function planProgressPayload(): { total: number; completed: number[] } {
-    const completed = [...approvedPlanMarkers]
-      .filter((step) => step >= 1 && step <= approvedPlanTotal)
-      .sort((a, b) => a - b);
-    return { total: approvedPlanTotal, completed };
+    return {
+      total: approvedPlanTotal,
+      completed: stepsDoneThrough(approvedPlanMarkers, approvedPlanTotal),
+    };
   }
 
   async function syncApprovedPlanProgress(generation: number): Promise<boolean> {
@@ -1197,13 +1543,9 @@ async function createSession(
       // Keep the last real total instead of flashing 0 or declaring completion.
       if (freshTotal > 0 || approvedPlanTotal === 0) approvedPlanTotal = freshTotal;
     }
-    broadcast("plan_progress", planProgressPayload());
-    return (
-      approvedPlanTotal > 0 &&
-      Array.from({ length: approvedPlanTotal }, (_, index) => index + 1).every((step) =>
-        approvedPlanMarkers.has(step),
-      )
-    );
+    const progress = planProgressPayload();
+    broadcast("plan_progress", progress);
+    return progress.total > 0 && progress.completed.length === progress.total;
   }
 
   function queueApprovedPlanProgressSync(): Promise<boolean> {
@@ -1329,13 +1671,18 @@ async function createSession(
   session.eventBus.on("model_change", (d) => broadcast("model_change", d));
   session.eventBus.on("hook", (d) => broadcast("hook", d));
   session.eventBus.on("diagnostics", (d) => broadcast("diagnostics", d));
+  session.eventBus.on("security_notice", (d) => broadcast("security_notice", d));
+  session.eventBus.on("security_block", (d) => broadcast("security_block", d));
   // Fires BEFORE the candidate final answer streams. The webview holds assistant
   // text back while armed, so an injected follow-up supersedes a draft that was never
   // painted instead of deleting one the user already started reading.
   session.eventBus.on("hook_armed", (d) => broadcast("hook_armed", d));
   session.eventBus.on("subagent_state", (d) => broadcast("subagent_state", d));
   session.eventBus.on("compaction_start", (d) => broadcast("compaction_start", d));
-  session.eventBus.on("compaction_end", (d) => broadcast("compaction_end", d));
+  session.eventBus.on("compaction_end", (d) => {
+    broadcast("compaction_end", d);
+    if (d.compacted) void trophies.count("compactions", opts.id);
+  });
   // Cold-prompt-cache notice: push the fresh TTL anchor + context size whenever
   // a run or compaction settles. Expiry itself is time-based, so the webview
   // also re-reads `cacheExpiry` from /state when the user returns or types.
@@ -1400,6 +1747,9 @@ async function createSession(
   // Bumped by /cancel — a run whose cancel generation changed mid-flight was
   // canceled and earns no XP.
   let cancelGeneration = 0;
+  // Wakes an idle session for its own failed background work; set up once the
+  // run machinery below exists. Null outside the coding agent.
+  let idleWake: IdleWakeController | null = null;
   // Autopilot (auto-review) toggle for THIS window's project. Loaded from
   // gg-app.json on boot; flipped via POST /autopilot. When on, POST /prompt runs
   // runAutopilotCycle after the user's turn settles — Ken auto-reviews the work
@@ -1494,12 +1844,12 @@ async function createSession(
     broadcast("plan_review", plan);
   }
 
-  // Workflow (prompt-template) commands: built-in + the project's custom
-  // `.gg/commands/*.md`. Used to gate autopilot off command turns and to label
+  // Workflow (prompt-template) commands: built-in + the custom
+  // `.gg/commands/*.md` of every workspace root (a goal's attached repos too). Used to gate autopilot off command turns and to label
   // expanded templates in Ken's digests. Loaded fresh so a newly added custom
   // command is picked up without a restart (mirrors GET /commands).
   async function loadWorkflowCommandSpecs(): Promise<WorkflowCommandSpec[]> {
-    const custom = await loadCustomCommands(cwd).catch(() => []);
+    const custom = await session.loadCustomCommands().catch(() => []);
     return [
       ...PROMPT_COMMANDS.map((c) => ({ name: c.name, aliases: c.aliases, prompt: c.prompt })),
       ...custom.map((c) => ({ name: c.name, aliases: [] as string[], prompt: c.prompt })),
@@ -1540,21 +1890,26 @@ async function createSession(
     kenModelOverride = null;
   }
 
-  /** The model Ken uses next turn: the pin when set, else GG Coder's. */
+  /** The model Ken uses next turn: the pin when set, else GG Coder's. Ken never
+   *  follows GG onto a paid tier: he runs in the background, unwatched. */
   function kenCurrentModel(): { provider: Provider; model: string } {
     if (kenModelOverride) return kenModelOverride;
     const st = session.getState();
-    return { provider: st.provider, model: st.model };
+    return { provider: st.provider, model: withoutPaidTier(st.model) };
   }
 
   /** Footer payload: Ken's effective model + whether it's a pin. Merged into
    *  /state, the SSE ready frame, and every ken_model_change broadcast. */
   function kenStatePayload(): ReturnType<typeof effectiveKenModel> {
     const st = session.getState();
-    return effectiveKenModel(kenModelOverride, { provider: st.provider, model: st.model });
+    return effectiveKenModel(kenModelOverride, {
+      provider: st.provider,
+      model: withoutPaidTier(st.model),
+    });
   }
 
-  async function syncKenModel(provider: Provider, model: string): Promise<void> {
+  async function syncKenModel(provider: Provider, requested: string): Promise<void> {
+    const model = withoutPaidTier(requested);
     if (kenRunning) {
       pendingKenModel = { provider, model };
       return;
@@ -1629,7 +1984,9 @@ async function createSession(
   let kenAutoAbort = new AbortController();
   let pendingKenAutoModel: { provider: Provider; model: string } | null = null;
 
-  async function syncKenAutoModel(provider: Provider, model: string): Promise<void> {
+  async function syncKenAutoModel(provider: Provider, requested: string): Promise<void> {
+    // The autopilot reviewer runs every turn, unwatched: never on a paid tier.
+    const model = withoutPaidTier(requested);
     if (autopilotReviewing) {
       pendingKenAutoModel = { provider, model };
       return;
@@ -1675,6 +2032,8 @@ async function createSession(
 
   function abortOwnedWork(): void {
     cancelGeneration++;
+    // Stop means "stop acting on your own" — that includes background alerts.
+    idleWake?.noteStop();
     abort.abort();
     // An MCP tool call parked on user input is not cancelled by the signal —
     // the promise lives in the bridge. Release it, or the aborted turn's tool
@@ -1718,6 +2077,8 @@ async function createSession(
     run: () => Promise<void>,
     reviewPending: () => boolean = () => false,
   ): Promise<void> {
+    // Only at boot: afterwards runAgent stays synchronous up to its first await.
+    if (savedLocalModelPending) await savedLocalModelPending;
     const ownsGeneration = !runLifecycle.running;
     const generation = ownsGeneration
       ? runLifecycle.begin(abortOwnedWork).generation
@@ -1728,6 +2089,7 @@ async function createSession(
     const runStartedAt = Date.now();
     const cancelGenAtStart = cancelGeneration;
     const assistantsBeforeRun = countAssistantMessages(session.getMessages());
+    const messagesBeforeRun = session.getMessages().length;
     let runSucceeded = false;
     broadcast("run_start", {
       text: label,
@@ -1762,7 +2124,25 @@ async function createSession(
         countAssistantMessages(session.getMessages()) > assistantsBeforeRun
       ) {
         // Fire-and-forget — XP must never delay or break run teardown.
-        void progress.awardRun(cwd, runStartedAt, opts.id);
+        // Trophies follow the award so they see this run's commits and level.
+        const st = session.getState();
+        const runFacts = {
+          mode,
+          chatAgent: mode === "chat" ? chatAgent : undefined,
+          goal: goal !== null,
+          provider: st.provider,
+          model: st.model,
+          tools: extractTurnToolCalls(session.getMessages(), messagesBeforeRun),
+          durationMs: Date.now() - runStartedAt,
+          hour: new Date().getHours(),
+          day: new Date().getDay(),
+          date: localTrophyDate(new Date()),
+          // A hash, so the trophies file never holds project paths.
+          project: createHash("sha256").update(path.resolve(cwd)).digest("hex").slice(0, 16),
+        };
+        void progress
+          .awardRun(cwd, runStartedAt, opts.id)
+          .then(() => trophies.recordRun(runFacts, opts.id));
       }
       // A run may have switched branches, changed files, or spawned/finished
       // background tasks. Refresh the workspace extras once it settles.
@@ -1810,6 +2190,11 @@ async function createSession(
       // cycle; its outer finalizer emits the one terminal cancelled run_end.
       if (!(cancelled && !ownsGeneration)) {
         if (cancelled) cancelledRunEndGenerations.add(generation);
+        // The run loaded the model, so Ollama can now say what size it served.
+        const runModel = session.getState().model;
+        if (session.getState().provider === "local") {
+          void learnServedContext(runModel, false).catch(() => {});
+        }
         broadcast("run_end", {
           ...(cancelled ? { cancelled: true } : {}),
           ...(verificationProblem ? { unverified: true } : {}),
@@ -1846,8 +2231,7 @@ async function createSession(
   // string the webview sends on a manual Accept (see PlanReviewModal's accept
   // handler in gg-app/src/App.tsx). Keep the two in lockstep so auto- and
   // manual approval produce identical implementation turns.
-  const IMPLEMENT_PLAN_PROMPT =
-    "The plan has been approved. Implement it now, following each step in order.";
+  const IMPLEMENT_PLAN_PROMPT = SHARED_IMPLEMENT_PLAN_PROMPT;
 
   // ── Stranded-queue drain ───────────────────────────────
   // A prompt POSTed while an autopilot cycle is between injected runs (build
@@ -1867,158 +2251,200 @@ async function createSession(
   let taskRunAll = false;
 
   // Moved to app-sidecar/autopilot-runner.ts
-  const { runAutopilotCycle, runStrandedQueue, runTasks } = createAutopilotRunner({
-    get autopilotReviewing() {
-      return autopilotReviewing;
+  const { answerAskWithKen, runAutopilotCycle, runStrandedQueue, runTasks } = createAutopilotRunner(
+    {
+      get autopilotReviewing() {
+        return autopilotReviewing;
+      },
+      set autopilotReviewing(v) {
+        autopilotReviewing = v;
+      },
+      get broadcast() {
+        return broadcast;
+      },
+      get ensureKenAutoSession() {
+        return ensureKenAutoSession;
+      },
+      get cwd() {
+        return cwd;
+      },
+      get gitBranch() {
+        return gitBranch;
+      },
+      set gitBranch(v) {
+        gitBranch = v;
+      },
+      get session() {
+        return session;
+      },
+      set session(v) {
+        session = v;
+      },
+      get injectedAutopilotPrompts() {
+        return injectedAutopilotPrompts;
+      },
+      set injectedAutopilotPrompts(v) {
+        injectedAutopilotPrompts = v;
+      },
+      get loadWorkflowCommandSpecs() {
+        return loadWorkflowCommandSpecs;
+      },
+      get autopilotCancelled() {
+        return autopilotCancelled;
+      },
+      set autopilotCancelled(v) {
+        autopilotCancelled = v;
+      },
+      get broadcastError() {
+        return broadcastError;
+      },
+      get pendingKenAutoModel() {
+        return pendingKenAutoModel;
+      },
+      set pendingKenAutoModel(v) {
+        pendingKenAutoModel = v;
+      },
+      get syncKenAutoModel() {
+        return syncKenAutoModel;
+      },
+      get pendingPlanPath() {
+        return pendingPlanPath;
+      },
+      set pendingPlanPath(v) {
+        pendingPlanPath = v;
+      },
+      get planGeneration() {
+        return planGeneration;
+      },
+      set planGeneration(v) {
+        planGeneration = v;
+      },
+      get pendingPlanContent() {
+        return pendingPlanContent;
+      },
+      set pendingPlanContent(v) {
+        pendingPlanContent = v;
+      },
+      get autopilot() {
+        return autopilot;
+      },
+      set autopilot(v) {
+        autopilot = v;
+      },
+      get runLifecycle() {
+        return runLifecycle;
+      },
+      get abortOwnedWork() {
+        return abortOwnedWork;
+      },
+      get pendingCancelDrain() {
+        return pendingCancelDrain;
+      },
+      set pendingCancelDrain(v) {
+        pendingCancelDrain = v;
+      },
+      get autopilotActive() {
+        return autopilotActive;
+      },
+      set autopilotActive(v) {
+        autopilotActive = v;
+      },
+      get MAX_AUTOPILOT_ROUNDS() {
+        return MAX_AUTOPILOT_ROUNDS;
+      },
+      get activateApprovedPlan() {
+        return activateApprovedPlan;
+      },
+      get clearPendingPlan() {
+        return clearPendingPlan;
+      },
+      get planProgressPayload() {
+        return planProgressPayload;
+      },
+      get IMPLEMENT_PLAN_PROMPT() {
+        return IMPLEMENT_PLAN_PROMPT;
+      },
+      get runAgent() {
+        return runAgent;
+      },
+      get kenAutoSession() {
+        return kenAutoSession;
+      },
+      set kenAutoSession(v) {
+        kenAutoSession = v;
+      },
+      get reenterPlanModeForRevision() {
+        return reenterPlanModeForRevision;
+      },
+      get finishOwnedGeneration() {
+        return finishOwnedGeneration;
+      },
+      get drainingStrandedQueue() {
+        return drainingStrandedQueue;
+      },
+      set drainingStrandedQueue(v) {
+        drainingStrandedQueue = v;
+      },
+      get running() {
+        return running;
+      },
+      set running(v) {
+        running = v;
+      },
+      get offerPendingPlan() {
+        return offerPendingPlan;
+      },
+      get deactivateApprovedPlan() {
+        return deactivateApprovedPlan;
+      },
+      get taskRunAll() {
+        return taskRunAll;
+      },
+      set taskRunAll(v) {
+        taskRunAll = v;
+      },
+      get runClaim() {
+        return runClaim;
+      },
     },
-    set autopilotReviewing(v) {
-      autopilotReviewing = v;
-    },
-    get broadcast() {
-      return broadcast;
-    },
-    get ensureKenAutoSession() {
-      return ensureKenAutoSession;
-    },
-    get cwd() {
-      return cwd;
-    },
-    get gitBranch() {
-      return gitBranch;
-    },
-    set gitBranch(v) {
-      gitBranch = v;
-    },
-    get session() {
-      return session;
-    },
-    set session(v) {
-      session = v;
-    },
-    get injectedAutopilotPrompts() {
-      return injectedAutopilotPrompts;
-    },
-    set injectedAutopilotPrompts(v) {
-      injectedAutopilotPrompts = v;
-    },
-    get loadWorkflowCommandSpecs() {
-      return loadWorkflowCommandSpecs;
-    },
-    get autopilotCancelled() {
-      return autopilotCancelled;
-    },
-    set autopilotCancelled(v) {
-      autopilotCancelled = v;
-    },
-    get broadcastError() {
-      return broadcastError;
-    },
-    get pendingKenAutoModel() {
-      return pendingKenAutoModel;
-    },
-    set pendingKenAutoModel(v) {
-      pendingKenAutoModel = v;
-    },
-    get syncKenAutoModel() {
-      return syncKenAutoModel;
-    },
-    get pendingPlanPath() {
-      return pendingPlanPath;
-    },
-    set pendingPlanPath(v) {
-      pendingPlanPath = v;
-    },
-    get planGeneration() {
-      return planGeneration;
-    },
-    set planGeneration(v) {
-      planGeneration = v;
-    },
-    get pendingPlanContent() {
-      return pendingPlanContent;
-    },
-    set pendingPlanContent(v) {
-      pendingPlanContent = v;
-    },
-    get autopilot() {
-      return autopilot;
-    },
-    set autopilot(v) {
-      autopilot = v;
-    },
-    get runLifecycle() {
-      return runLifecycle;
-    },
-    get abortOwnedWork() {
-      return abortOwnedWork;
-    },
-    get pendingCancelDrain() {
-      return pendingCancelDrain;
-    },
-    set pendingCancelDrain(v) {
-      pendingCancelDrain = v;
-    },
-    get autopilotActive() {
-      return autopilotActive;
-    },
-    set autopilotActive(v) {
-      autopilotActive = v;
-    },
-    get MAX_AUTOPILOT_ROUNDS() {
-      return MAX_AUTOPILOT_ROUNDS;
-    },
-    get activateApprovedPlan() {
-      return activateApprovedPlan;
-    },
-    get clearPendingPlan() {
-      return clearPendingPlan;
-    },
-    get planProgressPayload() {
-      return planProgressPayload;
-    },
-    get IMPLEMENT_PLAN_PROMPT() {
-      return IMPLEMENT_PLAN_PROMPT;
-    },
-    get runAgent() {
-      return runAgent;
-    },
-    get kenAutoSession() {
-      return kenAutoSession;
-    },
-    set kenAutoSession(v) {
-      kenAutoSession = v;
-    },
-    get reenterPlanModeForRevision() {
-      return reenterPlanModeForRevision;
-    },
-    get finishOwnedGeneration() {
-      return finishOwnedGeneration;
-    },
-    get drainingStrandedQueue() {
-      return drainingStrandedQueue;
-    },
-    set drainingStrandedQueue(v) {
-      drainingStrandedQueue = v;
-    },
-    get running() {
-      return running;
-    },
-    set running(v) {
-      running = v;
-    },
-    get offerPendingPlan() {
-      return offerPendingPlan;
-    },
-    get deactivateApprovedPlan() {
-      return deactivateApprovedPlan;
-    },
-    get taskRunAll() {
-      return taskRunAll;
-    },
-    set taskRunAll(v) {
-      taskRunAll = v;
-    },
-  });
+  );
+
+  // ── Idle wake for background alerts ────────────────────────
+  // A background task that fails, or a child agent that finishes, after the
+  // agent ended its turn would otherwise wait for the user's next message.
+  // The coding agent only: chat agents start no background work, Motion owns
+  // its own render flow, and GG Goals drives its workers itself.
+  if (mode !== "chat" && mode !== "motion" && !goal) {
+    idleWake = new IdleWakeController({
+      isBusy: () =>
+        running ||
+        runClaim.active ||
+        autopilotActive ||
+        autopilotReviewing ||
+        drainingStrandedQueue ||
+        taskRunAll,
+      isBlocked: () => pendingPlanPath !== null,
+      hasPendingAlert: () => session.hasPendingBackgroundAlert(),
+      humanPromptSeq: () => session.getHumanPromptSeq(),
+      onSkip: (reason) =>
+        log("INFO", "app-sidecar", "background alert left for the next message", { reason }),
+      start: async () => {
+        // Same race guard as POST /prompt: claim synchronously or yield.
+        if (!runClaim.claim()) return;
+        try {
+          log("INFO", "app-sidecar", "starting a run for a background alert");
+          await runAgent("Background task update", async () => {
+            await session.continueFromNotifications();
+          });
+          await runStrandedQueue();
+        } finally {
+          runClaim.release();
+          offerPendingPlan();
+        }
+      },
+    });
+    session.onBackgroundAlert(() => idleWake?.trigger());
+  }
 
   // ── Provider auth (login) bridge ───────────────────────────
   // OAuth login functions are interactive (open a URL, sometimes prompt for a
@@ -2041,15 +2467,19 @@ async function createSession(
   }
 
   async function authStatusPayload(): Promise<{
-    providers: (AuthProviderMeta & {
+    providers: (Omit<AuthProviderMeta, "methodDetails"> & {
       connected: boolean;
       connectedMethods: AuthMethod[];
       activeMethod?: AuthMethod;
       oauthExhaustedUntil?: number;
       priorityNote?: string;
       methodGuidance: AuthMethodMeta[];
+      claudeCodeInstalled?: boolean;
+      reauthMessage?: string;
     })[];
+    localConnected: boolean;
   }> {
+    const retired = await auth.legacySignIns();
     const providers = await Promise.all(
       AUTH_PROVIDERS.map(async (p) => {
         const dual = dualAuthProvider(p.value);
@@ -2058,19 +2488,12 @@ async function createSession(
         // cannot express "OAuth signed in, key also on file as backup", nor offer
         // a per-method disconnect.
         const oauthKey = dual?.oauthKey;
-        const hasOAuth = oauthKey ? await auth.hasCredentials(oauthKey) : false;
-        const apiKeyKeys = p.apiKeyVariants?.map((v) => v.key) ?? [p.value];
-        const hasApiKey = p.methods.includes("apikey")
-          ? (await Promise.all(apiKeyKeys.map((k) => auth.hasCredentials(k)))).some(Boolean)
-          : false;
+        const hasOAuth = oauthKey
+          ? await auth.hasCredentials(oauthKey)
+          : p.value === "anthropic" && (await auth.hasClaudeCodeLogin());
+        const hasApiKey = p.methods.includes("apikey") && (await auth.hasApiKey(p.value));
         const connectedMethods: AuthMethod[] = [];
-        // OAuth-only providers (Anthropic/OpenAI/Gemini) store under the provider
-        // id itself, so `hasProviderAuth` is what proves their OAuth connection.
-        if (
-          p.methods.includes("oauth") &&
-          (hasOAuth || (!dual && (await auth.hasCredentials(p.value))))
-        )
-          connectedMethods.push("oauth");
+        if (p.methods.includes("oauth") && hasOAuth) connectedMethods.push("oauth");
         if (hasApiKey) connectedMethods.push("apikey");
 
         // Which one a request would actually use, mirroring AuthStorage's
@@ -2080,6 +2503,7 @@ async function createSession(
           ? ((await auth.getCredentials(oauthKey))?.usageExhaustedUntil ?? 0)
           : 0;
         const oauthSidelined = hasOAuth && Date.now() < exhaustedUntil && hasApiKey;
+        const reauthMessage = retired.find((r) => r.provider === p.value)?.message;
         const activeMethod = connectedMethods.includes("oauth")
           ? oauthSidelined
             ? ("apikey" as const)
@@ -2098,10 +2522,22 @@ async function createSession(
           ...(oauthSidelined ? { oauthExhaustedUntil: exhaustedUntil } : {}),
           ...(authPriorityNote(p.value) ? { priorityNote: authPriorityNote(p.value)! } : {}),
           methodGuidance: describeAuthMethods(p.value),
+          // A retired sign-in is still on disk: ask the user once to reconnect.
+          ...(reauthMessage ? { reauthMessage } : {}),
+          // Whether "Sign in with Claude" still has to download Claude Code first.
+          ...(p.value === "anthropic"
+            ? { claudeCodeInstalled: resolveClaudeCodeBinary() !== null }
+            : {}),
         };
       }),
     );
-    return { providers };
+    // Local endpoints have no tile here, but they are a usable model source. An
+    // auto-detected server's credential outlives it, so it counts only while it
+    // answered the last scan with a model; a user-added endpoint always counts.
+    const localConnected =
+      (await listCustomEndpoints()).length > 0 ||
+      localProbes.some((probe) => probe.reachable && probe.models.length > 0);
+    return { providers, localConnected };
   }
 
   // Background tasks have no event source (the bash tool just spawns them), so
@@ -2117,7 +2553,8 @@ async function createSession(
     if (tasksPollStopped) return;
     tasksPoll = setTimeout(() => {
       const tasks = session.listBackgroundProcesses();
-      const next = JSON.stringify(tasks);
+      // Common case: no tasks now and none last time — nothing to serialize.
+      const next = tasks.length === 0 ? "[]" : JSON.stringify(tasks);
       if (next !== lastTasksJson) {
         lastTasksJson = next;
         broadcast("tasks", { tasks });
@@ -2181,31 +2618,56 @@ async function createSession(
   let gitTargetGeneration = 0;
   /**
    * A goal's attached folders changed: point the titlebar's git state at the
-   * new project folder. No-op when the target is unchanged; a newer call or
-   * teardown supersedes one still reading git.
+   * new project folder. No-op when the target is unchanged, unless `reread`
+   * asks for a fresh read of the same folder; a newer call or teardown
+   * supersedes one still reading git.
    */
-  async function retargetGit(): Promise<void> {
+  async function retargetGit(
+    options: { reread?: boolean; timeoutMs?: number } = {},
+  ): Promise<void> {
     const generation = ++gitTargetGeneration;
-    const next = await resolveGitCwd(cwd, goal?.record ?? null);
-    if (generation !== gitTargetGeneration || repoWatchStopped || next === gitCwd) return;
-    const state = await readGitState(next);
+    const read = { timeoutMs: options.timeoutMs };
+    const { dir: next } = await resolveGitCwd(cwd, goal?.record ?? null, (dir) =>
+      isGitRepo(dir, read),
+    );
     if (generation !== gitTargetGeneration || repoWatchStopped) return;
-    repoWatch.unsubscribe();
+    if (next === gitCwd && !options.reread) return;
+    const state = await readGitState(next, read);
+    if (generation !== gitTargetGeneration || repoWatchStopped) return;
+    const moved = next !== gitCwd || state.gitHubSlug !== gitHubSlug;
     gitCwd = next;
     gitBranch = state.branch;
     gitIsRepo = state.isRepo;
     gitDirtyFileCount = state.dirtyFileCount;
     gitHubSlug = state.gitHubSlug;
-    // The old repo's numbers don't apply; the new watchers fill these in.
-    gitHubIssues = null;
-    gitHubPRs = null;
-    gitHubCI = null;
-    projectHealthScan = null;
-    repoWatch = watchRepo(gitCwd);
+    if (moved) {
+      // The old repo's numbers don't apply; the new watchers fill these in.
+      repoWatch.unsubscribe();
+      gitHubIssues = null;
+      gitHubPRs = null;
+      gitHubCI = null;
+      projectHealthScan = null;
+      repoWatch = watchRepo(gitCwd);
+    }
     broadcast("extras", footerExtras());
   }
+  // Git missed its 2 s limit at startup (a busy machine): the titlebar would
+  // show "not a repo" until the next run. Read again in the background with
+  // more time; window creation doesn't wait for it.
+  if (!initialTarget.settled || !initialGit.settled) {
+    retargetGit({ reread: true, timeoutMs: SLOW_GIT_READ_TIMEOUT_MS }).catch((err: unknown) => {
+      log("WARN", "app-sidecar", "slow git re-read failed", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
 
+  const shell = new ShellRunner({
+    emit: (type, data) => broadcast(type, data),
+    onEnd: (run) => finishShellRun(routeCtx, run),
+  });
   const routeCtx: SessionRouteContext = {
+    shell,
     get session() {
       return session;
     },
@@ -2235,6 +2697,7 @@ async function createSession(
     kenStatePayload,
     footerExtras,
     progress,
+    trophies,
     memoryStore,
     jiwaStore,
     get clientSeq() {
@@ -2259,6 +2722,7 @@ async function createSession(
     sessionId: opts.id,
     sessionIdsAt,
     busyAt,
+    syncMcpServer,
     get goal() {
       return goal;
     },
@@ -2347,6 +2811,8 @@ async function createSession(
       localProbes = v;
     },
     localModelBlocker,
+    learnServedContext,
+    startGoalFromMessage,
     get kenModelOverride() {
       return kenModelOverride;
     },
@@ -2442,6 +2908,7 @@ async function createSession(
     if (handleAuthRoutes(routeCtx, req, res, url, method)) return;
     if (handleIntegrationRoutes(routeCtx, req, res, url, method)) return;
     if (handleMcpRoutes(routeCtx, req, res, url, method)) return;
+    if (handleShellRoutes(routeCtx, req, res, url, method)) return;
 
     json(res, 404, { error: "not found" });
   }
@@ -2452,6 +2919,8 @@ async function createSession(
     // started. Otherwise they keep streaming tokens and running tools on a
     // session that is being torn down.
     abortOwnedWork();
+    shell.stopAll();
+    idleWake?.dispose();
     cancelHfPull();
     releaseRunAwake?.();
     releaseRunAwake = null;
@@ -2474,6 +2943,7 @@ async function createSession(
   }
 
   function stopBackgroundProcesses(): void {
+    shell.stopAll();
     session.stopBackgroundProcesses();
     kenSession?.stopBackgroundProcesses();
     kenAutoSession?.stopBackgroundProcesses();

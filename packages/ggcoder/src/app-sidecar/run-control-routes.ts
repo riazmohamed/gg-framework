@@ -1,6 +1,13 @@
 import type http from "node:http";
-import type { Provider } from "@abukhaled/gg-ai";
-import { findProbedModel, parseLocalModelId } from "@abukhaled/gg-core";
+import { resolveFastModeModel, type Provider, type ThinkingLevel } from "@abukhaled/gg-ai";
+import {
+  fetchChatGPTPlanModels,
+  findProbedModel,
+  getAuthStorageKeys,
+  localModelShortName,
+  parseLocalModelId,
+  requiredKeyLabel,
+} from "@abukhaled/gg-core";
 import { getModel, getAllModels } from "../core/model-registry.js";
 import {
   getNextThinkingLevel,
@@ -8,6 +15,7 @@ import {
   isThinkingLevelSupported,
 } from "../core/thinking-level.js";
 import { log } from "../core/logger.js";
+import { openCodeCatalogs } from "../core/opencode-catalog-store.js";
 import { readBody, json } from "./http.js";
 import {
   ALL_PROVIDERS,
@@ -17,6 +25,91 @@ import {
   persistThinkingLevel,
 } from "./app-settings.js";
 import type { SessionRouteContext } from "./route-context.js";
+
+/** How long the ChatGPT plan's model list is trusted before it is read again. */
+const PLAN_MODELS_TTL_MS = 10 * 60_000;
+const planModelCache = new Map<string, { at: number; models: Promise<string[] | undefined> }>();
+
+/** The models the signed-in ChatGPT plan serves, or undefined when unknown (offline, error). */
+function chatgptPlanModels(accountId: string, accessToken: string): Promise<string[] | undefined> {
+  const cached = planModelCache.get(accountId);
+  if (cached && Date.now() - cached.at < PLAN_MODELS_TTL_MS) return cached.models;
+  const models = fetchChatGPTPlanModels(accessToken).catch((err: unknown) => {
+    log("WARN", "app-sidecar", "ChatGPT plan model list unavailable", {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  });
+  planModelCache.set(accountId, { at: Date.now(), models });
+  return models;
+}
+
+/**
+ * Why each model can't run on what the user connected, so the picker can say
+ * so instead of letting the request fail: a model the ChatGPT plan doesn't
+ * serve, or one that needs a particular key (Kimi Code plan, MiMo API Credits).
+ */
+async function unavailableReasons(
+  ctx: SessionRouteContext,
+  loggedIn: Provider[],
+): Promise<(modelId: string, provider: Provider) => string | undefined> {
+  let planModels: string[] | undefined;
+  if (loggedIn.includes("openai")) {
+    const creds = await ctx.auth.resolveCredentials("openai").catch(() => undefined);
+    if (creds?.accountId) planModels = await chatgptPlanModels(creds.accountId, creds.accessToken);
+  }
+  const keyed = new Map<string, boolean>();
+  const hasAnyKey = async (keys: string[]): Promise<boolean> => {
+    const id = keys.join(",");
+    if (!keyed.has(id)) keyed.set(id, (await ctx.auth.pickStorageKey(keys)) !== undefined);
+    return keyed.get(id)!;
+  };
+  const reasons = new Map<string, string>();
+  for (const m of getAllModels()) {
+    if (!loggedIn.includes(m.provider)) continue;
+    if (m.provider === "openai" && planModels) {
+      const base = resolveFastModeModel("openai", m.id).model;
+      if (!planModels.includes(base)) reasons.set(m.id, "Not in your ChatGPT plan");
+      continue;
+    }
+    const keys = getAuthStorageKeys(m.provider, m.id);
+    const needs = requiredKeyLabel(m.provider, keys);
+    if (needs && !(await hasAnyKey(keys))) reasons.set(m.id, needs);
+  }
+  return (modelId) => reasons.get(modelId);
+}
+
+/**
+ * What a POST /thinking asks for. An empty body cycles to the next level (the
+ * footer's original click-to-cycle); `{"level": "<level>"}` sets that level and
+ * `{"level": null}` turns thinking off, so a picker can jump straight to one.
+ * A level the current model doesn't support is refused, not clamped.
+ */
+export function resolveThinkingRequest(
+  provider: Provider,
+  model: string,
+  current: ThinkingLevel | undefined,
+  raw: string,
+): { ok: true; level: ThinkingLevel | undefined } | { ok: false; error: string } {
+  if (raw.trim() === "") {
+    return { ok: true, level: getNextThinkingLevel(provider, model, current) };
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    return { ok: false, error: "invalid JSON body" };
+  }
+  if (typeof body !== "object" || body === null || !("level" in body)) {
+    return { ok: true, level: getNextThinkingLevel(provider, model, current) };
+  }
+  const level = (body as { level: unknown }).level;
+  if (level === null) return { ok: true, level: undefined };
+  if (typeof level !== "string") return { ok: false, error: "level must be a string or null" };
+  const match = getSupportedThinkingLevels(provider, model).find((l) => l === level);
+  if (!match) return { ok: false, error: `${model} doesn't support thinking level "${level}"` };
+  return { ok: true, level: match };
+}
 
 export function handleRunControlRoutes(
   ctx: SessionRouteContext,
@@ -31,20 +124,38 @@ export function handleRunControlRoutes(
       for (const p of ALL_PROVIDERS) {
         if (await ctx.auth.hasProviderAuth(p)) loggedIn.push(p);
       }
+      // A connected OpenCode plan's list is read again in the background once
+      // stale; the pickers reload when it changed.
+      void openCodeCatalogs.refreshStale(loggedIn).then((changed) => {
+        if (changed) ctx.broadcastAll("models_change", {});
+      });
       // Just the names, grouped by provider in registry order — the UI shows
       // a clean multi-column list of model ids. Local models come from the
       // runtime registry (populated by the background scan) and are always
       // listed: their "login" is the endpoint answering a probe.
+      const unavailable = await unavailableReasons(ctx, loggedIn);
       const models = getAllModels()
         .filter((m) => m.provider === "local" || loggedIn.includes(m.provider))
         .map((m) => {
           if (m.provider !== "local") {
-            return { id: m.id, name: m.name, provider: m.provider };
+            const reason = unavailable(m.id, m.provider);
+            // `billing` flags models that change what the user pays (fast modes).
+            return {
+              id: m.id,
+              name: m.name,
+              provider: m.provider,
+              ...(m.billing ? { billing: m.billing } : {}),
+              // Listed, but can't run on what's connected; the picker says why.
+              ...(reason ? { unavailable: reason } : {}),
+            };
           }
           const probed = findProbedModel(ctx.localProbes, m.id);
+          const rawId = parseLocalModelId(m.id)?.rawId;
           return {
             id: m.id,
-            name: m.name,
+            // The app groups local models by endpoint, so the name drops the
+            // registry's "(Endpoint)" suffix, like every other model's name.
+            name: rawId ? localModelShortName(rawId) : m.name,
             provider: m.provider,
             local: true,
             endpoint: probed?.endpoint.label ?? parseLocalModelId(m.id)?.endpointId,
@@ -65,8 +176,11 @@ export function handleRunControlRoutes(
     void readBody(req, res).then(async (raw) => {
       if (raw === null) return;
       let modelId: string;
+      let confirmPaid: boolean;
       try {
-        modelId = (JSON.parse(raw) as { model?: string }).model ?? "";
+        const body = JSON.parse(raw) as { model?: string; confirmPaid?: unknown };
+        modelId = body.model ?? "";
+        confirmPaid = body.confirmPaid === true;
       } catch {
         json(res, 400, { error: "invalid JSON body" });
         return;
@@ -74,6 +188,17 @@ export function handleRunControlRoutes(
       const target = getModel(modelId);
       if (!target) {
         json(res, 404, { error: `unknown model: ${modelId}` });
+        return;
+      }
+      // A model that spends real money (Claude fast mode bills usage credits)
+      // is never switched to implicitly: the caller must pass the user's
+      // explicit confirmation. Fails closed for every client of this route.
+      if (target.billing?.paid && !confirmPaid) {
+        json(res, 409, {
+          error: `${target.name} spends real money: ${target.billing.detail} Confirm before switching.`,
+          requiresPaidConfirmation: true,
+          billing: target.billing,
+        });
         return;
       }
       if (ctx.running) {
@@ -87,7 +212,10 @@ export function handleRunControlRoutes(
           return;
         }
       }
-      await ctx.session.switchModel(target.provider, target.id);
+      await ctx.session.switchModel(target.provider, target.id, { confirmPaid });
+      // Picking an Ollama model loads it, so the footer shows the context Ollama
+      // really serves instead of the 4K guess. Never delays the switch.
+      if (target.provider === "local") void ctx.learnServedContext(target.id, true).catch(() => {});
       // Ken follows GG Coder's model only while un-pinned; a user-set Ken
       // override survives GG model switches untouched.
       if (!ctx.kenModelOverride) {
@@ -129,6 +257,7 @@ export function handleRunControlRoutes(
       // the footer's context meter rescales immediately.
       ctx.broadcast("extras", ctx.footerExtras());
       json(res, 200, { provider: target.provider, model: target.id, ...payload });
+      void ctx.trophies.count("modelSwitches", ctx.sessionId);
     });
     return true;
   }
@@ -173,6 +302,14 @@ export function handleRunControlRoutes(
           json(res, 404, { error: `unknown model: ${modelId}` });
           return;
         }
+        // Ken and the autopilot reviewer run unwatched in the background, so
+        // they never run on a model that spends real money.
+        if (target.billing?.paid) {
+          json(res, 400, {
+            error: `${target.name} spends real money, so it's only for your main chat. Pick another model for Ken.`,
+          });
+          return;
+        }
         ctx.kenModelOverride = { provider: target.provider, model: target.id };
         await saveKenModelPref(ctx.cwd, ctx.kenModelOverride);
         await ctx.syncKenModel(target.provider, target.id);
@@ -181,6 +318,7 @@ export function handleRunControlRoutes(
           provider: target.provider,
           model: target.id,
         });
+        void ctx.trophies.count("kenPins", ctx.sessionId);
       }
       const payload = ctx.kenStatePayload();
       ctx.broadcast("ken_model_change", payload);
@@ -221,6 +359,7 @@ export function handleRunControlRoutes(
         ...(cancelled ? { cancelledId: id } : {}),
       });
       json(res, 200, { cancelled, queued });
+      if (cancelled) void ctx.trophies.count("queueCancels", ctx.sessionId);
     });
     return true;
   }
@@ -243,6 +382,7 @@ export function handleRunControlRoutes(
       // Push the updated task list right away rather than waiting for the poll.
       ctx.broadcast("tasks", { tasks: ctx.session.listBackgroundProcesses() });
       json(res, 200, { message });
+      void ctx.trophies.count("processKills", ctx.sessionId);
     });
     return true;
   }
@@ -269,36 +409,51 @@ export function handleRunControlRoutes(
         ...(body.cwd ? { cwd: body.cwd } : {}),
       });
       json(res, result.ok ? 200 : 400, result);
+      if (result.ok) void ctx.trophies.count("transcriptImports", ctx.sessionId);
     });
     return true;
   }
 
   if (method === "POST" && url === "/thinking") {
     // The in-flight request already carries its reasoning config, so a
-    // mid-run cycle cannot affect the turn the user is watching — it just
+    // mid-run change cannot affect the turn the user is watching — it just
     // persists a level the footer then reports for a run that never used it.
     // Locked like POST /model; the footer button is disabled to match.
-    if (ctx.running) {
-      json(res, 409, { error: "cannot change reasoning level while running" });
-      return true;
-    }
-    const st = ctx.session.getState();
-    const next = getNextThinkingLevel(st.provider, st.model, ctx.session.getThinkingLevel());
-    ctx.session.setThinkingLevel(next);
-    // Persist per-project so THIS window restores its thinking state on
-    // restart; keep the global write as a fallback (mirrors the CLI).
-    void saveProjectModelPrefs(ctx.cwd, {
-      provider: st.provider,
-      model: st.model,
-      thinkingEnabled: !!next,
-      thinkingLevel: next ?? undefined,
-    }).then(() => persistThinkingLevel(ctx.paths.settingsFile, next));
-    const payload = {
-      thinkingLevel: next ?? null,
-      supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
-    };
-    ctx.broadcast("thinking_change", payload);
-    json(res, 200, payload);
+    void readBody(req, res).then((raw) => {
+      if (raw === null) return;
+      if (ctx.running) {
+        json(res, 409, { error: "cannot change reasoning level while running" });
+        return;
+      }
+      const st = ctx.session.getState();
+      const resolved = resolveThinkingRequest(
+        st.provider,
+        st.model,
+        ctx.session.getThinkingLevel(),
+        raw,
+      );
+      if (!resolved.ok) {
+        json(res, 400, { error: resolved.error });
+        return;
+      }
+      const next = resolved.level;
+      ctx.session.setThinkingLevel(next);
+      // Persist per-project so THIS window restores its thinking state on
+      // restart; keep the global write as a fallback (mirrors the CLI).
+      void saveProjectModelPrefs(ctx.cwd, {
+        provider: st.provider,
+        model: st.model,
+        thinkingEnabled: !!next,
+        thinkingLevel: next ?? undefined,
+      }).then(() => persistThinkingLevel(ctx.paths.settingsFile, next));
+      const payload = {
+        thinkingLevel: next ?? null,
+        supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
+      };
+      ctx.broadcast("thinking_change", payload);
+      json(res, 200, payload);
+      void ctx.trophies.count("thinkingChanges", ctx.sessionId);
+    });
     return true;
   }
 
@@ -353,6 +508,7 @@ export function handleRunControlRoutes(
         runState: ctx.runLifecycle.state,
         drained,
       });
+      if (result.status === "cancelled") void ctx.trophies.count("cancels", ctx.sessionId);
     })().catch((error) => {
       ctx.broadcast("cancel_failed", { error: "cancel_failed", runState: ctx.runLifecycle.state });
       json(res, 500, {
@@ -365,7 +521,7 @@ export function handleRunControlRoutes(
   }
 
   if (method === "POST" && url === "/new-session") {
-    if (ctx.running) {
+    if (ctx.running || ctx.runClaim.active || ctx.autopilotActive) {
       json(res, 409, { error: "cannot start a new session while running" });
       return true;
     }
@@ -381,6 +537,7 @@ export function handleRunControlRoutes(
         ctx.broadcast("session_reset", {});
         // The new conversation's file, so a daemon restart reopens it.
         json(res, 200, { ok: true, sessionPath: ctx.session.getState().sessionPath ?? null });
+        void ctx.trophies.count("newSessions", ctx.sessionId);
       })
       .catch((err) => {
         json(res, 500, { error: err instanceof Error ? err.message : String(err) });
@@ -436,6 +593,7 @@ export function handleRunControlRoutes(
         ctx.broadcast("session_reset", { planTotal });
         ctx.broadcast("plan_progress", ctx.planProgressPayload());
         json(res, 200, { ok: true, planTotal });
+        void ctx.trophies.count("plansApproved", ctx.sessionId);
       } catch (err) {
         json(res, 500, { error: err instanceof Error ? err.message : String(err) });
       }

@@ -15,7 +15,7 @@ const MODELS: ModelOption[] = [
   { id: "grok-4.5", name: "Grok 4.5", provider: "xai" },
   {
     id: "local/ollama/gemma4:e2b",
-    name: "gemma4:e2b (Ollama)",
+    name: "gemma4:e2b",
     provider: "local",
     local: true,
     endpoint: "Ollama",
@@ -24,7 +24,7 @@ const MODELS: ModelOption[] = [
   },
   {
     id: "local/ollama/tiny",
-    name: "tiny (Ollama)",
+    name: "tiny",
     provider: "local",
     local: true,
     endpoint: "Ollama",
@@ -57,6 +57,62 @@ describe("ModelSelect — compact recovery action", () => {
   });
 });
 
+describe("ModelSelect — models that change what you pay", () => {
+  const paid: ModelOption = {
+    id: "claude-opus-5-5-fast",
+    name: "Claude Opus 5.5 Fast",
+    provider: "anthropic",
+    billing: {
+      label: "bills usage credits",
+      detail: "Fast mode bills your Claude usage credits, never your plan's included usage.",
+      paid: true,
+    },
+  };
+  const planFast: ModelOption = {
+    id: "gpt-6-luna-fast",
+    name: "GPT-6 Luna Fast",
+    provider: "openai",
+    billing: { label: "2.5x plan usage", detail: "Uses plan limits at 2.5x.", paid: false },
+  };
+
+  it.each([true, false])(
+    "never offers a real-money model it can't confirm, but labels plan-usage tiers (native=%s)",
+    (native) => {
+      supportsNativeMock.mockReturnValue(native);
+      render(
+        <ModelSelect
+          models={[...MODELS, paid, planFast]}
+          currentModel="claude-sonnet-5"
+          onSelect={vi.fn()}
+          title="Switch model"
+          label="Choose model"
+        />,
+      );
+      if (!native) fireEvent.click(screen.getByRole("button", { name: "Choose model" }));
+      const role = native ? "option" : "menuitemradio";
+      expect(screen.queryByRole(role, { name: /Claude Opus 5\.5 Fast/ })).toBeNull();
+      expect(screen.getByRole(role, { name: "GPT-6 Luna Fast · 2.5x plan usage" })).toBeTruthy();
+    },
+  );
+
+  it("still shows a real-money model that is already the current one", () => {
+    supportsNativeMock.mockReturnValue(false);
+    render(
+      <ModelSelect
+        models={[...MODELS, paid]}
+        currentModel="claude-opus-5-5-fast"
+        onSelect={vi.fn()}
+        title="Switch model"
+        label="Choose model"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Choose model" }));
+    expect(
+      screen.getByRole("menuitemradio", { name: "Claude Opus 5.5 Fast · bills usage credits" }),
+    ).toBeTruthy();
+  });
+});
+
 describe("ModelSelect — native popup", () => {
   it("groups every provider under its own label, local last", () => {
     supportsNativeMock.mockReturnValue(true);
@@ -70,7 +126,7 @@ describe("ModelSelect — native popup", () => {
     );
 
     const groups = Array.from(document.querySelectorAll("optgroup")).map((g) => g.label);
-    expect(groups).toEqual(["Anthropic", "OpenAI", "xAI (Grok)", "Local"]);
+    expect(groups).toEqual(["Anthropic", "OpenAI", "xAI (Grok)", "Local · Ollama"]);
   });
 
   it("disables a tool-less local option and says why in its label", () => {
@@ -84,7 +140,7 @@ describe("ModelSelect — native popup", () => {
       />,
     );
 
-    const option = screen.getByRole("option", { name: /tiny \(Ollama\) — no tool calling/ });
+    const option = screen.getByRole("option", { name: /^tiny — no tool calling/ });
     expect(option.hasAttribute("disabled")).toBe(true);
   });
 
@@ -271,9 +327,9 @@ describe("ModelSelect — in-webview menu", () => {
     const headings = Array.from(document.querySelectorAll(".model-menu-subtitle")).map(
       (el) => el.textContent,
     );
-    expect(headings).toEqual(["Anthropic", "OpenAI", "xAI (Grok)", "Local"]);
+    expect(headings).toEqual(["Anthropic", "OpenAI", "xAI (Grok)", "Local · Ollama"]);
     // Each section's grid is labelled for screen readers.
-    expect(screen.getByRole("group", { name: "Local" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Local · Ollama" })).toBeTruthy();
   });
 
   it("selects a model from its provider group", () => {
@@ -287,7 +343,7 @@ describe("ModelSelect — in-webview menu", () => {
   it("refuses to select a tool-less local model", () => {
     const onSelect = openMenu();
 
-    const item = screen.getByRole("menuitemradio", { name: "tiny (Ollama)" });
+    const item = screen.getByRole("menuitemradio", { name: "tiny" });
     expect(item.hasAttribute("disabled")).toBe(true);
     expect(item.getAttribute("title")).toContain("has no tool calling");
 
@@ -299,9 +355,7 @@ describe("ModelSelect — in-webview menu", () => {
     openMenu("local/ollama/gemma4:e2b");
 
     expect(
-      screen
-        .getByRole("menuitemradio", { name: "gemma4:e2b (Ollama)" })
-        .getAttribute("aria-checked"),
+      screen.getByRole("menuitemradio", { name: "gemma4:e2b" }).getAttribute("aria-checked"),
     ).toBe("true");
   });
 });

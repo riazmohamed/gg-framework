@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { FAST_MODE_SUFFIX, resolveFastModeModel } from "@abukhaled/gg-ai";
 import { XIAOMI_CREDITS_KEY } from "./auth-storage.js";
 import {
   MODELS,
@@ -15,7 +16,9 @@ import {
   getModelsForProvider,
   getSummaryModel,
   getToolResultCharLimit,
+  isPaidModel,
   usesOpenAICodexTransport,
+  withoutPaidTier,
 } from "./model-registry.js";
 
 const PROVIDERS = [
@@ -29,6 +32,8 @@ const PROVIDERS = [
   "deepseek",
   "openrouter",
   "huggingface",
+  "opencode",
+  "opencode-go",
   "sakana",
   "xai",
 ] as const;
@@ -82,6 +87,82 @@ describe("model registry invariants", () => {
     }
   });
 
+  it("registers fast-mode entries as the same model as their base, wired in gg-ai", () => {
+    const fastIds = MODELS.filter((m) => m.id.endsWith(FAST_MODE_SUFFIX)).map((m) => m.id);
+    expect(fastIds).toEqual([
+      "claude-fable-5-2-fast",
+      "claude-opus-5-5-fast",
+      "gpt-6-astra-fast",
+      "gpt-6.1-sol-fast",
+      "gpt-6.1-terra-fast",
+      "gpt-6-luna-fast",
+    ]);
+    for (const id of fastIds) {
+      const { id: _id, name, billing, ...fast } = getModel(id) as ModelInfo;
+      const resolved = resolveFastModeModel(fast.provider, id);
+      expect(resolved.fast, `${id} resolves in gg-ai`).toBe(true);
+      const { id: _baseId, name: baseName, ...base } = getModel(resolved.model) as ModelInfo;
+      expect(fast, `${id} metadata matches ${resolved.model}`).toEqual(base);
+      expect(name).toBe(`${baseName} Fast`);
+      // Every fast tier changes what the user pays, so it must say so.
+      expect(billing, `${id} declares its billing`).toBeDefined();
+      expect(base.billing, `${resolved.model} bills normally`).toBeUndefined();
+    }
+    // Claude fast mode spends real money (usage credits); Codex fast spends plan allowance.
+    expect(getModel("claude-opus-5-5-fast")?.billing?.paid).toBe(true);
+    expect(getModel("gpt-6.1-sol-fast")?.billing?.paid).toBe(false);
+    // Only a real-money tier is ever stripped back to the standard model.
+    expect(isPaidModel("claude-opus-5-5-fast")).toBe(true);
+    expect(withoutPaidTier("claude-opus-5-5-fast")).toBe("claude-opus-5-5");
+    expect(isPaidModel("claude-fable-5-2-fast")).toBe(true);
+    expect(withoutPaidTier("claude-fable-5-2-fast")).toBe("claude-fable-5-2");
+    expect(withoutPaidTier("gpt-6.1-sol-fast")).toBe("gpt-6.1-sol-fast");
+    expect(withoutPaidTier("claude-sonnet-5-5")).toBe("claude-sonnet-5-5");
+    expect(withoutPaidTier("not-a-model")).toBe("not-a-model");
+    // Compaction summaries never land on a fast (premium) tier.
+    expect(getSummaryModel("openai", "gpt-6.1-sol-fast").id).toBe("gpt-6-luna");
+    expect(getSummaryModel("anthropic", "claude-opus-5-5-fast").id).toBe("claude-sonnet-5-5");
+  });
+
+  it("treats MiMo UltraSpeed as real money and strips it back to MiMo-V2.6-Pro", () => {
+    // UltraSpeed only runs on pay-per-token API Credits, never the Token Plan.
+    expect(isPaidModel("mimo-v2.6-pro-ultraspeed")).toBe(true);
+    expect(withoutPaidTier("mimo-v2.6-pro-ultraspeed")).toBe("mimo-v2.6-pro");
+    expect(isPaidModel("mimo-v2.6-pro")).toBe(false);
+  });
+
+  it("gives every paid model a registered, same-provider, unpaid standard model", () => {
+    for (const model of getAllModels().filter((m) => m.billing?.paid === true)) {
+      const standard = model.billing?.standardModel;
+      expect(standard, `${model.id} names its standard model`).toBeDefined();
+      const target = standard ? getModel(standard) : undefined;
+      expect(target, `${model.id} → ${standard} is registered`).toBeDefined();
+      expect(target?.provider, `${model.id} → ${standard} same provider`).toBe(model.provider);
+      expect(isPaidModel(standard ?? ""), `${model.id} → ${standard} is unpaid`).toBe(false);
+      expect(withoutPaidTier(model.id)).toBe(standard);
+    }
+  });
+
+  it("never strips a paid model back to a paid id when its standard model is missing", () => {
+    // Fail closed: a paid runtime model with no usable standard model falls
+    // back to the provider default, not to itself.
+    registerRuntimeModels([
+      {
+        ...(getModel("mimo-v2.6-pro-ultraspeed") as ModelInfo),
+        id: "mimo-test-paid-orphan",
+        billing: { label: "paid", detail: "paid", paid: true, standardModel: "not-registered" },
+      },
+    ]);
+    try {
+      const fallback = withoutPaidTier("mimo-test-paid-orphan");
+      expect(fallback).not.toBe("mimo-test-paid-orphan");
+      expect(isPaidModel(fallback)).toBe(false);
+      expect(getModel(fallback)).toBeDefined();
+    } finally {
+      clearRuntimeModels((m) => m.id === "mimo-test-paid-orphan");
+    }
+  });
+
   it("returns a registered default model for every provider", () => {
     for (const provider of PROVIDERS) {
       const defaultModel = getDefaultModel(provider);
@@ -104,6 +185,7 @@ describe("Claude Sonnet 5.5", () => {
       supportsImages: true,
       supportsVideo: false,
       costTier: "medium",
+      defaultThinkingLevel: "medium",
       maxThinkingLevel: "max",
     });
     expect(getModelsForProvider("anthropic")).toContain(model);
@@ -126,6 +208,7 @@ describe("Claude Haiku 5.5", () => {
       supportsImages: true,
       supportsVideo: false,
       costTier: "low",
+      defaultThinkingLevel: "medium",
       maxThinkingLevel: "max",
     });
     expect(getModelsForProvider("anthropic")).toContain(model);
@@ -315,21 +398,29 @@ describe("model registry context windows", () => {
       contextWindow: 262_144,
       maxThinkingLevel: "high",
     });
-    // K2.8 Preview only exists on the Kimi sign-in endpoint, and is never
+    // K2.8 Preview only exists on the Kimi Code plan endpoint, and is never
     // mislabelled with the K2.7 name it replaced behind the rolling alias.
     expect(getModel("kimi-for-coding")).toMatchObject({
       name: "Kimi K2.8 Preview",
       contextWindow: 1_048_576,
       maxThinkingLevel: "max",
-      authStorageKeys: ["moonshot-oauth"],
+      authStorageKeys: ["kimi-code"],
     });
-    expect(getAuthStorageKeys("moonshot", "kimi-for-coding")).toEqual(["moonshot-oauth"]);
+    expect(getAuthStorageKeys("moonshot", "kimi-for-coding")).toEqual(["kimi-code"]);
+    // The other Kimi models take the plan key first, then a Moonshot key.
+    for (const id of ["kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"]) {
+      expect(getAuthStorageKeys("moonshot", id), id).toEqual(["kimi-code", "moonshot"]);
+    }
+    expect(getAuthStorageKeys("gemini", "gemini-3.8-flash")).toEqual(["gemini-api"]);
     expect(getContextWindow("kimi-k3", { provider: "moonshot" })).toBe(1_048_576);
   });
 
-  it("starts Kimi K3 at the endpoint's declared default effort, kimi-code-style", () => {
-    // Kimi For Coding OAuth endpoint declares default_effort "high" …
+  it("starts Kimi K3 at the endpoint's declared default effort", () => {
+    // The Kimi Code plan endpoint (either host) declares default_effort "high" …
     expect(getDefaultThinkingLevel("kimi-k3", { baseUrl: "https://api.kimi.com/coding/v1" })).toBe(
+      "high",
+    );
+    expect(getDefaultThinkingLevel("kimi-k3", { baseUrl: "https://api.kimi.ai/coding/v1" })).toBe(
       "high",
     );
     // … the public Moonshot API declares "max" …
@@ -338,12 +429,18 @@ describe("model registry context windows", () => {
     );
     // … and no stored endpoint (e.g. API-key-only auth) means the public API.
     expect(getDefaultThinkingLevel("kimi-k3")).toBe("max");
-    // Every other model starts at its registry max regardless of endpoint.
+    // Models without a declared default start at their registry max regardless of endpoint.
     expect(
       getDefaultThinkingLevel("kimi-k2.7-code", { baseUrl: "https://api.kimi.com/coding/v1" }),
     ).toBe("high");
-    expect(getDefaultThinkingLevel("claude-opus-5-5")).toBe("max");
-    expect(getDefaultThinkingLevel("claude-opus-5-5")).toBe("max");
+  });
+
+  it("starts the Claude 5.5 family at medium, matching the API and Claude Code", () => {
+    for (const id of ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]) {
+      expect(getDefaultThinkingLevel(id)).toBe("medium");
+      // Ceiling unchanged — users can still opt up to max.
+      expect(getModel(id)?.maxThinkingLevel).toBe("max");
+    }
   });
 
   it("starts Codex models at their catalog default, not the ladder ceiling", () => {
@@ -416,16 +513,20 @@ describe("model registry context windows", () => {
     }
   });
 
-  it("defaults MiniMax to the multimodal M3 with a 1M context window", () => {
+  it("defaults MiniMax to M3.1 Flash, the model plan keys cover, and keeps M3", () => {
     expect(getDefaultModel("minimax")).toMatchObject({
-      id: "MiniMax-M3",
-      name: "MiniMax M3",
+      id: "MiniMax-M3.1-Flash",
+      name: "MiniMax M3.1 Flash",
       provider: "minimax",
       contextWindow: 1_000_000,
       supportsImages: true,
       supportsVideo: true,
+      maxThinkingLevel: "max",
     });
-    expect(getModelsForProvider("minimax").map((model) => model.id)).toEqual(["MiniMax-M3"]);
+    expect(getModelsForProvider("minimax").map((model) => model.id)).toEqual([
+      "MiniMax-M3.1-Flash",
+      "MiniMax-M3",
+    ]);
     expect(getContextWindow("MiniMax-M3", { provider: "minimax" })).toBe(1_000_000);
   });
 
@@ -483,7 +584,6 @@ describe("model registry context windows", () => {
       "gemini-3.1-flash-lite",
       "gemini-3.8-flash",
       "gemini-3.5-flash-lite",
-      "gemini-3.7-flash",
       "gemini-3-flash",
       "gemini-3.1-pro-preview",
     ]);
@@ -498,7 +598,8 @@ describe("model registry context windows", () => {
       // Summaries intentionally stay on the selected Gemini model.
       expect(getSummaryModel("gemini", id).id).toBe(id);
     }
-    expect(getContextWindow("gemini-3.7-flash", { provider: "gemini" })).toBe(1_048_576);
+    // Retired: Google routes gemini-3.7-flash to 3.8 Flash since 2026-10-08.
+    expect(getModel("gemini-3.7-flash")).toBeUndefined();
     expect(getContextWindow("gemini-3.1-flash-lite", { provider: "gemini" })).toBe(1_048_576);
     expect(getContextWindow("gemini-3-flash", { provider: "gemini" })).toBe(1_048_576);
   });
@@ -506,7 +607,8 @@ describe("model registry context windows", () => {
   it("retargets deepseek-v4-pro to the 0813 stable build under the same id", () => {
     expect(getDefaultModel("deepseek")).toMatchObject({
       id: "deepseek-v4-pro",
-      contextWindow: 1_048_576,
+      // Decimal 1M, as DeepSeek's own harness sizes it (DEFAULT_CONTEXT_WINDOW).
+      contextWindow: 1_000_000,
       maxOutputTokens: 384_000,
       supportsImages: false,
       costTier: "medium",
@@ -523,7 +625,7 @@ describe("model registry context windows", () => {
       name: "DeepSeek V4.1 Flash",
       supportsImages: true,
       supportsVideo: false,
-      contextWindow: 1_048_576,
+      contextWindow: 1_000_000,
       maxOutputTokens: 384_000,
       maxThinkingLevel: "max",
     });
@@ -574,7 +676,8 @@ describe("model registry context windows", () => {
     // holds a full session that gpt-oss's 131K could not.
     expect(getSummaryModel("huggingface", "moonshotai/Kimi-K2.7-Code")).toMatchObject({
       id: "deepseek-ai/DeepSeek-V4.1-Flash",
-      contextWindow: 1_048_576,
+      // The V4 family is 1,000,000 (DeepSeek pricing docs, cited by Hermes).
+      contextWindow: 1_000_000,
       costTier: "low",
     });
     expect(getModel("openai/gpt-oss-120b")).toMatchObject({
@@ -644,5 +747,21 @@ describe("runtime model registry", () => {
     registerRuntimeModels([local]);
 
     expect(getDefaultModel("local")).toBe(local);
+  });
+});
+
+describe("GPT-6.1 Terra", () => {
+  it("matches the Codex catalog: 500K Codex window, low default, Ultra ladder", () => {
+    expect(getModel("gpt-6.1-terra")).toMatchObject({
+      provider: "openai",
+      contextWindow: 1_050_000,
+      codexContextWindow: 500_000,
+      defaultThinkingLevel: "low",
+      maxThinkingLevel: "ultra",
+      costTier: "medium",
+    });
+    expect(getModel("gpt-6.1-terra-fast")?.billing).toBeDefined();
+    // Sol stays the OpenAI default.
+    expect(getDefaultModel("openai").id).toBe("gpt-6.1-sol");
   });
 });

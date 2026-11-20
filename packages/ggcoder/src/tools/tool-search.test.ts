@@ -17,7 +17,8 @@ function stub(name: string, description: string, result = "ok"): AgentTool {
 }
 
 async function search(tool: ReturnType<typeof createToolSearchTool>, query: string) {
-  return String(await tool.execute({ query }, CONTEXT));
+  const result = await tool.execute({ query }, CONTEXT);
+  return typeof result === "string" ? result : String(result.content);
 }
 
 describe("tool_search", () => {
@@ -99,7 +100,7 @@ describe("tool_search", () => {
     });
     catalog.add([
       {
-        name: "mcp__big__blob",
+        name: "mcp__big__get_screens",
         description: "fetch design screenshots",
         parameters: huge,
         execute: async () => "ok",
@@ -116,11 +117,11 @@ describe("tool_search", () => {
     expect(result).toContain("1 tool(s) now available");
     expect(result).toContain("mcp__figma__get_screens");
     expect(result).toContain("Refused (schema byte budget)");
-    expect(result).toContain("mcp__big__blob");
+    expect(result).toContain("mcp__big__get_screens");
     expect(result).toContain("contextLimits.mcpToolSchemaBytes");
     expect(promotedNames).toEqual(["mcp__figma__get_screens"]);
     // Refused tool stays in the catalog, not the live toolset.
-    expect(catalog.names()).toContain("mcp__big__blob");
+    expect(catalog.names()).toContain("mcp__big__get_screens");
   });
 
   it("fails closed when EVERY match exceeds the schema budget", async () => {
@@ -161,5 +162,40 @@ describe("tool_search", () => {
       resolveContextLimits({ mcpToolSchemaBytes: 16 * 1024 }),
     );
     expect(await search(tool, "design screenshots")).toContain("1 tool(s) now available");
+  });
+
+  it("promotes only the best match and near-ties, never weak substring hits", async () => {
+    const catalog = new DeferredToolCatalog();
+    catalog.add([
+      stub("web_search", "Search the web and return results."),
+      stub("web_fetch", "Fetch a URL from the web."),
+      stub("code_search", "Search code by meaning."),
+      stub("checklist", "Project checks with evidence."),
+      stub("tasks", "Task list for the project."),
+      stub("debug", "Node debugger."),
+    ]);
+    expect(catalog.search("web search").map((t) => t.name)).toEqual(["web_search"]);
+    // Word-level: "list" no longer matches inside "checklist"; plurals and
+    // stems still match ("tasks" → task, "debugger" → debug).
+    expect(catalog.search("task list").map((t) => t.name)).toEqual(["tasks"]);
+    expect(catalog.search("debugger").map((t) => t.name)).toEqual(["debug"]);
+    expect(catalog.search("nothing relevant here")).toEqual([]);
+  });
+});
+
+describe("tool_search loadedTools", () => {
+  it("names the promoted tools so transports can load them in the transcript", async () => {
+    const catalog = new DeferredToolCatalog();
+    catalog.add([
+      {
+        name: "steroids",
+        description: "Search real open-source code",
+        parameters: z.object({}),
+        execute: async () => "",
+      },
+    ]);
+    const tool = createToolSearchTool(catalog, () => {});
+    const result = await tool.execute({ query: "open-source code" }, CONTEXT);
+    expect(typeof result === "object" && result.loadedTools).toEqual(["steroids"]);
   });
 });

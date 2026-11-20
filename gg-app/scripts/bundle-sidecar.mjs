@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pruneOnnxRuntimePayloads } from "./prune-native-payloads.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
@@ -36,6 +37,11 @@ const bundledSkillsOut = join(outDir, "skills");
 // `skills/` so its skills never enter coder or chat discovery.
 const motionBundleSource = join(repoRoot, "packages", "ggcoder", "assets", "motion");
 const motionBundleOut = join(outDir, "motion");
+// Live preview's overlay (page script + chat frame), served by the sidecar.
+// Built here, not taken from a previous app build, so it is never stale.
+const livePreviewConfig = join(here, "..", "vite.live-preview.config.ts");
+const livePreviewBuilt = join(here, "..", "dist-live-preview");
+const livePreviewOut = join(outDir, "live-preview");
 
 // Packages that must NOT be inlined: native addons, lazily-loaded optional
 // heavy deps, and child-process entry points that esbuild cannot discover.
@@ -48,9 +54,6 @@ const EXTERNAL = [
   "turndown",
   "turndown-plugin-gfm",
   "@mozilla/readability",
-  // The Codex transport loads this package's zstd.wasm by path at runtime.
-  // Keep the package external so the WASM asset survives the sidecar bundle.
-  "@bokuweb/zstd-wasm",
   // LSP servers run as child processes from their real package entry points.
   // The server resolver also needs a physical tsserver.js path. Neither package
   // is imported by the sidecar, so esbuild would otherwise omit both and every
@@ -65,7 +68,20 @@ const EXTERNAL = [
   // Bash launches SRT's physical CLI as a child process for per-session OS
   // sandboxing; keep its platform binaries and CLI files on disk.
   "@anthropic-ai/sandbox-runtime",
+  // The Claude subscription route drives the Agent SDK, which spawns Claude Code
+  // and loads its own chunks by path. Its ~200 MB platform binaries are never
+  // shipped: GG downloads one on first "Sign in with Claude".
+  "@anthropic-ai/claude-agent-sdk",
 ];
+
+// Claude Code platform builds; see the EXTERNAL note above.
+const NEVER_SHIPPED = /^@anthropic-ai\/claude-agent-sdk-/;
+
+// Peer dependencies an external package imports at runtime. copyPackage only
+// follows dependencies/optionalDependencies, so name these explicitly.
+const RUNTIME_PEERS = {
+  "@anthropic-ai/claude-agent-sdk": ["zod"],
+};
 
 // require resolver anchored at the ggcoder package, where these deps live.
 const ggcoderRequire = createRequire(join(repoRoot, "packages", "ggcoder", "package.json"));
@@ -173,7 +189,7 @@ function packageRoot(name, fromRequire, fromDir) {
  * (npm-style hoist); the smoke test validates the result loads.
  */
 function copyPackage(name, fromRequire, fromDir, copied) {
-  if (copied.has(name)) return;
+  if (copied.has(name) || NEVER_SHIPPED.test(name)) return;
   const linkedRoot = packageRoot(name, fromRequire, fromDir);
   if (!linkedRoot) {
     console.warn(`skip (not found): ${name}`);
@@ -196,35 +212,9 @@ function copyPackage(name, fromRequire, fromDir, copied) {
     ...(pkg.optionalDependencies || {}),
   };
   const childRequire = createRequire(join(root, "package.json"));
-  for (const dep of Object.keys(deps)) {
+  for (const dep of [...Object.keys(deps), ...(RUNTIME_PEERS[name] ?? [])]) {
     copyPackage(dep, childRequire, root, copied);
   }
-}
-
-/**
- * Native packages can publish binaries for every supported OS/architecture in
- * one npm tarball. Keep only this build runner's payload: shipping dormant Intel
- * Mach-O files makes an arm64 app look Intel-based to macOS inventory scanners
- * and adds roughly 180 MB of unused files before compression.
- */
-function pruneForeignNativePayloads() {
-  const runtimes = join(nodeModulesOut, "onnxruntime-node", "bin", "napi-v3");
-  if (!existsSync(runtimes)) return;
-
-  const selected = join(runtimes, process.platform, process.arch);
-  if (!existsSync(selected)) {
-    throw new Error(
-      `onnxruntime-node has no native payload for ${process.platform}/${process.arch}`,
-    );
-  }
-
-  const keep = join(outDir, `.gg-onnxruntime-${process.pid}`);
-  cpSync(selected, keep, { recursive: true });
-  rmSync(runtimes, { recursive: true, force: true });
-  mkdirSync(join(runtimes, process.platform), { recursive: true });
-  cpSync(keep, selected, { recursive: true });
-  rmSync(keep, { recursive: true, force: true });
-  console.log(`pruned onnxruntime-node payloads to ${process.platform}/${process.arch}`);
 }
 
 const mb = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
@@ -330,6 +320,15 @@ async function main() {
     },
   });
 
+  const { build: viteBuild } = await import("vite");
+  await viteBuild({ configFile: livePreviewConfig, logLevel: "warn" });
+  for (const file of ["page.js", "frame.html"]) {
+    if (!existsSync(join(livePreviewBuilt, file))) {
+      throw new Error(`live preview build missing ${file}: ${livePreviewBuilt}`);
+    }
+  }
+  cpSync(livePreviewBuilt, livePreviewOut, { recursive: true });
+
   await build({
     entryPoints: [sidecarEntry],
     outfile: outFile,
@@ -361,7 +360,9 @@ async function main() {
   for (const name of EXTERNAL) {
     copyPackage(name, ggcoderRequire, ggcoderRoot, copied);
   }
-  pruneForeignNativePayloads();
+  for (const abi of pruneOnnxRuntimePayloads(nodeModulesOut)) {
+    console.log(`pruned onnxruntime-node ${abi} payloads to ${process.platform}/${process.arch}`);
+  }
   pruneBrowserOnnxPayloads();
   stripSourceMaps();
   console.log(

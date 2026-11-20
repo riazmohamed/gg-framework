@@ -40,3 +40,14 @@ export const PROVIDER_LOGOS: Record<string, string> = {
 export function providerLogo(value: string): string | undefined {
   return PROVIDER_LOGOS[value];
 }
+
+/**
+ * Marks drawn in near-white for a dark background (OpenAI, xAI, Moonshot).
+ * As <img> sources they can't take the theme's ink, so the light theme
+ * inverts them to near-black (see .login-logo[data-mono] in Deck.css).
+ */
+const MONO_LIGHT = new Set(["openai", "xai", "moonshot"]);
+
+export function providerLogoIsMono(value: string): boolean {
+  return MONO_LIGHT.has(value);
+}

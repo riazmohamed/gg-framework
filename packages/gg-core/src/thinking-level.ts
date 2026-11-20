@@ -22,7 +22,7 @@ const DEEPSEEK_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "high", "max"
 // rung (docs: low/medium/high default/xhigh); each model slices this ladder
 // by its registry maxThinkingLevel.
 const XAI_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh"];
-// Opus 5.x / 4.7, Sonnet 5.5 and Haiku 5.5 expose the full ladder including xhigh.
+// Fable/Mythos 5.x, Opus 5.x / 4.7, Sonnet 5.5 and Haiku 5.5 expose the full ladder including xhigh.
 // Other adaptive Anthropic models omit xhigh and would 400.
 const ANTHROPIC_XHIGH_THINKING_LEVELS: readonly ThinkingLevel[] = [
   "low",
@@ -50,6 +50,15 @@ const MOONSHOT_K3_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "high", "m
 // end-to-end on one hard reasoning prompt: low 0.8K reasoning chars / 15s,
 // high 3.2K / 28s, max 24.9K / 129s.
 const GLM_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
+// MiniMax M3.1 Flash: output_config.effort accepts low/medium/high/xhigh/max
+// (platform.minimax.io Anthropic API docs); M3 has only on/off thinking.
+const MINIMAX_EFFORT_THINKING_LEVELS: readonly ThinkingLevel[] = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
 /**
  * Effort ladder for locally hosted models. `xhigh`/`ultra` are deliberately
  * absent: no local server defines them (Ollama 0.32 answers
@@ -80,9 +89,14 @@ function isGlmModel(provider: Provider): boolean {
   return provider === "glm";
 }
 
+function isMiniMaxEffortModel(provider: Provider, model: string): boolean {
+  return provider === "minimax" && model.startsWith("MiniMax-M3.1");
+}
+
 function isAnthropicXhighModel(provider: Provider, model: string): boolean {
   return (
-    provider === "anthropic" && /opus-5|opus-4-8|opus-4-7|sonnet-5[-.]5|haiku-5[-.]5/.test(model)
+    provider === "anthropic" &&
+    /fable-5|mythos-5|opus-5|opus-4-8|opus-4-7|sonnet-5[-.]5|haiku-5[-.]5/.test(model)
   );
 }
 
@@ -112,6 +126,8 @@ export function getSupportedThinkingLevels(
       ? LOCAL_THINKING_LEVELS.slice(0, 3)
       : LOCAL_THINKING_LEVELS.slice(0, maxIndex + 1);
   }
+  const declared = getModel(model)?.thinkingLevels;
+  if (declared && declared.length > 0) return declared;
   const maxLevel = getMaxThinkingLevel(model);
   if (isAnthropicAdaptiveModel(provider, model)) {
     const levels = isAnthropicXhighModel(provider, model)
@@ -136,6 +152,8 @@ export function getSupportedThinkingLevels(
 
   if (isMoonshotK3Model(provider, model)) return MOONSHOT_K3_THINKING_LEVELS;
   if (provider === "deepseek") return DEEPSEEK_THINKING_LEVELS;
+
+  if (isMiniMaxEffortModel(provider, model)) return MINIMAX_EFFORT_THINKING_LEVELS;
 
   if (isGlmModel(provider)) {
     const maxIndex = GLM_THINKING_LEVELS.indexOf(maxLevel);
@@ -190,6 +208,7 @@ export function getNextThinkingLevel(
     isXaiModel(provider) ||
     isMoonshotK3Model(provider, model) ||
     isGlmModel(provider) ||
+    isMiniMaxEffortModel(provider, model) ||
     provider === "deepseek" ||
     // Local servers take a real effort level, not just on/off: Ollama accepts
     // low/medium/high on `reasoning_effort` (verified against 0.32) and the

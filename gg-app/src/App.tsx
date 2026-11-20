@@ -8,14 +8,14 @@ import {
   useLayoutEffect,
   useCallback,
   useMemo,
+  type SetStateAction,
 } from "react";
 import { createChatLayoutMotion } from "./chat-layout-motion";
 import { open } from "@tauri-apps/plugin-dialog";
 import { toAgentPath } from "./agent-path";
 import { theme } from "./theme";
-import { assignErrorCritters } from "./ErrorCritter";
 import { activeChatErrorId, readChatError } from "./chat-error";
-import { withViewTransition } from "./view-transition";
+import { showScreen } from "./view-transition";
 import {
   waitForReady,
   retryWindowSession,
@@ -26,7 +26,6 @@ import {
   setCritterModel,
   sendPrompt,
   sendKenPrompt,
-  cancelKen,
   setAutopilot,
   cancel,
   newSession,
@@ -35,10 +34,14 @@ import {
   isSwitchModelError,
   switchKenModel,
   listCommands,
+  addWorkspaceFolder,
+  removeWorkspaceFolder,
   cancelQueued,
   type PromptMeta,
   type QueuedMessage,
   listHistory,
+  listShellSuggestions,
+  type ShellSuggestion,
   listTasks,
   type ChecklistEntry,
   runTask,
@@ -95,6 +98,7 @@ import {
   type GoalTally,
 } from "./goal-progress";
 import { latestKenLine } from "./goal-ken-talk";
+import { kenStatusOf, lastRunOf } from "./goal-ken-status";
 import {
   FINISH_SETTLE_MS,
   goalFinishOf,
@@ -122,6 +126,10 @@ import { TasksModal } from "./TasksModal";
 import { ChecklistScreen } from "./ChecklistScreen";
 import { parseProjectHealth } from "./project-health";
 import { NotesModal } from "./NotesModal";
+import { FoldersPanel } from "./FoldersPanel";
+import { LivePreviewPanel } from "./LivePreviewPanel";
+import { livePreviewAvailable, START_DEV_SERVER_PROMPT } from "./livePreviewAvailable";
+import { useLivePreview } from "./useLivePreview";
 import { MemoryModal } from "./MemoryModal";
 import { GoalSettingsModal } from "./GoalSettingsModal";
 import { isHiddenScroller } from "./transcript-pin";
@@ -132,10 +140,10 @@ import { ConfirmModal } from "./ConfirmModal";
 import { InitGitModal } from "./InitGitModal";
 import type { PlanDecision } from "./PlanDecisionNotice";
 import { KenPowerBanner } from "./KenPowerBanner";
-import { ExportChatButton } from "./ExportChatButton";
 import { PlanReviewModal } from "./PlanReviewModal";
 import { McpElicitModal } from "./McpElicitModal";
 import { ProjectPicker } from "./ProjectPicker";
+import { type DraftEnhancement, followDraftEdit, rebaseSegments } from "./PromptEnhancement";
 import { ChatPicker } from "./ChatPicker";
 // The goal list and its New goal modal load on demand: they are only needed
 // once someone opens Goals.
@@ -146,19 +154,17 @@ import { BackButton } from "./BackButton";
 import { HomeScreen } from "./HomeScreen";
 import { SettingsModal } from "./SettingsModal";
 import { initialEntryView, type EntryView } from "./app-entry-view";
-import {
-  showsQueuedBubble,
-  submitDisposition,
-  withoutSupersedingMessage,
-} from "./submit-disposition";
+import { showsQueuedBubble, submitDisposition } from "./submit-disposition";
 import { Toaster } from "./Toaster";
 import { Confetti } from "./Confetti";
-import { ScorecardModal } from "./ScorecardModal";
-import { TitleUsageMeter } from "./TitleUsageMeter";
+import { ScorecardPanel } from "./Scorecard";
 import { useWindowFocused } from "./useWindowFocused";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 import { formatWorkspaceTitle } from "./workspace-title";
+import { chatTitle, firstUserPrompt } from "./chat-title";
 import { useProgress } from "./useProgress";
+import { useTrophies } from "./useTrophies";
+import { TrophyUnlock } from "./TrophyUnlock";
 import { SettingsScreen, type SettingsTabId } from "./SettingsScreen";
 import { PromptSendProvider } from "./Markdown";
 import { TranscriptSkeleton } from "./Skeleton";
@@ -166,45 +172,64 @@ import { recoverPromptLabel } from "./prompt-labels";
 import { playSound } from "./sounds";
 import { countPlanSteps } from "./plan-steps";
 import { toast } from "./toast";
-import { toWire, type PendingAttachment } from "./attachments";
+import { takeNewBlockedSkillMessages } from "./blocked-skills";
+import { collapseSecurityRows, takeNewSecurityNotices } from "./security-notices";
+import {
+  MAX_ATTACHMENT_BYTES,
+  attachmentBytes,
+  attachmentChips,
+  toWire,
+  type PendingAttachment,
+} from "./attachments";
 import { TranscriptRow } from "./TranscriptRow";
 import { nextId, lastIssuedId, type Item } from "./transcript-item";
-import { AppFooter } from "./AppFooter";
 import { useTranscriptScroll } from "./useTranscriptScroll";
 import { useTrayIntents } from "./useTrayIntents";
 import { useAttachments } from "./useAttachments";
 import { useDragOverlay, useWindowFileDrop } from "./useFileDrop";
-import { WorkspaceHeaderActions } from "./WorkspaceHeaderActions";
+import { DeckMenu, TitleBarActions } from "./WorkspaceHeaderActions";
+import { dockStepped, nextDockHeight } from "./dock-height";
+import { finishEntrances } from "./finish-entrances";
+import { Deck, type DeckPanelId } from "./Deck";
+import { ProjectHealthPanel } from "./ProjectHealthBadge";
 import { useChecklist } from "./useChecklist";
 import { useProjectNotes } from "./useProjectNotes";
 import { useChromeToggles } from "./useChromeToggles";
 import { useTranscriptExport } from "./useTranscriptExport";
 import { useWindowOrder } from "./useWindowOrder";
 import { dropHiddenFocus } from "./hidden-focus";
-import { Composer } from "./Composer";
+import { Composer, type ShellMenu } from "./Composer";
 import { UpdateBanner } from "./UpdateBanner";
 import { usePromptHistory } from "./usePromptHistory";
 import { usePromptEnhance } from "./usePromptEnhance";
+import { shellCommandFromInput, shellItemFromHistory, useShellRuns } from "./useShellRuns";
+import { filterShellSuggestions, shellEnterPicks } from "./shell-menu";
 import "./App.css";
-// Liquid glass trial layer (from veditor-app). Delete this line to revert.
-import "./glass.css";
+import { queueIdsForBubbles } from "./queued-bubble";
+import "./Deck.css";
+import "./Trophies.css";
 
 const DEFAULT_INPUT_PLACEHOLDER = "Type a message, / commands, @ files, @Ken for help";
 const INPUT_PLACEHOLDERS = [
   DEFAULT_INPUT_PLACEHOLDER,
   "Need a second opinion? Ask @Ken",
+  "Start with ! to run a command, like !git status",
   "Stuck on what to do next? Ask @Ken",
   DEFAULT_INPUT_PLACEHOLDER,
+  "Run tests yourself with !pnpm test, then ask GG to fix them",
   "Want a second set of eyes? Ask @Ken",
   "Unsure how to proceed? Ask @Ken",
+  "!ls runs in this project. GG sees the output next message",
   "Need a quick review? Ask @Ken",
 ] as const;
 const RUNNING_INPUT_PLACEHOLDERS = [
   "Agent is working. Add a follow-up if you want",
   "Got another thought? Queue it here",
+  "Run a command while you wait, like !git diff",
   "Agent is on it. You can stack the next note",
   "Thinking ahead? Drop the next instruction",
   "Keep going. Your next message will queue up",
+  "Check something yourself with !, it won't interrupt GG",
 ] as const;
 const INPUT_PLACEHOLDER_INTERVAL_MS = 12_000;
 const PLACEHOLDER_SHUFFLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -215,12 +240,12 @@ const PLACEHOLDER_SHUFFLE_FRAME_MS = 24;
 // video analysis. Shared by the live send path and history restore so the
 // resumed transcript matches the live one exactly.
 const VIDEO_CAPABILITY_WARNING =
-  "This model can't watch video directly. The agent can still extract frames or audio with ffmpeg if needed — switch to a video-capable model (Gemini, Kimi, MiniMax) for native video analysis.";
+  "This model can't watch video directly. The agent can still extract frames or audio with ffmpeg if needed — switch to a video-capable model (Kimi, MiniMax, MiMo) for native video analysis.";
 
 function shufflePlaceholderFrame(target: string, frame: number): string {
   const revealCount = Math.ceil((target.length * frame) / PLACEHOLDER_SHUFFLE_FRAMES);
   return Array.from(target, (char, index) => {
-    if (index < revealCount || /\s|[.,?/@]/.test(char)) return char;
+    if (index < revealCount || /\s|[.,?/@!]/.test(char)) return char;
     const pick = Math.floor(Math.random() * PLACEHOLDER_SHUFFLE_CHARS.length);
     return PLACEHOLDER_SHUFFLE_CHARS[pick];
   }).join("");
@@ -239,26 +264,42 @@ const SCHEDULE_COMMAND: SlashCommand = {
 export type { Item, TranscriptImage } from "./transcript-item";
 
 function App(): React.ReactElement {
-  const [items, setItems] = useState<Item[]>([]);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const liveRegionRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
+  const chatLayout = useMemo(
+    () =>
+      createChatLayoutMotion(() => ({
+        transcript: scrollRef.current,
+        surfaces: [liveRegionRef.current, composerRef.current],
+      })),
+    [],
+  );
+  const [items, updateItems] = useState<Item[]>([]);
+  // Every change to the rows is captured first, whoever makes it (the agent,
+  // Ken, autopilot, a shell run, an answered question), so the rows it moves
+  // glide to their new place instead of landing there in one frame.
+  const setItems = useCallback(
+    (update: Parameters<typeof updateItems>[0]) => {
+      chatLayout.capture();
+      updateItems(update);
+    },
+    [chatLayout],
+  );
   // Text of the reply streaming right now, grown outside `items` so each chunk
   // re-renders only that row (live-text.ts). One store for the window's life.
   const [liveText] = useState(createLiveTextStore);
   // Ken Kai (mentor agent): own running flag, token/thinking metrics, streaming
   // bubble, and `ken_*` SSE handling. Lives in its own hook; App just consumes
   // the state for rendering and delegates ken events to `handleKenEvent`.
-  const {
-    kenRunning,
-    kenTokens,
-    kenRunStartTs,
-    kenIsThinking,
-    kenThinkingStartTs,
-    kenThinkingAccumMs,
-    handleKenEvent,
-  } = useKenMentor({ setItems, nextId, liveText });
+  const { kenRunning, kenTokens, kenRunStartTs, handleKenEvent } = useKenMentor({
+    setItems,
+    nextId,
+    liveText,
+  });
   // Ken's face talks on the reply he is streaming right now: the last row,
   // while his run is live. Only that row's props change, so memo holds.
   const currentErrorId = useMemo(() => activeChatErrorId(items), [items]);
-  const errorCritters = useMemo(() => assignErrorCritters(items), [items]);
   const lastItem = items[items.length - 1];
   const talkingKenId = kenRunning && lastItem?.kind === "ken" ? lastItem.id : null;
   // Autopilot Ken (auto-reviewer): consumes the `autopilot_*` event family into
@@ -266,12 +307,18 @@ function App(): React.ReactElement {
   // shared setItems/nextId pattern as useKenMentor.
   const { autopilotReviewing, handleAutopilotEvent } = useAutopilot({ setItems, nextId });
   const { snapshot: progress, levelUp, levelUpNonce, levelUpOrigin } = useProgress();
-  const [showScorecard, setShowScorecard] = useState(false);
-  const [rankCelebrateNonce, setRankCelebrateNonce] = useState<string | null>(null);
+  const trophies = useTrophies();
+  const [, setRankCelebrateNonce] = useState<string | null>(null);
   const [xpChips, setXpChips] = useState<Array<{ id: string; label: string }>>([]);
   const lastProgressXpRef = useRef<number | null>(null);
   const [confettiNonce, setConfettiNonce] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  const [shellSuggestions, setShellSuggestions] = useState<ShellSuggestion[]>([]);
+  const [shellIndex, setShellIndex] = useState(0);
+  // The input the `!` picker was closed for (Esc or a pick); it reopens on edit.
+  const [shellMenuDismissedFor, setShellMenuDismissedFor] = useState<string | null>(null);
+  // The input the user last moved the picker's highlight for (↑/↓).
+  const [shellNavigatedFor, setShellNavigatedFor] = useState<string | null>(null);
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [displayPlaceholder, setDisplayPlaceholder] = useState(DEFAULT_INPUT_PLACEHOLDER);
   const displayPlaceholderRef = useRef(DEFAULT_INPUT_PLACEHOLDER);
@@ -298,20 +345,15 @@ function App(): React.ReactElement {
     removeAttachment,
   } = useAttachments();
   // The most recent prompt-enhancement result. `plain` is the text now in the
-  // textarea; `segments` drive the inline highlight overlay + the sent bubble.
-  // It's dropped the moment the textarea diverges from `plain` so highlights
-  // never misalign. `enhancing` shows the pulse on the Enhance pill mid-call.
-  const [enhancement, setEnhancement] = useState<{
-    plain: string;
-    segments: PromptSegment[];
-  } | null>(null);
+  // textarea; `segments` drive the highlighted terms in the sent bubble. Edits
+  // re-anchor the segments onto the new text (followDraftEdit), keeping every
+  // corrected term the edit didn't touch. `enhancing` shows the pulse on the
+  // Enhance pill mid-call.
+  const [enhancement, setEnhancement] = useState<DraftEnhancement | null>(null);
   const [enhancing, setEnhancing] = useState(false);
   // Composer sends so far: a change tells the composer strips (attachments,
   // @-files, cold-cache notice) to drop what the send cleared in that commit.
   const [sendCount, setSendCount] = useState(0);
-  // The floating "Enhance" pill is shown only after the user pauses typing for
-  // ~1s (and hidden again on the next keystroke / send / empty input).
-  const [enhanceHintVisible, setEnhanceHintVisible] = useState(false);
   // Drives the Matrix dissolve→decode animation over the input while enhancing.
   // `newText` is null until the enhancer returns (dissolve/scramble), then the
   // enhanced text (decode). Null when no animation is playing.
@@ -374,17 +416,6 @@ function App(): React.ReactElement {
     });
   }, [cancelling]);
   const [status, setStatus] = useState("connecting to agent\u2026");
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const liveRegionRef = useRef<HTMLDivElement>(null);
-  const composerRef = useRef<HTMLDivElement>(null);
-  const chatLayout = useMemo(
-    () =>
-      createChatLayoutMotion(() => ({
-        transcript: scrollRef.current,
-        surfaces: [liveRegionRef.current, composerRef.current],
-      })),
-    [],
-  );
   const [liveToolFeed, updateLiveToolFeed] = useState<LiveToolEntry[]>([]);
   const setLiveToolFeed = useCallback(
     (update: Parameters<typeof updateLiveToolFeed>[0]) => {
@@ -460,17 +491,23 @@ function App(): React.ReactElement {
   // running context-window usage (input-side tokens of the latest turn).
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [contextTokens, setContextTokens] = useState(0);
-  // Project task list (the agent's `tasks` tool store) + the Tasks modal.
+  // Project task list (the agent's `tasks` tool store), shown in the deck.
   // Updated live via the `tasks_list` SSE event while a run-all sweep advances.
   const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
-  const [showTasks, setShowTasks] = useState(false);
-  // Checklist is a workspace view; the mounted chat keeps its draft and history.
-  const [showChecklist, setShowChecklist] = useState(false);
-  // Activity can reconnect memoized effects before external-store subscriptions.
-  // A fresh view identity forces rows to read the latest hidden stream first.
-  const chatView = useMemo(() => ({ visible: !showChecklist }), [showChecklist]);
-  const [showNotes, setShowNotes] = useState(false);
-  const [showMemories, setShowMemories] = useState(false);
+  // What has taken the message box's place in the deck, if anything.
+  const [deckPanel, setDeckPanel] = useState<DeckPanelId | null>(null);
+  // The checklist is a deck tool like Notes: open while the deck shows it.
+  const showChecklist = deckPanel === "checklist";
+  const setShowChecklist = useCallback((next: SetStateAction<boolean>) => {
+    setDeckPanel((open) => {
+      const isOpen = open === "checklist";
+      const want = typeof next === "function" ? next(isOpen) : next;
+      if (want) return "checklist";
+      return isOpen ? null : open;
+    });
+  }, []);
+  // The chat never leaves the screen for the checklist any more.
+  const chatView = useMemo(() => ({ visible: true }), []);
   // Every window chooses a code or chat workspace before connecting. Mode stays
   // separate from picker visibility so restore and reopened pickers are explicit.
   const [needsProject, setNeedsProject] = useState(true);
@@ -492,16 +529,11 @@ function App(): React.ReactElement {
   const { activity, handleActivityEvent } = useTaskActivity(hydrateNonce);
   // New-session confirmation modal + in-flight guard.
   const [confirmNewSession, setConfirmNewSession] = useState(false);
-  const {
-    navHidden,
-    setNavHiddenPersisted,
-    toggleNav,
-    toolsHidden,
-    setToolsHiddenPersisted,
-    toggleTools,
-  } = useChromeToggles(chatLayout);
+  /** The added folder being removed right now (Remove folder panel). */
+  const [removingFolder, setRemovingFolder] = useState<string | null>(null);
+  const { toolsHidden, setToolsHiddenPersisted, toggleTools } = useChromeToggles(chatLayout);
   const [newSessionBusy, setNewSessionBusy] = useState(false);
-  const { exporting, chatHovered, setChatHovered, exportTranscript } = useTranscriptExport();
+  const { exporting, exportTranscript } = useTranscriptExport();
   const {
     appUpdate,
     showTraySettings,
@@ -527,7 +559,7 @@ function App(): React.ReactElement {
   useLayoutEffect(() => {
     const last = items[items.length - 1];
     if (last) entrances.settle(last.id);
-  }, [entrances, items, showChecklist]);
+  }, [entrances, items]);
 
   const readyRef = useRef(false);
   // Bumped by every hydrate. Lets work that outlives a hydrate (a project
@@ -549,6 +581,7 @@ function App(): React.ReactElement {
   const {
     stickToBottomRef,
     lastScrollTopRef,
+    noteTranscriptViewport,
     scrollToBottom,
     maybeScrollToBottom,
     following,
@@ -570,11 +603,16 @@ function App(): React.ReactElement {
   const insertDroppedFolderPaths = useCallback((paths: string[]): void => {
     if (paths.length === 0) return;
     const text = paths.join(" ");
-    setInput((prev) => {
+    const append = (prev: string): string => {
       if (!prev.trim()) return text;
       return `${prev}${/\s$/.test(prev) ? "" : " "}${text}`;
-    });
-    setEnhancement(null);
+    };
+    setInput(append);
+    // A live enhancement's `plain` is the current draft, so the same append
+    // re-anchors its highlights; a stale one is discarded on the next edit/send.
+    setEnhancement((current) =>
+      current ? followDraftEdit(current, current.plain, append(current.plain)) : null,
+    );
     requestAnimationFrame(() => inputRef.current?.focus());
   }, []);
 
@@ -655,17 +693,74 @@ function App(): React.ReactElement {
   const attachTranscript = useCallback(
     (el: HTMLDivElement | null) => {
       scrollRef.current = el;
-      if (el) lastScrollTopRef.current = el.scrollTop;
+      if (el) {
+        lastScrollTopRef.current = el.scrollTop;
+        noteTranscriptViewport(el);
+      }
       transcriptRoRef.current?.disconnect();
       transcriptRoRef.current = null;
       if (!el || typeof ResizeObserver === "undefined") return;
       const ro = new ResizeObserver(() => {
+        // Record the new size here too: a resize with no scroll event would
+        // otherwise make the reader's next scroll read as layout.
+        noteTranscriptViewport(el);
         if (chatLayout.resized()) maybeScrollToBottom();
       });
       ro.observe(el);
       transcriptRoRef.current = ro;
     },
-    [maybeScrollToBottom, chatLayout, lastScrollTopRef],
+    [maybeScrollToBottom, chatLayout, lastScrollTopRef, noteTranscriptViewport],
+  );
+
+  // The dock floats over the conversation's bottom edge, so the transcript
+  // doesn't shrink when it grows (a wrapping draft, a panel opening). Its
+  // height goes to the frame as --dock-h, which the transcript reserves as
+  // bottom padding; a pinned chat then follows the bottom in the same frame,
+  // so the newest message is never left behind the dock.
+  //
+  // A callback ref, like the transcript's: the dock unmounts whenever a picker
+  // takes over the window, and must be observed afresh when it comes back.
+  const transcriptFrameRef = useRef<HTMLDivElement>(null);
+  const dockElRef = useRef<HTMLDivElement | null>(null);
+  const dockRoRef = useRef<ResizeObserver | null>(null);
+  const syncDockHeight = useCallback((): boolean => {
+    const dock = dockElRef.current;
+    const frame = transcriptFrameRef.current;
+    if (!dock || !frame) return false;
+    const height = nextDockHeight(dock, frame.style.getPropertyValue("--dock-h"));
+    if (height === null) return false;
+    frame.style.setProperty("--dock-h", height);
+    return true;
+  }, []);
+  const dockRef = useCallback(
+    (dock: HTMLDivElement | null) => {
+      dockRoRef.current?.disconnect();
+      dockRoRef.current = null;
+      dockElRef.current = dock;
+      if (!dock) return;
+      const apply = (): void => {
+        const frame = transcriptFrameRef.current;
+        if (!frame) return;
+        const current = frame.style.getPropertyValue("--dock-h");
+        const next = nextDockHeight(dock, current);
+        if (next === null) return;
+        // A step nobody captured (a panel opening, a draft wrapping or being
+        // deleted). The transcript has not heard yet, so its rows are still
+        // where they were: capture them here and glide, instead of following.
+        const glide = dockStepped(current, next) && !chatLayout.capturing();
+        if (glide) chatLayout.capture();
+        frame.style.setProperty("--dock-h", next);
+        if (!glide) maybeScrollToBottom();
+        else if (chatLayout.commit(stickToBottomRef.current, scrollToBottom) && scrollRef.current)
+          lastScrollTopRef.current = scrollRef.current.scrollTop;
+      };
+      apply();
+      if (typeof ResizeObserver === "undefined") return;
+      const observer = new ResizeObserver(apply);
+      observer.observe(dock);
+      dockRoRef.current = observer;
+    },
+    [chatLayout, lastScrollTopRef, maybeScrollToBottom, scrollToBottom, stickToBottomRef],
   );
 
   // Settle the scroll position after a session hydrates. The single layout-effect
@@ -703,12 +798,14 @@ function App(): React.ReactElement {
   const sendDisabled =
     attachmentsLoading ||
     (!input.trim() && attachments.length === 0 && mentionedPaths.length === 0);
+  const canLivePreview = livePreviewAvailable(workspaceMode, needsProject, state);
+  const livePreview = useLivePreview(canLivePreview);
   // Cosmetic work only belongs to a focused, visible, empty code composer.
   const animatePlaceholder =
     windowFocused &&
     !needsProject &&
     !showPicker &&
-    !showChecklist &&
+    deckPanel === null &&
     workspaceMode === "code" &&
     input.length === 0;
   const inputPlaceholder = running
@@ -754,24 +851,32 @@ function App(): React.ReactElement {
       addFiles,
     });
 
+  // A chat is titled by its first prompt: the saved one survives compaction,
+  // the transcript's covers a new chat before the next state refresh.
+  const chatHeaderTitle =
+    workspaceMode === "chat" ? chatTitle(state?.sessionTitle ?? firstUserPrompt(items)) : null;
+
   // Keep the native window title aligned with the visible title-bar context.
   useEffect(() => {
     const fallbackTitle = workspaceProductName(workspaceMode, Boolean(state?.goal));
     const title =
-      !needsProject && !showPicker && state?.goal
-        ? `${state.goal.name} \u2502 ${fallbackTitle}`
-        : !needsProject && !showPicker
-          ? formatWorkspaceTitle(
-              state?.cwd,
-              state?.gitBranch,
-              fallbackTitle,
-              state?.gitDirtyFileCount,
-              state?.gitHubIssues ?? null,
-              state?.gitHubPRs ?? null,
-            )
-          : fallbackTitle;
+      chatHeaderTitle !== null && !needsProject && !showPicker
+        ? `${chatHeaderTitle} · ${fallbackTitle}`
+        : !needsProject && !showPicker && state?.goal
+          ? `${state.goal.name} · ${fallbackTitle}`
+          : !needsProject && !showPicker
+            ? formatWorkspaceTitle(
+                state?.cwd,
+                state?.gitBranch,
+                fallbackTitle,
+                state?.gitDirtyFileCount,
+                state?.gitHubIssues ?? null,
+                state?.gitHubPRs ?? null,
+              )
+            : fallbackTitle;
     setWindowTitle(title);
   }, [
+    chatHeaderTitle,
     needsProject,
     showPicker,
     state?.cwd,
@@ -787,8 +892,9 @@ function App(): React.ReactElement {
   // intact across the measurement (see composer-autosize.ts for why both
   // halves matter).
   const autosizeInput = useCallback(() => {
-    chatLayout.settle();
-    autosizeComposer(inputRef.current, scrollRef.current, stickToBottomRef.current);
+    chatLayout.still(() =>
+      autosizeComposer(inputRef.current, scrollRef.current, stickToBottomRef.current),
+    );
   }, [chatLayout, stickToBottomRef]);
 
   // useLayoutEffect (not useEffect) so the height is recomputed BEFORE the
@@ -809,14 +915,14 @@ function App(): React.ReactElement {
   useLayoutEffect(() => {
     // Nothing to commit while the transcript is hidden behind another view
     // (a goal's Workers): it has no size, so any offset taken now is wrong.
-    if (
-      showChecklist ||
-      needsProject ||
-      (scrollRef.current !== null && isHiddenScroller(scrollRef.current))
-    ) {
+    if (needsProject || (scrollRef.current !== null && isHiddenScroller(scrollRef.current))) {
       chatLayout.cancel();
       return;
     }
+    // The dock's new height reaches the transcript here, not a frame later
+    // through its observer: the transaction has to measure where rows will
+    // really rest, or it finds nothing to move and the observer snaps them.
+    if (chatLayout.capturing()) syncDockHeight();
     if (chatLayout.commit(stickToBottomRef.current, scrollToBottom) && scrollRef.current) {
       lastScrollTopRef.current = scrollRef.current.scrollTop;
     }
@@ -921,7 +1027,7 @@ function App(): React.ReactElement {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const { windowIndex, windowTotal, isThisFocused } = useWindowOrder(inputRef);
+  const { windowIndex, windowTotal } = useWindowOrder(inputRef);
 
   // A goal cut off by a daemon restart (found on reconnect) carries on, or
   // asks its briefing question again. The sidecar ignores it when nothing was
@@ -950,11 +1056,26 @@ function App(): React.ReactElement {
   // state (its render + other handlers use it) and passes the setters +
   // cross-cutting refs in. App consumes `handleEvent` (for the SSE subscription)
   // and the two helpers it still calls directly (`pushItem`, `endStreamingText`).
+  const focusComposer = useCallback(() => inputRef.current?.focus(), []);
+  const shellRuns = useShellRuns({ setItems, nextId, liveText, focusComposer, toast });
+  const {
+    shellTrusted,
+    refreshShellTrust,
+    revokeShellTrust,
+    submitShell,
+    markShellShared,
+    handleShellEvent,
+  } = shellRuns;
+  const shellActions = useMemo(
+    () => ({ confirm: shellRuns.confirm, stop: shellRuns.stop }),
+    [shellRuns.confirm, shellRuns.stop],
+  );
   const { handleEvent, pushItem, endStreamingText } = useAgentEvents({
     setItems,
     nextId,
     handleKenEvent,
     handleAutopilotEvent,
+    handleShellEvent,
     handleActivityEvent,
     setState,
     setTasks,
@@ -1004,6 +1125,12 @@ function App(): React.ReactElement {
       const st = await getState().catch(() => null);
       if (st) {
         setState(st);
+        for (const message of takeNewBlockedSkillMessages(st.blockedSkills, localStorage)) {
+          toast(message, "warning", 8000);
+        }
+        for (const message of takeNewSecurityNotices(st.installedThreats, localStorage)) {
+          toast(message, "warning", 12000);
+        }
         setRunning(st.running);
         setStatus(st.runState === "cancelling" ? "cancelling..." : "ready");
       } else {
@@ -1031,6 +1158,8 @@ function App(): React.ReactElement {
       // Hydrate the transcript when resuming an existing session — the webview
       // only sees live SSE events, so past messages must be fetched explicitly.
       const history = await listHistory();
+      const pendingShellRuns = Array.isArray(st?.pendingShellRuns) ? st.pendingShellRuns : [];
+      void refreshShellTrust();
       if (history.length > 0) {
         // A freshly hydrated session lands at the bottom (newest message).
         stickToBottomRef.current = true;
@@ -1049,99 +1178,113 @@ function App(): React.ReactElement {
         // header's tally starts again from it (see tallySource).
         setTranscriptEpoch((epoch) => epoch + 1);
         setItems(
-          history.map((h): Item => {
-            // Tool-produced images (screenshots, generate_image) — reconstructed
-            // from persisted ImageContent blocks, downsampled by the sidecar.
-            if (h.toolImages && h.toolImages.length > 0)
+          collapseSecurityRows(
+            history.map((h): Item => {
+              // Tool-produced images (screenshots, generate_image) — reconstructed
+              // from persisted ImageContent blocks, downsampled by the sidecar.
+              if (h.toolImages && h.toolImages.length > 0)
+                return {
+                  kind: "images",
+                  id: nextId(),
+                  images: h.toolImages.map((img) => ({ src: img.src, path: img.path })),
+                };
+              // Sub-agent delegation group — reconstructed from persisted tool_call
+              // + tool_result pairing. toolUseCount/activities aren't persisted, so
+              // the resumed feed shows agent name + status only.
+              if (h.subagentGroup && h.subagentGroup.length > 0)
+                return {
+                  kind: "subagent_group",
+                  id: nextId(),
+                  agents: h.subagentGroup.map((a, i) => ({
+                    toolCallId: `history-${i}`,
+                    agentName: a.agentName,
+                    status: a.status,
+                    activities: [],
+                    toolUseCount: a.toolUseCount,
+                    tokenUsage: { input: 0, output: 0 },
+                  })),
+                };
+              if (h.hook) return { kind: "hook", id: nextId(), hook: h.hook };
+              // A resumed compacted session shows the quiet compaction notice in
+              // place of the raw summary body (counts aren't persisted).
+              if (h.compacted)
+                return {
+                  kind: "compaction",
+                  id: nextId(),
+                  status: "done",
+                  originalCount: h.compactionCounts?.originalCount,
+                  newCount: h.compactionCounts?.newCount,
+                };
+              // Persisted display-only markers: plan-mode banner, task header,
+              // error rows, and the video-capability info row — all rendered
+              // identically to their live counterparts.
+              if (h.plan) return { kind: "plan", id: nextId(), reason: h.plan.reason };
+              if (h.task) return { kind: "task", id: nextId(), title: h.task.title };
+              if (h.error) {
+                return {
+                  kind: "error",
+                  id: nextId(),
+                  ...readChatError({ ...h.error }, h.error.scope, true),
+                };
+              }
+              if (h.security)
+                return {
+                  kind: "security",
+                  id: nextId(),
+                  rule: h.security.rule,
+                  target: h.security.target,
+                };
+              if (h.infoKind === "video_warning")
+                return { kind: "info", id: nextId(), text: VIDEO_CAPABILITY_WARNING };
+              if (h.shell) return shellItemFromHistory(h.shell, nextId(), pendingShellRuns);
+              // Ken "Send to GG Coder" prompts: restore the shimmer label, not the
+              // full prompt body (matches live).
+              if (h.kenSent && h.role === "user")
+                return { kind: "user", id: nextId(), text: h.text, kenSent: true };
+              // Persisted Ken (mentor) turns: his reply restores as a Ken bubble,
+              // the `@Ken` question as a Ken-tinted user bubble (matches live).
+              if (h.ken && h.role === "assistant")
+                return { kind: "ken", id: nextId(), text: h.text };
+              if (h.ken && h.role === "user")
+                return { kind: "user", id: nextId(), text: h.text, ken: true };
+              // Persisted autopilot verdict marker: render identically to the
+              // live item so a resumed session never shows the raw verdict text
+              // (e.g. "ALL_CLEAR") the model actually replied with.
+              if (h.autopilot)
+                return {
+                  kind: "autopilot",
+                  id: nextId(),
+                  phase: h.autopilot.phase,
+                  reason: h.autopilot.reason,
+                  body: h.autopilot.body,
+                  copySeed: h.autopilot.copySeed,
+                };
+              if (h.role !== "user") return { kind: h.role, id: nextId(), text: h.text };
+              // App-button prompts (e.g. "Initialize Git") were shown live as a
+              // friendly shimmer label, not the expanded body. The label is
+              // webview-only, so recover it from the restored prompt text. Slash
+              // commands are already collapsed to `/name` by the sidecar (h.command).
+              const label = !h.command ? recoverPromptLabel(h.text) : null;
+              // Recover @-referenced files appended to the prompt so resumed
+              // sessions show the same file chips (and clean text) as when sent.
+              const parsed = !h.command && label === null ? parseReferencedFiles(h.text) : null;
               return {
-                kind: "images",
+                kind: "user",
                 id: nextId(),
-                images: h.toolImages.map((img) => ({ src: img.src, path: img.path })),
+                text: parsed ? parsed.text : h.text,
+                command: h.command || label !== null,
+                ...(label !== null ? { label } : {}),
+                images: h.images && h.images.length > 0 ? h.images : undefined,
+                ...(h.attachments && h.attachments.length > 0
+                  ? { attachments: h.attachments }
+                  : {}),
+                ...(parsed && parsed.files.length > 0 ? { files: parsed.files } : {}),
+                ...(h.enhancements && h.enhancements.length > 0
+                  ? { enhancements: h.enhancements }
+                  : {}),
               };
-            // Sub-agent delegation group — reconstructed from persisted tool_call
-            // + tool_result pairing. toolUseCount/activities aren't persisted, so
-            // the resumed feed shows agent name + status only.
-            if (h.subagentGroup && h.subagentGroup.length > 0)
-              return {
-                kind: "subagent_group",
-                id: nextId(),
-                agents: h.subagentGroup.map((a, i) => ({
-                  toolCallId: `history-${i}`,
-                  agentName: a.agentName,
-                  status: a.status,
-                  activities: [],
-                  toolUseCount: a.toolUseCount,
-                  tokenUsage: { input: 0, output: 0 },
-                })),
-              };
-            if (h.hook) return { kind: "hook", id: nextId(), hook: h.hook };
-            // A resumed compacted session shows the quiet compaction notice in
-            // place of the raw summary body (counts aren't persisted).
-            if (h.compacted)
-              return {
-                kind: "compaction",
-                id: nextId(),
-                status: "done",
-                originalCount: h.compactionCounts?.originalCount,
-                newCount: h.compactionCounts?.newCount,
-              };
-            // Persisted display-only markers: plan-mode banner, task header,
-            // error rows, and the video-capability info row — all rendered
-            // identically to their live counterparts.
-            if (h.plan) return { kind: "plan", id: nextId(), reason: h.plan.reason };
-            if (h.task) return { kind: "task", id: nextId(), title: h.task.title };
-            if (h.error) {
-              return {
-                kind: "error",
-                id: nextId(),
-                ...readChatError({ ...h.error }, h.error.scope, true),
-              };
-            }
-            if (h.infoKind === "video_warning")
-              return { kind: "info", id: nextId(), text: VIDEO_CAPABILITY_WARNING };
-            // Ken "Send to GG Coder" prompts: restore the shimmer label, not the
-            // full prompt body (matches live).
-            if (h.kenSent && h.role === "user")
-              return { kind: "user", id: nextId(), text: h.text, kenSent: true };
-            // Persisted Ken (mentor) turns: his reply restores as a Ken bubble,
-            // the `@Ken` question as a Ken-tinted user bubble (matches live).
-            if (h.ken && h.role === "assistant") return { kind: "ken", id: nextId(), text: h.text };
-            if (h.ken && h.role === "user")
-              return { kind: "user", id: nextId(), text: h.text, ken: true };
-            // Persisted autopilot verdict marker: render identically to the
-            // live item so a resumed session never shows the raw verdict text
-            // (e.g. "ALL_CLEAR") the model actually replied with.
-            if (h.autopilot)
-              return {
-                kind: "autopilot",
-                id: nextId(),
-                phase: h.autopilot.phase,
-                reason: h.autopilot.reason,
-                body: h.autopilot.body,
-                copySeed: h.autopilot.copySeed,
-              };
-            if (h.role !== "user") return { kind: h.role, id: nextId(), text: h.text };
-            // App-button prompts (e.g. "Initialize Git") were shown live as a
-            // friendly shimmer label, not the expanded body. The label is
-            // webview-only, so recover it from the restored prompt text. Slash
-            // commands are already collapsed to `/name` by the sidecar (h.command).
-            const label = !h.command ? recoverPromptLabel(h.text) : null;
-            // Recover @-referenced files appended to the prompt so resumed
-            // sessions show the same file chips (and clean text) as when sent.
-            const parsed = !h.command && label === null ? parseReferencedFiles(h.text) : null;
-            return {
-              kind: "user",
-              id: nextId(),
-              text: parsed ? parsed.text : h.text,
-              command: h.command || label !== null,
-              ...(label !== null ? { label } : {}),
-              images: h.images && h.images.length > 0 ? h.images : undefined,
-              ...(parsed && parsed.files.length > 0 ? { files: parsed.files } : {}),
-              ...(h.enhancements && h.enhancements.length > 0
-                ? { enhancements: h.enhancements }
-                : {}),
-            };
-          }),
+            }),
+          ),
         );
       }
       // History keeps a question's tool call but not its card: put back the
@@ -1180,12 +1323,30 @@ function App(): React.ReactElement {
       setLiveFromId(lastIssuedId() + 1);
       setHydrated(true);
     }
-  }, [stickToBottomRef]);
+  }, [stickToBottomRef, refreshShellTrust, setItems]);
 
   useEffect(() => {
     const unsub = subscribe(handleEvent);
     return () => unsub();
   }, [handleEvent]);
+
+  // Re-read the slash commands: each workspace root brings its own
+  // `.gg/commands` (a goal's attached repos, `/add-dir`). An answer from a
+  // superseded hydrate (project switch) is dropped.
+  const refreshCommands = useCallback((): void => {
+    const generation = hydrateGenerationRef.current;
+    void listCommands().then((cmds) => {
+      if (hydrateGenerationRef.current === generation && cmds.length > 0) setCommands(cmds);
+    });
+  }, []);
+  // Roots added or removed mid-session (they arrive with the footer extras).
+  const rootsKey = (state?.additionalRoots ?? []).join("\n");
+  const rootsSeenRef = useRef(rootsKey);
+  useEffect(() => {
+    if (!hydrated || rootsSeenRef.current === rootsKey) return;
+    rootsSeenRef.current = rootsKey;
+    refreshCommands();
+  }, [hydrated, rootsKey, refreshCommands]);
 
   // Boot-time/reload workspace recovery: Rust keeps THIS window's active target
   // for its lifetime. A restored app launch and a WebKit content-process reload
@@ -1212,12 +1373,16 @@ function App(): React.ReactElement {
     if (!needsProject) void hydrate();
   }, [needsProject, hydrate, hydrateNonce]);
 
-  // Open the Tasks modal, refreshing the list from the sidecar first so it
+  // Open Tasks in the deck, refreshing the list from the sidecar first so it
   // reflects any tasks the agent just added.
   const openTasks = useCallback(() => {
-    setShowTasks(true);
+    setDeckPanel("todo");
     void listTasks().then(setProjectTasks);
   }, []);
+  const closeDeckPanel = useCallback(
+    (id: DeckPanelId) => setDeckPanel((open) => (open === id ? null : open)),
+    [],
+  );
 
   const {
     checklistLoad,
@@ -1233,18 +1398,21 @@ function App(): React.ReactElement {
   } = useChecklist({ showChecklist, setShowChecklist, inputRef });
 
   // Run a single task: the sidecar opens a fresh session and streams progress
-  // back (session_reset → task_start → run_start/…/run_end). Close the modal so
+  // back (session_reset → task_start → run_start/…/run_end). Close the list so
   // the transcript is visible while it runs.
-  const handleRunTask = useCallback((id: string) => {
-    setShowTasks(false);
-    void runTask(id);
-  }, []);
+  const handleRunTask = useCallback(
+    (id: string) => {
+      closeDeckPanel("todo");
+      void runTask(id);
+    },
+    [closeDeckPanel],
+  );
 
   // Run every pending task sequentially (a fresh session each), in order.
   const handleRunAllTasks = useCallback(() => {
-    setShowTasks(false);
+    closeDeckPanel("todo");
     void runAllTasks();
-  }, []);
+  }, [closeDeckPanel]);
 
   const handleDeleteTask = useCallback((id: string) => {
     void deleteTask(id).then(setProjectTasks);
@@ -1293,9 +1461,9 @@ function App(): React.ReactElement {
       );
   }
 
-  function onSelectModel(modelId: string): void {
+  function onSelectModel(modelId: string, options?: { confirmPaid?: boolean }): void {
     if (state && modelId === state.model) return;
-    void switchModel(modelId).then((res) => {
+    void switchModel(modelId, options).then((res) => {
       if (isSwitchModelError(res)) {
         // The sidecar refuses with a reason worth reading ("Ollama isn't
         // running at …", "has no tool calling"). Show it — otherwise the
@@ -1372,11 +1540,57 @@ function App(): React.ReactElement {
   // `@`-mention picker: open whenever a mention token is active and the search
   // returned at least one file. Clamp the highlighted row to the result count.
   // Never open while `@Ken` is active — that token addresses Ken, not a file.
-  const mentionOpen = mention !== null && fileMatches.length > 0 && !kenActive;
+  // `!cmd`: the input runs a command instead of messaging the agent.
+  const shellMode = workspaceMode === "code" && shellCommandFromInput(input) !== null;
+  // Entering `!` loads the picker's commands (history counts change per run).
+  useEffect(() => {
+    if (!shellMode) return;
+    let live = true;
+    void listShellSuggestions().then((list) => {
+      if (live) setShellSuggestions(list);
+    });
+    return () => {
+      live = false;
+    };
+  }, [shellMode]);
+  const shellMatches = useMemo(
+    () => (shellMode ? filterShellSuggestions(shellSuggestions, input.slice(1)) : []),
+    [shellMode, shellSuggestions, input],
+  );
+  const shellMenu: ShellMenu | null =
+    shellMatches.length > 0 && shellMenuDismissedFor !== input
+      ? {
+          matches: shellMatches,
+          activeIndex: shellIndex % shellMatches.length,
+          setActiveIndex: setShellIndex,
+          navigate: (delta) => {
+            const n = shellMatches.length;
+            setShellIndex((i) => (((i + delta) % n) + n) % n);
+            setShellNavigatedFor(input);
+          },
+          enterPicks: shellEnterPicks(input, shellNavigatedFor),
+          pick: (s) => {
+            const next = `!${s.command}`;
+            setInput(next);
+            setShellIndex(0);
+            // A picked command is complete: close the picker until the user edits it.
+            setShellMenuDismissedFor(next);
+            requestAnimationFrame(() => {
+              const el = inputRef.current;
+              if (!el) return;
+              el.focus();
+              el.setSelectionRange(next.length, next.length);
+            });
+          },
+          dismiss: () => setShellMenuDismissedFor(input),
+          trusted: shellTrusted,
+          revokeTrust: () => void revokeShellTrust(),
+        }
+      : null;
+  const mentionOpen = mention !== null && fileMatches.length > 0 && !kenActive && !shellMode;
   const clampedFileIndex = fileMatches.length > 0 ? fileIndex % fileMatches.length : 0;
   // Footer background-tasks indicator only shows while something is actually
   // running (exited tasks shouldn't keep the bar item around).
-  const runningTaskCount = tasks.filter((t) => t.exitCode === null).length;
 
   // True when `text` is a known workflow command invocation (first token).
   function isWorkflowCommand(text: string): boolean {
@@ -1430,19 +1644,7 @@ function App(): React.ReactElement {
     });
   }
 
-  /** Ordered queue events own both pending rows and cancelled transcript bubbles. */
-  function handleCancelQueued(id: string): void {
-    void cancelQueued(id);
-  }
-
   function pickSlashCommand(cmd: SlashCommand): void {
-    if (cmd.name === "add-dir" || cmd.name === "remove-dir") {
-      setInput("");
-      setSlashIndex(0);
-      void pickWorkspaceDirectory(cmd.name);
-      return;
-    }
-
     // Fill the input with the command; the user can add args or press Enter.
     const next = `/${cmd.name} `;
     setInput(next);
@@ -1453,20 +1655,36 @@ function App(): React.ReactElement {
     requestAnimationFrame(() => inputRef.current?.focus());
   }
 
-  async function pickWorkspaceDirectory(command: "add-dir" | "remove-dir"): Promise<void> {
+  /** "Remove folder": drop one of the folders added with "Add folder". */
+  async function removeFolder(root: string): Promise<void> {
+    setRemovingFolder(root);
+    try {
+      const { additionalRoots } = await removeWorkspaceFolder(root);
+      const name = root.split(/[\\/]/).filter(Boolean).pop() ?? root;
+      toast(`Removed ${name}. GG no longer works in it.`, "success");
+      if (additionalRoots.length === 0) closeDeckPanel("folders");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    } finally {
+      setRemovingFolder(null);
+    }
+  }
+
+  /** "Add folder" in the More panel: one more folder GG can work in. */
+  async function addFolder(): Promise<void> {
     const selected = await open({
       directory: true,
       multiple: false,
-      title:
-        command === "add-dir"
-          ? "Add project folder to workspace"
-          : "Remove project folder from workspace",
+      title: "Add a folder GG can work in",
     });
     if (typeof selected !== "string") return;
-    submitText(
-      `/${command} ${await toAgentPath(selected)}`,
-      command === "add-dir" ? "/add-dir" : "/remove-dir",
-    );
+    try {
+      const { root } = await addWorkspaceFolder(await toAgentPath(selected));
+      const name = root.split(/[\\/]/).filter(Boolean).pop() ?? root;
+      toast(`Added ${name}. GG can work in it now.`, "success");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
   }
 
   // Detect an active `@`-mention token at the caret: a `@` that starts at a word
@@ -1523,6 +1741,7 @@ function App(): React.ReactElement {
     const tail = input.slice(caret);
     const next = head + tail;
     setInput(next);
+    setEnhancement((current) => followDraftEdit(current, input, next));
     setMentionedPaths((prev) => (prev.includes(file.path) ? prev : [...prev, file.path]));
     setMention(null);
     setFileMatches([]);
@@ -1558,13 +1777,12 @@ function App(): React.ReactElement {
     const disposition = submitDisposition(trimmed, readyRef.current, running);
     if (disposition === "ignore") return false;
     chatLayout.capture();
+    markShellShared();
     // A send that supersedes an open question is consumed the moment it lands
     // (the sidecar releases the parked call), so it must not wear the queued
-    // look for the one frame before that, nor open the queued strip below the
-    // transcript — see showsQueuedBubble / withoutSupersedingMessage.
+    // look for the one frame before that — see showsQueuedBubble.
     const supersedesQuestion = hasOpenAsk();
     const queued = showsQueuedBubble(disposition, supersedesQuestion);
-    if (disposition === "queue" && supersedesQuestion) noteSupersedingSend(trimmed);
     dismissOpenAsks();
     // A user send always re-pins to the bottom — they want to see their message.
     stickToBottomRef.current = true;
@@ -1623,7 +1841,7 @@ function App(): React.ReactElement {
         onError: failed,
       })
     ) {
-      withViewTransition(() => setShowChecklist(false));
+      setShowChecklist(false);
     } else {
       failed();
     }
@@ -1634,7 +1852,7 @@ function App(): React.ReactElement {
   // run it leaves the composer draft alone and returns to the chat.
   function reviewProjectHealth(prompt: string, label: string): boolean {
     if (!submitText(prompt, label, { keepInput: true })) return false;
-    if (showChecklist) withViewTransition(() => setShowChecklist(false));
+    setDeckPanel(null);
     return true;
   }
 
@@ -1660,39 +1878,14 @@ function App(): React.ReactElement {
     typingAskRef.current = null;
   }, [setItems]);
 
-  // Text of the prompt that superseded a question and is now briefly sitting in
-  // the sidecar's steering queue. Kept out of the queued strip until the agent
-  // consumes it — see withoutSupersedingMessage.
-  const supersedingTextRef = useRef<string | null>(null);
-  const [supersedingText, setSupersedingText] = useState<string | null>(null);
-  const supersedeClearRef = useRef<number | null>(null);
-  const noteSupersedingSend = useCallback((text: string) => {
-    supersedingTextRef.current = text;
-    setSupersedingText(text);
-    // Safety net: if the message never shows up in a queue broadcast at all
-    // (the run ended between typing and sending, so it started a fresh turn),
-    // nothing would ever clear the filter and a later identical message would
-    // be missing from the strip.
-    if (supersedeClearRef.current !== null) window.clearTimeout(supersedeClearRef.current);
-    supersedeClearRef.current = window.setTimeout(() => {
-      supersedingTextRef.current = null;
-      setSupersedingText(null);
-    }, 5000);
-  }, []);
-  useEffect(() => {
-    const text = supersedingTextRef.current;
-    if (text === null) return;
-    // Gone from the queue: the agent took it, so stop filtering — otherwise a
-    // later identical message would be hidden from the strip forever.
-    if (!queuedMessages.some((m) => m.text === text)) {
-      supersedingTextRef.current = null;
-      setSupersedingText(null);
-    }
-  }, [queuedMessages]);
-  const visibleQueuedMessages = useMemo(
-    () => withoutSupersedingMessage(queuedMessages, supersedingText),
-    [queuedMessages, supersedingText],
+  // Which sidecar queue entry each queued bubble is, so the bubble can cancel it.
+  const queuedBubbleIds = useMemo(
+    () => queueIdsForBubbles(items, queuedMessages),
+    [items, queuedMessages],
   );
+  // Stable, so passing it doesn't defeat the transcript rows' memo. Queue events
+  // own the outcome: a confirmed cancel removes the bubble (useAgentEvents).
+  const cancelQueuedMessage = useCallback((id: string) => void cancelQueued(id), []);
   // Sub-agent groups for the critter floor. Recomputed with `items`, but the
   // floor compares group identities and ignores token-only re-renders.
   const critterGroups = useMemo(
@@ -1740,7 +1933,7 @@ function App(): React.ReactElement {
         return false;
       }
     },
-    [pushItem, endStreamingText, dismissOpenAsks, stickToBottomRef],
+    [pushItem, endStreamingText, dismissOpenAsks, stickToBottomRef, setItems],
   );
 
   // Record answers for an `ask_user` band, and settle the parked tool call once
@@ -1791,7 +1984,6 @@ function App(): React.ReactElement {
   // edge, in place of the chat, input and footer. The header's Chat | Workers
   // switch flips between that and the full conversation (with its input).
   const [goalChatFor, setGoalChatFor] = useState<string | null>(null);
-  const [showGoalSettings, setShowGoalSettings] = useState(false);
   // Pause stops the current run and its workers (the same cancel as Stop) and
   // keeps the goal put, even across restarts; resume carries it on.
   const setGoalPaused = useCallback(
@@ -1867,6 +2059,9 @@ function App(): React.ReactElement {
     }
     const saved = chatScrollOnHideRef.current;
     chatScrollOnHideRef.current = null;
+    // Shown again, not opened: every entrance inside lands at its end at once
+    // (see finish-entrances.ts), so the deck and its notices don't replay.
+    if (saved) finishEntrances([transcriptFrameRef.current, dockElRef.current]);
     const el = scrollRef.current;
     if (!saved || !el) return;
     stickToBottomRef.current = saved.pinned;
@@ -1957,6 +2152,27 @@ function App(): React.ReactElement {
     if (goalFinish && (running || goalView === "chat")) setGoalFinish(null);
   }, [goalFinish, running, goalView]);
   const shownGoalFinish = goalFinish?.goalId === activeGoalId ? goalFinish : null;
+  // What Ken is doing right now, for the Workers view's status pill and the
+  // thought mark over his head (see goal-ken-status).
+  const goalPaused = state?.goal?.paused === true;
+  const goalLastRun = useMemo(
+    () => (activeGoalId ? lastRunOf(goalRuns, activeGoalId, items) : null),
+    [activeGoalId, goalRuns, items],
+  );
+  const kenStatus = useMemo(
+    () =>
+      activeGoalId
+        ? kenStatusOf({
+            running,
+            paused: goalPaused,
+            waitingOnUser: goalWaitingOnUser,
+            liveTools: liveToolFeed,
+            workers: goalWorkers,
+            lastRun: goalLastRun,
+          })
+        : null,
+    [activeGoalId, running, goalPaused, goalWaitingOnUser, liveToolFeed, goalWorkers, goalLastRun],
+  );
   // The header's counts: workers working now, tasks done and failed so far
   // (see goal-progress). Counting starts afresh for each goal.
   // Restarted when the transcript is reloaded (after a daemon restart, say):
@@ -2008,13 +2224,12 @@ function App(): React.ReactElement {
     inputRef,
   });
 
-  const { runEnhance, onEnhanceAnimDone } = usePromptEnhance({
+  const { runEnhance, onEnhanceAnimDone, enhanceHintVisible } = usePromptEnhance({
     input,
     setInput,
     inputRef,
     enhancing,
     setEnhancing,
-    setEnhanceHintVisible,
     setEnhanceAnim,
     pendingEnhanceRef,
     enhancement,
@@ -2085,6 +2300,21 @@ function App(): React.ReactElement {
     if (!readyRef.current) return;
     if (!trimmed && attachments.length === 0 && mentionedPaths.length === 0) return;
 
+    // `!cmd` runs a command for the user, in the project folder, with no agent
+    // turn. Attachments and file chips stay in the composer for the next message.
+    const shellCommand = workspaceMode === "code" ? shellCommandFromInput(input) : null;
+    if (shellCommand !== null) {
+      if (!shellCommand) return;
+      chatLayout.capture();
+      recordHistory(trimmed);
+      stickToBottomRef.current = true;
+      submitShell(shellCommand, state?.cwd ?? "");
+      setInput("");
+      setSlashIndex(0);
+      setMention(null);
+      return;
+    }
+
     // `/schedule` registers a recurring prompt instead of sending anything now.
     // An invalid draft is refused outright — sending it would run the raw command
     // text as a prompt — and the hint above the composer already says why.
@@ -2143,15 +2373,26 @@ function App(): React.ReactElement {
       return;
     }
 
+    // Over this the sidecar refuses the whole request, so stop here with the draft intact.
+    const totalBytes = attachmentBytes(attachments);
+    if (totalBytes > MAX_ATTACHMENT_BYTES) {
+      const mb = (bytes: number): number => Math.ceil(bytes / (1024 * 1024));
+      toast(
+        `Attachments are too big to send (${mb(totalBytes)} MB). The limit is ${mb(MAX_ATTACHMENT_BYTES)} MB per message.`,
+        "error",
+      );
+      return;
+    }
+
     chatLayout.capture();
     // The strips this send clears (chips, the cold-cache notice) must leave in
     // the bubble's commit, or their fold resizes the transcript mid-move.
     setSendCount((n) => n + 1);
     recordHistory(trimmed);
+    markShellShared();
     // Read BEFORE the dismissal clears the band: a prompt that supersedes a
-    // question is consumed as soon as it lands, so it must neither flash the
-    // queued look on the way in nor open the queued strip below the transcript
-    // (see showsQueuedBubble / withoutSupersedingMessage).
+    // question is consumed as soon as it lands, so it must not flash the
+    // queued look on the way in (see showsQueuedBubble).
     const supersedesQuestion = hasOpenAsk();
     dismissOpenAsks();
     // A user send always re-pins to the bottom — they want to see their message.
@@ -2168,16 +2409,17 @@ function App(): React.ReactElement {
       mentionedPaths,
       scope: "error" as const,
     };
-    // Carry the enhancer's highlighted segments into the sent bubble ONLY when
-    // the message is the unedited enhanced text (the bubble shows `trimmed`).
+    // Carry the enhancer's highlighted segments (re-anchored through any edits)
+    // into the sent bubble, aligned to the trimmed text the bubble shows.
     const sentEnhancements =
-      enhancement && enhancement.plain === trimmed ? enhancement.segments : undefined;
+      enhancement && enhancement.plain === input
+        ? (rebaseSegments(enhancement.segments, input, trimmed) ?? undefined)
+        : undefined;
     // While a run is in flight, the message is QUEUED as steering (the sidecar
     // injects it mid-loop). Attachments queue too — they're persisted and ride
     // the same native-block path when the queue drains. Queued rows render
     // dimmed until run_end clears the flag.
     if (running) {
-      if (supersedesQuestion) noteSupersedingSend(prompt);
       const queuedWire = attachments.map(toWire);
       const queuedImgs = attachments.flatMap((a) => (a.previewUrl ? [a.previewUrl] : []));
       pushItem({
@@ -2186,6 +2428,7 @@ function App(): React.ReactElement {
         text: trimmed,
         command: isWorkflowCommand(trimmed),
         images: queuedImgs.length > 0 ? queuedImgs : undefined,
+        attachments: attachmentChips(attachments),
         files: mentionedPaths.length > 0 ? mentionedPaths : undefined,
         enhancements: sentEnhancements,
         queued: showsQueuedBubble("queue", supersedesQuestion) ? true : undefined,
@@ -2211,6 +2454,7 @@ function App(): React.ReactElement {
       text: trimmed,
       command: isWorkflowCommand(trimmed),
       images: imgPreviews.length > 0 ? imgPreviews : undefined,
+      attachments: attachmentChips(attachments),
       files: mentionedPaths.length > 0 ? mentionedPaths : undefined,
       enhancements: sentEnhancements,
     });
@@ -2335,8 +2579,8 @@ function App(): React.ReactElement {
   // the hydrate effect even when needsProject is already false (switching
   // sessions from the reopened picker), which flipping the boolean alone won't.
   function onProjectChosen(): void {
-    // Picker → workspace crossfades like every other screen change.
-    withViewTransition(resetForChosenProject);
+    // Picker → workspace switches like every other screen change (showScreen).
+    showScreen(resetForChosenProject);
   }
   function resetForChosenProject(): void {
     checklistFetchRef.current++;
@@ -2389,83 +2633,85 @@ function App(): React.ReactElement {
 
   if (needsProject) {
     return (
-      <div
-        className={`app${windowFocused ? " window-focused" : ""}`}
-        style={{ background: theme.background }}
-      >
-        {entryView === "home" ? (
-          <HomeScreen
-            onProjects={() =>
-              withViewTransition(() => {
-                setWorkspaceMode("code");
-                setEntryView("projects");
-              })
-            }
-            onGoals={() =>
-              withViewTransition(() => {
-                setWorkspaceMode("code");
-                setEntryView("goals");
-              })
-            }
-            onChat={() =>
-              withViewTransition(() => {
-                setWorkspaceMode("chat");
-                setEntryView("chats");
-              })
-            }
-            onMotion={() =>
-              withViewTransition(() => {
-                setWorkspaceMode("motion");
-                setEntryView("motion");
-              })
-            }
-            onSettings={(tab) =>
-              withViewTransition(() => {
-                setSettingsTab(tab ?? "general");
-                setEntryView("settings");
-              })
-            }
-            refreshSignal={homeRefreshSignal}
-          />
-        ) : entryView === "settings" ? (
-          <SettingsScreen
-            initialTab={settingsTab}
-            onClose={() =>
-              withViewTransition(() => {
-                setEntryView("home");
-                // Settings may have changed the folder or providers.
-                setHomeRefreshSignal((n) => n + 1);
-              })
-            }
-          />
-        ) : entryView === "goals" ? (
-          <Suspense fallback={null}>
-            <GoalPicker
-              onChosen={onProjectChosen}
-              onClose={() => withViewTransition(() => setEntryView("home"))}
+      <>
+        <div
+          className={`app${windowFocused ? " window-focused" : ""}`}
+          style={{ background: theme.background }}
+        >
+          {entryView === "home" ? (
+            <HomeScreen
+              onProjects={() =>
+                showScreen(() => {
+                  setWorkspaceMode("code");
+                  setEntryView("projects");
+                })
+              }
+              onGoals={() =>
+                showScreen(() => {
+                  setWorkspaceMode("code");
+                  setEntryView("goals");
+                })
+              }
+              onChat={() =>
+                showScreen(() => {
+                  setWorkspaceMode("chat");
+                  setEntryView("chats");
+                })
+              }
+              onMotion={() =>
+                showScreen(() => {
+                  setWorkspaceMode("motion");
+                  setEntryView("motion");
+                })
+              }
+              onSettings={(tab) =>
+                showScreen(() => {
+                  setSettingsTab(tab ?? "general");
+                  setEntryView("settings");
+                })
+              }
+              refreshSignal={homeRefreshSignal}
             />
-          </Suspense>
-        ) : entryView === "chats" ? (
-          <ChatPicker
-            onChosen={onProjectChosen}
-            onClose={() => withViewTransition(() => setEntryView("home"))}
-          />
-        ) : entryView === "motion" ? (
-          <ChatPicker
-            mode="motion"
-            onChosen={onProjectChosen}
-            onClose={() => withViewTransition(() => setEntryView("home"))}
-          />
-        ) : (
-          <ProjectPicker
-            onChosen={onProjectChosen}
-            // Every window can return to the mode-neutral home screen.
-            onClose={() => withViewTransition(() => setEntryView("home"))}
-          />
-        )}
-        {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
-        <Toaster />
-      </div>
+          ) : entryView === "settings" ? (
+            <SettingsScreen
+              initialTab={settingsTab}
+              onClose={() =>
+                showScreen(() => {
+                  setEntryView("home");
+                  // Settings may have changed the folder or providers.
+                  setHomeRefreshSignal((n) => n + 1);
+                })
+              }
+            />
+          ) : entryView === "goals" ? (
+            <Suspense fallback={null}>
+              <GoalPicker
+                onChosen={onProjectChosen}
+                onClose={() => showScreen(() => setEntryView("home"))}
+              />
+            </Suspense>
+          ) : entryView === "chats" ? (
+            <ChatPicker
+              onChosen={onProjectChosen}
+              onClose={() => showScreen(() => setEntryView("home"))}
+            />
+          ) : entryView === "motion" ? (
+            <ChatPicker
+              mode="motion"
+              onChosen={onProjectChosen}
+              onClose={() => showScreen(() => setEntryView("home"))}
+            />
+          ) : (
+            <ProjectPicker
+              onChosen={onProjectChosen}
+              // Every window can return to the mode-neutral home screen.
+              onClose={() => showScreen(() => setEntryView("home"))}
+            />
+          )}
+          {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
+          <Toaster />
+        </div>
+      </>
     );
   }
 
@@ -2474,557 +2720,694 @@ function App(): React.ReactElement {
   if (showPicker) {
     const pickerProps = {
       onChosen: () =>
-        withViewTransition(() => {
+        showScreen(() => {
           setShowPicker(false);
           resetForChosenProject();
         }),
       onClose: () =>
-        withViewTransition(() => {
+        showScreen(() => {
           setShowPicker(false);
           setNeedsProject(true);
           setEntryView("home" as const);
         }),
     };
     return (
-      <div
-        className={`app${windowFocused ? " window-focused" : ""}`}
-        style={{ background: theme.background }}
-      >
-        {workspaceMode === "chat" ? (
-          <ChatPicker initialAgent={state?.chatAgent ?? "general"} {...pickerProps} />
-        ) : workspaceMode === "motion" ? (
-          <ChatPicker mode="motion" {...pickerProps} />
-        ) : state?.goal ? (
-          <Suspense fallback={null}>
-            <GoalPicker {...pickerProps} />
-          </Suspense>
-        ) : (
-          <ProjectPicker initialProjectPath={state?.cwd ?? null} {...pickerProps} />
-        )}
-        {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
-        {/* Tray Settings can toast a save failure over the picker. */}
-        <Toaster />
-      </div>
+      <>
+        <div
+          className={`app${windowFocused ? " window-focused" : ""}`}
+          style={{ background: theme.background }}
+        >
+          {workspaceMode === "chat" ? (
+            <ChatPicker initialAgent={state?.chatAgent ?? "general"} {...pickerProps} />
+          ) : workspaceMode === "motion" ? (
+            <ChatPicker mode="motion" {...pickerProps} />
+          ) : state?.goal ? (
+            <Suspense fallback={null}>
+              <GoalPicker {...pickerProps} />
+            </Suspense>
+          ) : (
+            <ProjectPicker initialProjectPath={state?.cwd ?? null} {...pickerProps} />
+          )}
+          {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
+          {/* Tray Settings can toast a save failure over the picker. */}
+          <Toaster />
+        </div>
+      </>
     );
   }
 
+  const backLabel =
+    workspaceMode === "chat"
+      ? "Back to chats"
+      : workspaceMode === "motion"
+        ? "Back to motion sessions"
+        : "Back to this project's sessions";
+  const goBack = (): void => {
+    const back = (): void => setShowPicker(true);
+    showScreen(back);
+  };
+  const closeDeckThen =
+    (run: () => void): (() => void) =>
+    () => {
+      setDeckPanel(null);
+      run();
+    };
+
   return (
-    <div
-      className={`app${isFileDragOver ? " app-file-dragover" : ""}${windowFocused ? " window-focused" : ""}${workspaceMode === "code" && showChecklist ? " checklist-open" : ""}${goalWorldOpen && !showChecklist ? " goal-world-open" : ""}`}
-      data-glow={glowState}
-      style={{ background: theme.background, ...glowStyle }}
-      onDragEnter={handleWindowDragEnter}
-      onDragOver={handleWindowDragOver}
-      onDragLeave={handleWindowDragLeave}
-      onDrop={handleWindowDrop}
-    >
-      {confettiNonce && <Confetti key={confettiNonce} />}
-
-      <WorkspaceHeader
-        ref={workspaceHeaderRef}
-        workspaceMode={workspaceMode}
-        cwd={state?.cwd}
-        goalName={state?.goal?.name ?? null}
-        gitBranch={state?.gitBranch}
-        gitDirtyFileCount={state?.gitDirtyFileCount}
-        gitHubIssues={state?.gitHubIssues}
-        gitHubPRs={state?.gitHubPRs}
-        gitHubRepoUrl={state?.gitHubRepoUrl}
-        gitHubCI={state?.gitHubCI}
-        projectHealth={projectHealth}
-        onReviewHealth={reviewProjectHealth}
-        additionalRoots={state?.additionalRoots}
-        navHidden={navHidden}
-        onToggleNav={() => withViewTransition(toggleNav)}
-        stripExtras={
-          <>
-            <TitleUsageMeter currentProvider={state?.provider ?? ""} />
-            {windowTotal > 1 && windowIndex !== null && (
-              <span
-                className={`window-index${isThisFocused ? "" : " dim"}`}
-                data-tauri-drag-region
-                title={`Window ${windowIndex} of ${windowTotal} · ⌘\` to cycle`}
-              >
-                {windowIndex}/{windowTotal}
-              </span>
-            )}
-          </>
-        }
+    <>
+      <div
+        className={`app${isFileDragOver ? " app-file-dragover" : ""}${windowFocused ? " window-focused" : ""}${goalWorldOpen ? " goal-world-open" : ""}`}
+        data-glow={glowState}
+        style={{ background: theme.background, ...glowStyle }}
+        onDragEnter={handleWindowDragEnter}
+        onDragOver={handleWindowDragOver}
+        onDragLeave={handleWindowDragLeave}
+        onDrop={handleWindowDrop}
       >
-        <BackButton
-          label={
-            showChecklist
-              ? "Back to chat"
-              : workspaceMode === "chat"
-                ? "Back to chats"
-                : workspaceMode === "motion"
-                  ? "Back to motion sessions"
-                  : "Back to this project's sessions"
-          }
-          onClick={() => {
-            const goBack = (): void =>
-              showChecklist ? setShowChecklist(false) : setShowPicker(true);
-            // Leaving a goal (Chat or Workers) for the goal list skips the
-            // screen crossfade: WebKit's snapshot of a goal workspace flashed a
-            // magenta line along the header's bottom edge for a few frames
-            // (caught on screen recordings of the real window, every time from
-            // Workers and some of the time from Chat; never without the
-            // crossfade). The list still resolves in through its own dissolve-in.
-            if (state?.goal && !showChecklist) goBack();
-            else withViewTransition(goBack);
-          }}
-        />
-        <WorkspaceHeaderActions
+        {confettiNonce && <Confetti key={confettiNonce} />}
+
+        <WorkspaceHeader
+          ref={workspaceHeaderRef}
           workspaceMode={workspaceMode}
-          isGoal={Boolean(state?.goal)}
-          goalView={goalView}
-          // No view transition: WebKit leaves the header's frost (backdrop
-          // blur) out of its snapshots, so it popped in after the crossfade.
-          // The farm and its frost fade in together instead (App.css), and the
-          // chat dissolves back in on its own when shown again.
-          onGoalViewChange={(view) => setGoalChatFor(view === "chat" ? activeGoalId : null)}
-          goalNeedsAnswer={goalWaitingOnUser}
-          goalTally={goalTally}
-          goalState={
-            state?.goal?.paused
-              ? "paused"
-              : running || (goalTally?.working ?? 0) > 0
-                ? "running"
-                : "stopped"
+          cwd={state?.cwd}
+          goalName={state?.goal?.name ?? null}
+          title={chatHeaderTitle}
+          gitBranch={state?.gitBranch}
+          gitDirtyFileCount={state?.gitDirtyFileCount}
+          gitHubIssues={state?.gitHubIssues}
+          gitHubPRs={state?.gitHubPRs}
+          additionalRoots={state?.additionalRoots}
+          subtitle={
+            workspaceMode === "chat"
+              ? state?.chatAgent === "therapist"
+                ? "Therapist"
+                : state?.chatAgent === "research"
+                  ? "Research"
+                  : "General"
+              : null
           }
-          onGoalPauseChange={state?.goal?.phase === "active" ? setGoalPaused : undefined}
-          onOpenGoalSettings={state?.goal ? () => setShowGoalSettings(true) : undefined}
-          progress={progress}
-          rankCelebrateNonce={rankCelebrateNonce}
-          xpChips={xpChips}
-          onOpenScorecard={() => setShowScorecard(true)}
-          windowFocused={windowFocused}
-          running={running}
-          autopilot={state?.autopilot ?? false}
-          autopilotReviewing={autopilotReviewing}
-          onAutopilotChange={(next) => {
-            setState((s) => (s ? { ...s, autopilot: next } : s));
-            void setAutopilot(next);
-            setKenPowerBanner(next ? "on" : "off");
-          }}
-          onNewSession={() => setConfirmNewSession(true)}
-          onOpenNotes={() => setShowNotes(true)}
-          onOpenMemories={() => setShowMemories(true)}
-          projectTasks={projectTasks}
-          onOpenTasks={openTasks}
-          showChecklist={showChecklist}
-          onOpenChecklist={openChecklist}
-          onArrange={() => {
-            setNavHiddenPersisted(true);
-            setToolsHiddenPersisted(true);
-          }}
-          needsGitInit={needsGitInit}
-          onInitGit={() => setShowInitGit(true)}
-          commitCommand={commitCommand}
-          hasCommit={hasCommit}
-          onCommit={() =>
-            submitText(
-              `/${commitCommand}`,
-              hasCommit ? "Committing\u2026" : "Setting up commits\u2026",
-            )
-          }
-        />
-      </WorkspaceHeader>
-
-      {workspaceMode === "code" && showChecklist && (
-        <ChecklistScreen
-          load={checklistLoad}
-          running={running || checklistRunId !== null}
-          activeId={checklistRunId}
-          notice={checklistNotice}
-          onRun={handleRunChecklistItem}
-          onRetry={() => {
-            setChecklistLoad({ kind: "loading" });
-            void refreshChecklist();
-          }}
-        />
-      )}
-
-      {/* Kept alive while hidden (Chat view), so switching back doesn't rebuild the farm. */}
-      {activeGoalId && (
-        <Activity mode={goalWorldOpen && !showChecklist ? "visible" : "hidden"}>
-          <Suspense fallback={null}>
-            <GoalWorld
-              key={activeGoalId}
-              headerRef={workspaceHeaderRef}
-              goalId={activeGoalId}
+          leading={<BackButton label={backLabel} onClick={goBack} />}
+          trailing={
+            <TitleBarActions
+              workspaceMode={workspaceMode}
+              isGoal={Boolean(state?.goal)}
+              goalView={goalView}
+              // No view transition: WebKit leaves the header's frost (backdrop
+              // blur) out of its snapshots, so it popped in after the crossfade.
+              onGoalViewChange={(view) => setGoalChatFor(view === "chat" ? activeGoalId : null)}
+              goalNeedsAnswer={goalWaitingOnUser}
+              goalTally={goalTally}
+              goalState={
+                state?.goal?.paused
+                  ? "paused"
+                  : running || (goalTally?.working ?? 0) > 0
+                    ? "running"
+                    : "stopped"
+              }
+              onGoalPauseChange={state?.goal?.phase === "active" ? setGoalPaused : undefined}
+              xpChips={xpChips}
               running={running}
-              liveTools={liveToolFeed}
-              waitingOnUser={goalWaitingOnUser}
-              workers={goalWorkers}
-              ask={goalAskNotice}
-              kenSaid={kenSaid}
-              onShowChat={() => setGoalChatFor(activeGoalId)}
-              finish={shownGoalFinish}
-              onCloseFinish={() => setGoalFinish(null)}
+              dirtyCount={state?.gitDirtyFileCount ?? 0}
+              needsGitInit={needsGitInit}
+              onInitGit={() => setShowInitGit(true)}
+              commitCommand={commitCommand}
+              hasCommit={hasCommit}
+              onCommit={() =>
+                submitText(
+                  `/${commitCommand}`,
+                  hasCommit ? "Committing\u2026" : "Setting up commits\u2026",
+                )
+              }
             />
-          </Suspense>
-        </Activity>
-      )}
+          }
+        />
 
-      {/* React owns chat visibility rather than a stylesheet override. Activity
+        {/* Kept alive while hidden (Chat view), so switching back doesn't rebuild the farm. */}
+        {activeGoalId && (
+          <Activity mode={goalWorldOpen ? "visible" : "hidden"}>
+            <Suspense fallback={null}>
+              <GoalWorld
+                key={activeGoalId}
+                headerRef={workspaceHeaderRef}
+                goalId={activeGoalId}
+                running={running}
+                liveTools={liveToolFeed}
+                waitingOnUser={goalWaitingOnUser}
+                workers={goalWorkers}
+                ask={goalAskNotice}
+                kenSaid={kenSaid}
+                onShowChat={() => setGoalChatFor(activeGoalId)}
+                finish={shownGoalFinish}
+                onCloseFinish={() => setGoalFinish(null)}
+                kenStatus={kenStatus}
+              />
+            </Suspense>
+          </Activity>
+        )}
+
+        {/* React owns chat visibility rather than a stylesheet override. Activity
           keeps the draft and transcript state, and suspends hidden child effects. */}
-      <Activity mode={showChecklist || goalWorldOpen ? "hidden" : "visible"}>
-        {/* Non-scrolling frame the same size as the chat viewport. The banner
+        <Activity mode={goalWorldOpen ? "hidden" : "visible"}>
+          {/* Non-scrolling frame the same size as the chat viewport. The banner
           lives HERE, not inside `.transcript` — `.transcript` scrolls, and an
           absolutely positioned child of a scrolling container is pinned to the
           top of the scrolled CONTENT, not the visible viewport, so in an
           existing session scrolled down it rendered far above what's on
           screen. Anchoring to this non-scrolling sibling keeps it pinned to
           what the user is actually looking at, at any scroll position. */}
-        <div
-          className="transcript-frame"
-          onMouseEnter={() => setChatHovered(true)}
-          onMouseLeave={() => setChatHovered(false)}
-        >
-          {workspaceMode === "code" && kenPowerBanner && (
-            <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
-          )}
-          <div
-            className="transcript"
-            ref={attachTranscript}
-            onScroll={onTranscriptScroll}
-            onWheel={onTranscriptWheel}
-          >
-            {!hydrated && items.length === 0 ? (
-              <TranscriptSkeleton />
-            ) : (
-              <>
-                {items.length === 0 &&
-                  (connectError !== null ? (
-                    <div className="picker-empty transcript-reveal" role="alert">
-                      <span>Couldn't connect to the agent.</span>
-                      <span style={{ color: theme.textDim }}>{connectError}</span>
-                      <button
-                        type="button"
-                        className="btn btn-sm btn-ghost"
-                        onClick={() => {
-                          // Restart the failed start first so the re-hydrate
-                          // waits on a fresh attempt, not the recorded failure.
-                          void retryWindowSession()
-                            .catch((e: unknown) =>
-                              toast(
-                                `Couldn't restart the agent: ${e instanceof Error ? e.message : String(e)}`,
-                                "error",
-                              ),
-                            )
-                            .finally(() => setHydrateNonce((n) => n + 1));
-                        }}
-                      >
-                        Try again
-                      </button>
-                    </div>
-                  ) : status === "ready" ? (
-                    <WakeScreen
-                      chat={workspaceMode === "chat"}
-                      motion={workspaceMode === "motion"}
-                      goals={Boolean(state?.goal)}
-                    />
-                  ) : emptyTranscriptStatus(status) ? (
-                    <div className="line transcript-reveal" style={{ color: theme.textDim }}>
-                      {`\u273b ${emptyTranscriptStatus(status)}`}
-                    </div>
-                  ) : null)}
-                <PromptSendProvider value={sendKenRecommendedPrompt}>
-                  <LiveTextContext.Provider value={liveText}>
-                    {visibleItems.flatMap((it) => {
-                      const row = (
-                        <TranscriptRow
-                          key={it.id}
-                          item={it}
-                          view={chatView}
-                          animateIn={it.id >= liveFromId}
-                          consumeEntrance={entrances.consume}
-                          kenTalking={it.id === talkingKenId}
-                          errorActive={it.id === currentErrorId}
-                          errorCritterId={errorCritters.get(it.id)}
-                          errorModelPicker={
-                            it.kind === "error" && it.id === currentErrorId ? (
-                              <ModelSelect
-                                models={models}
-                                currentModel={
-                                  it.scope === "ken_error" || it.scope === "autopilot_error"
-                                    ? (state?.kenModel ?? state?.model ?? "")
-                                    : (state?.model ?? "")
-                                }
-                                onSelect={
-                                  it.scope === "ken_error" || it.scope === "autopilot_error"
-                                    ? onSelectKenModel
-                                    : onSelectModel
-                                }
-                                disabled={running || kenRunning || autopilotReviewing}
-                                title={
-                                  it.scope === "ken_error" || it.scope === "autopilot_error"
-                                    ? "Switch Ken's model"
-                                    : "Switch model"
-                                }
-                                label={
-                                  it.reason === "usage_limit" ? "Switch provider" : "Choose model"
-                                }
-                                color={theme.primary}
-                              />
-                            ) : undefined
-                          }
-                          onContentGrow={maybeScrollToBottom}
-                          onAskAnswer={answerAsk}
-                          onAskType={typeAskInstead}
-                        />
-                      );
-                      // Zero-height landing spot for "You have new chats". A flat
-                      // keyed list, so rows never remount when it comes and goes.
-                      return it.id === firstNewId
-                        ? [
-                            <div
-                              key="new-marker"
-                              ref={newMarkerRef}
-                              className="transcript-new-marker"
-                              aria-hidden="true"
-                            />,
-                            row,
-                          ]
-                        : [row];
-                    })}
-                  </LiveTextContext.Provider>
-                </PromptSendProvider>
-              </>
+          <div ref={transcriptFrameRef} className="transcript-frame">
+            {workspaceMode === "code" && kenPowerBanner && (
+              <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
+            )}
+            <div
+              className="transcript"
+              ref={attachTranscript}
+              onScroll={onTranscriptScroll}
+              onWheel={onTranscriptWheel}
+            >
+              {!hydrated && items.length === 0 ? (
+                <TranscriptSkeleton />
+              ) : (
+                <>
+                  {items.length === 0 &&
+                    (connectError !== null ? (
+                      <div className="picker-empty transcript-reveal" role="alert">
+                        <span>Couldn't connect to the agent.</span>
+                        <span style={{ color: theme.textDim }}>{connectError}</span>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-ghost"
+                          onClick={() => {
+                            // Restart the failed start first so the re-hydrate
+                            // waits on a fresh attempt, not the recorded failure.
+                            void retryWindowSession()
+                              .catch((e: unknown) =>
+                                toast(
+                                  `Couldn't restart the agent: ${e instanceof Error ? e.message : String(e)}`,
+                                  "error",
+                                ),
+                              )
+                              .finally(() => setHydrateNonce((n) => n + 1));
+                          }}
+                        >
+                          Try again
+                        </button>
+                      </div>
+                    ) : status === "ready" ? (
+                      <WakeScreen
+                        chat={workspaceMode === "chat"}
+                        motion={workspaceMode === "motion"}
+                        goals={Boolean(state?.goal)}
+                      />
+                    ) : emptyTranscriptStatus(status) ? (
+                      <div className="line transcript-reveal" style={{ color: theme.textDim }}>
+                        {`\u273b ${emptyTranscriptStatus(status)}`}
+                      </div>
+                    ) : null)}
+                  <PromptSendProvider value={sendKenRecommendedPrompt}>
+                    <LiveTextContext.Provider value={liveText}>
+                      {visibleItems.flatMap((it) => {
+                        const row = (
+                          <TranscriptRow
+                            key={it.id}
+                            item={it}
+                            view={chatView}
+                            animateIn={it.id >= liveFromId}
+                            consumeEntrance={entrances.consume}
+                            kenTalking={it.id === talkingKenId}
+                            errorActive={it.id === currentErrorId}
+                            errorModelPicker={
+                              it.kind === "error" && it.id === currentErrorId ? (
+                                <ModelSelect
+                                  models={models}
+                                  currentModel={
+                                    it.scope === "ken_error" || it.scope === "autopilot_error"
+                                      ? (state?.kenModel ?? state?.model ?? "")
+                                      : (state?.model ?? "")
+                                  }
+                                  onSelect={
+                                    it.scope === "ken_error" || it.scope === "autopilot_error"
+                                      ? onSelectKenModel
+                                      : onSelectModel
+                                  }
+                                  disabled={running || kenRunning || autopilotReviewing}
+                                  title={
+                                    it.scope === "ken_error" || it.scope === "autopilot_error"
+                                      ? "Switch Ken's model"
+                                      : "Switch model"
+                                  }
+                                  label={
+                                    it.reason === "usage_limit" ? "Switch provider" : "Choose model"
+                                  }
+                                  color={theme.primary}
+                                />
+                              ) : undefined
+                            }
+                            onContentGrow={maybeScrollToBottom}
+                            queueId={queuedBubbleIds.get(it.id)}
+                            onCancelQueued={cancelQueuedMessage}
+                            onAskAnswer={answerAsk}
+                            onAskType={typeAskInstead}
+                            shellActions={shellActions}
+                          />
+                        );
+                        // Zero-height landing spot for "You have new chats". A flat
+                        // keyed list, so rows never remount when it comes and goes.
+                        return it.id === firstNewId
+                          ? [
+                              <div
+                                key="new-marker"
+                                ref={newMarkerRef}
+                                className="transcript-new-marker"
+                                aria-hidden="true"
+                              />,
+                              row,
+                            ]
+                          : [row];
+                      })}
+                    </LiveTextContext.Provider>
+                  </PromptSendProvider>
+                </>
+              )}
+            </div>
+            {items.length > 0 && (
+              <TranscriptJumpControls
+                away={!following}
+                hasNew={firstNewId !== null}
+                askAt={askPlace === "above" || askPlace === "below" ? askPlace : null}
+                onScrollToBottom={jumpToLatest}
+                onJumpToNew={jumpToNew}
+                onJumpToAsk={jumpToAsk}
+              />
             )}
           </div>
-          {items.length > 0 && (
-            <ExportChatButton
-              visible={chatHovered || exporting}
-              busy={exporting}
-              onExport={() => void exportTranscript()}
-            />
-          )}
-          {items.length > 0 && (
-            <TranscriptJumpControls
-              away={!following}
-              hasNew={firstNewId !== null}
-              askAt={askPlace === "above" || askPlace === "below" ? askPlace : null}
-              onScrollToBottom={jumpToLatest}
-              onJumpToNew={jumpToNew}
-              onJumpToAsk={jumpToAsk}
-            />
-          )}
-        </div>
 
-        {/* Sub-agents walk on top of the pinned region as critters; the lane
+          {/* The dock: everything below the conversation, floating over its
+          bottom edge so messages scroll on behind it through a frost (the
+          title bar's, mirrored). The transcript reserves the dock's height as
+          padding (--dock-h, kept current by a ResizeObserver). */}
+          <div ref={dockRef} className="dock">
+            {/* Sub-agents walk on top of the pinned region as critters; the lane
           opens (pushing the chat up) only while one is out. */}
-        <CritterFloor groups={critterGroups} />
-        <div ref={liveRegionRef} className="liveregion">
-          {/* Motion's starting points sit just above the activity bar and go away
-            once the conversation has its first message. */}
-          {workspaceMode === "motion" && hydrated && items.length === 0 && !running && (
-            <MotionStarters onPick={fillComposer} />
-          )}
-          {workspaceMode === "code" && kenRunning && (
-            <KenActivityBar
-              runStartTs={kenRunStartTs}
-              tokens={kenTokens}
-              isThinking={kenIsThinking}
-              thinkingStartTs={kenThinkingStartTs}
-              thinkingAccumMs={kenThinkingAccumMs}
-              onCancel={() => void cancelKen()}
-            />
-          )}
-          {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
-          {/* Automatic review stays in the same task row; manual @Ken keeps its own bar. */}
-          {(workspaceMode !== "code" || running || autopilotReviewing || !kenRunning) && (
-            <ActivityBar
+            <CritterFloor groups={critterGroups} />
+            <div ref={liveRegionRef} className="liveregion">
+              {/* Motion's starting points sit just above the deck and go away once
+            the conversation has its first message. */}
+              {workspaceMode === "motion" && hydrated && items.length === 0 && !running && (
+                <MotionStarters onPick={fillComposer} />
+              )}
+              {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
+            </div>
+
+            <Deck
+              state={state}
+              hydrated={hydrated}
+              // A Goal works in a git repo too: its branch key opens the Git panel.
+              showGit={workspaceMode === "code"}
+              panel={deckPanel}
+              onPanelChange={setDeckPanel}
               running={running}
-              runStartedAt={runStartedAt}
-              activity={barActivity}
-              cancelling={cancelling}
-              tokens={tokens}
-              doneStatus={doneStatus}
-              isThinking={isThinking}
-              thinkingStartTs={thinkingStartTs}
-              thinkingAccumMs={thinkingAccumMs}
-              planTotal={workspaceMode !== "code" ? 0 : planTotal}
-              planDone={workspaceMode !== "code" ? 0 : Math.min(planDone.size, planTotal)}
-              onCancel={requestCancel}
-              toolsHidden={toolsHidden}
-              hasToolFeed={liveToolFeed.length > 0}
-              onToggleTools={toggleTools}
+              contextPct={contextPct}
+              models={models}
+              modelsFailed={modelsFailed}
+              onSelectModel={onSelectModel}
+              second={
+                state?.goal
+                  ? {
+                      name: "Critters",
+                      followLabel: "GG Goals",
+                      model: state.goal.critterModel ?? state.model,
+                      following: !state.goal.critterModel,
+                      disabled: false,
+                      onSelect: onSelectCritterModel,
+                    }
+                  : workspaceMode === "code" && state
+                    ? {
+                        name: "Ken",
+                        followLabel: "GG",
+                        model: state.kenModel ?? state.model,
+                        following: !state.kenModelOverride,
+                        disabled: running || kenRunning || autopilotReviewing,
+                        onSelect: onSelectKenModel,
+                      }
+                    : null
+              }
+              tasks={tasks}
+              schedules={schedules}
+              onStopSchedule={stopSchedule}
+              projectHealth={projectHealth}
+              onReviewHealth={reviewProjectHealth}
+              tools={{
+                preview: canLivePreview
+                  ? {
+                      title: "Live preview",
+                      meta: livePreview.status?.running ? "Running" : undefined,
+                      fit: true,
+                      body: (
+                        <LivePreviewPanel
+                          preview={livePreview}
+                          onStartDevServer={() => {
+                            if (
+                              submitText(
+                                START_DEV_SERVER_PROMPT,
+                                "Start the dev server and open the live preview",
+                                { keepInput: true },
+                              )
+                            )
+                              setDeckPanel(null);
+                          }}
+                        />
+                      ),
+                    }
+                  : undefined,
+                folders:
+                  (state?.additionalRoots?.length ?? 0) > 0
+                    ? {
+                        title: "Added folders",
+                        meta: `${state?.additionalRoots?.length ?? 0} added`,
+                        body: (
+                          <FoldersPanel
+                            roots={state?.additionalRoots ?? []}
+                            busy={removingFolder}
+                            onRemove={(root) => void removeFolder(root)}
+                          />
+                        ),
+                      }
+                    : undefined,
+                notes: {
+                  title: "Notes",
+                  meta: "Saved on this Mac",
+                  body: (
+                    <NotesModal
+                      value={notes}
+                      onChange={handleNotesChange}
+                      onClose={() => closeDeckPanel("notes")}
+                    />
+                  ),
+                },
+                todo:
+                  workspaceMode === "code"
+                    ? {
+                        title: "Tasks",
+                        meta: `${projectTasks.filter((t) => t.status !== "done").length} pending`,
+                        body: (
+                          <TasksModal
+                            tasks={projectTasks}
+                            running={running}
+                            onRun={handleRunTask}
+                            onRunAll={handleRunAllTasks}
+                            onDelete={handleDeleteTask}
+                            onClose={() => closeDeckPanel("todo")}
+                          />
+                        ),
+                      }
+                    : undefined,
+                checklist:
+                  workspaceMode === "code" && !state?.goal
+                    ? {
+                        title: "Checklist",
+                        meta:
+                          checklistLoad.kind === "ready"
+                            ? `${checklistLoad.snapshot.items.filter((i) => i.status === "passed").length} of ${checklistLoad.snapshot.items.length} passing`
+                            : undefined,
+                        body: (
+                          <ChecklistScreen
+                            load={checklistLoad}
+                            running={running || checklistRunId !== null}
+                            activeId={checklistRunId}
+                            notice={checklistNotice}
+                            onRun={handleRunChecklistItem}
+                            onRetry={() => {
+                              setChecklistLoad({ kind: "loading" });
+                              void refreshChecklist();
+                            }}
+                          />
+                        ),
+                      }
+                    : undefined,
+                // Goal windows show the attached project's score too (Usage →
+                // Project Health), so the breakdown must open there as well.
+                health:
+                  workspaceMode === "code"
+                    ? {
+                        title: "Project Health",
+                        body: (
+                          <ProjectHealthPanel
+                            health={projectHealth}
+                            onReview={reviewProjectHealth}
+                            onDone={() => closeDeckPanel("health")}
+                          />
+                        ),
+                      }
+                    : undefined,
+                goal: state?.goal
+                  ? {
+                      title: "Goal settings",
+                      body: (
+                        <GoalSettingsModal
+                          context={state.goal.context ?? []}
+                          instructions={state.goal.instructions ?? ""}
+                          busy={running}
+                          onClose={() => closeDeckPanel("goal")}
+                          onSaved={(next) => {
+                            setState((s) => (s?.goal ? { ...s, goal: { ...s.goal, ...next } } : s));
+                            // Newly attached repos bring their own slash commands.
+                            refreshCommands();
+                          }}
+                        />
+                      ),
+                    }
+                  : undefined,
+                scorecard: progress
+                  ? { title: "Scorecard", body: <ScorecardPanel snapshot={progress} /> }
+                  : undefined,
+                brain:
+                  workspaceMode === "chat"
+                    ? {
+                        title: "Brain",
+                        body: <MemoryModal onClose={() => closeDeckPanel("brain")} />,
+                      }
+                    : undefined,
+              }}
+              progress={progress}
+              trophies={trophies.snapshot}
+              usageExtras={
+                windowTotal > 1 &&
+                windowIndex !== null && (
+                  <span
+                    className="deck-pm"
+                    title={`Window ${windowIndex} of ${windowTotal} · ⌘\` to cycle`}
+                  >
+                    Window {windowIndex} of {windowTotal}
+                  </span>
+                )
+              }
+              menu={
+                <DeckMenu
+                  workspaceMode={workspaceMode}
+                  isGoal={Boolean(state?.goal)}
+                  running={running}
+                  autopilot={state?.autopilot ?? false}
+                  autopilotReviewing={autopilotReviewing}
+                  onAutopilotChange={(next) => {
+                    setState((s) => (s ? { ...s, autopilot: next } : s));
+                    void setAutopilot(next);
+                    setKenPowerBanner(next ? "on" : "off");
+                  }}
+                  onNewSession={closeDeckThen(() => setConfirmNewSession(true))}
+                  onOpenNotes={() => setDeckPanel("notes")}
+                  onOpenMemories={() => setDeckPanel("brain")}
+                  projectTasks={projectTasks}
+                  onOpenTasks={openTasks}
+                  showChecklist={showChecklist}
+                  onOpenChecklist={openChecklist}
+                  onOpenLivePreview={
+                    canLivePreview
+                      ? () => {
+                          setDeckPanel("preview");
+                          void livePreview.start();
+                        }
+                      : undefined
+                  }
+                  livePreviewRunning={livePreview.status?.running ?? false}
+                  hasHealth={projectHealth !== null}
+                  onOpenHealth={() => setDeckPanel("health")}
+                  onOpenRadio={() => setDeckPanel("radio")}
+                  onOpenGoalSettings={state?.goal ? () => setDeckPanel("goal") : undefined}
+                  onAddFolder={closeDeckThen(() => void addFolder())}
+                  onRemoveFolder={
+                    (state?.additionalRoots?.length ?? 0) > 0
+                      ? () => setDeckPanel("folders")
+                      : undefined
+                  }
+                  canExport={items.length > 0}
+                  exporting={exporting}
+                  onExport={closeDeckThen(() => void exportTranscript())}
+                  onArrange={() => setToolsHiddenPersisted(true)}
+                  onBack={closeDeckThen(goBack)}
+                  backLabel={backLabel}
+                />
+              }
+              status={
+                /* The deck's status line is whoever is working: a manual @Ken
+                 reply shows Ken's bar there in place of GG's (an automatic
+                 review stays in GG's task row). */
+                workspaceMode === "code" && kenRunning && !running && !autopilotReviewing ? (
+                  <KenActivityBar
+                    runStartTs={kenRunStartTs}
+                    tokens={kenTokens}
+                    toolsHidden={toolsHidden}
+                    onToggleTools={toggleTools}
+                  />
+                ) : (
+                  <ActivityBar
+                    running={running}
+                    runStartedAt={runStartedAt}
+                    activity={barActivity}
+                    cancelling={cancelling}
+                    tokens={tokens}
+                    doneStatus={doneStatus}
+                    isThinking={isThinking}
+                    thinkingStartTs={thinkingStartTs}
+                    thinkingAccumMs={thinkingAccumMs}
+                    planTotal={workspaceMode !== "code" ? 0 : planTotal}
+                    planDone={workspaceMode !== "code" ? 0 : Math.min(planDone.size, planTotal)}
+                    toolsHidden={toolsHidden}
+                    hasToolFeed={liveToolFeed.length > 0}
+                    onToggleTools={toggleTools}
+                  />
+                )
+              }
+              composer={
+                <Composer
+                  workspaceMode={workspaceMode}
+                  state={state}
+                  composerRef={composerRef}
+                  isFileDragOver={isFileDragOver}
+                  scheduleInvalid={scheduleInvalid}
+                  scheduleDraft={scheduleDraft}
+                  running={running}
+                  kenRunning={kenRunning}
+                  autopilotReviewing={autopilotReviewing}
+                  cancelling={cancelling}
+                  sendDisabled={sendDisabled}
+                  input={input}
+                  setInput={setInput}
+                  caret={caret}
+                  setCaret={setCaret}
+                  fillScheduleInterval={fillScheduleInterval}
+                  slashOpen={slashOpen}
+                  slashMatches={slashMatches}
+                  clampedSlashIndex={clampedSlashIndex}
+                  pickSlashCommand={pickSlashCommand}
+                  setSlashIndex={setSlashIndex}
+                  mentionOpen={mentionOpen}
+                  fileMatches={fileMatches}
+                  clampedFileIndex={clampedFileIndex}
+                  mention={mention}
+                  setMention={setMention}
+                  pickMentionFile={pickMentionFile}
+                  setFileIndex={setFileIndex}
+                  updateMention={updateMention}
+                  attachments={attachments}
+                  attachmentsLoading={attachmentsLoading}
+                  removeAttachment={removeAttachment}
+                  addFiles={addFiles}
+                  fileInputRef={fileInputRef}
+                  mentionedPaths={mentionedPaths}
+                  removeMentionChip={removeMentionChip}
+                  sendCount={sendCount}
+                  enhanceAnim={enhanceAnim}
+                  onEnhanceAnimDone={onEnhanceAnimDone}
+                  enhancement={enhancement}
+                  setEnhancement={setEnhancement}
+                  enhancing={enhancing}
+                  enhanceHintVisible={enhanceHintVisible && !shellMode}
+                  shellMode={shellMode}
+                  shellMenu={shellMenu}
+                  runEnhance={runEnhance}
+                  kenActive={kenActive}
+                  kenInputParts={kenInputParts}
+                  attachInput={attachInput}
+                  displayPlaceholder={displayPlaceholder}
+                  lastKeystrokeAtRef={lastKeystrokeAtRef}
+                  historyIndex={historyIndex}
+                  setHistoryIndex={setHistoryIndex}
+                  navigateHistory={navigateHistory}
+                  submit={submit}
+                  requestCancel={requestCancel}
+                />
+              }
             />
-          )}
-        </div>
 
-        <Composer
-          workspaceMode={workspaceMode}
-          state={state}
-          composerRef={composerRef}
-          isFileDragOver={isFileDragOver}
-          scheduleInvalid={scheduleInvalid}
-          scheduleDraft={scheduleDraft}
-          running={running}
-          kenRunning={kenRunning}
-          autopilotReviewing={autopilotReviewing}
-          cancelling={cancelling}
-          sendDisabled={sendDisabled}
-          windowFocused={windowFocused}
-          input={input}
-          setInput={setInput}
-          caret={caret}
-          setCaret={setCaret}
-          fillScheduleInterval={fillScheduleInterval}
-          slashOpen={slashOpen}
-          slashMatches={slashMatches}
-          clampedSlashIndex={clampedSlashIndex}
-          pickSlashCommand={pickSlashCommand}
-          setSlashIndex={setSlashIndex}
-          mentionOpen={mentionOpen}
-          fileMatches={fileMatches}
-          clampedFileIndex={clampedFileIndex}
-          mention={mention}
-          setMention={setMention}
-          pickMentionFile={pickMentionFile}
-          setFileIndex={setFileIndex}
-          updateMention={updateMention}
-          attachments={attachments}
-          attachmentsLoading={attachmentsLoading}
-          removeAttachment={removeAttachment}
-          addFiles={addFiles}
-          fileInputRef={fileInputRef}
-          mentionedPaths={mentionedPaths}
-          removeMentionChip={removeMentionChip}
-          visibleQueuedMessages={visibleQueuedMessages}
-          sendCount={sendCount}
-          handleCancelQueued={handleCancelQueued}
-          enhanceAnim={enhanceAnim}
-          onEnhanceAnimDone={onEnhanceAnimDone}
-          enhancement={enhancement}
-          setEnhancement={setEnhancement}
-          enhancing={enhancing}
-          enhanceHintVisible={enhanceHintVisible}
-          runEnhance={runEnhance}
-          kenActive={kenActive}
-          kenInputParts={kenInputParts}
-          attachInput={attachInput}
-          displayPlaceholder={displayPlaceholder}
-          lastKeystrokeAtRef={lastKeystrokeAtRef}
-          historyIndex={historyIndex}
-          setHistoryIndex={setHistoryIndex}
-          navigateHistory={navigateHistory}
-          submit={submit}
-          requestCancel={requestCancel}
-        />
+            <UpdateBanner appUpdate={appUpdate} />
+          </div>
+        </Activity>
 
-        <AppFooter
-          hydrated={hydrated}
-          workspaceMode={workspaceMode}
-          state={state}
-          tasks={tasks}
-          schedules={schedules}
-          stopSchedule={stopSchedule}
-          runningTaskCount={runningTaskCount}
-          contextPct={contextPct}
-          running={running}
-          kenRunning={kenRunning}
-          autopilotReviewing={autopilotReviewing}
-          models={models}
-          modelsFailed={modelsFailed}
-          onSelectModel={onSelectModel}
-          onSelectKenModel={onSelectKenModel}
-          onSelectCritterModel={state?.goal ? onSelectCritterModel : undefined}
-        />
+        {workspaceMode === "code" && showInitGit && (
+          <InitGitModal
+            defaultName={defaultRepoName}
+            onClose={() => setShowInitGit(false)}
+            onInitialize={(prompt) => {
+              setShowInitGit(false);
+              submitText(prompt, "Initializing Git\u2026");
+            }}
+          />
+        )}
 
-        <UpdateBanner appUpdate={appUpdate} />
-      </Activity>
+        {confirmNewSession && (
+          <ConfirmModal
+            title={workspaceMode === "chat" ? "New Chat" : "New Session"}
+            // Nothing is cleared: `newSession()` writes a NEW session file and
+            // leaves the old one on disk, still listed and re-openable. Saying
+            // "will be cleared" made a safe action read as destructive.
+            message="Start fresh? This conversation stays saved."
+            confirmLabel={workspaceMode === "chat" ? "New Chat" : "New Session"}
+            busy={newSessionBusy}
+            onConfirm={() => void startNewSession()}
+            onClose={() => setConfirmNewSession(false)}
+          />
+        )}
 
-      {workspaceMode === "code" && showInitGit && (
-        <InitGitModal
-          defaultName={defaultRepoName}
-          onClose={() => setShowInitGit(false)}
-          onInitialize={(prompt) => {
-            setShowInitGit(false);
-            submitText(prompt, "Initializing Git\u2026");
-          }}
-        />
-      )}
-
-      {confirmNewSession && (
-        <ConfirmModal
-          title={workspaceMode === "chat" ? "New Chat" : "New Session"}
-          // Nothing is cleared: `newSession()` writes a NEW session file and
-          // leaves the old one on disk, still listed and re-openable. Saying
-          // "will be cleared" made a safe action read as destructive.
-          message="Start fresh? This conversation stays saved."
-          confirmLabel={workspaceMode === "chat" ? "New Chat" : "New Session"}
-          busy={newSessionBusy}
-          onConfirm={() => void startNewSession()}
-          onClose={() => setConfirmNewSession(false)}
-        />
-      )}
-
-      {/* Always mounted: an MCP server can ask for input at any moment, in any
+        {/* Always mounted: an MCP server can ask for input at any moment, in any
           workspace mode, and its tool call stays blocked until we answer. */}
-      <McpElicitModal />
+        <McpElicitModal />
 
-      {workspaceMode === "code" && planReview !== null && (
-        <PlanReviewModal
-          key={planReviewAttempt}
-          content={planReview}
-          // Autopilot Ken reviews submitted plans himself; the indicator tells
-          // the user, but manual Accept/Reject stays live and always wins.
-          kenReviewing={autopilotReviewing}
-          onAccept={acceptPlan}
-          onFeedback={sendPlanFeedback}
-          onReject={rejectPlan}
-        />
-      )}
+        {workspaceMode === "code" && planReview !== null && (
+          <PlanReviewModal
+            key={planReviewAttempt}
+            content={planReview}
+            // Autopilot Ken reviews submitted plans himself; the indicator tells
+            // the user, but manual Accept/Reject stays live and always wins.
+            kenReviewing={autopilotReviewing}
+            onAccept={acceptPlan}
+            onFeedback={sendPlanFeedback}
+            onReject={rejectPlan}
+          />
+        )}
 
-      {workspaceMode === "chat" && showMemories && (
-        <MemoryModal onClose={() => setShowMemories(false)} />
-      )}
-
-      {showNotes && (
-        <NotesModal
-          value={notes}
-          onChange={handleNotesChange}
-          onClose={() => setShowNotes(false)}
-        />
-      )}
-
-      {showGoalSettings && state?.goal && (
-        <GoalSettingsModal
-          context={state.goal.context ?? []}
-          instructions={state.goal.instructions ?? ""}
-          busy={running}
-          onClose={() => setShowGoalSettings(false)}
-          onSaved={(next) =>
-            setState((s) => (s?.goal ? { ...s, goal: { ...s.goal, ...next } } : s))
-          }
-        />
-      )}
-      {showScorecard && progress && (
-        <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
-      )}
-
-      {/* Settings reached from the menu-bar tray. Rendered in every view branch
+        {/* Settings reached from the menu-bar tray. Rendered in every view branch
           (Home, picker, workspace) because the tray targets a WINDOW and can't
           know which of the three it is showing. */}
-      {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
+        {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
 
-      {workspaceMode === "code" && showTasks && (
-        <TasksModal
-          tasks={projectTasks}
-          running={running}
-          onRun={handleRunTask}
-          onRunAll={handleRunAllTasks}
-          onDelete={handleDeleteTask}
-          onClose={() => setShowTasks(false)}
-        />
-      )}
-      {/* Workspace toasts (saved transcript, Remote on/off, rank-up) need their
+        {/* Workspace toasts (saved transcript, Remote on/off, rank-up) need their
           own host: the one in the Home/Settings branch isn't mounted here. */}
-      <Toaster />
-    </div>
+        <Toaster />
+
+        {/* One trophy at a time, in the order earned; it files itself into the
+          deck's trophies key, so it only plays where the deck is. */}
+        {trophies.queue[0] && (
+          <TrophyUnlock
+            key={trophies.queue[0].id}
+            trophy={trophies.queue[0]}
+            snapshot={trophies.snapshot}
+            onOpenTrophies={() => setDeckPanel("trophies")}
+            onDone={trophies.shift}
+          />
+        )}
+      </div>
+    </>
   );
 }
 

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CritterTerrain } from "./CritterTerrain";
-import { CRITTERS, renderCritterFrame, type CritterDef } from "./critter-sprites";
+import { CRITTER_CELLS, CRITTERS, renderCritterFrame, withEyesClosed } from "./critter-sprites";
+
+export { withEyesClosed };
 import {
   DECOR_COLS,
   TERRAIN_FLOOR_ROW,
@@ -97,8 +99,6 @@ const POKE_MS = 1400; // how long a poke's bubble stays up
 
 /** Visible width of the terrain patch, in cells. */
 export const PATCH_COLS = 85;
-/** Critter sprite edge, in cells. */
-const CRITTER_CELLS = 14;
 /** Weather particles across the screen: few, so it stays calm. */
 const WEATHER_COUNT = 34;
 /** Screen weather runs this many times slower than a lane's. */
@@ -151,33 +151,6 @@ export function patchOffset(spot: number): number {
   while (offset > 0) offset -= DECOR_COLS;
   while (offset <= -DECOR_COLS) offset += DECOR_COLS;
   return Math.round(offset);
-}
-
-/**
- * The same critter with its eyes shut, for blinks. Chibi eyes (whites over
- * two-pixel pupils) become skin over a lid line. Eyes that are just a tall dark
- * pixel (the ghost's) lose their top half, so they squint shut.
- */
-export function withEyesClosed(critter: CritterDef): CritterDef {
-  const rows = critter.rows.map((row) =>
-    row.includes("W") && row.includes("K")
-      ? row.replace(/[WK]/g, "B")
-      : row.includes("KK")
-        ? row.replace(/K/g, "O")
-        : row,
-  );
-  if (rows.some((row, i) => row !== critter.rows[i])) return { ...critter, rows };
-
-  // Tall eyes: the first dark row whose pixels continue straight down.
-  const top = critter.rows.findIndex((row, i) => {
-    const below = critter.rows[i + 1] ?? "";
-    return row.includes("K") && [...row].every((ch, x) => ch !== "K" || below[x] === "K");
-  });
-  if (top < 0) return critter;
-  return {
-    ...critter,
-    rows: critter.rows.map((row, i) => (i === top ? row.replace(/K/g, "B") : row)),
-  };
 }
 
 /**
@@ -364,10 +337,14 @@ export function WakeScreen({
     width: `${(PATCH_COLS + DECOR_COLS) * TERRAIN_PX}px`,
   };
 
+  // The critter's box and everything placed round it (the bubble, the art's
+  // height) follow the sprite's real size, so a resized sprite never squashes.
+  const sceneStyle: Style = { "--wake-critter": `${CRITTER_CELLS * TERRAIN_PX}px` };
+
   return (
     <div className="wake-screen transcript-reveal" aria-label="Ready to start">
       {!reduced && <WakeWeather biome={biome} />}
-      <div className="wake-scene">
+      <div className="wake-scene" style={sceneStyle}>
         <p className="wake-bubble">
           <span className="wake-bubble-text">{poke ?? text}</span>
           {poke === null && (
@@ -390,6 +367,7 @@ export function WakeScreen({
             onClick={onPoke}
             aria-label={`Say hi to the ${critter.name}`}
           >
+            <span className="critter-shadow" />
             <span key={hops} className={`wake-critter-body${hops > 0 ? " wake-hop" : ""}`}>
               <img
                 src={blink ? shut : open}

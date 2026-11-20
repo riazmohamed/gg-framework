@@ -1,9 +1,22 @@
 {
   "name": "@abukhaled/gg-ai",
-  "version": "5.79.2",
+  "version": "5.103.0",
   "type": "module",
-  "description": "Unified LLM streaming API for Anthropic, OpenAI, Gemini, xAI, Moonshot, GLM, DeepSeek, OpenRouter, local models and more",
-  "license": "MIT",
+  "description": "One streaming API for 12 LLM providers and local models: Anthropic, OpenAI, Gemini, xAI, Moonshot, GLM, DeepSeek, OpenRouter and more. Tool calls, reasoning, embeddings and reranking.",
+  "author": "Ken Kai",
+  "keywords": [
+    "llm",
+    "ai",
+    "streaming",
+    "anthropic",
+    "openai",
+    "gemini",
+    "openrouter",
+    "ollama",
+    "tool-calling",
+    "embeddings"
+  ],
+  "license": "AGPL-3.0-only",
   "engines": {
     "node": ">=22"
   },
@@ -11,6 +24,10 @@
     "type": "git",
     "url": "git+https://github.com/abukhaled/gg-framework.git",
     "directory": "packages/gg-ai"
+  },
+  "homepage": "https://github.com/KenKaiii/gg-framework/tree/main/packages/gg-ai#readme",
+  "bugs": {
+    "url": "https://github.com/KenKaiii/gg-framework/issues"
   },
   "exports": {
     ".": {
@@ -23,7 +40,8 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsup",
@@ -31,13 +49,13 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.124.0",
-    "@bokuweb/zstd-wasm": "^0.0.27",
-    "openai": "^7.13.0",
-    "zod": "^4.4.3"
+    "@anthropic-ai/sdk": "^1.7.0",
+    "openai": "^7.54.0",
+    "undici": "7.25.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/node": "^25.6.0",
+    "@types/node": "^26.6.6",
     "typescript": "^6.0.3",
     "vitest": "^4.1.4"
   },

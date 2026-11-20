@@ -1,14 +1,17 @@
 import type { AgentTool } from "@abukhaled/gg-agent";
 import { AgentSession, type AgentSessionOptions } from "../core/agent-session.js";
 import {
+  GOAL_HOLD_OPTION,
+  GOAL_START_OPTION,
   readGoalMemory,
   renderGoalPrompt,
   type GoalBriefExtras,
   type GoalRecord,
 } from "../core/goals-store.js";
 import { collectProjectContext } from "../system-prompt.js";
-import { getModel } from "../core/model-registry.js";
+import { getModel, withoutPaidTier } from "../core/model-registry.js";
 import type { ChildModelPick } from "../core/subagent-manager.js";
+import { holdGoalRun } from "../core/goal-run-marker.js";
 import { GOAL_TEAM } from "./goal-team.js";
 
 /**
@@ -127,7 +130,8 @@ export function goalCritterPick(record: GoalRecord | undefined): ChildModelPick 
   if (!pick) return undefined;
   const model = getModel(pick.model);
   if (!model || model.provider !== pick.provider) return undefined;
-  return { provider: model.provider, model: model.id };
+  // Workers run in parallel; a paid tier would multiply real-money spend.
+  return { provider: model.provider, model: withoutPaidTier(model.id) };
 }
 
 /** GG Goals' full prompt body: identity first, then this goal's brief. */
@@ -186,7 +190,8 @@ export const GOALS_WITHOUT_TOOLS: readonly string[] = ["ui_adopt", "generate_ima
 
 /** What editing, running or starting work returns during the briefing. */
 export const BRIEFING_ERROR =
-  "Not yet: the goal hasn't started. During the briefing you only read (read, ls, find, web search) and ask. Editing, running commands and starting workers open once the user starts the goal. If the user has told you to go ahead, ask the start question now with ask_user (the goal starts when they pick it); never begin the work before that.";
+  "Not yet: the goal hasn't started. During the briefing you only read (read, ls, find, web search) and ask. Editing, running commands and starting workers open once the user starts the goal. If the user has told you to go ahead, ask the start question now with ask_user (the goal starts when they pick it): " +
+  `kind "choice", with exactly the option labels "${GOAL_START_OPTION}" and "${GOAL_HOLD_OPTION}". Never begin the work before that.`;
 
 /** Error text ask_user returns while GG Goals has not spoken yet. */
 export const GREET_FIRST_ERROR =
@@ -263,8 +268,30 @@ function goalAskUser(
  * the goal folder, so the goal list and goal deletion find them there.
  */
 export function createGoalsAgentSession(options: GoalsAgentOptions): AgentSession {
-  const { goal, extras, additionalTools = [], isActive = () => false, ...sessionOptions } = options;
+  const {
+    goal,
+    extras,
+    additionalTools = [],
+    isActive = () => false,
+    onRunActive,
+    ...sessionOptions
+  } = options;
   let spokeThisSession = false;
+  // The goal is being worked on while GG Goals' own loop runs or any worker
+  // is still live (a turn can end waiting on its team). Other processes read
+  // that from the marker, so a goal this one is running never shows there as
+  // interrupted, and is never resumed twice.
+  let looping = false;
+  const liveWorkers = new Set<string>();
+  let release: (() => void) | null = null;
+  const syncRunMarker = (): void => {
+    const working = looping || liveWorkers.size > 0;
+    if (working && !release) release = holdGoalRun(goal.dir);
+    else if (!working && release) {
+      release();
+      release = null;
+    }
+  };
   // `getMessages()` is the conversation as of the last finished run, so text
   // streamed in the current run is tracked live alongside it.
   const hasSpoken = (): boolean => spokeThisSession || hasAssistantText(session.getMessages());
@@ -280,6 +307,11 @@ export function createGoalsAgentSession(options: GoalsAgentOptions): AgentSessio
     // as workspace roots and read on demand.
     agentContext: "none",
     promptCacheKeyPrefix: "gggoals",
+    onRunActive: (active) => {
+      looping = active;
+      syncRunMarker();
+      onRunActive?.(active);
+    },
     // Orchestrating is the job: bringing in workers, steering them and
     // waiting on them must not need a tool_search first.
     coreTools: GOALS_CORE_TOOLS,
@@ -306,5 +338,22 @@ export function createGoalsAgentSession(options: GoalsAgentOptions): AgentSessio
   session.eventBus.on("text_delta", ({ text }) => {
     if (text.trim()) spokeThisSession = true;
   });
+  session.eventBus.on("subagent_state", (worker) => {
+    if (worker.state === "starting" || worker.state === "running") liveWorkers.add(worker.agent_id);
+    else liveWorkers.delete(worker.agent_id);
+    syncRunMarker();
+  });
+  // Teardown drops every bus listener, so a worker's last "closed" may never
+  // arrive: a disposed session lets go of the goal however it ended.
+  const dispose = session.dispose.bind(session);
+  session.dispose = async () => {
+    try {
+      await dispose();
+    } finally {
+      looping = false;
+      liveWorkers.clear();
+      syncRunMarker();
+    }
+  };
   return session;
 }

@@ -97,15 +97,18 @@ describe("thinking-level helpers", () => {
     expect(getNextThinkingLevel("anthropic", "claude-haiku-5-5", "max")).toBeUndefined();
   });
 
-  it("cycles Claude Fable 5.1 through the adaptive ladder without xhigh", () => {
-    expect(getSupportedThinkingLevels("anthropic", "claude-fable-5-1")).toEqual([
-      "low",
-      "medium",
-      "high",
-      "max",
-    ]);
-    expect(getNextThinkingLevel("anthropic", "claude-fable-5-1", "high")).toBe("max");
-    expect(isThinkingLevelSupported("anthropic", "claude-fable-5-1", "xhigh")).toBe(false);
+  it("cycles Claude Fable 5.2 (and its fast tier) through the full adaptive ladder, including xhigh", () => {
+    for (const model of ["claude-fable-5-2", "claude-fable-5-2-fast"]) {
+      expect(getSupportedThinkingLevels("anthropic", model)).toEqual([
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ]);
+      expect(getNextThinkingLevel("anthropic", model, "high")).toBe("xhigh");
+      expect(isThinkingLevelSupported("anthropic", model, "xhigh")).toBe(true);
+    }
   });
 
   it("cycles xAI Grok 4.7 through low, medium, high, and its xhigh rung", () => {
@@ -286,6 +289,27 @@ describe("local models", () => {
     expect(isThinkingLevelSupported("local", "local/ollama/qwen3", "xhigh")).toBe(false);
   });
 
+  it("offers exactly the ladder a synced gateway model declared", () => {
+    registerRuntimeModels([
+      {
+        ...base,
+        id: "openrouter/deepseek-flash",
+        name: "deepseek-flash",
+        provider: "openrouter",
+        supportsThinking: true,
+        maxThinkingLevel: "max",
+        thinkingLevels: ["low", "high", "xhigh", "max"],
+      },
+    ]);
+
+    expect(getSupportedThinkingLevels("openrouter", "openrouter/deepseek-flash")).toEqual([
+      "low",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+  });
+
   it("offers nothing for an unknown local id (never discovered)", () => {
     expect(getSupportedThinkingLevels("local", "local/ollama/ghost")).toEqual([]);
   });
@@ -298,5 +322,23 @@ describe("local models", () => {
     expect(clampThinkingForPlanMode("medium")).toBe("medium");
     expect(clampThinkingForPlanMode("low")).toBe("low");
     expect(clampThinkingForPlanMode(undefined)).toBeUndefined();
+  });
+});
+
+describe("MiniMax thinking levels", () => {
+  it("offers M3.1 Flash's full low→max effort ladder and cycles through it", () => {
+    expect(getSupportedThinkingLevels("minimax", "MiniMax-M3.1-Flash")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(getNextThinkingLevel("minimax", "MiniMax-M3.1-Flash", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("minimax", "MiniMax-M3.1-Flash", "max")).toBeUndefined();
+  });
+
+  it("keeps M3 as a plain on/off toggle", () => {
+    expect(getSupportedThinkingLevels("minimax", "MiniMax-M3")).toEqual(["high"]);
   });
 });

@@ -17,6 +17,8 @@ const PROVIDER_LABELS: Record<string, string> = {
   xiaomi: "Xiaomi (MiMo)",
   deepseek: "DeepSeek",
   huggingface: "Hugging Face",
+  "opencode-go": "OpenCode Go",
+  opencode: "OpenCode",
   sakana: "Sakana (Fugu)",
   openrouter: "OpenRouter",
   local: "Local",
@@ -38,6 +40,8 @@ const PROVIDER_ORDER = [
   "xiaomi",
   "deepseek",
   "huggingface",
+  "opencode-go",
+  "opencode",
   "sakana",
   "openrouter",
 ];
@@ -53,25 +57,31 @@ export function providerRank(provider: string): number {
   return index === -1 ? PROVIDER_ORDER.length : index;
 }
 
+/** Where a model comes from: its provider, or for a local model, the endpoint serving it. */
+export function modelSourceLabel(model: { provider: string; endpoint?: string }): string {
+  return model.provider === "local" && model.endpoint
+    ? `${providerLabel("local")} · ${model.endpoint}`
+    : providerLabel(model.provider);
+}
+
 /**
  * Group models by provider, preserving each provider's model order from the
- * registry (which is curated: newest/flagship first).
+ * registry (which is curated: newest/flagship first). Local models get one
+ * group per endpoint, so the same model on two servers stays distinguishable.
  */
-export function groupByProvider<T extends { provider: string }>(
+export function groupByProvider<T extends { provider: string; endpoint?: string }>(
   models: readonly T[],
-): { provider: string; label: string; models: T[] }[] {
-  const groups = new Map<string, T[]>();
+): { key: string; provider: string; label: string; models: T[] }[] {
+  const groups = new Map<string, { provider: string; label: string; models: T[] }>();
   for (const model of models) {
-    const existing = groups.get(model.provider);
-    if (existing) existing.push(model);
-    else groups.set(model.provider, [model]);
+    const label = modelSourceLabel(model);
+    const key = model.provider === "local" ? `local:${label}` : model.provider;
+    const existing = groups.get(key);
+    if (existing) existing.models.push(model);
+    else groups.set(key, { provider: model.provider, label, models: [model] });
   }
   return [...groups.entries()]
-    .map(([provider, groupModels]) => ({
-      provider,
-      label: providerLabel(provider),
-      models: groupModels,
-    }))
+    .map(([key, group]) => ({ key, ...group }))
     .sort(
       (a, b) =>
         providerRank(a.provider) - providerRank(b.provider) || a.label.localeCompare(b.label),

@@ -1,11 +1,6 @@
 import type http from "node:http";
 import path from "node:path";
 import { sessionToMarkdown, defaultExportFilename } from "../core/session-export.js";
-import {
-  installPlugin,
-  listInstalledPlugins,
-  removePlugin,
-} from "../core/extensions/plugin-bundles.js";
 import { discoverProjects } from "../core/project-discovery.js";
 import { goalsRoot } from "../core/goals-store.js";
 import { listSidecarSessions } from "../app-sidecar-sessions.js";
@@ -23,40 +18,38 @@ export function handleWorkspaceRoutes(
   url: string,
   method: string,
 ): boolean {
-  if (method === "GET" && url === "/plugins") {
-    void listInstalledPlugins(ctx.paths.extensionsDir)
-      .then((plugins) => json(res, 200, { plugins }))
-      .catch((error) => {
-        json(res, 500, { error: error instanceof Error ? error.message : String(error) });
-      });
-    return true;
-  }
-
-  if (method === "POST" && url === "/plugins/install") {
+  // "Add folder" / "Remove folder" in the More panel: another folder GG can
+  // work in, in Code and Chat windows. The model hears from the environment note.
+  if (method === "POST" && (url === "/workspace/add-dir" || url === "/workspace/remove-dir")) {
     void readBody(req, res).then(async (raw) => {
       if (raw === null) return;
+      let dir: unknown;
       try {
-        const bundlePath = (JSON.parse(raw) as { bundlePath?: unknown }).bundlePath;
-        if (typeof bundlePath !== "string" || !path.isAbsolute(bundlePath)) {
-          json(res, 400, { error: "bundlePath must be an absolute path" });
-          return;
-        }
-        const plugin = await installPlugin(bundlePath, ctx.paths.extensionsDir);
-        json(res, 200, { plugin, restartRequired: true });
-      } catch (error) {
-        json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        dir = (JSON.parse(raw) as { path?: unknown }).path;
+      } catch {
+        json(res, 400, { error: "invalid JSON body" });
+        return;
       }
+      if (typeof dir !== "string" || !dir.trim()) {
+        json(res, 400, { error: "path is required" });
+        return;
+      }
+      if (ctx.mode !== "code" && ctx.mode !== "chat") {
+        json(res, 403, { error: "folders can be changed only in Code and Chat windows" });
+        return;
+      }
+      const result =
+        url === "/workspace/add-dir"
+          ? await ctx.session.addDirectory(dir)
+          : await ctx.session.removeDirectory(dir);
+      if (!result.ok) {
+        json(res, 400, { error: result.error });
+        return;
+      }
+      // The header's root badge and the `/` menu follow the extras.
+      ctx.broadcast("extras", ctx.footerExtras());
+      json(res, 200, { root: result.root, additionalRoots: ctx.session.getAdditionalRoots() });
     });
-    return true;
-  }
-
-  if (method === "DELETE" && url.startsWith("/plugins/")) {
-    const pluginId = decodeURIComponent(url.slice("/plugins/".length));
-    void removePlugin(pluginId, ctx.paths.extensionsDir)
-      .then(() => json(res, 200, { removed: pluginId, restartRequired: true }))
-      .catch((error) => {
-        json(res, 400, { error: error instanceof Error ? error.message : String(error) });
-      });
     return true;
   }
 
@@ -174,6 +167,7 @@ export function handleWorkspaceRoutes(
       { toolDetail: parseToolDetail(query.get("tools")) },
     );
     json(res, 200, { filename, markdown });
+    void ctx.trophies.count("exports", ctx.sessionId);
     return true;
   }
 

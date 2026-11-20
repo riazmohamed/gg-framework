@@ -1,5 +1,7 @@
-import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from "react";
+import type { Dispatch, MutableRefObject, ReactNode, RefObject, SetStateAction } from "react";
 import { ArrowUpIcon, PaperclipIcon, SquareIcon } from "@phosphor-icons/react";
+import { ShellCommandMenu } from "./ShellCommandMenu";
+import type { ShellSuggestion } from "./agent";
 import {
   cancelKen,
   openImageDataUrl,
@@ -7,19 +9,16 @@ import {
   sendPrompt,
   type AgentState,
   type FileHit,
-  type PromptSegment,
-  type QueuedMessage,
   type SlashCommand,
   type WorkspaceMode,
 } from "./agent";
-import { ActionMetal } from "./ActionMetal";
 import { AttachmentBar } from "./AttachmentBar";
 import type { PendingAttachment } from "./attachments";
 import { CacheExpiryNotice } from "./CacheExpiryNotice";
 import { EnhanceDissolve } from "./EnhanceDissolve";
 import { FileMentionMenu } from "./FileMentionMenu";
 import { FloatingSurface } from "./FloatingSurface";
-import { QueuedBar } from "./QueuedBar";
+import { type DraftEnhancement, followDraftEdit } from "./PromptEnhancement";
 import { ReferencedFiles } from "./ReferencedFiles";
 import { ScheduleHint } from "./ScheduleHint";
 import { ShimmerText } from "./ShimmerText";
@@ -27,6 +26,7 @@ import { SlashMenu } from "./SlashMenu";
 import { theme } from "./theme";
 import { toast } from "./toast";
 import { WorkingBeam } from "./WorkingBeam";
+import { sendKeyAction } from "./send-key";
 
 export interface ComposerProps {
   workspaceMode: WorkspaceMode;
@@ -40,7 +40,6 @@ export interface ComposerProps {
   autopilotReviewing: boolean;
   cancelling: boolean;
   sendDisabled: boolean;
-  windowFocused: boolean;
   input: string;
   setInput: Dispatch<SetStateAction<string>>;
   caret: number;
@@ -66,18 +65,20 @@ export interface ComposerProps {
   fileInputRef: RefObject<HTMLInputElement | null>;
   mentionedPaths: string[];
   removeMentionChip: (p: string) => void;
-  visibleQueuedMessages: readonly QueuedMessage[];
   /** Bumped by every send; the strips a send clears leave in that same commit. */
   sendCount: number;
-  handleCancelQueued: (id: string) => void;
   enhanceAnim: { oldText: string; newText: string | null } | null;
   onEnhanceAnimDone: () => void;
-  enhancement: { plain: string; segments: PromptSegment[] } | null;
-  setEnhancement: Dispatch<SetStateAction<{ plain: string; segments: PromptSegment[] } | null>>;
+  enhancement: DraftEnhancement | null;
+  setEnhancement: Dispatch<SetStateAction<DraftEnhancement | null>>;
   enhancing: boolean;
   enhanceHintVisible: boolean;
   runEnhance: () => Promise<void>;
   kenActive: boolean;
+  /** The input starts with `!`: it runs a command instead of messaging GG. */
+  shellMode: boolean;
+  /** The `!` picker, when it has commands to offer. */
+  shellMenu: ShellMenu | null;
   kenInputParts: { lead: string; token: string; rest: string } | null;
   attachInput: (el: HTMLTextAreaElement | null) => void;
   displayPlaceholder: string;
@@ -87,6 +88,25 @@ export interface ComposerProps {
   navigateHistory: (dir: -1 | 1, el: HTMLTextAreaElement) => boolean;
   submit: () => void;
   requestCancel: () => void;
+  // Replaces the attach button (the live preview puts its element picker here).
+  leadAction?: ReactNode;
+}
+
+/** The `!` command picker's state; App owns it, the composer drives it. */
+export interface ShellMenu {
+  matches: readonly ShellSuggestion[];
+  activeIndex: number;
+  setActiveIndex: (index: number) => void;
+  /** ↑/↓: move the highlight. */
+  navigate: (delta: 1 | -1) => void;
+  /** Enter fills the highlighted command (bare `!`, or after ↑/↓) instead of running the typed one. */
+  enterPicks: boolean;
+  /** Put the command in the input (Enter/Tab/click). */
+  pick: (s: ShellSuggestion) => void;
+  /** Esc: close until the input changes. */
+  dismiss: () => void;
+  trusted: boolean;
+  revokeTrust: () => void;
 }
 
 /**
@@ -106,7 +126,6 @@ export function Composer({
   autopilotReviewing,
   cancelling,
   sendDisabled,
-  windowFocused,
   input,
   setInput,
   caret,
@@ -132,9 +151,7 @@ export function Composer({
   fileInputRef,
   mentionedPaths,
   removeMentionChip,
-  visibleQueuedMessages,
   sendCount,
-  handleCancelQueued,
   enhanceAnim,
   onEnhanceAnimDone,
   enhancement,
@@ -143,6 +160,8 @@ export function Composer({
   enhanceHintVisible,
   runEnhance,
   kenActive,
+  shellMode,
+  shellMenu,
   kenInputParts,
   attachInput,
   displayPlaceholder,
@@ -152,13 +171,16 @@ export function Composer({
   navigateHistory,
   submit,
   requestCancel,
+  leadAction,
 }: ComposerProps): React.ReactElement {
+  const keyAction = sendKeyAction({ shellMode, running, kenRunning, autopilotReviewing });
+  const stopping = keyAction !== "send";
   return (
     <div
       ref={composerRef}
       className={`inputwrap${isFileDragOver ? " dragover" : ""}${
         scheduleInvalid ? " schedule-invalid" : ""
-      }`}
+      }${shellMode ? " shell-mode" : ""}`}
     >
       <WorkingBeam active={running || kenRunning || autopilotReviewing} />
       {scheduleDraft && (
@@ -171,6 +193,18 @@ export function Composer({
             activeIndex={clampedSlashIndex}
             onSelect={pickSlashCommand}
             onHover={setSlashIndex}
+          />
+        )}
+      </FloatingSurface>
+      <FloatingSurface>
+        {shellMenu && (
+          <ShellCommandMenu
+            suggestions={shellMenu.matches}
+            activeIndex={shellMenu.activeIndex}
+            trusted={shellMenu.trusted}
+            onRevokeTrust={shellMenu.revokeTrust}
+            onSelect={shellMenu.pick}
+            onHover={shellMenu.setActiveIndex}
           />
         )}
       </FloatingSurface>
@@ -202,26 +236,28 @@ export function Composer({
           )
         }
       />
-      <QueuedBar messages={visibleQueuedMessages} onCancel={handleCancelQueued} />
       <div className="inputrow">
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept="image/*,video/*"
-          style={{ display: "none" }}
-          onChange={(e) => {
-            if (e.target.files) void addFiles(e.target.files);
-            e.target.value = "";
-          }}
-        />
-        <button
-          className="icon-circle"
-          title="Attach files"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <PaperclipIcon size={15} />
-        </button>
+        {leadAction ?? (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => {
+                if (e.target.files) void addFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            <button
+              className="icon-circle"
+              title="Attach files"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <PaperclipIcon size={15} />
+            </button>
+          </>
+        )}
         <div className="input-stack">
           {enhanceAnim && (
             <EnhanceDissolve
@@ -246,7 +282,9 @@ export function Composer({
             ref={attachInput}
             // AskBand's number keys still pick an option while this is empty.
             data-composer-input=""
-            className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
+            className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}${
+              shellMode ? " input-shell" : ""
+            }`}
             rows={1}
             // Lock the input while the dissolve→decode animation plays: the caret
             // is invisible, so typing would be silently discarded and Enter would
@@ -278,9 +316,10 @@ export function Composer({
               setCaret(e.target.selectionStart ?? e.target.value.length);
               // Typing exits history-recall mode so ↑/↓ start fresh next time.
               if (historyIndex !== null) setHistoryIndex(null);
-              // Drop the enhancement the instant the text diverges from it, so
-              // the highlighted preview/bubble never misalign with edited text.
-              if (enhancement && e.target.value !== enhancement.plain) setEnhancement(null);
+              // Re-anchor the corrected terms onto the edited text so their
+              // highlights survive edits; terms the edit touched are dropped.
+              if (enhancement && e.target.value !== enhancement.plain)
+                setEnhancement(followDraftEdit(enhancement, input, e.target.value));
               updateMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
             }}
             onClick={(e) => {
@@ -302,7 +341,20 @@ export function Composer({
                 e.preventDefault();
                 return;
               }
-              if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+              if (shellMenu && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                e.preventDefault();
+                shellMenu.navigate(e.key === "ArrowDown" ? 1 : -1);
+              } else if (
+                shellMenu &&
+                (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && shellMenu.enterPicks))
+              ) {
+                e.preventDefault();
+                const picked = shellMenu.matches[shellMenu.activeIndex];
+                if (picked) shellMenu.pick(picked);
+              } else if (shellMenu && e.key === "Escape") {
+                e.preventDefault();
+                shellMenu.dismiss();
+              } else if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
                 e.preventDefault();
                 const delta = e.key === "ArrowDown" ? 1 : -1;
                 setFileIndex((i) => (i + delta + fileMatches.length) % fileMatches.length);
@@ -334,11 +386,10 @@ export function Composer({
                 e.preventDefault();
                 submit();
               } else if (e.key === "Escape") {
-                // Cancel the build if it's running; otherwise cancel Ken so the
-                // "esc to cancel" on his bar actually works.
+                // Escape stops whatever the send key would stop.
                 if (slashOpen) setInput("");
-                else if (running && !cancelling) requestCancel();
-                else if (kenRunning) void cancelKen();
+                else if (keyAction === "stop-run" && !cancelling) requestCancel();
+                else if (keyAction === "stop-ken") void cancelKen();
               }
             }}
             autoFocus
@@ -348,48 +399,48 @@ export function Composer({
           never moves. It stays on the text's line while the draft fits one
           line, and drops below with the field once the text wraps. */}
         <div className="inputactions-trailing">
-          <WorkingBeam active={running} size="sm" />
-          <ActionMetal
-            active={!running && !cancelling && !sendDisabled}
-            windowFocused={windowFocused}
-          />
+          {/* Enhance sits beside send, in the row, once there's a draft to
+            improve: no floating pill over the box's edge. */}
+          {!enhanceAnim && (
+            <button
+              type="button"
+              className={`key key-sm enhance-key${enhancing ? " enhancing" : ""}`}
+              data-visible={enhanceHintVisible || undefined}
+              title="Rewrite your prompt with clearer wording and the right terms"
+              disabled={enhancing || !enhanceHintVisible}
+              aria-hidden={!enhanceHintVisible}
+              tabIndex={enhanceHintVisible ? undefined : -1}
+              onClick={() => void runEnhance()}
+            >
+              {enhancing ? "Enhancing\u2026" : "Enhance"}
+            </button>
+          )}
+          {/* A command runs alongside the agent, so mid-run this is Run, not Stop. */}
           <button
-            className="icon-circle icon-circle-primary"
-            title={running ? "Stop the run" : attachmentsLoading ? "Loading attachments…" : "Send"}
-            disabled={cancelling || (!running && sendDisabled)}
+            className={`icon-circle icon-circle-primary${stopping ? " icon-circle-stop" : ""}`}
+            title={
+              shellMode
+                ? "Run command"
+                : keyAction === "stop-run"
+                  ? "Stop the run"
+                  : keyAction === "stop-ken"
+                    ? "Stop Ken"
+                    : attachmentsLoading
+                      ? "Loading attachments…"
+                      : "Send"
+            }
+            aria-label={shellMode ? "Run command" : undefined}
+            disabled={shellMode ? sendDisabled : cancelling || (!stopping && sendDisabled)}
             onClick={() => {
-              if (running) requestCancel();
+              if (keyAction === "stop-run") requestCancel();
+              else if (keyAction === "stop-ken") void cancelKen();
               else submit();
             }}
           >
-            {running ? <SquareIcon size={12} weight="fill" /> : <ArrowUpIcon size={16} />}
+            {stopping ? <SquareIcon size={12} weight="fill" /> : <ArrowUpIcon size={16} />}
           </button>
         </div>
       </div>
-      {!enhanceAnim && (
-        // Pill pinned to the center of the input box (.inputwrap) top border,
-        // overlapping it. Decoupled from text flow, so it never overlaps text,
-        // drifts, or shifts the caret/height; centered (not in a corner) to
-        // stay clear of the status row's "esc to cancel". Always mounted (so it
-        // can transition both ways); the `visible` class fades/slides it in
-        // when there's text and out when there isn't.
-        <div className={`enhance-pill-host${enhanceHintVisible ? " visible" : ""}`}>
-          <ActionMetal
-            active={enhanceHintVisible && !enhancing}
-            windowFocused={windowFocused}
-            variant="button"
-          />
-          <button
-            className={`enhance-pill${enhancing ? " enhancing" : ""}`}
-            title="Enhance prompt — clearer wording + correct terms"
-            disabled={enhancing || !enhanceHintVisible}
-            aria-hidden={!enhanceHintVisible}
-            onClick={() => void runEnhance()}
-          >
-            {enhancing ? "Enhancing…" : "Enhance?"}
-          </button>
-        </div>
-      )}
     </div>
   );
 }

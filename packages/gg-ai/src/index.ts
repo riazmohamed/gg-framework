@@ -1,5 +1,13 @@
 // Core entry point
 export { stream, localWireModelId } from "./stream.js";
+export { LOCAL_NO_API_KEY, localBearerKey } from "./local-api-key.js";
+export {
+  FAST_MODE_SUFFIX,
+  describeFastModeRejection,
+  parseFastModeRejection,
+  resolveFastModeModel,
+} from "./fast-mode.js";
+export type { FastModeRejection, FastModeResolution } from "./fast-mode.js";
 
 // Embeddings + reranking (resolved through the same provider registry)
 export { embed, rerank } from "./embed.js";
@@ -22,6 +30,12 @@ export type {
 
 // Provider registry
 export { providerRegistry } from "./provider-registry.js";
+export {
+  preconnectProvider,
+  preconnectOrigin,
+  PRECONNECT_INTERVAL_MS,
+  type PreconnectOptions,
+} from "./utils/preconnect.js";
 export type { ProviderStreamFn, ProviderEntry, ProviderCapability } from "./provider-registry.js";
 
 // Types
@@ -76,6 +90,7 @@ export { StreamResult, EventStream } from "./utils/event-stream.js";
 export {
   GGAIError,
   ProviderError,
+  ResponseStalledError,
   formatError,
   formatErrorForDisplay,
   isUsageLimitError,
@@ -118,8 +133,9 @@ export {
 export type { ToolCallNameRule } from "./providers/transform.js";
 export { continuesTurn, opensTurn } from "./utils/turn-continuation.js";
 
-// Codex model family served with the Responses-Lite request shape
-export { usesResponsesLite } from "./providers/openai-codex.js";
+// GPT-6 model family (reasoning floor, low verbosity)
+export { usesResponsesLite } from "./providers/openai-responses.js";
+export { GG_CODER_USER_AGENT } from "./user-agent.js";
 
 // Cache pre-warming (Anthropic — fires a max_tokens:1 warm-up to prime the KV cache)
 export { prewarmAnthropicCache } from "./providers/anthropic.js";

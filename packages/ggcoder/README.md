@@ -6,14 +6,14 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@abukhaled/ogcoder"><img src="https://img.shields.io/npm/v/@abukhaled/ogcoder?style=for-the-badge" alt="npm version"></a>
-  <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+  <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg?style=for-the-badge" alt="AGPL-3.0 License"></a>
   <a href="https://youtube.com/@abukhaled"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
   <a href="https://skool.com/abukhaled"><img src="https://img.shields.io/badge/Skool-Community-7C3AED?style=for-the-badge" alt="Skool"></a>
 </p>
 
 The CLI that sits on top of the [GG Framework](../../README.md). Built on [`@abukhaled/gg-ai`](../gg-ai/README.md) and [`@abukhaled/gg-agent`](../gg-agent/README.md).
 
----
+## Why GG Coder
 
 ## Install
 
@@ -34,31 +34,63 @@ ogcoder          # Start coding
 
 OAuth for Anthropic and OpenAI (log in once, auto-refresh). API keys for GLM and Moonshot. Up and running in seconds either way.
 
----
+## Providers
 
-## The system prompt problem
+Switch any time with `/model`.
 
-Every token in the system prompt gets processed on **every single turn**. It's not a one-time cost. It's a tax on every request.
+| Provider         | Models                                                                             | Sign-in                                |
+| ---------------- | ---------------------------------------------------------------------------------- | -------------------------------------- |
+| **Anthropic**    | Claude Fable 5.2, Opus 5.5, Sonnet 5.5, Haiku 5.5                                  | Claude or API key                      |
+| **OpenAI**       | GPT-6 Astra, GPT-6.1 Sol, GPT-6.1 Terra, GPT-6 Luna                                | Continue with ChatGPT or API key       |
+| **Gemini**       | Gemini 3.8 Flash, 3.5 Flash Lite, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)     | API key (Google AI Studio)             |
+| **xAI**          | Grok 4.7                                                                           | API key                                |
+| **Kimi**         | Kimi K3, K2.8 Preview, K2.7 Code, K2.7 Code HighSpeed                              | Kimi Code plan key or Moonshot API key |
+| **Z.AI**         | GLM-5.3, GLM-5.3-Flash                                                             | API key (pay-per-token)                |
+| **MiniMax**      | MiniMax M3.1 Flash, M3                                                             | M Plan key or API key                  |
+| **Xiaomi**       | MiMo-V2.6-Pro, MiMo-V2.6-Flash, MiMo-V2.6-Pro-UltraSpeed                           | Token Plan key or API Credits key      |
+| **DeepSeek**     | DeepSeek V4 Pro, V4.1 Flash                                                        | API key                                |
+| **Sakana**       | Fugu, Fugu Max, Fugu Ultra                                                         | API key                                |
+| **OpenRouter**   | Qwen3.8 Max                                                                        | API key                                |
+| **Hugging Face** | Kimi K2.7 Code, DeepSeek V4.1 Flash, GPT-OSS 120B                                  | API key                                |
+| **OpenCode Go**  | Kimi K3, GLM-5.3, GLM-5.3-Flash and more Go models                                 | OpenCode API key (Go subscription)     |
+| **OpenCode**     | Kimi K3, GLM-5.3, GLM-5.3-Flash and more paid Console models                       | OpenCode API key (pay-per-token)       |
+| **Local**        | Anything on Ollama, LM Studio, llama.cpp, vLLM or another OpenAI-compatible server | None                                   |
 
 | | **Claude Code / Agent SDK** | **OG Coder** |
 |---|---|---|
 | System prompt size | ~15,000 tokens | **~1,100 tokens** |
 | Ratio | baseline | **~13x smaller** |
 
-### Why you should care
+Signing in with a Claude Pro or Max plan goes through Anthropic's official Claude Code. GG Coder downloads it (about 200 MB, checked against a pinned hash) into `~/.gg/claude-code` the first time you pick "Sign in with Claude", and keeps its own Claude login there, separate from any Claude Code you already use. On this route Claude Code runs each turn with GG Coder's prompt and tools. Without a plan, use an Anthropic API key.
 
-- **Slower responses.** More input tokens = longer time-to-first-token. In a 30-turn session, that wait adds up to minutes.
-- **Worse instruction following.** More rules = more things the model ignores. "Lost in the middle" is well-documented. A 1,100 token prompt gets read. A 15,000 token one gets skimmed.
-- **Context fills up faster.** ~15,000 tokens sitting in your window permanently. That's ~7.5% of a 200K model gone before you say hello. You hit compaction sooner, lose history faster, and the agent forgets what it was doing.
-- **Higher cost.** Input tokens aren't free. Every cache miss charges you for the full bloat. Smaller prompt = smaller bill.
+Each provider connects only the way its owner allows. "Continue with ChatGPT" is OpenAI's official sign-in for open-source apps; manage what GG Coder may use at [chatgpt.com/settings/usage](https://chatgpt.com/settings/usage). Kimi Code, MiniMax M Plan and MiMo Token Plan keys use your plan. xAI, Gemini and Z.AI take pay-per-token keys: their plans are limited to their own or partner apps. Image generation (`generate_image`) needs an OpenAI API key.
 
 OG Coder sends only what the model needs: how to work, what tools it has, and your project context. No walls of rules. No formatting instructions. Just signal.
 
----
+| Key                     | What it does                                 |
+| ----------------------- | -------------------------------------------- |
+| <kbd>Enter</kbd>        | Send (<kbd>Shift+Enter</kbd> for a new line) |
+| <kbd>Esc</kbd>          | Stop the agent mid-turn                      |
+| <kbd>Shift+Tab</kbd>    | Change thinking level                        |
+| <kbd>Ctrl+T</kbd>       | Tasks                                        |
+| <kbd>Ctrl+S</kbd>       | Skills                                       |
+| <kbd>Ctrl+R</kbd>       | Search earlier prompts                       |
+| <kbd>Ctrl+V</kbd>       | Paste an image                               |
+| <kbd>Ctrl+C</kbd> twice | Quit                                         |
 
-## The MCP problem
+| Command           | What it does                                           |
+| ----------------- | ------------------------------------------------------ |
+| `/model` (`/m`)   | Switch model                                           |
+| `/compact` (`/c`) | Shrink a long conversation                             |
+| `/new` (`/n`)     | Start a new session                                    |
+| `/session` (`/s`) | Resume an earlier session                              |
+| `/branch` (`/b`)  | Fork the conversation from an earlier point            |
+| `/rewind`         | Undo the agent's file edits, the conversation, or both |
+| `/add-dir`        | Add another project folder to this session             |
+| `/settings`       | Settings                                               |
+| `/help`           | Every command                                          |
 
-Same philosophy applies to tools. People collect MCPs like Pokemon. Slack MCP, GitHub MCP, Notion MCP, five different file system MCPs. Every single one injects its tool descriptions into the context. The model now has to figure out which of 40+ tools to use for any given task.
+Built-in workflows:
 
 This doesn't help. It confuses the agent. More tool descriptions = more noise = worse tool selection. The model spends tokens reasoning about tools it will never call.
 
@@ -157,4 +189,4 @@ Plus the [Grep MCP](https://grep.dev) for searching across 1M+ public GitHub rep
 
 ## License
 
-MIT
+[AGPL-3.0-only](../../LICENSE). Based on [KenKaiii/gg-framework](https://github.com/KenKaiii/gg-framework); see NOTICE.

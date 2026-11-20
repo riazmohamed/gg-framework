@@ -3,7 +3,13 @@ import { spawn, execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { autoBackgroundedId, createBashTool, renderBashOutput } from "./bash.js";
+import {
+  autoBackgroundedId,
+  BASH_INLINE_MAX_BYTES,
+  createBashTool,
+  renderBashOutput,
+  REVIEW_SKIPPED_NOTE,
+} from "./bash.js";
 import { clearPackageThreatCache } from "../core/package-threats.js";
 import { getToolOutputRoot } from "./overflow.js";
 import { ProcessManager } from "../core/process-manager.js";
@@ -140,20 +146,18 @@ describe("foreground verification review", () => {
   });
 
   it.each([
-    { command: "npm test; git diff" },
-    { command: "npm test && git diff --check" },
+    { command: "echo edited > note.txt && npm test" },
     { command: "echo not-a-check" },
-    { command: "npm test", persist: true },
-    { command: "npm test", run_in_background: true },
-  ])("rejects unsupported review execution before spawning: %j", async (args) => {
-    const spawnSpy = vi.spyOn(localOperations, "spawn");
-    try {
-      const tool = createBashTool(tmpHome, new ProcessManager());
-      const result = await tool.execute({ ...args, review: true }, context());
-      expect(result).toContain("Nothing was run");
-      expect(spawnSpy).not.toHaveBeenCalled();
-    } finally {
-      spawnSpy.mockRestore();
+    { command: "echo bg", run_in_background: true },
+  ])("runs a command that cannot carry a review and skips only the review: %j", async (args) => {
+    const tool = createBashTool(tmpHome, new ProcessManager());
+    const result = await tool.execute({ ...args, review: true }, context());
+    // The edits used to be thrown away here, and the model re-sent them unreviewed.
+    expect(result).toContain(REVIEW_SKIPPED_NOTE);
+    expect(result).not.toContain("Independent read-only review");
+    expect(result).not.toContain("Nothing was run");
+    if (args.command.startsWith("echo edited")) {
+      expect(await fs.readFile(path.join(tmpHome, "note.txt"), "utf8")).toBe("edited\n");
     }
   });
 
@@ -169,74 +173,23 @@ describe("foreground verification review", () => {
 });
 
 describe("renderBashOutput", () => {
-  it("stays quiet for a check with read-only commands around it under bash", async () => {
-    // These count (via the host's workspace comparison), so a note would only
-    // make the model re-run a suite that already passed.
-    const command = "cat src/a.js; npm test 2>&1 | grep -E 'pass|fail'";
-    expect(await renderBashOutput("ok", command, true)).toBe("ok");
-    // On the cmd.exe fallback the same chain proves nothing, so the note stays.
-    expect(await renderBashOutput("ok", command, false)).toContain(
-      "Verification evidence rejected",
+  // Regression (haiku-ab-nonote, 2026-10-18): a note on checks whose exit status
+  // cannot prove success made Haiku 5.5 re-run suites that had already passed.
+  // The host still rejects them as evidence (verification tracker / run status);
+  // the tool result is just the output.
+  it("returns check output unchanged, including checks that cannot prove success", async () => {
+    for (const raw of ["ok", "tests failed"]) {
+      expect(await renderBashOutput(raw)).toBe(raw);
+    }
+    // `;` hands the exit status to `git --version`: rejected as evidence, no note.
+    const result = await createBashTool(tmpHome, new ProcessManager()).execute(
+      { command: "npm test; git --version" },
+      { signal: new AbortController().signal, toolCallId: "no-note" },
     );
+    expect(result).toMatch(/git version/);
+    expect(result).not.toContain("Verification evidence rejected");
+    expect(result).not.toContain("cannot establish fresh verification");
   });
-
-  it("explains why a semicolon check cannot prove verification", async () => {
-    const output = await renderBashOutput("diff succeeded", "npm test; git diff --stat");
-    expect(output).toContain("Verification evidence rejected");
-    expect(output).toContain("standalone command");
-    expect(output).toContain("chain only checks with &&");
-  });
-
-  it("does not demand reshaping a baseline command solely to record evidence", async () => {
-    const output = await renderBashOutput("tests failed", "cat src/example.js; npm test");
-    expect(output).toContain("Verification evidence rejected");
-    expect(output).toContain("do not reshape this command to satisfy this note");
-    expect(output).toContain("after your last edit");
-    expect(output).toContain("do not claim verification from this shell exit status");
-  });
-
-  it("keeps teaching the check shape on every rejected check", async () => {
-    expect(await renderBashOutput("ok", "npm test; git diff --stat")).toContain(
-      "Verification evidence rejected",
-    );
-    expect(await renderBashOutput("ok", "npm test | grep passed")).toContain(
-      "Verification evidence rejected",
-    );
-  });
-
-  it.each([
-    "ls -d .venv 2>/dev/null && ls .venv/bin/ | grep -i ruff; .venv/bin/ruff --version",
-    'grep -n -A 30 "\\[tool.ruff" pyproject.toml || echo "no ruff config"',
-    "ls src && echo --- && ls .venv/bin/ | grep -i ruff",
-    'grep -rn "import time" src/*.py; echo "--- ruff config ---"',
-  ])("adds no feedback to exploration that only mentions a verifier: %s", async (command) => {
-    expect(await renderBashOutput("output", command)).toBe("output");
-  });
-
-  it("explains that mixed checks cannot establish fresh evidence without discarding prior verification", async () => {
-    const output = await renderBashOutput(
-      "tests and whitespace passed",
-      "npm test && git diff --check",
-    );
-    expect(output).toContain("cannot establish fresh verification");
-    expect(output).toContain("can only preserve earlier successful checks");
-    expect(output).toContain("If the current changes are not already verified");
-    expect(output).toContain("run the check standalone");
-  });
-
-  it.each([
-    "npm test",
-    "npm test && npm run check",
-    "git diff --stat",
-    "npm run build",
-    "npm test 2>&1",
-    ".venv/bin/python -m ruff check src/pipelines/",
-  ])(
-    "does not add rejection feedback to accepted or snapshot-eligible commands: %s",
-    async (command) => {
-      expect(await renderBashOutput("output", command)).toBe("output");
-    },
-  );
 
   it("saves full output and returns a recovery pointer when output exceeds 50KB", async () => {
     const raw = Array.from(
@@ -252,6 +205,26 @@ describe("renderBashOutput", () => {
     expect(rendered).toContain("read it with offset/limit if needed");
     expect(await fs.readFile(saved[0], "utf-8")).toBe(raw);
     expect(rendered.length).toBeLessThan(raw.length);
+  });
+
+  // Regression: at a 50KB limit, `cat lib/utils.js` (36KB) came back whole and
+  // stayed in every later request; Claude Code offloads past 30,000 (agent-race,
+  // 2026-11-04).
+  it("offloads output over Claude Code's 30,000 inline limit and keeps output under it", async () => {
+    const line = (i: number) => `export function helper${i}(value) { return value + ${i}; }`;
+    const big = Array.from({ length: 700 }, (_, i) => line(i)).join("\n");
+    expect(Buffer.byteLength(big, "utf-8")).toBeGreaterThan(BASH_INLINE_MAX_BYTES);
+    expect(Buffer.byteLength(big, "utf-8")).toBeLessThan(50 * 1024);
+
+    const rendered = await renderBashOutput(big);
+    const saved = await listSavedOutputs();
+    expect(saved).toHaveLength(1);
+    expect(rendered).toContain(`Full output saved to ${saved[0]}`);
+    expect(rendered.length).toBeLessThan(big.length / 4);
+
+    const small = Array.from({ length: 400 }, (_, i) => line(i)).join("\n");
+    expect(Buffer.byteLength(small, "utf-8")).toBeLessThan(BASH_INLINE_MAX_BYTES);
+    expect(await renderBashOutput(small)).toBe(small);
   });
 
   it("does not create a pointer file for small output", async () => {
@@ -318,6 +291,8 @@ describe("createBashTool shell snapshot", () => {
     // 2026-08 guardrail additions (audit P1/P2); git rule now lives in the system prompt.
     expect(tool.description).toContain("never `&`, nohup or sleep");
     expect(tool.description).toContain("Kill by exact PID");
+    // Host-process safety moved out of the lean skill so it is always on.
+    expect(tool.description).toContain("never by name or pattern");
   });
 });
 
@@ -352,39 +327,99 @@ describe("shell-threat guard", () => {
 });
 
 describe("package-install guard", () => {
-  const osvReply = (vulns: Array<{ id: string }>): typeof fetch =>
-    (async () =>
-      new Response(JSON.stringify({ results: [{ vulns }] }), { status: 200 })) as typeof fetch;
+  /** Fake registry + OSV: every package is 1.0.0. `fresh` = first published now. */
+  const fakeNet =
+    (opts: { mal?: Record<string, string[]>; fresh?: string[]; downloads?: number }) =>
+    async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("api.osv.dev")) {
+        const body = JSON.parse(String(init?.body)) as {
+          queries: Array<{ package: { name: string }; version?: string }>;
+        };
+        return new Response(
+          JSON.stringify({
+            results: body.queries.map((q) => ({
+              vulns: (opts.mal?.[`${q.package.name}@${q.version}`] ?? []).map((id) => ({ id })),
+            })),
+          }),
+        );
+      }
+      if (url.includes("/downloads/")) {
+        return new Response(JSON.stringify({ downloads: opts.downloads ?? 1_000_000 }));
+      }
+      const name = decodeURIComponent(url.split("registry.npmjs.org/")[1] ?? "");
+      const created = opts.fresh?.includes(name)
+        ? new Date(Date.now() - 3_600_000 * 72).toISOString()
+        : "2020-01-01T00:00:00Z";
+      return new Response(
+        JSON.stringify({
+          "dist-tags": { latest: "1.0.0" },
+          versions: { "1.0.0": { dist: {} } },
+          time: { "1.0.0": created },
+        }),
+      );
+    };
 
   afterEach(() => {
     vi.unstubAllGlobals();
     clearPackageThreatCache();
   });
 
-  it("stops a likely typosquat once, then runs the identical command", async () => {
-    vi.stubGlobal("fetch", osvReply([]));
+  /** A package block returns { content, details }; everything else a string. */
+  const text = (result: unknown): string =>
+    typeof result === "string" ? result : String((result as { content: unknown }).content);
+
+  it("blocks a fresh typosquat every time (no retry-to-allow)", async () => {
+    vi.stubGlobal("fetch", fakeNet({ fresh: ["raect"] }));
     const tool = createBashTool(tmpHome, new ProcessManager());
     // `true ||` short-circuits, so npm never actually runs.
     const command = "true || npm install raect";
     const ctx = { signal: new AbortController().signal, toolCallId: "pkg-1" };
-
-    const first = String(await tool.execute({ command }, ctx));
-    expect(first).toContain("did you mean react");
-    expect(first).toContain("run the exact same command again");
-
-    const second = String(await tool.execute({ command }, ctx));
-    expect(second).toContain("Exit code: 0");
+    for (let i = 0; i < 2; i++) {
+      const out = text(await tool.execute({ command }, ctx));
+      expect(out).toContain("Blocked install (typosquat)");
+      expect(out).toContain('"react"');
+    }
   });
 
-  it("refuses a package OSV flags as malware", async () => {
-    vi.stubGlobal("fetch", osvReply([{ id: "MAL-2026-1234" }]));
+  it("runs an established lookalike silently", async () => {
+    vi.stubGlobal("fetch", fakeNet({}));
+    const tool = createBashTool(tmpHome, new ProcessManager());
+    const out = String(
+      await tool.execute(
+        { command: "true || npm install raect" },
+        { signal: new AbortController().signal, toolCallId: "pkg-3" },
+      ),
+    );
+    expect(out).toContain("Exit code: 0");
+  });
+
+  it("refuses a package version OSV flags as malware", async () => {
+    vi.stubGlobal(
+      "fetch",
+      fakeNet({ mal: { "totally-unknown-pkg-xyz@1.0.0": ["MAL-2026-1234"] } }),
+    );
     const tool = createBashTool(tmpHome, new ProcessManager());
     const result = await tool.execute(
       { command: "true || npm install totally-unknown-pkg-xyz" },
       { signal: new AbortController().signal, toolCallId: "pkg-2" },
     );
-    expect(String(result)).toContain("Blocked by package safety check (malicious-package)");
-    expect(String(result)).toContain("MAL-2026-1234");
+    expect(text(result)).toContain("Blocked install (malicious-package)");
+    expect(text(result)).toContain("totally-unknown-pkg-xyz@1.0.0");
+    expect(text(result)).toContain("MAL-2026-1234");
+    // The refused package travels with the result, for the project's list.
+    expect((result as { details?: unknown }).details).toEqual({
+      safetyBlock: {
+        packages: [
+          {
+            ecosystem: "npm",
+            name: "totally-unknown-pkg-xyz",
+            version: "1.0.0",
+            reason: "known malware (MAL-2026-1234)",
+          },
+        ],
+      },
+    });
   });
 });
 

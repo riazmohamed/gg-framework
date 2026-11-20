@@ -32,8 +32,56 @@ describe("logger rotation", () => {
     closeLogger({ shutdownLine: false });
 
     expect(await readFile(file, "utf-8")).toContain("line after rotation");
-    // One generation is retained, not discarded.
+    // The full file is retained as the newest generation, not discarded.
     expect((await stat(`${file}.1`)).size).toBe(10 * 1024 * 1024 - 4);
+  });
+
+  it("keeps three rotated generations and drops the fourth", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "gg-logger-"));
+    dirs.push(dir);
+    const file = path.join(dir, "debug.log");
+
+    // Four launches, each finding the previous one's file full.
+    for (const launch of ["a", "b", "c", "d"]) {
+      await writeFile(file, launch.repeat(10 * 1024 * 1024));
+      expect(openLog(file, "test")).toBe(true);
+      closeLogger({ shutdownLine: false });
+    }
+
+    const firstByte = async (name: string) => (await readFile(name, "utf-8"))[0];
+    expect(await firstByte(`${file}.1`)).toBe("d");
+    expect(await firstByte(`${file}.2`)).toBe("c");
+    expect(await firstByte(`${file}.3`)).toBe("b");
+    await expect(stat(`${file}.4`)).rejects.toMatchObject({ code: "ENOENT" });
+    // The live file is the fresh one, not a rotated generation.
+    expect((await stat(file)).size).toBeLessThan(64 * 1024);
+  });
+
+  it("rotates mid-run instead of going dark when a long-lived process starts near the cap", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "gg-logger-"));
+    dirs.push(dir);
+    const file = path.join(dir, "debug.log");
+
+    // Just enough headroom to skip startup rotation. The app daemon started
+    // like this, filled the remaining ~64 KB in 15 minutes, and then logged
+    // nothing for a day because the cap counted earlier launches' bytes.
+    const inherited = 10 * 1024 * 1024 - 64 * 1024;
+    await writeFile(file, "x".repeat(inherited));
+
+    expect(openLog(file, "test")).toBe(true);
+    const line = "y".repeat(1024);
+    for (let i = 0; i < 200; i++) log("INFO", "test", line);
+    log("INFO", "test", "still logging after the file filled");
+
+    expect(isLoggerOpen()).toBe(true);
+    closeLogger({ shutdownLine: false });
+
+    const current = await readFile(file, "utf-8");
+    expect(current).toContain("still logging after the file filled");
+    expect(current).not.toContain("Log cap reached");
+    expect((await stat(file)).size).toBeLessThanOrEqual(10 * 1024 * 1024);
+    expect((await stat(`${file}.1`)).size).toBeGreaterThan(inherited);
+    expect((await stat(`${file}.1`)).size).toBeLessThanOrEqual(10 * 1024 * 1024);
   });
 });
 

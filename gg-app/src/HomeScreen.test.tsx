@@ -2,16 +2,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { error as logError } from "@tauri-apps/plugin-log";
-import { authStatus, getSettings } from "./agent";
+import { getSettings, hasModelSource } from "./agent";
 import { HomeScreen } from "./HomeScreen";
 
 vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(async () => undefined) }));
 
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn(async () => "1.0.0") }));
-vi.mock("./AsciiLogo", () => ({ AsciiLogo: () => null }));
 vi.mock("./HomeScenery", () => ({ HomeScenery: () => null, withScenery: (b: unknown) => b }));
 vi.mock("./HomeCritters", () => ({ HomeCritters: () => null }));
-vi.mock("./RankBadge", () => ({ RankBadge: () => null }));
 vi.mock("./ScorecardModal", () => ({ ScorecardModal: () => null }));
 vi.mock("./update", () => ({ useAppUpdate: () => ({ status: "idle" }) }));
 vi.mock("./toast", () => ({ toast: vi.fn() }));
@@ -19,7 +17,7 @@ vi.mock("./agent", () => ({
   openUrl: vi.fn(),
   waitForReady: vi.fn(async () => undefined),
   getSettings: vi.fn(),
-  authStatus: vi.fn(),
+  hasModelSource: vi.fn(),
   openWhatsNewWindow: vi.fn(),
   getProgress: vi.fn(async () => null),
   setRemoteActive: vi.fn(),
@@ -34,7 +32,7 @@ afterEach(() => {
 describe("HomeScreen", () => {
   it("logs a failed setup check instead of swallowing it", async () => {
     vi.mocked(getSettings).mockRejectedValue(new Error("settings unreadable"));
-    vi.mocked(authStatus).mockResolvedValue([]);
+    vi.mocked(hasModelSource).mockResolvedValue(false);
 
     render(
       <HomeScreen
@@ -54,16 +52,7 @@ describe("HomeScreen", () => {
 
   it("offers Motion beside Code and Chat and opens it once set up", async () => {
     vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
-    vi.mocked(authStatus).mockResolvedValue([
-      {
-        value: "anthropic",
-        label: "Anthropic",
-        description: "",
-        methods: [],
-        connected: true,
-        connectedMethods: [],
-      },
-    ]);
+    vi.mocked(hasModelSource).mockResolvedValue(true);
     const onMotion = vi.fn();
 
     render(
@@ -88,16 +77,7 @@ describe("HomeScreen", () => {
 
   it("orders the workspaces Code, Goals, Chat, Motion and opens Goals", async () => {
     vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
-    vi.mocked(authStatus).mockResolvedValue([
-      {
-        value: "anthropic",
-        label: "Anthropic",
-        description: "",
-        methods: [],
-        connected: true,
-        connectedMethods: [],
-      },
-    ]);
+    vi.mocked(hasModelSource).mockResolvedValue(true);
     const onGoals = vi.fn();
 
     render(
@@ -124,9 +104,31 @@ describe("HomeScreen", () => {
     expect(onGoals).toHaveBeenCalledOnce();
   });
 
-  it("says under the Goals button that Goals is in beta", async () => {
+  it("shows the running version beside What's new, not in the update corner", async () => {
     vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
-    vi.mocked(authStatus).mockResolvedValue([]);
+    vi.mocked(hasModelSource).mockResolvedValue(false);
+
+    const { container } = render(
+      <HomeScreen
+        onProjects={vi.fn()}
+        onGoals={vi.fn()}
+        onChat={vi.fn()}
+        onMotion={vi.fn()}
+        onSettings={vi.fn()}
+      />,
+    );
+
+    const version = await screen.findByText("v1.0.0");
+    const row = version.closest(".home-version-row");
+    expect(row?.classList.contains("is-pending")).toBe(false);
+    expect(row?.querySelector("button")?.textContent).toBe("What's new");
+    // With no update out, the top corner stays empty.
+    expect(container.querySelector(".home-version-corner")?.childElementCount).toBe(0);
+  });
+
+  it("shows Goals with no Beta tag and leaves the byline to Settings", async () => {
+    vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    vi.mocked(hasModelSource).mockResolvedValue(false);
 
     render(
       <HomeScreen
@@ -138,13 +140,12 @@ describe("HomeScreen", () => {
       />,
     );
 
-    const note = await screen.findByText("In beta");
-    expect(note.id).not.toBe("");
-    // Screen readers hear it with the Goals button, and only with that one.
-    expect(screen.getByRole("button", { name: "Goals" }).getAttribute("aria-describedby")).toBe(
-      note.id,
-    );
-    expect(screen.queryByText("Still in process")).toBeNull();
+    const goals = await screen.findByRole("button", { name: "Goals" });
+    expect(goals.hasAttribute("aria-describedby")).toBe(false);
+    expect(screen.queryByText("Beta")).toBeNull();
+    expect(screen.queryByText("In beta")).toBeNull();
+    expect(screen.queryByText(/By Ken Kai/)).toBeNull();
+    expect(screen.queryByRole("link", { name: "Skool" })).toBeNull();
     expect(screen.getByRole("button", { name: "Motion" }).hasAttribute("aria-describedby")).toBe(
       false,
     );

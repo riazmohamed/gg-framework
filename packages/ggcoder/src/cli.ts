@@ -76,14 +76,16 @@ import { SessionManager, type TurnMetricPayload } from "./core/session-manager.j
 import { ensureAppDirs, getAppPaths, loadSavedSettings, projectScopeAllowed } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
 import { setStreamDiagnostic } from "@abukhaled/gg-agent";
+import { streamDiagLevel } from "./core/stream-diag-level.js";
 import { setProviderDiagnostic } from "@abukhaled/gg-ai";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { matchPromptCommand } from "./core/prompt-command-expansion.js";
 import { createTools } from "./tools/index.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
+import { pruneDiagnosticsRecords } from "./core/internal-diagnostics.js";
 import { spawnedTasks, type SpawnedTaskArgs } from "./tools/subagent-shared.js";
-import { CheckpointStore } from "./core/checkpoint-store.js";
+import { CheckpointStore, pruneCheckpointSessions } from "./core/checkpoint-store.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import {
   createCompactedSessionCheckpoint,
@@ -101,6 +103,7 @@ import {
   getDefaultThinkingLevel,
   getModel,
   getModelsForProvider,
+  isPaidModel,
 } from "./core/model-registry.js";
 import { MCPClientManager, getAllMcpServers } from "./core/mcp/index.js";
 import { runLogin, runLogout, runDoctor } from "./cli/auth.js";
@@ -117,7 +120,7 @@ import { isEyesActive, journalCount } from "@abukhaled/ggcoder-eyes";
 import { enrichProcessPath } from "./core/shell-path.js";
 import { discoverAgents } from "./core/agents.js";
 import { applyAsyncSubagentPolicy } from "./core/subagent-policy.js";
-import { discoverSkills } from "./core/skills.js";
+import { blockedSkillNotice, discoverSkillsWithBlocked } from "./core/skills.js";
 import path from "node:path";
 import chalk from "chalk";
 import { checkAndAutoUpdate } from "./core/auto-update.js";
@@ -441,9 +444,11 @@ function main(): void {
     if (p === "gemini") return "gemini-3.1-flash-lite";
     if (p === "glm") return "glm-5.3";
     if (p === "moonshot") return "kimi-k3";
-    if (p === "minimax") return "MiniMax-M3";
+    if (p === "minimax") return "MiniMax-M3.1-Flash";
     if (p === "deepseek") return "deepseek-v4-pro";
     if (p === "huggingface") return "moonshotai/Kimi-K2.7-Code";
+    if (p === "opencode") return "opencode/kimi-k3";
+    if (p === "opencode-go") return "opencode-go/kimi-k3";
     if (p === "openrouter") return "qwen/qwen3.8-max";
     if (p === "sakana") return "fugu";
     if (p === "xai") return "grok-4.7";
@@ -511,9 +516,8 @@ async function runInkTUI(opts: {
 
   // Wire stream stall diagnostics into the debug log
   setStreamDiagnostic((phase, data) => {
-    // A session stuck on the non-streaming fallback costs real money and real
-    // latency; it does not belong in the INFO noise floor.
-    const level = phase === "non_streaming_session" ? "WARN" : "INFO";
+    const level = streamDiagLevel(phase, data);
+    if (level === null) return;
     log(level, "stream", phase, data as Record<string, unknown>);
   });
   setProviderDiagnostic((phase, data) => {
@@ -538,7 +542,7 @@ async function runInkTUI(opts: {
   // mimo-v2.6-pro-ultraspeed) since a user may hold either or both.
   const credentialsByProvider: Record<
     string,
-    { accessToken: string; accountId?: string; projectId?: string; baseUrl?: string }
+    { accessToken: string; accountId?: string; baseUrl?: string }
   > = {};
   const expiredProviders: Provider[] = [];
   for (const p of loggedInProviders) {
@@ -556,7 +560,6 @@ async function runInkTUI(opts: {
         credentialsByProvider[key] = {
           accessToken: resolved.accessToken,
           accountId: resolved.accountId,
-          projectId: resolved.projectId,
           baseUrl: resolved.baseUrl,
         };
         resolvedAny = true;
@@ -574,9 +577,9 @@ async function runInkTUI(opts: {
   // The model a provider should actually boot with, given which storage keys
   // resolved: prefer the provider's default model, but for a provider like
   // Xiaomi that splits credentials across models, fall back to whichever
-  // model's specific storage key DID resolve (e.g. a user who configured only
-  // API Credits, no Token Plan, must still land on mimo-v2.6-pro-ultraspeed,
-  // not get treated as logged out of Xiaomi entirely).
+  // model's specific storage key DID resolve, so a user with only one of the
+  // keys is not treated as logged out entirely. Never a paid model: a fallback
+  // the user didn't pick must not start spending real money.
   const resolvedKeyFor = (p: Provider, modelId: string): string | undefined =>
     getAuthStorageKeys(p, modelId).find((key) => credentialsByProvider[key]);
   const modelResolves = (p: Provider, modelId: string): boolean =>
@@ -584,7 +587,7 @@ async function runInkTUI(opts: {
   const resolvableModelFor = (p: Provider): string | undefined => {
     const def = getDefaultModel(p).id;
     if (modelResolves(p, def)) return def;
-    return getModelsForProvider(p).find((m) => modelResolves(p, m.id))?.id;
+    return getModelsForProvider(p).find((m) => !isPaidModel(m.id) && modelResolves(p, m.id))?.id;
   };
 
   // Fall back if the preferred provider/model didn't resolve. The settings
@@ -593,8 +596,8 @@ async function runInkTUI(opts: {
   let provider = preferredProvider;
   let model = preferredModel;
   if (!modelResolves(provider, model)) {
-    // Same provider, different model first — e.g. Xiaomi Credits-only users
-    // land on mimo-v2.6-pro-ultraspeed instead of bouncing to another provider.
+    // Same provider, different model first, instead of bouncing to another
+    // provider when only one of its credential keys resolved.
     const sameProviderModel = resolvableModelFor(provider);
     if (sameProviderModel) {
       model = sameProviderModel;
@@ -641,7 +644,6 @@ async function runInkTUI(opts: {
   const creds = {
     accessToken: cached.accessToken,
     accountId: cached.accountId,
-    projectId: cached.projectId,
     refreshToken: "", // not needed downstream; SDK only uses accessToken
     expiresAt: Number.POSITIVE_INFINITY,
   };
@@ -650,17 +652,20 @@ async function runInkTUI(opts: {
   // all in parallel, since none of them depend on each other. Serial awaits
   // here cost ~100ms of time-to-interactive on cold caches.
   const localGGDir = path.join(cwd, ".gg");
-  const [, , , agents, skills] = await Promise.all([
+  const [, , , agents, { skills, blocked: blockedSkills }] = await Promise.all([
     fs.promises.mkdir(path.join(localGGDir, "skills"), { recursive: true }),
     fs.promises.mkdir(path.join(localGGDir, "commands"), { recursive: true }),
     fs.promises.mkdir(path.join(localGGDir, "agents"), { recursive: true }),
     discoverAgents({ globalAgentsDir: paths.agentsDir, projectDir: cwd }),
-    discoverSkills({ globalSkillsDir: paths.skillsDir, projectDir: cwd }),
+    discoverSkillsWithBlocked({ globalSkillsDir: paths.skillsDir, projectDir: cwd }),
     // Fork: like the desktop sidecar, merge the login-shell PATH and well-known
     // bin dirs (~/.cargo/bin, Homebrew, ...) so tools such as `steroids` are found
     // regardless of the PATH of the terminal that launched us. No-op on Windows.
     enrichProcessPath(),
   ]);
+  // Same startup-warning line as an expired login: plain, never a prompt.
+  for (const blocked of blockedSkills)
+    console.warn(chalk.yellow(`⚠ ${blockedSkillNotice(blocked)}`));
 
   // Runtime mode refs — shared between tools and UI
   const planModeRef = { current: false };
@@ -689,6 +694,7 @@ async function runInkTUI(opts: {
   } = await createTools(cwd, {
     agents,
     skills,
+    blockedSkills,
     provider,
     model,
     planModeRef,
@@ -793,6 +799,7 @@ async function runInkTUI(opts: {
           model,
           contextWindow,
           threshold: savedSettings.compactThreshold,
+          compactAtTokens: savedSettings.compactAtTokens,
           accountId: creds.accountId,
         });
         const activeTokens = undefined;
@@ -871,7 +878,6 @@ async function runInkTUI(opts: {
                     model,
                     apiKey: creds.accessToken,
                     accountId: creds.accountId,
-                    projectId: creds.projectId,
                     baseUrl: cached.baseUrl,
                     contextWindow,
                     targetTokens: policy.targetTokens,
@@ -1013,6 +1019,25 @@ async function runInkTUI(opts: {
       .catch(() => {});
     // Sweep recoverable full tool outputs (~/.gg/tool-output/) older than 48h.
     void cleanupToolOutputs().catch(() => {});
+    // ~/.gg/checkpoints/<session> folders untouched for 30 days (best-effort, non-blocking).
+    void pruneCheckpointSessions()
+      .then(({ removed }) => {
+        if (removed > 0) {
+          log("INFO", "checkpoints", "Pruned old checkpoint folders", { removed: String(removed) });
+        }
+      })
+      .catch(() => {});
+    // ~/.gg/diagnostics/sessions records older than 30 days (best-effort, non-blocking).
+    void pruneDiagnosticsRecords()
+      .then(({ removed, freedBytes }) => {
+        if (removed > 0) {
+          log("INFO", "diagnostics", "Pruned old diagnostics records", {
+            removed: String(removed),
+            freedBytes: String(freedBytes),
+          });
+        }
+      })
+      .catch(() => {});
   }
 
   await renderApp({
@@ -1026,7 +1051,6 @@ async function runInkTUI(opts: {
     thinking: opts.thinkingLevel,
     apiKey: creds.accessToken,
     accountId: creds.accountId,
-    projectId: creds.projectId,
     cwd,
     theme: opts.theme,
     loggedInProviders,
@@ -1087,9 +1111,11 @@ async function runSessions(): Promise<void> {
     if (p === "gemini") return "gemini-3.1-flash-lite";
     if (p === "glm") return "glm-5.3";
     if (p === "moonshot") return "kimi-k3";
-    if (p === "minimax") return "MiniMax-M3";
+    if (p === "minimax") return "MiniMax-M3.1-Flash";
     if (p === "deepseek") return "deepseek-v4-pro";
     if (p === "huggingface") return "moonshotai/Kimi-K2.7-Code";
+    if (p === "opencode") return "opencode/kimi-k3";
+    if (p === "opencode-go") return "opencode-go/kimi-k3";
     if (p === "sakana") return "fugu";
     if (p === "xai") return "grok-4.7";
     return "claude-opus-5-5";
@@ -1558,9 +1584,17 @@ async function resolveActiveProvider(
     "minimax",
     "deepseek",
     "openrouter",
+    "opencode-go",
+    "opencode",
     "sakana",
     "xai",
   ];
+  // Retired sign-ins (old Claude, Codex, Kimi, Grok or Google tokens) are never
+  // used. Tell the user once, then remove them.
+  for (const retired of await authStorage.legacySignIns()) {
+    if (!(await authStorage.takeLegacySignIn(retired.provider))) continue;
+    console.warn(chalk.yellow(`⚠ ${retired.message}\n  Run "ggcoder login" to connect again.`));
+  }
   const loggedInProviders: Provider[] = [];
   for (const p of allProviders) {
     if (await authStorage.hasProviderAuth(p)) loggedInProviders.push(p);

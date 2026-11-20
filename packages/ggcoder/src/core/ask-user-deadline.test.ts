@@ -6,6 +6,7 @@ import {
   askSoftDeadlineMs,
   createAskUserBridge,
   deliverLateAnswer,
+  formatAskResult,
   formatLateAnswer,
   type AskUserPrompt,
   type LateAskAnswer,
@@ -164,9 +165,9 @@ describe("ask_user soft deadline", () => {
     await expect(interactive).resolves.toBe(ASK_DEFERRED_RESULT);
   });
 
-  it("uses 2 minutes unattended and 10 minutes interactive", () => {
+  it("uses 2 minutes unattended and 5 minutes interactive", () => {
     expect(askSoftDeadlineMs(true)).toBe(2 * 60_000);
-    expect(askSoftDeadlineMs(false)).toBe(10 * 60_000);
+    expect(askSoftDeadlineMs(false)).toBe(5 * 60_000);
   });
 });
 
@@ -216,5 +217,22 @@ describe("late answer delivery", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("Ken's answer", () => {
+  it("says Ken answered and forbids destructive work on it", () => {
+    const questions = [{ id: "go", question: "Add the test?", kind: "confirm" as const }];
+    const text = formatAskResult(questions, {
+      action: "answer",
+      answers: { go: "yes" },
+      by: "ken",
+    });
+    expect(text).toContain("Autopilot Ken answered for the user:");
+    expect(text).toContain("Add the test?\n→ yes");
+    expect(text).toContain("do NOT delete data, push, publish");
+    expect(formatAskResult(questions, { action: "answer", answers: { go: "yes" } })).toMatch(
+      /^The user answered:/,
+    );
   });
 });

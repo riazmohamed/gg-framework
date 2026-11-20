@@ -14,6 +14,8 @@
  *     → This is a GG Coder bug — please report it.
  */
 
+import { parseFastModeRejection } from "./fast-mode.js";
+
 export type ErrorSource = "provider" | "ggcoder" | "network" | "auth" | "capability";
 
 /**
@@ -94,6 +96,24 @@ export class VideoUnsupportedError extends GGAIError {
   }
 }
 
+/**
+ * Every automatic retry connected to the provider but the reply never finished:
+ * the provider went silent mid-response (or the full non-streamed reply never
+ * arrived in time). Distinct from "couldn't reach the provider" — the network
+ * worked, the response was too slow or too large to complete.
+ * `inToolCall` is set when the replies kept dying while the model was still
+ * writing a tool call's arguments, which is almost always one oversized write.
+ */
+export class ResponseStalledError extends GGAIError {
+  readonly inToolCall: boolean;
+
+  constructor(message: string, options: { inToolCall: boolean; hint?: string; cause?: unknown }) {
+    super(message, { source: "network", hint: options.hint, cause: options.cause });
+    this.name = "ResponseStalledError";
+    this.inToolCall = options.inToolCall;
+  }
+}
+
 export class ProviderError extends GGAIError {
   readonly provider: string;
   readonly statusCode?: number;
@@ -141,6 +161,8 @@ const PROVIDER_DISPLAY: Record<string, string> = {
   sakana: "Sakana",
   xai: "xAI (Grok)",
   huggingface: "Hugging Face",
+  opencode: "OpenCode",
+  "opencode-go": "OpenCode Go",
   xiaomi: "Xiaomi (MiMo)",
   minimax: "MiniMax",
 };
@@ -192,6 +214,9 @@ export function isHardBillingMessage(message: string): boolean {
     lower.includes("recharge") ||
     lower.includes("balance is too low") ||
     lower.includes("out of credits") ||
+    // Anthropic fast mode when usage credits can't pay (see fast-mode.ts).
+    lower.includes("usage credits are required") ||
+    lower.includes("fast mode unavailable") ||
     lower.includes("arrears") ||
     lower.includes("arrearage") ||
     lower.includes("token quota") ||
@@ -295,7 +320,41 @@ export function formatError(err: unknown): FormattedError {
         statusCode: err.statusCode,
         ...(err.requestId ? { requestId: err.requestId } : {}),
         guidance:
-          "Request access via your Anthropic account team (see platform.claude.com/docs/en/about-claude/models/overview), or switch to Claude Fable 5.1 via the model selector — same underlying model, generally available.",
+          "Request access via your Anthropic account team (see platform.claude.com/docs/en/about-claude/models/overview), or switch to Claude Fable 5.2 via the model selector — same underlying model, generally available.",
+      };
+    }
+    // Fast mode rejections must never read as the plan's usage running out:
+    // they bill usage credits, which is real money the user controls.
+    const fastRejection =
+      err.provider === "anthropic" ? parseFastModeRejection(err.message) : undefined;
+    if (fastRejection) {
+      return {
+        headline: `${fastRejection.headline}.`,
+        source: "provider",
+        message: cleanMessage,
+        provider: err.provider,
+        statusCode: err.statusCode,
+        ...(err.requestId ? { requestId: err.requestId } : {}),
+        guidance: fastRejection.guidance,
+      };
+    }
+    const miniMax = err.provider === "minimax" ? formatMiniMaxError(err, cleanMessage) : undefined;
+    if (miniMax) return miniMax;
+    if (isUsageLimitError(err) && err.provider === "openai" && /chatgpt/i.test(err.message)) {
+      // OpenAI: don't assume the whole plan is empty or guess a reset time —
+      // the limit can be one the user set for GG Coder.
+      return {
+        headline: "ChatGPT plan usage limit reached.",
+        source: "provider",
+        message:
+          "GG Coder has used what your ChatGPT plan allows for now. That can be your plan's limit or one you set for GG Coder.",
+        provider: err.provider,
+        statusCode: err.statusCode,
+        ...(err.requestId ? { requestId: err.requestId } : {}),
+        ...(err.resetsAt ? { resetsAt: err.resetsAt } : {}),
+        guidance:
+          err.hint ??
+          "Check or raise it at chatgpt.com/settings/usage, or add an OpenAI API key to keep going.",
       };
     }
     if (isUsageLimitError(err)) {
@@ -322,6 +381,15 @@ export function formatError(err: unknown): FormattedError {
     };
   }
 
+  if (err instanceof ResponseStalledError) {
+    // Connected, but the reply never finished — not an unreachable provider.
+    return {
+      headline: "The response kept stalling before it finished.",
+      source: err.source,
+      message: err.message,
+      guidance: err.hint ?? "Retry once. If it keeps happening, choose another model.",
+    };
+  }
   if (err instanceof GGAIError) {
     return finaliseBySource(err.source, err.message, err.requestId, err.hint);
   }
@@ -435,6 +503,47 @@ function inferSource(err: Error): ErrorSource {
     return "auth";
   }
   return "ggcoder";
+}
+
+/**
+ * MiniMax's documented error codes (platform.minimax.io/docs/api-reference/errorcode)
+ * whose generic wording misleads: a plan key calling a model its plan doesn't
+ * cover answers "insufficient balance", which otherwise reads as a spent quota.
+ */
+function formatMiniMaxError(err: ProviderError, cleanMessage: string): FormattedError | undefined {
+  const code = /\((\d{4,5})\)/.exec(err.message)?.[1];
+  const base = {
+    source: "provider" as const,
+    message: cleanMessage,
+    provider: err.provider,
+    statusCode: err.statusCode,
+    ...(err.requestId ? { requestId: err.requestId } : {}),
+  };
+  if (code === "2049" || code === "1004") {
+    return {
+      ...base,
+      headline: "MiniMax didn't accept this API key.",
+      guidance:
+        "A MiniMax key only works in the region that issued it (Global: platform.minimax.io, Mainland China: platform.minimaxi.com). Connect MiniMax again with the key so GG Coder can detect its region, and check the key is active.",
+    };
+  }
+  if (code === "2061") {
+    return {
+      ...base,
+      headline: "Your MiniMax plan doesn't include this model.",
+      guidance:
+        "Switch to MiniMax M3.1 Flash in the model selector — it's the model M Plan and Token Plan cover. MiniMax M3 needs a pay-as-you-go key.",
+    };
+  }
+  if (code === "1008") {
+    return {
+      ...base,
+      headline: "MiniMax has no balance for this request.",
+      guidance:
+        "Check this key's plan is active, or its pay-as-you-go balance, at platform.minimax.io (platform.minimaxi.com for Mainland China keys). Plan keys only cover MiniMax M3.1 Flash. Not a GG Coder issue.",
+    };
+  }
+  return undefined;
 }
 
 /**

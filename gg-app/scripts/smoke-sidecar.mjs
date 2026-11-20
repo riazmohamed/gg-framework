@@ -8,6 +8,7 @@
 // Run AFTER `stage:node` + `bundle:sidecar`. Exits non-zero on any failure so
 // it can gate CI.
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -17,7 +18,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const srcTauri = join(here, "..", "src-tauri");
 const binDir = join(srcTauri, "binaries");
 const sidecar = join(srcTauri, "sidecar", "app-sidecar.mjs");
-const evidenceSkill = join(srcTauri, "sidecar", "skills", "evidence-led-ui", "SKILL.md");
+const complianceSkill = join(srcTauri, "sidecar", "skills", "compliance-guard", "SKILL.md");
 
 function fail(msg) {
   console.error(`SMOKE FAIL: ${msg}`);
@@ -234,6 +235,24 @@ function smokeSandboxRuntime(node) {
 }
 
 /**
+ * The Claude subscription route imports the external Agent SDK, but Claude Code
+ * itself is downloaded on first sign-in. Shipping a platform build would add
+ * ~200 MB to every install.
+ */
+function smokeClaudeAgentSdk() {
+  const scope = join(srcTauri, "sidecar", "node_modules", "@anthropic-ai");
+  if (!existsSync(join(scope, "claude-agent-sdk", "sdk.mjs"))) {
+    fail("bundled Claude Agent SDK missing: @anthropic-ai/claude-agent-sdk/sdk.mjs");
+  }
+  if (!existsSync(join(srcTauri, "sidecar", "node_modules", "zod", "package.json"))) {
+    fail("bundled Claude Agent SDK peer missing: zod");
+  }
+  const shipped = readdirSync(scope).filter((name) => name.startsWith("claude-agent-sdk-"));
+  if (shipped.length > 0) fail(`Claude Code platform builds were bundled: ${shipped.join(", ")}`);
+  console.log("smoke: Claude Agent SDK bundled without Claude Code platform builds");
+}
+
+/**
  * Payload gate: bundle-sidecar strips dev-only weight after copying the
  * dependency tree (source maps; onnxruntime-web's browser wasm/webgl/webgpu
  * payloads, which the Node exports map never resolves). If either returns,
@@ -257,7 +276,8 @@ function smokeLeanPayload() {
 
 async function main() {
   if (!existsSync(sidecar)) fail(`bundled sidecar missing: ${sidecar}`);
-  if (!existsSync(evidenceSkill)) fail(`bundled evidence-led-ui skill missing: ${evidenceSkill}`);
+  if (!existsSync(complianceSkill))
+    fail(`bundled compliance-guard skill missing: ${complianceSkill}`);
   const node = nodeBin();
   console.log(`smoke: ${node} ${sidecar}`);
 
@@ -265,6 +285,7 @@ async function main() {
   smokeOpenSrc(node);
   smokeSandboxRuntime(node);
   smokeMotionBundle(node);
+  smokeClaudeAgentSdk();
   smokeLeanPayload();
 
   const child = spawn(node, [sidecar], {
@@ -369,6 +390,38 @@ async function main() {
     fail(`/state body missing "ready": ${JSON.stringify(body)}`);
   }
   console.log(`smoke: session ${sessionId.slice(0, 8)} /state 200 ready=${body.ready}`);
+
+  // Live preview must find its packaged overlay: start one against a stub dev
+  // server, load the page through the proxy and its page script from the frame server.
+  const dev = createServer((_req, r) =>
+    r.writeHead(200, { "content-type": "text/html" }).end("<html><head></head><body>ok</body></html>"),
+  );
+  await new Promise((r) => dev.listen(0, "127.0.0.1", r));
+  try {
+    const headers = { "x-gg-session": sessionId, "x-gg-token": token };
+    const started = await fetch(`http://127.0.0.1:${port}/live-preview/start`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ url: `http://127.0.0.1:${dev.address().port}/` }),
+    }).then((r) => r.json());
+    if (!started.running) fail(`live preview didn't start: ${JSON.stringify(started)}`);
+    const page = await fetch(started.url, { headers: { "sec-fetch-dest": "document" } }).then((r) =>
+      r.text(),
+    );
+    const script = /<script defer src="(http:\/\/127\.0\.0\.1:\d+\/page\.js)">/.exec(page);
+    if (!script) fail(`live preview page has no overlay: ${page.slice(0, 200)}`);
+    const js = await fetch(script[1]);
+    if (js.status !== 200) fail(`live preview page.js returned ${js.status}`);
+    const frame = await fetch(script[1].replace("/page.js", "/frame"));
+    if (frame.status !== 200) fail(`live preview frame returned ${frame.status}`);
+    await fetch(`http://127.0.0.1:${port}/live-preview/stop`, { method: "POST", headers });
+    console.log(`smoke: live preview served ${started.url}`);
+  } catch (err) {
+    child.kill("SIGKILL");
+    fail(`live preview failed: ${err.message}`);
+  } finally {
+    dev.close();
+  }
 
   // A Motion session must build from the packaged bundle (skills + prompt).
   const motionCwd = mkdtempSync(join(tmpdir(), "gg-smoke-motion-"));

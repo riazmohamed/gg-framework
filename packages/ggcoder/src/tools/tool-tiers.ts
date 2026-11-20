@@ -31,6 +31,10 @@ export const CORE_TOOL_NAMES: readonly string[] = [
   "grep",
   "skill",
   "tool_search",
+  // Under the one-in-five rule (1% of sessions), but as an on-demand line it
+  // was almost never reached even when a request needed a plan. The steering
+  // line in prompt-hints.ts says when to use it.
+  "enter_plan",
 ];
 
 /**
@@ -48,7 +52,8 @@ export const CORE_TOOL_NAMES: readonly string[] = [
  *
  * The 2026-10 prompt diet (bench/prompt-diet, GLM-5.3-Flash, 22 tasks) counted
  * 1,429 sessions over 60 days and deferred every built-in under the one-in-five
- * rule: find/ls (8%), code_search/code_nav (5%), spawn_agent (4%), web_fetch
+ * rule: find/ls (8%), code_search/code_nav (5%; both removed 2026-10-27 after 0
+ * calls in 2,818 sessions), spawn_agent (4%), web_fetch
  * (3%), enter_plan/exit_plan (1%), task_send (0%). Together ~1.9k tokens per
  * request. Promotion appends to the tool list, so a session that does reach
  * one pays a cache restart once; the bench showed no pass-rate or speed loss.
@@ -78,12 +83,9 @@ export const DEFERRED_TOOL_NAMES: readonly string[] = [
   "task_stop",
   "find",
   "ls",
-  "code_search",
-  "code_nav",
   "web_fetch",
   "task_send",
   "spawn_agent",
-  "enter_plan",
   "exit_plan",
   "web_search",
   "steroids",

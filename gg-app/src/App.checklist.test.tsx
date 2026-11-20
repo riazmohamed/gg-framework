@@ -11,14 +11,7 @@ const agent = await import("./agent");
 const scrollToDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTo");
 const transitionDescriptor = Object.getOwnPropertyDescriptor(document, "startViewTransition");
 let composerStyles: HTMLStyleElement;
-function mockTransitions(): ReturnType<typeof vi.fn> {
-  const start = vi.fn((update: () => void) => {
-    update();
-    return { ready: Promise.resolve(), finished: Promise.resolve() };
-  });
-  Object.defineProperty(document, "startViewTransition", { configurable: true, value: start });
-  return start;
-}
+
 beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: vi.fn() });
   // The real composer and footer use flex. Native `hidden` alone loses to
@@ -94,7 +87,10 @@ const SNAPSHOT: ChecklistSnapshot = {
     },
   ],
 };
-function harness(history: HistoryEntry[] = []): {
+function harness(
+  history: HistoryEntry[] = [],
+  extra: Partial<AgentState> = {},
+): {
   fetches: ReturnType<typeof vi.fn>;
   sends: ReturnType<typeof vi.fn>;
   emit: (event: SidecarEvent) => void;
@@ -112,6 +108,7 @@ function harness(history: HistoryEntry[] = []): {
     provider: "anthropic",
     model: "claude-sonnet-4-6",
     running: false,
+    ...extra,
   };
   const fetches = vi.fn(() => SNAPSHOT);
   const sends = vi.fn();
@@ -152,8 +149,24 @@ function harness(history: HistoryEntry[] = []): {
   };
 }
 
+/**
+ * The project tools live in the deck's ⋯ keypad, which closes once a tool is
+ * picked. `findTool` waits for the window to be ready; `clickTool` opens the
+ * keypad (when it isn't already) and presses the named key.
+ */
+async function findTool(name: string): Promise<string> {
+  await screen.findByRole("button", { name: "More" });
+  return name;
+}
+function clickTool(name: string): void {
+  if (!screen.queryByRole("region", { name: "More" })) {
+    fireEvent.click(screen.getByRole("button", { name: "More" }));
+  }
+  fireEvent.click(screen.getByRole("button", { name }));
+}
+
 describe("checklist workspace navigation", () => {
-  it("consumes entrances before hiding and settles messages received while hidden", async () => {
+  it("plays a reply's entrance once while the checklist is open, and none on close", async () => {
     const { emit } = harness();
     const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "animate");
     const animate = vi.fn(
@@ -163,7 +176,7 @@ describe("checklist workspace navigation", () => {
     Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: animate });
     try {
       render(<App />);
-      const open = await screen.findByRole("button", { name: "Checklist" });
+      const open = await findTool("Checklist");
       const input = screen.getByRole<HTMLTextAreaElement>("textbox");
       fireEvent.change(input, { target: { value: "visible message" } });
       fireEvent.keyDown(input, { key: "Enter" });
@@ -175,11 +188,15 @@ describe("checklist workspace navigation", () => {
       const count = entrances();
       expect(count).toBeGreaterThan(0);
       fireEvent.change(input, { target: { value: "preserved draft" } });
-      fireEvent.click(open);
+      clickTool(open);
       await screen.findByRole("button", { name: "Check Git & GitHub" });
-      act(() => emit({ type: "text_delta", data: { text: "received while hidden" } }));
-      fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
-      expect(entrances()).toBe(count);
+      // The conversation stays on screen while the checklist is open, so a
+      // reply arriving now plays its entrance once, there and then...
+      act(() => emit({ type: "text_delta", data: { text: "received while open" } }));
+      await waitFor(() => expect(entrances()).toBe(count + 1));
+      // ...and closing the checklist replays nothing.
+      fireEvent.click(screen.getByRole("button", { name: "Close Checklist" }));
+      expect(entrances()).toBe(count + 1);
       expect(input.value).toBe("preserved draft");
       expect(document.querySelector(".row-enter")).toBeNull();
     } finally {
@@ -192,14 +209,14 @@ describe("checklist workspace navigation", () => {
     async (refresh) => {
       const { fetches, sends, emit } = harness();
       render(<App />);
-      const open = await screen.findByRole("button", { name: "Checklist" });
-      fireEvent.click(open);
+      const open = await findTool("Checklist");
+      clickTool(open);
       fireEvent.click(await screen.findByRole("button", { name: "Check Git & GitHub" }));
       await waitFor(() => expect(sends).toHaveBeenCalledOnce());
       await act(async () => {
         emit({ type: "run_end", data: {} });
       });
-      fireEvent.click(open);
+      clickTool(open);
       expect(
         await screen.findByText("No result recorded. View the conversation for details."),
       ).toBeTruthy();
@@ -213,8 +230,8 @@ describe("checklist workspace navigation", () => {
       };
       fetches.mockReturnValue(recorded);
       if (refresh === "reopen") {
-        fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
-        fireEvent.click(open);
+        fireEvent.click(screen.getByRole("button", { name: "Close Checklist" }));
+        clickTool(open);
       } else {
         await act(async () => {
           emit({ type: "run_end", data: {} });
@@ -236,7 +253,7 @@ describe("checklist workspace navigation", () => {
       }),
     );
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Checklist" }));
+    clickTool(await findTool("Checklist"));
     await waitFor(() => expect(fetches).toHaveBeenCalledOnce());
     fetches.mockReturnValue({
       ...SNAPSHOT,
@@ -261,10 +278,10 @@ describe("checklist workspace navigation", () => {
   it("runs /init for Agent setup, returns to chat and keeps the draft", async () => {
     const { sends } = harness();
     render(<App />);
-    const open = await screen.findByRole("button", { name: "Checklist" });
+    const open = await findTool("Checklist");
     const draft = screen.getByRole<HTMLTextAreaElement>("textbox");
     fireEvent.change(draft, { target: { value: "Keep this draft" } });
-    fireEvent.click(open);
+    clickTool(open);
     fireEvent.click(await screen.findByRole("button", { name: "Check Agent setup" }));
     await waitFor(() => expect(sends).toHaveBeenCalledOnce());
     expect(sends.mock.calls[0]?.[0]).toMatchObject({ text: "/init", attachments: [] });
@@ -298,64 +315,45 @@ describe("checklist workspace navigation", () => {
       view.unmount();
     }
   });
-  it("fetches after the transition commits so a fast response cannot get stuck loading", async () => {
+  it("fetches as it opens, so a fast response cannot get stuck loading", async () => {
     const { fetches } = harness();
-    let commit: (() => void) | undefined;
-    Object.defineProperty(document, "startViewTransition", {
-      configurable: true,
-      value: (update: () => void) => {
-        commit = update;
-        return { ready: Promise.resolve(), finished: Promise.resolve() };
-      },
-    });
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Checklist" }));
-    expect(fetches).not.toHaveBeenCalled();
-    expect(commit).toBeTypeOf("function");
-    act(() => commit?.());
+    clickTool(await findTool("Checklist"));
+    await waitFor(() => expect(fetches).toHaveBeenCalledOnce());
     expect(await screen.findByText("Git initialized · Not reviewed")).toBeTruthy();
     expect(screen.queryByText("Reading project setup…")).toBeNull();
   });
-  it("keeps navigation and draft, uses the existing back button, and refetches on open", async () => {
+  it("opens in the deck over the message box, keeps the chat and draft, and refetches on open", async () => {
     const { fetches } = harness();
-    const transitions = mockTransitions();
     render(<App />);
-    const open = await screen.findByRole("button", { name: "Checklist" });
+    const open = await findTool("Checklist");
     const draft = screen.getByRole<HTMLTextAreaElement>("textbox");
     fireEvent.change(draft, { target: { value: "Keep this unfinished thought" } });
-    fireEvent.click(open);
+    clickTool(open);
     const checklist = await screen.findByRole("region", { name: "Project checklist" });
     await within(checklist).findByText("Git initialized · Not reviewed");
     expect(screen.queryByRole("dialog")).toBeNull();
-    expect(document.querySelector(".app.checklist-open")).not.toBeNull();
-    expect(screen.queryByRole("textbox")).toBeNull();
-    for (const selector of [".transcript-frame", ".liveregion", ".inputwrap", ".footer"]) {
-      const element = document.querySelector<HTMLElement>(selector);
-      expect(element).not.toBeNull();
-      if (element) {
-        expect(getComputedStyle(element).display).toBe("none");
-        expect(element.style.display).toBe("none");
-      }
-    }
-    expect(transitions).toHaveBeenCalledOnce();
-    expect(screen.getByRole("button", { name: "Tasks" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
+    // A deck tool: inside the deck, with the conversation still on screen and
+    // the message box stepped aside (inert) rather than unmounted.
+    expect(checklist.closest(".deck")).not.toBeNull();
+    expect(document.querySelector<HTMLElement>(".transcript-frame")?.style.display).not.toBe(
+      "none",
+    );
+    expect(draft.closest(".deck-main")?.hasAttribute("inert")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Close Checklist" }));
     expect(screen.queryByRole("region", { name: "Project checklist" })).toBeNull();
     expect(draft.value).toBe("Keep this unfinished thought");
     expect(screen.getByRole("textbox")).toBe(draft);
-    expect(document.activeElement).toBe(draft);
-    expect(transitions).toHaveBeenCalledTimes(2);
-    fireEvent.click(open);
+    clickTool(open);
     await waitFor(() => expect(fetches).toHaveBeenCalledTimes(2));
   });
-  it("dissolves back to chat for the report, preserving the draft and preventing duplicate checks", async () => {
+  it("closes for the report, preserving the draft and preventing duplicate checks", async () => {
     const { sends } = harness();
-    const transitions = mockTransitions();
     render(<App />);
-    const open = await screen.findByRole("button", { name: "Checklist" });
+    const open = await findTool("Checklist");
     const draft = screen.getByRole<HTMLTextAreaElement>("textbox");
     fireEvent.change(draft, { target: { value: "A draft before checking" } });
-    fireEvent.click(open);
+    clickTool(open);
     fireEvent.click(await screen.findByRole("button", { name: "Check Git & GitHub" }));
     await waitFor(() => expect(sends).toHaveBeenCalledOnce());
     expect(sends.mock.calls[0]?.[0]).toMatchObject({
@@ -369,13 +367,42 @@ describe("checklist workspace navigation", () => {
     );
     expect(screen.getByRole("textbox")).toBe(draft);
     expect(draft.value).toBe("A draft before checking");
-    expect(document.activeElement).toBe(draft);
-    expect(transitions).toHaveBeenCalledTimes(2);
-    fireEvent.click(open);
+    clickTool(open);
     const check = await screen.findByRole("button", { name: "Check Git & GitHub" });
     expect(check.getAttribute("aria-disabled")).toBe("true");
     expect(screen.queryByRole("button", { name: /stop/i })).toBeNull();
     fireEvent.click(check);
     expect(sends).toHaveBeenCalledOnce();
+  });
+});
+
+describe("project health in a goal window", () => {
+  it("opens the breakdown from Usage and sends Review all", async () => {
+    const { sends } = harness([], {
+      goal: { id: "g1", name: "Ship it", needsKickoff: false, phase: "briefing" },
+      projectHealth: {
+        score: 64,
+        fixPrompt: "REVIEW ALL",
+        cappedBy: null,
+        truncated: false,
+        categories: [
+          {
+            id: "files",
+            label: "File size",
+            score: 40,
+            summary: "2 files over 800 lines",
+            findings: ["src/App.tsx · 2,400 lines"],
+            fixPrompt: "REVIEW FILES",
+          },
+        ],
+      },
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Usage$/ }));
+    fireEvent.click(await screen.findByTitle("Open the Project Health breakdown"));
+    expect(await screen.findByRole("meter", { name: "Project health" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Review all" }));
+    await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+    expect(sends.mock.calls[0]?.[0]).toMatchObject({ text: "REVIEW ALL" });
   });
 });

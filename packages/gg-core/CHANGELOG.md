@@ -1,5 +1,402 @@
 # @abukhaled/gg-core
 
+## 5.103.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.103.0
+
+## 5.102.0
+
+### Minor Changes
+
+- 188a0ca: Local endpoints can pin `supportsImages` (it wins over the server, like `contextLength`), llama.cpp's `/props` `modalities.vision` now marks its models as seeing images, and a new `pointScale(modelId)` says whether a model points in pixels or on Qwen3-VL/Qwen3.5's 0–1000 grid.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.102.0
+
+## 5.101.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.101.0
+
+## 5.100.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.100.3
+
+## 5.100.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.100.2
+
+## 5.100.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.100.1
+
+## 5.100.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.100.0
+
+## 5.99.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.99.0
+
+## 5.98.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.98.2
+
+## 5.98.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.98.1
+
+## 5.98.0
+
+### Minor Changes
+
+- ec684b8: Add OpenCode as two providers: **OpenCode Go** (the subscription) and **OpenCode** (pay-as-you-go), each connected with an OpenCode Console API key (#142). Every request carries GG Coder's own User-Agent and a stable `x-opencode-session` per conversation, which Go requires; calls made outside a conversation (summaries, the prompt enhancer) share one fallback id. Models are listed as `opencode-go/<id>` and `opencode/<id>` and run over the gateway's Chat Completions API, so only the models OpenCode serves on that API are offered (19 of Go's 30 today); models whose own API is Responses, Anthropic Messages or Gemini are left out for now. Requests cap output with `max_tokens` and return earlier thinking as `reasoning_content`, which the gateway's backends require. The desktop app reads each connected plan's public model list (context, output cap, image input, effort levels) and refreshes it every six hours; pay-as-you-go leaves out the free tier, which only runs inside OpenCode. Kimi K3, GLM-5.3 and GLM-5.3-Flash are built in for the CLI and offline starts.
+
+  - gg-ai: new `opencode` and `opencode-go` providers.
+  - gg-core: `parseOpenCodeCatalog`, `OPENCODE_CATALOG_URLS`, `OPENCODE_PROVIDERS`, `formatOpenCodeModelId`.
+
+### Patch Changes
+
+- Updated dependencies [ec684b8]
+  - @kenkaiiii/gg-ai@5.98.0
+
+## 5.97.1
+
+### Patch Changes
+
+- Fix the Claude subscription route failing a resume whose Claude Code transcript is gone: the session now seeds a fresh one from its own history, holds the transcript it would resume against the retention pass, and reloads the on-demand tools a restored conversation already used (the prompt now says to run `tool_search` first on that route). A Claude Code summary that keeps streaming is no longer dropped at the attempt timeout, a caller's access token is refreshed before reuse, and an unfinished run owned by another live process is left open instead of being treated as a crash.
+
+  Prune tool results less often on a warm cache (warm floor 0.2 → 0.35 of active tokens, flat floor near the compaction trigger), halve the `ask_user` interactive deadline to 5 min and the `task_output` wait cap to 300s, keep three rotated `debug.log` generations, and stop repeating unchanged log lines (local-model scan, autopilot disabled, unknown agent tools). The Claude Code route now logs `cache_health` and `retry` like the public-API route.
+  - @kenkaiiii/gg-ai@5.97.1
+
+## 5.97.0
+
+### Minor Changes
+
+- 4900c19: Add Claude Fable 5.2 (`claude-fable-5-2`, released 2026-11-09) to the model registry — 1M context, 128k output, image input, always-on adaptive thinking, now $8/$40 MTok (down from $10/$50) with cache reads at $0.20/MTok. It replaces Fable 5.1, which is retired from the registry, model picker and login copy — a session still pinned to it falls back to the provider default on next start. The API surface matches 5.1 (no forced tool use, no prefill, no sampling params), so no call path changes.
+
+  Add Claude Fable 5.2 Fast (`claude-fable-5-2-fast`): the same model in fast mode at up to 2.5x output speed, billed to Claude usage credits at $16/$80 MTok, with the same paid-model confirmation as Opus 5.5 Fast. The thinking picker now offers `xhigh` on the Fable line, which Anthropic supports on all five effort levels. Fast-mode refusals now point back to "the same model without Fast" instead of always naming Opus 5.5.
+
+### Patch Changes
+
+- Updated dependencies [4900c19]
+  - @kenkaiiii/gg-ai@5.97.0
+
+## 5.96.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.96.2
+
+## 5.96.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.96.1
+
+## 5.96.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.96.0
+
+## 5.95.4
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.95.4
+
+## 5.95.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.95.3
+
+## 5.95.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.95.2
+
+## 5.95.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.95.1
+
+## 5.95.0
+
+### Minor Changes
+
+- f5d115b: Every provider now connects only in a way its owner allows, and GG Coder no longer poses as Codex CLI, Kimi Code CLI, Grok CLI or Gemini CLI anywhere (#139).
+
+  - **OpenAI:** "Continue with ChatGPT" uses OpenAI's official Sign in with ChatGPT for open-source apps: GG Coder registers itself once per ChatGPT account, checks the ID token against OpenAI's keys, needs the "Use your ChatGPT plan" permission, and revokes the session on sign-out. Requests go to the public Responses API (`api.openai.com/v1/responses`) with GG Coder's own User-Agent. An OpenAI API key is new and rides the same Responses transport, so GPT-6 models can call tools on a key; it takes over while the plan's usage is out. The ChatGPT usage meter is replaced by a "Using ChatGPT plan · Manage usage" link, and plan usage-limit errors point to chatgpt.com/settings/usage.
+  - **Models your plan or keys can't run** are greyed out in the app's model picker with the reason ("Not in your ChatGPT plan", read from the account's own model list; "Needs a Kimi Code plan key"; "Needs an API Credits key"). Requests that still hit those limits say so: "gpt-6.1-sol isn't included in your ChatGPT plan", "Fast mode isn't included in your ChatGPT plan".
+  - **Kimi:** the Kimi sign-in is gone. Paste a Kimi Code plan key (from the Kimi Code Console; `api.kimi.com` or `api.kimi.ai` is detected) or a Moonshot API key. K2.8 Preview needs the plan key.
+  - **xAI:** API key only (xAI offers SuperGrok and X Premium usage only in apps it partners with).
+  - **Gemini:** the Google sign-in and Code Assist route are gone; Gemini is back in the provider list with a Google AI Studio key.
+  - **GLM:** keys use Z.AI's standard pay-per-token endpoint, because the GLM Coding Plan is limited to the tools Z.AI lists.
+  - **MiniMax and Xiaomi:** each key type now says what it bills (plan or pay-per-token).
+  - Old sign-ins (Codex, Kimi, Grok, Google) are never used and never read as API keys. The app and CLI ask once to reconnect, and connecting again or dismissing removes them.
+  - gg-agent: the per-turn credential refresh now drops the ChatGPT account when the credential switches to an API key, so a key never rides the plan route.
+  - `generate_image` moves to OpenAI's public Image API (GPT Image 2.6) and needs an OpenAI API key; with only the ChatGPT plan it explains that.
+  - gg-core: `loginOpenAI`/`refreshOpenAIToken` become `loginChatGPT`/`refreshChatGPTToken`/`revokeChatGPTSignIn`; `loginKimi`, `loginXai`, `loginGemini` and their helpers are removed; new `KIMI_CODE_KEY`, `OPENAI_CHATGPT_KEY`, `RETIRED_SIGN_INS`, `AuthStorage.legacySignIns()`/`takeLegacySignIn()`/`hasApiKey()`/`resolveApiKey()` and `detectKimiCodeBaseUrl`. gg-ai: `streamOpenAICodex` becomes `streamOpenAIResponses`, `CODEX_CLIENT_VERSION` and the `responsesLite`/`projectId` stream options are removed, and `GG_CODER_USER_AGENT` is exported. The `codexResponsesLite` setting is removed.
+
+### Patch Changes
+
+- Updated dependencies [f5d115b]
+  - @kenkaiiii/gg-ai@5.95.0
+
+## 5.94.0
+
+### Minor Changes
+
+- 5092ebc: Updated Claude sign-in. Claude Pro/Max plans now connect through Anthropic's official sign-in, and an Anthropic API key is also an option. If you were signed in to Claude before, sign in once more (`ggcoder login`, or AI Providers in the desktop app) to keep using Claude models. Removed `loginAnthropic`, `refreshAnthropicToken` and `getClaudeCliUserAgent`.
+- 5092ebc: Add GPT-6.1 Terra (`gpt-6.1-terra`, released 2026-10-26) and its Fast mode (`gpt-6.1-terra-fast`, 1.5x speed). It has a 1.05M context window on the public Responses API, 500K on the ChatGPT OAuth/Codex route, 128K output and text+image input, and costs $1/$5 per MTok (cached input $0.05). It starts at `low` effort and runs the full ladder up to `ultra`, which maps to xhigh plus the async-subagent orchestration prompt, the same as Sol and Astra. GPT-6.1 Sol stays the OpenAI default.
+
+### Patch Changes
+
+- Updated dependencies [5092ebc]
+- Updated dependencies [5092ebc]
+  - @kenkaiiii/gg-ai@5.94.0
+
+## 5.93.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.93.0
+
+## 5.92.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.92.0
+
+## 5.91.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.91.2
+
+## 5.91.1
+
+### Patch Changes
+
+- A file lock no longer gets broken while its live holder is still writing its contents, so two processes can't both think they own the same lock.
+- 8627ee6: Radio no longer keeps playing after the app crashes or is force-quit: the next start stops the leftover player, but only when it is still playing that station, so an unrelated process that reused the ID is never touched. On Windows, stopping a station now stops the real player behind a launcher too. Custom local endpoints can pin a context length (a new field in Local models), and llama.cpp-style servers that report `meta.n_ctx` get their real window. OpenRouter keys can point at a compatible gateway with an optional base URL, changeable without pasting the key again, and "Sync models" replaces the built-in OpenRouter list with what that endpoint actually serves (tool-capable models only, with their context, output cap, image support and effort levels). A model that lists its own effort levels gets exactly those in the picker, and the chosen one is sent as-is, so `max` is no longer sent as `xhigh`.
+- Updated dependencies [8627ee6]
+  - @kenkaiiii/gg-ai@5.91.1
+
+## 5.91.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.91.0
+
+## 5.90.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.90.0
+
+## 5.89.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.89.0
+
+## 5.88.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.88.1
+
+## 5.88.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.88.0
+
+## 5.87.3
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@5.87.3
+
+## 5.87.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.87.2
+
+## 5.87.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.87.1
+
+## 5.87.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.87.0
+
+## 5.86.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.86.3
+
+## 5.86.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.86.2
+
+## 5.86.1
+
+### Patch Changes
+
+- 1c91814: Fix Grok subscription (OAuth) chats failing with HTTP 426: report Grok CLI version 1.0.67, since xAI's chat proxy now rejects clients below 1.0.13.
+- 1c91814: Remove Gemini from login lists, model pickers and startup. Google is suspending accounts that use their Gemini subscription through third-party harnesses (any of them, not just GG Coder), so GG Coder no longer supports signing in to Gemini. Existing stored credentials are left untouched but are no longer used.
+- Updated dependencies [1c91814]
+  - @kenkaiiii/gg-ai@5.86.1
+
+## 5.86.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.86.0
+
+## 5.85.0
+
+### Minor Changes
+
+- Add Trophies: 144 achievements earned by using GG Coder, from a first slash command to a 365-day streak. The app sidecar records them in `~/.gg/trophies.json` (counting only what happens from now on), serves `GET /trophies`, and broadcasts a `trophies` event when one is earned. `getAppPaths()` gains `trophiesFile`.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.85.0
+
+## 5.84.3
+
+### Patch Changes
+
+- dd2c2e6: Stop a rejected OAuth token refresh from signing every window out: re-read auth.json before deleting the credential, and adopt a newer login that another gg process saved while the refresh was in flight.
+- dd2c2e6: Keep long-lived processes logging: rotate the debug log mid-run when the shared file fills, and count the 10 MB cap against this process's own writes instead of the whole file. The app daemon previously went dark within minutes when it started next to a nearly full log.
+  - @kenkaiiii/gg-ai@5.84.3
+
+## 5.84.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.84.2
+
+## 5.84.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.84.1
+
+## 5.84.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.84.0
+
+## 5.83.5
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.5
+
+## 5.83.4
+
+### Patch Changes
+
+- Updated dependencies [420b1ad]
+  - @kenkaiiii/gg-ai@5.83.4
+
+## 5.83.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.3
+
+## 5.83.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.2
+
+## 5.83.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.1
+
+## 5.83.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.0
+
+## 5.82.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.82.0
+
+## 5.81.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.81.0
+
+## 5.80.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.80.1
+
+## 5.80.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.80.0
+
+## 5.79.4
+
+### Patch Changes
+
+- Claude Opus, Sonnet and Haiku 5.5 now start new sessions at medium effort (matching Anthropic's API and Claude Code) instead of the max ceiling; saved thinking levels are unchanged.
+  - @kenkaiiii/gg-ai@5.79.4
+
+## 5.79.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.79.3
+
 ## 5.79.2
 
 ### Patch Changes

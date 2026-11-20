@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { anthropicMinCacheableTokens, estimatePrefixTokens } from "./cache-minimums.js";
 import type {
   ContentPart,
   ServerToolCall,
@@ -28,18 +29,30 @@ import {
   toAnthropicThinking,
   toAnthropicToolChoice,
   toAnthropicTools,
+  planDeferredTools,
+  supportsAnthropicDeferredTools,
   isAdaptiveThinkingModel,
 } from "./transform.js";
 import { isJsonObject } from "../utils/json.js";
+import {
+  PROVIDER_TRANSPORT_TIMEOUT_MS,
+  providerFetch,
+  withBodyActivity,
+} from "../utils/provider-fetch.js";
+import {
+  FAST_MODE_REJECTION_HEADER,
+  describeFastModeRejection,
+  fastModeRejectionMessage,
+  parseFastModeRejection,
+  type FastModeRejection,
+} from "../fast-mode.js";
 
 /**
  * Client cache — avoids re-instantiating the SDK on every stream() call.
  * The SDK constructor parses config, computes auth headers, and sets up the
  * fetch dispatcher. Node's undici pool already reuses TCP connections, but
  * the SDK overhead itself (config parsing, header computation) repeats on
- * every call. Keyed by the identity-relevant fields (apiKey, baseUrl,
- * userAgent) so a mid-session model switch (which may change the UA) gets a
- * fresh client.
+ * every call. Keyed by the identity-relevant fields (apiKey, baseUrl).
  */
 const anthropicClientCache = new Map<string, Anthropic>();
 
@@ -55,9 +68,11 @@ const anthropicClientCache = new Map<string, Anthropic>();
  * ceiling (~32K), so the fallback tripped this every time. The SDK only runs
  * that pre-flight check when the *client* carries no explicit `timeout`, so we
  * set one here to bypass it. The agent loop already bounds this call with its
- * own abort signal (NON_STREAMING_HARD_TIMEOUT_MS), so this is just a ceiling.
+ * own abort signal (up to 15min for thinking turns), so this is just a ceiling
+ * and must not undercut it: the whole reply is one response, so a 10min value
+ * here would abort a healthy long thinking turn.
  */
-const NON_STREAMING_REQUEST_TIMEOUT_MS = 600_000;
+const NON_STREAMING_REQUEST_TIMEOUT_MS = PROVIDER_TRANSPORT_TIMEOUT_MS;
 
 /**
  * Fine-grained (eager) tool-input streaming is OFF by default.
@@ -84,6 +99,8 @@ export function fineGrainedToolStreamingEnabled(): boolean {
 
 /** Beta that enables server-side refusal fallback (`fallbacks` body param). */
 export const SERVER_FALLBACK_BETA = "server-side-fallback-2026-07-01";
+/** Beta that gates `speed: "fast"` (fast mode research preview, Opus 5.5/5/4.8). */
+export const FAST_MODE_BETA = "fast-mode-2026-02-01";
 
 /**
  * Per-process memo of provider configs whose server-side-fallback request was
@@ -98,8 +115,7 @@ export const anthropicServerFallback = {
 };
 
 function serverFallbackKey(options: StreamOptions): string {
-  const auth = options.apiKey?.startsWith("sk-ant-oat") ? "oauth" : "key";
-  return `${options.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? ""}|${auth}`;
+  return options.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? "";
 }
 
 /**
@@ -157,9 +173,7 @@ export function sumUsageIterations(usage: unknown): IterationTotals | null {
 }
 
 function createClient(options: StreamOptions): Anthropic {
-  const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
-  const userAgent = isOAuth ? (options.userAgent ?? "claude-cli/2.1.75 (external, cli)") : "";
-  const cacheKey = `${options.apiKey ?? ""}|${options.baseUrl ?? ""}|${userAgent}`;
+  const cacheKey = `${options.apiKey ?? ""}|${options.baseUrl ?? ""}`;
 
   // Skip cache when a custom fetch is provided (tests, React Native, etc.) —
   // the cached client would carry the wrong fetch implementation.
@@ -169,20 +183,11 @@ function createClient(options: StreamOptions): Anthropic {
   }
 
   const client = new Anthropic({
-    ...(isOAuth
-      ? { apiKey: null as unknown as string, authToken: options.apiKey }
-      : { apiKey: options.apiKey }),
+    apiKey: options.apiKey,
     ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
-    ...(options.fetch ? { fetch: options.fetch } : {}),
+    // Default transport lifts undici's 300s header/body caps (see provider-fetch.ts).
+    fetch: options.fetch ?? providerFetch,
     maxRetries: 0,
-    ...(isOAuth
-      ? {
-          defaultHeaders: {
-            "user-agent": userAgent,
-            "x-app": "cli",
-          },
-        }
-      : {}),
   });
 
   // Only cache production clients (no custom fetch override).
@@ -213,7 +218,6 @@ export async function prewarmAnthropicCache(options: {
   tools?: StreamOptions["tools"];
   serverTools?: StreamOptions["serverTools"];
   baseUrl?: string;
-  userAgent?: string;
   cacheRetention?: StreamOptions["cacheRetention"];
   signal?: AbortSignal;
 }): Promise<void> {
@@ -221,7 +225,6 @@ export async function prewarmAnthropicCache(options: {
     const client = createClient({
       apiKey: options.apiKey,
       baseUrl: options.baseUrl,
-      userAgent: options.userAgent,
     } as StreamOptions);
     const cacheControl = toAnthropicCacheControl(options.cacheRetention ?? "long", options.baseUrl);
     const { system, messages } = toAnthropicMessages(
@@ -231,16 +234,6 @@ export async function prewarmAnthropicCache(options: {
       ],
       cacheControl,
     );
-    const isOAuth = options.apiKey.startsWith("sk-ant-oat");
-    const fullSystem = isOAuth
-      ? [
-          {
-            type: "text" as const,
-            text: "You are Claude Code, Anthropic's official CLI for Claude.",
-          },
-          ...(system ?? []),
-        ]
-      : system;
     const tools = options.tools?.length
       ? toAnthropicTools(options.tools, {
           cacheControl,
@@ -249,12 +242,15 @@ export async function prewarmAnthropicCache(options: {
           enableFineGrainedToolStreaming: fineGrainedToolStreamingEnabled(),
         })
       : undefined;
+    if (estimatePrefixTokens(system, tools) < anthropicMinCacheableTokens(options.model)) {
+      return;
+    }
     await client.messages.create(
       {
         model: options.model,
         max_tokens: 1,
         messages,
-        ...(fullSystem ? { system: fullSystem as Anthropic.MessageCreateParams["system"] } : {}),
+        ...(system ? { system: system as Anthropic.MessageCreateParams["system"] } : {}),
         ...(tools
           ? {
               tools: [
@@ -267,14 +263,10 @@ export async function prewarmAnthropicCache(options: {
       {
         signal: options.signal ?? undefined,
         ...(() => {
-          // Mirror runStream's beta headers for the parts that affect caching:
-          // OAuth identity betas + the extended-cache-ttl beta, without which a
-          // 1-h pre-warm silently writes a 5-min cache and expires before the
+          // Mirror runStream's extended-cache-ttl beta, without which a 1-h
+          // pre-warm silently writes a 5-min cache and expires before the
           // user's first turn.
-          const betas = [
-            ...(isOAuth ? ["claude-code-20250219", "oauth-2025-04-20"] : []),
-            ...(cacheControl?.ttl === "1h" ? ["extended-cache-ttl-2025-04-11"] : []),
-          ];
+          const betas = cacheControl?.ttl === "1h" ? ["extended-cache-ttl-2025-04-11"] : [];
           return betas.length ? { headers: { "anthropic-beta": betas.join(",") } } : {};
         })(),
       },
@@ -290,7 +282,6 @@ export function streamAnthropic(options: StreamOptions): StreamResult {
 
 async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, StreamResponse> {
   const client = createClient(options);
-  const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
   // Prewarm uses a single non-streaming request: the stream flag is not part of
   // the prompt-cache key, and a 1-token response needs no incremental events.
   const useStreaming = options.streaming !== false && !options.prewarm;
@@ -309,20 +300,28 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     options.provider !== "minimax" &&
     isDirectAnthropicApi(options.baseUrl) &&
     !anthropicServerFallback.disabled.has(fallbackKey);
-  const { system: rawSystem, messages } = toAnthropicMessages(downgradedMessages, cacheControl, {
+  // Deferred tool loading (tool search): the whole on-demand catalog rides in
+  // `tools` with defer_loading from the first request, and a promotion loads
+  // its tool through a tool_reference in the transcript, so the cached tools
+  // block never changes. Without it, each promotion grew `tools` and rewrote
+  // the entire cached prefix (measured: cache read 0 after every tool_search).
+  const deferredPlan =
+    options.provider === "anthropic" &&
+    isDirectAnthropicApi(options.baseUrl) &&
+    supportsAnthropicDeferredTools(options.model)
+      ? planDeferredTools(options.tools, options.deferredTools, downgradedMessages)
+      : undefined;
+  const toolReferences = deferredPlan?.loaded;
+  const { system, messages } = toAnthropicMessages(downgradedMessages, cacheControl, {
     fallbackBlocks: useServerFallback,
+    toolReferences,
   });
-
-  // OAuth tokens require Claude Code identity in the system prompt
-  const system = isOAuth
-    ? [
-        {
-          type: "text" as const,
-          text: "You are Claude Code, Anthropic's official CLI for Claude.",
-        },
-        ...(rawSystem ?? []),
-      ]
-    : rawSystem;
+  // Fast mode (`speed: "fast"` + its beta) is a first-party-API feature; never
+  // send it to Anthropic-compatible endpoints (MiniMax, gateways).
+  const useFastMode =
+    options.speed === "fast" &&
+    options.provider === "anthropic" &&
+    isDirectAnthropicApi(options.baseUrl);
 
   let maxTokens = options.maxTokens ?? 4096;
   let thinking: Anthropic.ThinkingConfigParam | undefined;
@@ -361,10 +360,11 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     ...(outputConfig
       ? { output_config: outputConfig as unknown as Anthropic.MessageCreateParams["output_config"] }
       : {}),
-    ...(options.temperature != null && !thinking ? { temperature: options.temperature } : {}),
-    ...(options.topP != null ? { top_p: options.topP } : {}),
+    // API version 2026-10-21 (SDK 1.x) rejects temperature/top_p/top_k with a 400.
     ...(options.stop ? { stop_sequences: options.stop } : {}),
-    ...(options.tools?.length || options.serverTools?.length || options.webSearch
+    ...((deferredPlan?.live ?? options.tools)?.length ||
+    options.serverTools?.length ||
+    options.webSearch
       ? (() => {
           // Build the tools array with server-side tools taking precedence over
           // client tools that share their name. Anthropic rejects duplicate tool
@@ -377,16 +377,16 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
             const name = (t as { name?: string }).name;
             if (name) reservedServerNames.add(name);
           }
-          const clientTools = options.tools?.length
-            ? toAnthropicTools(
-                options.tools.filter((t) => !reservedServerNames.has(t.name)),
-                {
-                  ...(supportsFirstPartyToolExtras && cacheControl ? { cacheControl } : {}),
-                  ...(supportsFirstPartyToolExtras && fineGrainedToolStreamingEnabled()
-                    ? { enableFineGrainedToolStreaming: true }
-                    : {}),
-                },
-              )
+          const notReserved = (t: { name: string }) => !reservedServerNames.has(t.name);
+          const liveTools = deferredPlan?.live ?? options.tools ?? [];
+          const clientTools = liveTools.length
+            ? toAnthropicTools(liveTools.filter(notReserved), {
+                ...(supportsFirstPartyToolExtras && cacheControl ? { cacheControl } : {}),
+                ...(supportsFirstPartyToolExtras && fineGrainedToolStreamingEnabled()
+                  ? { enableFineGrainedToolStreaming: true }
+                  : {}),
+                ...(deferredPlan ? { deferred: deferredPlan.deferred.filter(notReserved) } : {}),
+              })
             : [];
           return {
             tools: [
@@ -408,17 +408,30 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       return contextEdits.length ? { context_management: { edits: contextEdits } } : {};
     })(),
     ...(useServerFallback ? { fallbacks: "default" } : {}),
+    ...(useFastMode ? { speed: "fast" } : {}),
     stream: useStreaming,
   } as Anthropic.MessageCreateParams;
+  // A prefix below the model's minimum cacheable size is never cached: the
+  // prewarm would write nothing, so skip it.
+  if (
+    options.prewarm &&
+    estimatePrefixTokens(baseParams.system, baseParams.tools) <
+      anthropicMinCacheableTokens(options.model)
+  ) {
+    return {
+      message: { role: "assistant", content: [] },
+      stopReason: "end_turn",
+      usage: { inputTokens: 0, outputTokens: 0 },
+    };
+  }
   // Caller-supplied provider-specific body fields; they only fill unset fields.
   const params = mergeProviderOptions(baseParams, options.providerOptions);
 
-  // Adaptive thinking models (Fable 5.1, Opus 5.5/5, Opus 4.8/4.7/4.6, Sonnet 5.5/5, Haiku 5.5)
+  // Adaptive thinking models (Fable 5.2/5.1, Opus 5.5/5, Opus 4.8/4.7/4.6, Sonnet 5.5/5, Haiku 5.5)
   // don't need the interleaved-thinking beta — they have it built in.
   const hasAdaptiveThinking = isAdaptiveThinkingModel(options.model);
 
   const betaHeaders = [
-    ...(isOAuth ? ["claude-code-20250219", "oauth-2025-04-20"] : []),
     ...(options.compaction ? ["compact-2026-01-12"] : []),
     ...(options.clearToolUses ? ["context-management-2025-06-27"] : []),
     // Eager tool-input streaming beta — opt-in only (see
@@ -432,6 +445,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     // is only "1h" on the first-party endpoint (see toAnthropicCacheControl).
     ...(cacheControl?.ttl === "1h" ? ["extended-cache-ttl-2025-04-11"] : []),
     ...(useServerFallback ? [SERVER_FALLBACK_BETA] : []),
+    ...(useFastMode ? [FAST_MODE_BETA] : []),
   ];
 
   const toRequestOptions = (
@@ -464,8 +478,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       };
       const retryParams = {
         ...rest,
-        messages: toAnthropicMessages(downgradedMessages, cacheControl, { fallbackBlocks: false })
-          .messages,
+        messages: toAnthropicMessages(downgradedMessages, cacheControl, {
+          fallbackBlocks: false,
+          toolReferences,
+        }).messages,
       } as Anthropic.MessageCreateParams;
       return create(
         retryParams,
@@ -495,7 +511,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       yield* synthesizeEventsFromMessage(message);
       return messageToResponse(message);
     } catch (err) {
-      throw toError(err);
+      throw toError(err, { fastMode: useFastMode, provider: options.provider });
     }
   }
 
@@ -533,8 +549,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     // request before our async iterator attaches listeners, its iterator can miss
     // the already-emitted error/end event and wait forever. That surfaced as the
     // CLI sitting on "Working..." when an OAuth account ran out of usage.
+    const onActivity = options.onTransportActivity;
+    const streamClient = onActivity
+      ? client.withOptions({ fetch: withBodyActivity(options.fetch ?? providerFetch, onActivity) })
+      : client;
     const stream = (await send((p, o) =>
-      client.messages.create(p as Anthropic.MessageCreateParamsStreaming, o),
+      streamClient.messages.create(p as Anthropic.MessageCreateParamsStreaming, o),
     )) as AsyncIterable<Anthropic.MessageStreamEvent>;
 
     for await (const event of stream) {
@@ -666,7 +686,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
                 const snippet =
                   rawPartial.length > 200 ? `${rawPartial.slice(0, 200)}\u2026` : rawPartial;
                 throw new ProviderError(
-                  "anthropic",
+                  options.provider,
                   `Tool "${accum.toolName}" input JSON was truncated in the stream ` +
                     `(${rawPartial.length} bytes): ${snippet}; ${(parseErr as Error).message}`,
                   { cause: parseErr },
@@ -786,7 +806,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       }
     }
   } catch (err) {
-    throw toError(err);
+    throw toError(err, { fastMode: useFastMode, provider: options.provider });
   }
 
   // Race-condition safety: if the SDK's stream ended (or error'd) before the
@@ -794,7 +814,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   // Treat that as a transport failure so the agent loop retries instead of
   // presenting a phantom empty reply.
   if (!receivedAnyEvent) {
-    throw new ProviderError("anthropic", "Stream ended without producing any events.", {
+    throw new ProviderError(options.provider, "Stream ended without producing any events.", {
       statusCode: 504,
     });
   }
@@ -808,7 +828,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   // transport failure (same bucket as a mid-stream socket destroy). The partial
   // body is surfaced on `cause` for debugging, never silently returned.
   if (stopReason === null) {
-    throw new ProviderError("anthropic", "Stream ended before completion (no stop_reason).", {
+    throw new ProviderError(options.provider, "Stream ended before completion (no stop_reason).", {
       statusCode: 504,
       cause: { partialContent: contentParts, outputTokens },
     });
@@ -952,6 +972,23 @@ function messageToResponse(message: Anthropic.Message): StreamResponse {
 }
 
 /**
+ * A fast-mode request Anthropic refused because usage credits couldn't pay for
+ * it: the overage-disabled-reason header on a fast 429, or the fast-mode body
+ * text on any request. Undefined for every other error.
+ */
+function readFastModeRejection(
+  err: InstanceType<typeof Anthropic.APIError>,
+  message: string,
+  fastMode: boolean,
+): FastModeRejection | undefined {
+  const reason = readHeader(err.headers, FAST_MODE_REJECTION_HEADER);
+  if (fastMode && err.status === 429 && reason) return describeFastModeRejection(reason);
+  const fromBody = parseFastModeRejection(message);
+  if (!fromBody) return undefined;
+  return reason ? describeFastModeRejection(reason) : fromBody;
+}
+
+/**
  * Read Anthropic's unified rate-limit headers — the subscription (OAuth) quota
  * signal. `anthropic-ratelimit-unified-status: rejected` means the usage window
  * is spent (not a transient per-minute throttle); `-reset` is the unix-seconds
@@ -970,7 +1007,13 @@ function readUnifiedRateLimit(headers: unknown): { rejected: boolean; resetsAt?:
   return { rejected: status === "rejected", ...(resetsAt ? { resetsAt } : {}) };
 }
 
-function toError(err: unknown): ProviderError {
+function toError(
+  err: unknown,
+  context?: { fastMode?: boolean; provider?: StreamOptions["provider"] },
+): ProviderError {
+  // Anthropic-compatible third parties (MiniMax) ride this transport; name them
+  // in errors so a MiniMax problem never reads as "Anthropic usage limit".
+  const provider = context?.provider ?? "anthropic";
   // Already normalized (e.g. the truncated-tool-JSON guard in runStream throws a
   // ProviderError whose cause is the SyntaxError). Pass it through untouched so
   // its statusCode and cause chain survive for agent-loop's retry classifiers
@@ -1017,6 +1060,23 @@ function toError(err: unknown): ProviderError {
         ? `${bodyType}: ${bodyMessage}`
         : (bodyMessage ?? fallbackMessage);
 
+    // Fast mode on a Claude subscription bills usage credits only. When it
+    // can't, Anthropic answers 429 with a generic body and the real reason in
+    // the overage-disabled-reason header (no credits, credits off, spend cap,
+    // org policy). It also carries a far-off unified reset, so it must be read
+    // before the plan-limit check below or it shows as "usage limit reached".
+    // The header can also accompany plain plan-limit 429s, so only trust it on
+    // a fast request; the body wording is fast-mode specific either way.
+    const fastRejection = readFastModeRejection(err, message, context?.fastMode === true);
+    if (fastRejection) {
+      return new ProviderError("anthropic", fastModeRejectionMessage(fastRejection), {
+        statusCode: err.status,
+        ...(requestId ? { requestId } : {}),
+        hint: fastRejection.guidance,
+        cause: err,
+      });
+    }
+
     // Subscription (OAuth) usage-window exhaustion. Anthropic returns 429 with
     // the unified rate-limit headers; a "rejected" status — or a reset stamp
     // meaningfully in the future — means the plan's usage is spent, not a
@@ -1044,21 +1104,21 @@ function toError(err: unknown): ProviderError {
       const usageMessage = /usage limit reached/i.test(message)
         ? message
         : `usage limit reached: ${message}`;
-      return new ProviderError("anthropic", usageMessage, {
+      return new ProviderError(provider, usageMessage, {
         statusCode: err.status,
         ...(requestId ? { requestId } : {}),
         cause: err,
       });
     }
 
-    return new ProviderError("anthropic", message, {
+    return new ProviderError(provider, message, {
       statusCode: err.status,
       ...(requestId ? { requestId } : {}),
       cause: err,
     });
   }
   if (err instanceof Error) {
-    return new ProviderError("anthropic", err.message, { cause: err });
+    return new ProviderError(provider, err.message, { cause: err });
   }
-  return new ProviderError("anthropic", String(err));
+  return new ProviderError(provider, String(err));
 }

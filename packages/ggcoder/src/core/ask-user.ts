@@ -3,7 +3,9 @@
  * plain interactive run). Past it the tool stops blocking: the agent proceeds
  * on its best guess while the question stays answerable in the app.
  */
-export const ASK_USER_INTERACTIVE_DEADLINE_MS = 10 * 60_000;
+import type { ImageContent, TextContent, ToolResultContent, VideoContent } from "@abukhaled/gg-ai";
+
+export const ASK_USER_INTERACTIVE_DEADLINE_MS = 5 * 60_000;
 
 /**
  * Soft deadline when nobody is watching — autopilot (Ken), task run-all
@@ -60,12 +62,23 @@ export interface AskUserPrompt extends AskUserRequest {
 }
 
 export type AskUserResult =
-  | { action: "answer"; answers: Record<string, string | string[]> }
+  | {
+      action: "answer";
+      answers: Record<string, string | string[]>;
+      /** Autopilot Ken answered in the user's place. */
+      by?: "ken";
+    }
   /**
    * No answer. `superseded` means the user replied with a message of their own
    * instead of picking — the question is moot, but they are still talking.
    */
-  | { action: "cancel"; superseded?: boolean }
+  | {
+      action: "cancel";
+      superseded?: boolean;
+      message?: string;
+      /** The reply's attachments as model-ready blocks (images, file notes). */
+      attachments?: Array<TextContent | ImageContent | VideoContent>;
+    }
   /**
    * The soft deadline passed with no answer. The question stays open; a later
    * answer is delivered to the agent as a message (see `onLateAnswer`).
@@ -225,6 +238,24 @@ export function formatAskResult(questions: AskQuestion[], result: AskUserResult)
   if (result.action === "deferred") return ASK_DEFERRED_RESULT;
   if (result.action === "cancel") {
     if (result.superseded) {
+      // The message itself, not a promise that it follows: a transport that
+      // queues it behind the current turn (Claude Code) would leave the model
+      // waiting on a message it can't see yet.
+      const attached = (result.attachments?.length ?? 0) > 0;
+      if (result.message?.trim()) {
+        return (
+          "The user skipped the question and replied with this message instead:\n\n" +
+          `<user_message>\n${result.message.trim()}\n</user_message>\n\n` +
+          (attached ? "Their attachments follow. " : "") +
+          "Treat it as their answer and continue. Do not ask this again."
+        );
+      }
+      if (attached) {
+        return (
+          "The user skipped the question and replied with the attachments below instead. " +
+          "Treat them as their answer and continue. Do not ask this again."
+        );
+      }
       return (
         "The user ignored the question and sent their own message instead. " +
         "It arrives next — treat it as their answer and continue. Do not ask this again."
@@ -240,7 +271,26 @@ export function formatAskResult(questions: AskQuestion[], result: AskUserResult)
     const text = Array.isArray(answer) ? answer.join(", ") : answer;
     return `${q.question}\n→ ${text?.trim() ? text.trim() : "(no answer)"}`;
   });
+  if (result.by === "ken") {
+    return `Autopilot Ken answered for the user:\n\n${lines.join("\n\n")}\n\n${KEN_ANSWER_SAFETY}`;
+  }
   return `The user answered:\n\n${lines.join("\n\n")}`;
+}
+
+/** Ken is not the user: his pick never licenses an action that can't be undone. */
+const KEN_ANSWER_SAFETY =
+  "This is Ken's call, not the user's. On it alone do NOT delete data, push, publish, deploy, " +
+  "pay, send messages or take any other destructive, costly or externally visible action — " +
+  "leave those for the user.";
+
+/** The tool result: {@link formatAskResult}'s text, plus a reply's attachments. */
+export function askResultContent(
+  questions: AskQuestion[],
+  result: AskUserResult,
+): ToolResultContent {
+  const text = formatAskResult(questions, result);
+  const attachments = result.action === "cancel" ? (result.attachments ?? []) : [];
+  return attachments.length > 0 ? [{ type: "text", text }, ...attachments] : text;
 }
 
 /**

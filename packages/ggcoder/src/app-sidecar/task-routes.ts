@@ -10,6 +10,8 @@ import {
   setRadioVolume,
   stopRadio,
 } from "../core/radio.js";
+import { getGitHubRepoSlug } from "../utils/github.js";
+import { getGitOverview } from "../utils/git-overview.js";
 import { readBody, json } from "./http.js";
 import type { SessionRouteContext } from "./route-context.js";
 
@@ -41,6 +43,24 @@ export function handleTaskRoutes(
       } catch (error) {
         log("WARN", "app-sidecar", "checklist snapshot failed", { error: String(error) });
         if (!res.destroyed) json(res, 500, { error: "Could not read the project checklist" });
+      }
+    })();
+    return true;
+  }
+
+  // The Git panel: open issues and PRs on the project's GitHub repo, and the
+  // working tree's changed files with line counts (see utils/git-overview).
+  if (method === "GET" && url === "/git/overview") {
+    const controller = new AbortController();
+    res.once("close", () => controller.abort());
+    void (async () => {
+      try {
+        const slug = await getGitHubRepoSlug(ctx.cwd);
+        const overview = await getGitOverview(ctx.cwd, slug, controller.signal);
+        if (!res.destroyed) json(res, 200, overview);
+      } catch (error) {
+        log("WARN", "app-sidecar", "git overview failed", { error: String(error) });
+        if (!res.destroyed) json(res, 500, { error: "Could not read this project's git status" });
       }
     })();
     return true;
@@ -108,6 +128,10 @@ export function handleTaskRoutes(
         return;
       }
       json(res, 200, { current: getCurrentStation() });
+      void ctx.trophies.record(
+        { count: { radioPlays: 1 }, add: { radioStations: [station] } },
+        ctx.sessionId,
+      );
     });
     return true;
   }
@@ -125,12 +149,13 @@ export function handleTaskRoutes(
         json(res, 400, { error: "invalid JSON body" });
         return;
       }
-      if (ctx.running) {
+      if (ctx.running || ctx.runClaim.active || ctx.autopilotActive) {
         json(res, 409, { error: "cannot run a task while the agent is running" });
         return;
       }
       json(res, 202, { accepted: true });
       void ctx.runTasks(id, all);
+      void ctx.trophies.count("tasksRun", ctx.sessionId);
     });
     return true;
   }

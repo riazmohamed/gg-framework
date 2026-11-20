@@ -1,11 +1,11 @@
 [package]
 name = "gg-app"
-version = "0.87.2"
-description = "A Tauri App"
-authors = ["you"]
+version = "0.114.0"
+# Shown as the Linux deb/rpm package description and maintainer.
+description = "GG Coder desktop workspace for code, chat and motion agents"
+authors = ["Ken Kai"]
+license = "AGPL-3.0-only"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
@@ -53,12 +53,17 @@ uuid = { version = "1", features = ["v4"] }
 tauri-plugin-updater = "2.11.0"
 tauri-plugin-process = "2"
 
+# Already in the build via tao/wry with `exception` on; used to catch AppKit
+# exceptions under tao's extern "C" sendEvent: (macos_event_guard.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "=0.6.5", features = ["exception"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 # Launcher list for opening links/files (`open::commands`); already in the
 # build via tauri-plugin-opener. We spawn + reap it ourselves because the
 # plugin's detached spawn leaves a zombie per opened link (process.rs).
-open = "=5.3.5"
+open = "=5.4.5"
 
 # Job Object containment for the daemon's process tree (daemon_job.rs). Pinned
 # to the version tauri already pulls in, so this adds no crates to the build.

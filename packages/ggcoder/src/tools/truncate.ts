@@ -1,9 +1,6 @@
 export const MAX_LINES = 2000;
 export const MAX_BYTES = 50 * 1024; // 50KB
 
-/** @deprecated Use MAX_BYTES instead. Kept for backwards compatibility with tests. */
-export const MAX_CHARS = MAX_BYTES;
-
 export interface TruncateResult {
   content: string;
   truncated: boolean;
@@ -158,18 +155,6 @@ const FRAME_LINE = new RegExp(
 /** Object-literal / call-argument continuation lines in source code. */
 const CODE_TAIL = /[,{([]\s*$/;
 
-function isError(line: string): boolean {
-  return (
-    DIAG_PREFILTER.test(line) && !CODE_TAIL.test(line) && ERROR_LINE.some((re) => re.test(line))
-  );
-}
-
-function isWarning(line: string): boolean {
-  return (
-    DIAG_PREFILTER.test(line) && !CODE_TAIL.test(line) && WARN_LINE.some((re) => re.test(line))
-  );
-}
-
 function extractFile(line: string): string | undefined {
   return (PY_FILE.exec(line) ?? RUST_FILE.exec(line) ?? FILE_LOC.exec(line))?.[1];
 }
@@ -218,8 +203,10 @@ export function describeOmitted(omitted: readonly string[], shown: string): stri
   };
 
   for (const line of omitted) {
-    const err = isError(line);
-    const warn = !err && isWarning(line);
+    // isError/isWarning inlined so the shared prefilter runs once per line.
+    const diag = DIAG_PREFILTER.test(line) && !CODE_TAIL.test(line);
+    const err = diag && ERROR_LINE.some((re) => re.test(line));
+    const warn = diag && !err && WARN_LINE.some((re) => re.test(line));
     if (err) errors++;
     else if (warn) warnings++;
     if (err || warn) {

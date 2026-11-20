@@ -276,18 +276,6 @@ export interface ImageAttachment {
   data: string; // base64 for images/video, raw text for text files
 }
 
-/** Check if a file path points to an image based on extension. */
-export function isImagePath(filePath: string): boolean {
-  const ext = path.extname(filePath).toLowerCase();
-  return IMAGE_EXTENSIONS.has(ext);
-}
-
-/** Check if a file path points to a video based on extension. */
-export function isVideoPath(filePath: string): boolean {
-  const ext = path.extname(filePath).toLowerCase();
-  return VIDEO_EXTENSIONS.has(ext);
-}
-
 /** Check if a file path points to an attachable file (image or text). */
 export function isAttachablePath(filePath: string): boolean {
   const ext = path.extname(filePath).toLowerCase();
@@ -539,12 +527,78 @@ export async function downscaleForPreview(buffer: Buffer): Promise<Buffer> {
     const meta = await sharp(buffer).metadata();
     const width = meta.width ?? 0;
     if (width > 0 && width <= PREVIEW_MAX_WIDTH) return buffer;
-    return await sharp(buffer)
+    // Without `animated`, sharp decodes only the first frame and a GIF preview would freeze.
+    const animated = (meta.pages ?? 1) > 1;
+    return await sharp(buffer, { animated })
       .resize(PREVIEW_MAX_WIDTH, undefined, { fit: "inside", withoutEnlargement: true })
       .toBuffer();
   } catch {
     return buffer;
   }
+}
+
+/** Largest animated preview sent to the chat; above it, a smaller or still copy. */
+export const MAX_ANIMATED_PREVIEW_BYTES = 2.5 * 1024 * 1024;
+const SMALL_PREVIEW_WIDTH = 320;
+
+/**
+ * The chat preview for an animated GIF: every frame at preview width while it
+ * stays under MAX_ANIMATED_PREVIEW_BYTES, then narrower, then the first frame
+ * as a PNG, so a long, wide GIF (or a batch of them) cannot swamp the event stream.
+ */
+export async function animatedPreview(
+  gif: Buffer,
+  maxBytes = MAX_ANIMATED_PREVIEW_BYTES,
+): Promise<{ buffer: Buffer; mediaType: "image/gif" | "image/png" }> {
+  const preview = await downscaleForPreview(gif);
+  if (preview.length <= maxBytes) {
+    return { buffer: preview, mediaType: "image/gif" };
+  }
+  try {
+    const sharp = await loadSharp();
+    const smaller = await sharp(gif, { animated: true })
+      .resize(SMALL_PREVIEW_WIDTH, undefined, { fit: "inside", withoutEnlargement: true })
+      .toBuffer();
+    if (smaller.length <= maxBytes) {
+      return { buffer: smaller, mediaType: "image/gif" };
+    }
+    const still = await sharp(gif)
+      .resize(PREVIEW_MAX_WIDTH, undefined, { fit: "inside", withoutEnlargement: true })
+      .png()
+      .toBuffer();
+    return { buffer: still, mediaType: "image/png" };
+  } catch {
+    return { buffer: preview, mediaType: "image/gif" };
+  }
+}
+
+/**
+ * Pixel dimensions from the image header, or null when it cannot be read.
+ * Header only: no pixel decode, so it is cheap on large images.
+ */
+export async function imageDimensions(
+  buffer: Buffer,
+): Promise<{ width: number; height: number } | null> {
+  try {
+    const sharp = await loadSharp();
+    const { width, height } = await sharp(buffer).metadata();
+    return width && height ? { width, height } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-encode an image as `format`. Unlike the preview helpers this is the saved
+ * file itself, so a failure propagates rather than silently keeping the
+ * original bytes under a mismatched extension.
+ */
+export async function convertImageFormat(
+  buffer: Buffer,
+  format: "png" | "jpeg" | "webp",
+): Promise<Buffer> {
+  const sharp = await loadSharp();
+  return sharp(buffer).toFormat(format).toBuffer();
 }
 
 /**
